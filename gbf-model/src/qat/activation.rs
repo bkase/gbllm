@@ -98,40 +98,50 @@ pub enum ActivationQuantFormat {
 }
 
 impl ActivationQuantFormat {
-    pub fn levels(self) -> u16 {
+    pub fn quant_steps(self) -> u16 {
         match self {
-            Self::Int8 | Self::UInt8 => 255,
+            Self::UInt8 => 255,
+            Self::Int8 => 127,
             Self::Int4 => 15,
         }
     }
 
-    pub fn quant_scale(self, range: ActivationRange) -> f32 {
-        f32::from(self.levels()) / (range.hi() - range.lo())
+    fn is_signed(self) -> bool {
+        matches!(self, Self::Int8)
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationForwardMode {
+    Train,
+    Eval,
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
-pub struct ActivationSteSpec {
+struct ActivationSteSpec {
     range: ActivationRange,
     quant_format: ActivationQuantFormat,
     enabled: bool,
 }
 
+#[cfg(test)]
 impl ActivationSteSpec {
-    pub fn range(self) -> ActivationRange {
+    fn range(self) -> ActivationRange {
         self.range
     }
 
-    pub fn quant_format(self) -> ActivationQuantFormat {
+    fn quant_format(self) -> ActivationQuantFormat {
         self.quant_format
     }
 
-    pub fn enabled(self) -> bool {
+    fn enabled(self) -> bool {
         self.enabled
     }
 }
 
-pub trait ActivationFakeQuantBackend {
+#[cfg(test)]
+trait ActivationFakeQuantBackend {
     type Tensor;
 
     /// Apply clamp + fake quantization while preserving STE gradients through
@@ -171,31 +181,31 @@ impl ActFakeQuant {
         self
     }
 
-    pub fn forward<B: ActivationFakeQuantBackend>(
+    #[cfg(test)]
+    fn forward<B: ActivationFakeQuantBackend>(
         &self,
         backend: &B,
         input: &B::Tensor,
-        training: bool,
+        mode: ActivationForwardMode,
     ) -> B::Tensor {
-        backend.activation_fake_quant_ste(self.ste_spec(training), input)
+        backend.activation_fake_quant_ste(self.ste_spec(mode), input)
     }
 
     pub fn inference_forward(
         &self,
         input: &[f32],
-        training: bool,
+        mode: ActivationForwardMode,
     ) -> Result<Vec<f32>, ActFakeQuantError> {
         validate_input(input)?;
 
-        let spec = self.ste_spec(training);
-        if !spec.enabled() {
+        if mode == ActivationForwardMode::Eval && self.eval_passthrough {
             return Ok(input.to_vec());
         }
 
         Ok(input
             .iter()
             .copied()
-            .map(|value| fake_quantize_value(value, spec.range(), spec.quant_format()))
+            .map(|value| fake_quantize_value(value, self.export_range(), self.quant_format))
             .collect())
     }
 
@@ -223,11 +233,18 @@ impl ActFakeQuant {
         }
     }
 
-    fn ste_spec(&self, training: bool) -> ActivationSteSpec {
+    pub fn update_learned_range(&mut self, learned: ActivationRange) {
+        if matches!(self.range_mode, ActivationRangeMode::Learned(_)) {
+            self.range_mode = ActivationRangeMode::Learned(learned);
+        }
+    }
+
+    #[cfg(test)]
+    fn ste_spec(&self, mode: ActivationForwardMode) -> ActivationSteSpec {
         ActivationSteSpec {
             range: self.range_mode.range(),
             quant_format: self.quant_format,
-            enabled: training || !self.eval_passthrough,
+            enabled: mode == ActivationForwardMode::Train || !self.eval_passthrough,
         }
     }
 }
@@ -274,9 +291,15 @@ fn fake_quantize_value(
     range: ActivationRange,
     quant_format: ActivationQuantFormat,
 ) -> f32 {
-    let scale = quant_format.quant_scale(range);
     let clamped = range.clamp(value);
-    ((clamped - range.lo()) * scale).round() / scale + range.lo()
+    if quant_format.is_signed() {
+        let max_abs = range.lo().abs().max(range.hi().abs());
+        let scale = f32::from(quant_format.quant_steps()) / max_abs;
+        (clamped * scale).round() / scale
+    } else {
+        let scale = f32::from(quant_format.quant_steps()) / (range.hi() - range.lo());
+        ((clamped - range.lo()) * scale).round() / scale + range.lo()
+    }
 }
 
 #[cfg(test)]
@@ -314,12 +337,36 @@ mod tests {
         .unwrap();
         let input = vec![-2.0, -0.25, 0.25, 2.0];
 
-        let output = quant.forward(&ScalarActivationBackend, &input, true);
+        let output = quant.forward(
+            &ScalarActivationBackend,
+            &input,
+            ActivationForwardMode::Train,
+        );
 
         assert!(output.iter().all(|value| (-1.0..=1.0).contains(value)));
         assert_eq!(output[0], -1.0);
         assert_eq!(output[3], 1.0);
-        assert_eq!(output, quant.inference_forward(&input, true).unwrap());
+        assert_eq!(
+            output,
+            quant
+                .inference_forward(&input, ActivationForwardMode::Train)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn qat_activation_signed_int8_preserves_zero() {
+        let quant = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(-1.0, 1.0).unwrap()),
+            ActivationQuantFormat::Int8,
+        )
+        .unwrap();
+
+        let output = quant
+            .inference_forward(&[0.0], ActivationForwardMode::Train)
+            .unwrap();
+
+        assert_eq!(output, vec![0.0]);
     }
 
     #[test]
@@ -333,10 +380,19 @@ mod tests {
         let input = vec![-1.0, 0.25, 2.0];
 
         assert_eq!(
-            quant.forward(&ScalarActivationBackend, &input, false),
+            quant.forward(
+                &ScalarActivationBackend,
+                &input,
+                ActivationForwardMode::Eval
+            ),
             input
         );
-        assert_eq!(quant.inference_forward(&input, false).unwrap(), input);
+        assert_eq!(
+            quant
+                .inference_forward(&input, ActivationForwardMode::Eval)
+                .unwrap(),
+            input
+        );
     }
 
     #[test]
@@ -372,8 +428,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            quant.inference_forward(&[0.0, f32::NAN], true),
+            quant.inference_forward(&[0.0, f32::NAN], ActivationForwardMode::Train),
             Err(ActFakeQuantError::NonFiniteInput { index: 1 })
         );
+    }
+
+    #[test]
+    fn qat_activation_learned_range_updates_explicitly() {
+        let mut quant = ActFakeQuant::new(
+            ActivationRangeMode::Learned(ActivationRange::new(-1.0, 1.0).unwrap()),
+            ActivationQuantFormat::Int8,
+        )
+        .unwrap();
+
+        quant.update_learned_range(ActivationRange::new(-2.0, 3.0).unwrap());
+
+        let range = quant.export_range();
+        assert_eq!(range.lo(), -2.0);
+        assert_eq!(range.hi(), 3.0);
     }
 }

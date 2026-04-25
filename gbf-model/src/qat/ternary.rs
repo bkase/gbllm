@@ -131,71 +131,62 @@ impl TernaryValue {
 
 #[derive(Debug, Clone, PartialEq)]
 struct TensorParts<T> {
-    shape: Vec<usize>,
     values: Vec<T>,
 }
 
 impl<T> TensorParts<T> {
-    fn from_parts_unchecked(shape: Vec<usize>, values: Vec<T>) -> Self {
-        Self { shape, values }
+    fn from_values(values: Vec<T>) -> Self {
+        Self { values }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TernaryLinearExport {
+pub(crate) struct TernaryLinearExport {
     ternary_weights: TensorParts<TernaryValue>,
     scales: TensorParts<Q8_8Scale>,
     bias: Option<TensorParts<f32>>,
 }
 
 impl TernaryLinearExport {
-    pub fn ternary_shape(&self) -> &[usize] {
-        &self.ternary_weights.shape
-    }
-
-    pub fn ternary_values(&self) -> &[TernaryValue] {
+    pub(crate) fn ternary_values(&self) -> &[TernaryValue] {
         &self.ternary_weights.values
     }
 
-    pub fn scale_shape(&self) -> &[usize] {
-        &self.scales.shape
-    }
-
-    pub fn scales(&self) -> &[Q8_8Scale] {
+    pub(crate) fn scales(&self) -> &[Q8_8Scale] {
         &self.scales.values
     }
 
-    pub fn bias_shape(&self) -> Option<&[usize]> {
-        self.bias.as_ref().map(|bias| bias.shape.as_slice())
-    }
-
-    pub fn bias_values(&self) -> Option<&[f32]> {
+    #[cfg(test)]
+    pub(crate) fn bias_values(&self) -> Option<&[f32]> {
         self.bias.as_ref().map(|bias| bias.values.as_slice())
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
-pub struct TernarySteLinear<'a> {
+struct TernarySteLinear<'a> {
     shape: MatrixShape,
     thresholds: &'a [TernaryThreshold],
     bias: Option<&'a [f32]>,
 }
 
+#[cfg(test)]
 impl<'a> TernarySteLinear<'a> {
-    pub fn shape(self) -> MatrixShape {
+    fn shape(self) -> MatrixShape {
         self.shape
     }
 
-    pub fn thresholds(self) -> &'a [TernaryThreshold] {
+    fn thresholds(self) -> &'a [TernaryThreshold] {
         self.thresholds
     }
 
-    pub fn bias(self) -> Option<&'a [f32]> {
+    fn bias(self) -> Option<&'a [f32]> {
         self.bias
     }
 }
 
-pub trait TernarySteBackend {
+#[cfg(test)]
+trait TernarySteBackend {
     type Tensor;
 
     /// Implement hard ternary forward values while preserving STE gradients
@@ -268,7 +259,8 @@ impl TernaryLinearQat {
         Self::new(shape, full_precision_weights, bias, thresholds, scales)
     }
 
-    pub fn fake_quant_forward<B: TernarySteBackend>(
+    #[cfg(test)]
+    fn fake_quant_forward<B: TernarySteBackend>(
         &self,
         backend: &B,
         full_precision_weights: &B::Tensor,
@@ -325,7 +317,7 @@ impl TernaryLinearQat {
         Ok(output)
     }
 
-    pub fn export_canonical(&self) -> TernaryLinearExport {
+    pub(crate) fn export_canonical(&self) -> TernaryLinearExport {
         let ternary_values = self
             .full_precision_weights
             .chunks_exact(self.shape.input_cols())
@@ -339,17 +331,12 @@ impl TernaryLinearQat {
             .collect();
 
         TernaryLinearExport {
-            ternary_weights: TensorParts::from_parts_unchecked(
-                vec![self.shape.output_rows(), self.shape.input_cols()],
-                ternary_values,
-            ),
-            scales: TensorParts::from_parts_unchecked(
-                vec![self.shape.output_rows()],
-                self.scales.clone(),
-            ),
-            bias: self.bias.as_ref().map(|bias| {
-                TensorParts::from_parts_unchecked(vec![self.shape.output_rows()], bias.clone())
-            }),
+            ternary_weights: TensorParts::from_values(ternary_values),
+            scales: TensorParts::from_values(self.scales.clone()),
+            bias: self
+                .bias
+                .as_ref()
+                .map(|bias| TensorParts::from_values(bias.clone())),
         }
     }
 
