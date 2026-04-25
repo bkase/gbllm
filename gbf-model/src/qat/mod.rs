@@ -12,4 +12,7 @@ pub use expert::ExpertBlockQat;
 pub use export::ExportVisitor;
 pub use norm::NormApproxQat;
 pub use router::Top1RouterQat;
-pub use ternary::TernaryLinearQat;
+pub use ternary::{
+    CanonicalTensor, MatrixShape, Q8_8Scale, TernaryLinearQat, TernaryLinearQatError,
+    TernaryThreshold, TernaryValue,
+};
