@@ -1,0 +1,14 @@
+[package]
+name = "gbf-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+gbf-abi = { path = "../gbf-abi" }
+gbf-asm = { path = "../gbf-asm" }
+gbf-foundation = { path = "../gbf-foundation" }
+gbf-hw = { path = "../gbf-hw" }
+serde.workspace = true
+serde_json.workspace = true

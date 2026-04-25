@@ -1,0 +1,13 @@
+[package]
+name = "gbf-asm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+gbf-foundation = { path = "../gbf-foundation" }
+gbf-hw = { path = "../gbf-hw" }
+gbf-kernel = { path = "../gbf-kernel" }
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "gbf-policy"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+gbf-artifact = { path = "../gbf-artifact" }
+gbf-foundation = { path = "../gbf-foundation" }
+gbf-hw = { path = "../gbf-hw" }
+serde.workspace = true
+serde_json.workspace = true

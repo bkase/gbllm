@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# gbllm pre-commit hook
+# Ensures every commit is self-certifying (CONSTITUTION §I.4)
+# Must complete in <2 minutes (CONSTITUTION §II.1)
+set -euo pipefail
+
+# Stage 1: formatting (instant)
+if ! cargo fmt --check --all 2>/dev/null; then
+    echo "pre-commit: cargo fmt failed. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
+
+# Stage 2: lint (seconds)
+if ! cargo clippy --workspace -- -D warnings 2>/dev/null; then
+    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
+    exit 1
+fi
+
+# Stage 3: full test suite (no escape hatch)
+if ! cargo test --workspace 2>/dev/null; then
+    echo "pre-commit: tests failed."
+    exit 1
+fi
+
+# Sync beads if br is available
+if command -v br &>/dev/null; then
+    br sync --flush-only --quiet 2>/dev/null || true
+fi

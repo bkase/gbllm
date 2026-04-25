@@ -1,0 +1,12 @@
+[package]
+name = "gbf-ir-schema"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+gbf-foundation = { path = "../gbf-foundation" }
+gbf-ir = { path = "../gbf-ir" }
+serde.workspace = true
+serde_json.workspace = true

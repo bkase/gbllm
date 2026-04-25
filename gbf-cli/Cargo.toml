@@ -1,0 +1,12 @@
+[package]
+name = "gbf-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+gbf-codegen = { path = "../gbf-codegen" }
+gbf-foundation = { path = "../gbf-foundation" }
+gbf-policy = { path = "../gbf-policy" }
+gbf-report = { path = "../gbf-report" }
