@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-burn-adapter = ["dep:burn"]
+burn-adapter = ["dep:burn", "burn/autodiff", "burn/ndarray"]
 
 [dependencies]
 burn = { workspace = true, optional = true }
