@@ -13,6 +13,6 @@ pub use export::ExportVisitor;
 pub use norm::NormApproxQat;
 pub use router::Top1RouterQat;
 pub use ternary::{
-    CanonicalTensor, MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat,
-    TernaryLinearQatError, TernarySteBackend, TernarySteLinear, TernaryThreshold, TernaryValue,
+    MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError,
+    TernarySteBackend, TernarySteLinear, TernaryThreshold, TernaryValue,
 };

@@ -9,6 +9,7 @@ const Q8_8_SCALE: f32 = 256.0;
 pub struct MatrixShape {
     output_rows: usize,
     input_cols: usize,
+    weight_len: usize,
 }
 
 impl MatrixShape {
@@ -20,9 +21,17 @@ impl MatrixShape {
             });
         }
 
+        let weight_len = output_rows.checked_mul(input_cols).ok_or(
+            TernaryLinearQatError::ShapeElementOverflow {
+                output_rows,
+                input_cols,
+            },
+        )?;
+
         Ok(Self {
             output_rows,
             input_cols,
+            weight_len,
         })
     }
 
@@ -34,8 +43,8 @@ impl MatrixShape {
         self.input_cols
     }
 
-    fn weight_len(self) -> usize {
-        self.output_rows * self.input_cols
+    pub fn weight_len(self) -> usize {
+        self.weight_len
     }
 }
 
@@ -121,57 +130,47 @@ impl TernaryValue {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CanonicalTensor<T> {
+struct TensorParts<T> {
     shape: Vec<usize>,
     values: Vec<T>,
 }
 
-impl<T> CanonicalTensor<T> {
+impl<T> TensorParts<T> {
     fn from_parts_unchecked(shape: Vec<usize>, values: Vec<T>) -> Self {
         Self { shape, values }
-    }
-
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
-    pub fn values(&self) -> &[T] {
-        &self.values
-    }
-
-    pub fn into_values(self) -> Vec<T> {
-        self.values
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TernaryLinearExport {
-    ternary_weights: CanonicalTensor<TernaryValue>,
-    scales: CanonicalTensor<Q8_8Scale>,
-    bias: Option<CanonicalTensor<f32>>,
+    ternary_weights: TensorParts<TernaryValue>,
+    scales: TensorParts<Q8_8Scale>,
+    bias: Option<TensorParts<f32>>,
 }
 
 impl TernaryLinearExport {
-    pub fn ternary_weights(&self) -> &CanonicalTensor<TernaryValue> {
-        &self.ternary_weights
+    pub fn ternary_shape(&self) -> &[usize] {
+        &self.ternary_weights.shape
     }
 
-    pub fn scales(&self) -> &CanonicalTensor<Q8_8Scale> {
-        &self.scales
+    pub fn ternary_values(&self) -> &[TernaryValue] {
+        &self.ternary_weights.values
     }
 
-    pub fn bias(&self) -> Option<&CanonicalTensor<f32>> {
-        self.bias.as_ref()
+    pub fn scale_shape(&self) -> &[usize] {
+        &self.scales.shape
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        CanonicalTensor<TernaryValue>,
-        CanonicalTensor<Q8_8Scale>,
-        Option<CanonicalTensor<f32>>,
-    ) {
-        (self.ternary_weights, self.scales, self.bias)
+    pub fn scales(&self) -> &[Q8_8Scale] {
+        &self.scales.values
+    }
+
+    pub fn bias_shape(&self) -> Option<&[usize]> {
+        self.bias.as_ref().map(|bias| bias.shape.as_slice())
+    }
+
+    pub fn bias_values(&self) -> Option<&[f32]> {
+        self.bias.as_ref().map(|bias| bias.values.as_slice())
     }
 }
 
@@ -340,40 +339,38 @@ impl TernaryLinearQat {
             .collect();
 
         TernaryLinearExport {
-            ternary_weights: CanonicalTensor::from_parts_unchecked(
+            ternary_weights: TensorParts::from_parts_unchecked(
                 vec![self.shape.output_rows(), self.shape.input_cols()],
                 ternary_values,
             ),
-            scales: CanonicalTensor::from_parts_unchecked(
+            scales: TensorParts::from_parts_unchecked(
                 vec![self.shape.output_rows()],
                 self.scales.clone(),
             ),
             bias: self.bias.as_ref().map(|bias| {
-                CanonicalTensor::from_parts_unchecked(vec![self.shape.output_rows()], bias.clone())
+                TensorParts::from_parts_unchecked(vec![self.shape.output_rows()], bias.clone())
             }),
         }
     }
 
-    pub fn projected_weights(&self) -> CanonicalTensor<f32> {
+    pub fn projected_weights(&self) -> Vec<f32> {
         let export = self.export_canonical();
-        let projected = export
-            .ternary_weights()
-            .values()
+        export
+            .ternary_values()
             .chunks_exact(self.shape.input_cols())
-            .zip(export.scales().values())
+            .zip(export.scales())
             .flat_map(|(row, &scale)| row.iter().map(move |&value| value.scaled(scale)))
-            .collect();
-
-        CanonicalTensor::from_parts_unchecked(
-            vec![self.shape.output_rows(), self.shape.input_cols()],
-            projected,
-        )
+            .collect()
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TernaryLinearQatError {
     EmptyShape {
+        output_rows: usize,
+        input_cols: usize,
+    },
+    ShapeElementOverflow {
         output_rows: usize,
         input_cols: usize,
     },
@@ -419,6 +416,13 @@ impl fmt::Display for TernaryLinearQatError {
             } => write!(
                 f,
                 "matrix shape must be non-empty, got {output_rows}x{input_cols}"
+            ),
+            Self::ShapeElementOverflow {
+                output_rows,
+                input_cols,
+            } => write!(
+                f,
+                "matrix shape {output_rows}x{input_cols} overflows addressable weight length"
             ),
             Self::WeightLenMismatch { expected, actual } => {
                 write!(
@@ -561,10 +565,7 @@ mod tests {
             scale_factors: &Self::Tensor,
             input: &Self::Tensor,
         ) -> Self::Tensor {
-            assert_eq!(
-                full_precision_weights.len(),
-                spec.shape().output_rows() * spec.shape().input_cols()
-            );
+            assert_eq!(full_precision_weights.len(), spec.shape().weight_len());
             assert_eq!(spec.thresholds().len(), spec.shape().output_rows());
             assert_eq!(scale_factors.len(), spec.shape().output_rows());
             assert_eq!(input.len(), spec.shape().input_cols());
@@ -616,24 +617,25 @@ mod tests {
         assert_eq!(output, vec![0.75]);
         assert_eq!(output, inference_output);
         assert_eq!(
-            export.ternary_weights().values(),
+            export.ternary_values(),
             &[
                 TernaryValue::Negative,
                 TernaryValue::Zero,
                 TernaryValue::Positive,
             ]
         );
-        assert_eq!(
-            export.scales().values(),
-            &[Q8_8Scale::from_f32(0.25).unwrap()]
-        );
-        assert_eq!(export.bias(), None);
-        assert_eq!(layer.projected_weights().values(), &[-0.25, 0.0, 0.25]);
+        assert_eq!(export.scales(), &[Q8_8Scale::from_f32(0.25).unwrap()]);
+        assert_eq!(export.bias_values(), None);
+        assert_eq!(layer.projected_weights(), vec![-0.25, 0.0, 0.25]);
     }
 
     #[test]
     fn qat_ternary_rejects_invalid_numeric_contracts() {
         assert!(MatrixShape::new(0, 3).is_err());
+        assert!(matches!(
+            MatrixShape::new(usize::MAX, 2),
+            Err(TernaryLinearQatError::ShapeElementOverflow { .. })
+        ));
         assert!(TernaryThreshold::new(-0.1).is_err());
         assert!(TernaryThreshold::new(f32::NAN).is_err());
         assert!(Q8_8Scale::from_f32(-0.1).is_err());
@@ -676,7 +678,7 @@ mod tests {
         let export = layer.export_canonical();
 
         assert_eq!(
-            export.ternary_weights().values(),
+            export.ternary_values(),
             &[
                 TernaryValue::Positive,
                 TernaryValue::Negative,
@@ -686,12 +688,9 @@ mod tests {
                 TernaryValue::Zero,
             ]
         );
-        assert_eq!(
-            export.scales().values()[0],
-            Q8_8Scale::from_f32(2.0).unwrap()
-        );
-        assert_eq!(export.scales().values()[1], Q8_8Scale::ZERO);
-        assert_eq!(export.bias().unwrap().values(), &[0.5, -0.5]);
+        assert_eq!(export.scales()[0], Q8_8Scale::from_f32(2.0).unwrap());
+        assert_eq!(export.scales()[1], Q8_8Scale::ZERO);
+        assert_eq!(export.bias_values().unwrap(), &[0.5, -0.5]);
         assert_eq!(
             layer.inference_forward(&[1.0, 1.0, 1.0]).unwrap(),
             vec![0.5, -0.5]
