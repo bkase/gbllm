@@ -145,6 +145,72 @@ impl<T> CanonicalTensor<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TernaryLinearExport {
+    ternary_weights: CanonicalTensor<TernaryValue>,
+    scales: CanonicalTensor<Q8_8Scale>,
+    bias: Option<CanonicalTensor<f32>>,
+}
+
+impl TernaryLinearExport {
+    pub fn ternary_weights(&self) -> &CanonicalTensor<TernaryValue> {
+        &self.ternary_weights
+    }
+
+    pub fn scales(&self) -> &CanonicalTensor<Q8_8Scale> {
+        &self.scales
+    }
+
+    pub fn bias(&self) -> Option<&CanonicalTensor<f32>> {
+        self.bias.as_ref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        CanonicalTensor<TernaryValue>,
+        CanonicalTensor<Q8_8Scale>,
+        Option<CanonicalTensor<f32>>,
+    ) {
+        (self.ternary_weights, self.scales, self.bias)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TernarySteLinear<'a> {
+    shape: MatrixShape,
+    thresholds: &'a [TernaryThreshold],
+    bias: Option<&'a [f32]>,
+}
+
+impl<'a> TernarySteLinear<'a> {
+    pub fn shape(self) -> MatrixShape {
+        self.shape
+    }
+
+    pub fn thresholds(self) -> &'a [TernaryThreshold] {
+        self.thresholds
+    }
+
+    pub fn bias(self) -> Option<&'a [f32]> {
+        self.bias
+    }
+}
+
+pub trait TernarySteBackend {
+    type Tensor;
+
+    /// Implement hard ternary forward values while preserving STE gradients
+    /// through backend-owned full-precision weights and scale factors.
+    fn ternary_linear_ste(
+        &self,
+        spec: TernarySteLinear<'_>,
+        full_precision_weights: &Self::Tensor,
+        scale_factors: &Self::Tensor,
+        input: &Self::Tensor,
+    ) -> Self::Tensor;
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TernaryLinearQat {
     shape: MatrixShape,
     full_precision_weights: Vec<f32>,
@@ -167,6 +233,7 @@ impl TernaryLinearQat {
             bias.as_deref(),
             &thresholds,
             &scales,
+            ScaleValidation::RequirePerRow,
         )?;
 
         Ok(Self {
@@ -190,6 +257,7 @@ impl TernaryLinearQat {
             bias.as_deref(),
             &thresholds,
             &[],
+            ScaleValidation::AllowEmptyForDerivation,
         )?;
 
         let scales = full_precision_weights
@@ -201,7 +269,31 @@ impl TernaryLinearQat {
         Self::new(shape, full_precision_weights, bias, thresholds, scales)
     }
 
-    pub fn fake_quant_forward(&self, x: &[f32]) -> Result<Vec<f32>, TernaryLinearQatError> {
+    pub fn fake_quant_forward<B: TernarySteBackend>(
+        &self,
+        backend: &B,
+        full_precision_weights: &B::Tensor,
+        scale_factors: &B::Tensor,
+        input: &B::Tensor,
+    ) -> B::Tensor {
+        let spec = TernarySteLinear {
+            shape: self.shape,
+            thresholds: &self.thresholds,
+            bias: self.bias.as_deref(),
+        };
+
+        backend.ternary_linear_ste(spec, full_precision_weights, scale_factors, input)
+    }
+
+    pub fn full_precision_weights(&self) -> &[f32] {
+        &self.full_precision_weights
+    }
+
+    pub fn scales(&self) -> &[Q8_8Scale] {
+        &self.scales
+    }
+
+    pub fn inference_forward(&self, x: &[f32]) -> Result<Vec<f32>, TernaryLinearQatError> {
         if x.len() != self.shape.input_cols() {
             return Err(TernaryLinearQatError::InputLenMismatch {
                 expected: self.shape.input_cols(),
@@ -234,7 +326,7 @@ impl TernaryLinearQat {
         Ok(output)
     }
 
-    pub fn export_canonical(&self) -> (CanonicalTensor<TernaryValue>, CanonicalTensor<Q8_8Scale>) {
+    pub fn export_canonical(&self) -> TernaryLinearExport {
         let ternary_values = self
             .full_precision_weights
             .chunks_exact(self.shape.input_cols())
@@ -247,24 +339,28 @@ impl TernaryLinearQat {
             })
             .collect();
 
-        (
-            CanonicalTensor::from_parts_unchecked(
+        TernaryLinearExport {
+            ternary_weights: CanonicalTensor::from_parts_unchecked(
                 vec![self.shape.output_rows(), self.shape.input_cols()],
                 ternary_values,
             ),
-            CanonicalTensor::from_parts_unchecked(
+            scales: CanonicalTensor::from_parts_unchecked(
                 vec![self.shape.output_rows()],
                 self.scales.clone(),
             ),
-        )
+            bias: self.bias.as_ref().map(|bias| {
+                CanonicalTensor::from_parts_unchecked(vec![self.shape.output_rows()], bias.clone())
+            }),
+        }
     }
 
     pub fn projected_weights(&self) -> CanonicalTensor<f32> {
-        let (ternary, scales) = self.export_canonical();
-        let projected = ternary
+        let export = self.export_canonical();
+        let projected = export
+            .ternary_weights()
             .values()
             .chunks_exact(self.shape.input_cols())
-            .zip(scales.values())
+            .zip(export.scales().values())
             .flat_map(|(row, &scale)| row.iter().map(move |&value| value.scaled(scale)))
             .collect();
 
@@ -360,12 +456,19 @@ impl fmt::Display for TernaryLinearQatError {
 
 impl Error for TernaryLinearQatError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScaleValidation {
+    RequirePerRow,
+    AllowEmptyForDerivation,
+}
+
 fn validate_shape_state(
     shape: MatrixShape,
     full_precision_weights: &[f32],
     bias: Option<&[f32]>,
     thresholds: &[TernaryThreshold],
     scales: &[Q8_8Scale],
+    scale_validation: ScaleValidation,
 ) -> Result<(), TernaryLinearQatError> {
     if full_precision_weights.len() != shape.weight_len() {
         return Err(TernaryLinearQatError::WeightLenMismatch {
@@ -401,11 +504,22 @@ fn validate_shape_state(
         });
     }
 
-    if !scales.is_empty() && scales.len() != shape.output_rows() {
-        return Err(TernaryLinearQatError::ScaleLenMismatch {
-            expected: shape.output_rows(),
-            actual: scales.len(),
-        });
+    match scale_validation {
+        ScaleValidation::RequirePerRow if scales.len() != shape.output_rows() => {
+            return Err(TernaryLinearQatError::ScaleLenMismatch {
+                expected: shape.output_rows(),
+                actual: scales.len(),
+            });
+        }
+        ScaleValidation::AllowEmptyForDerivation
+            if !scales.is_empty() && scales.len() != shape.output_rows() =>
+        {
+            return Err(TernaryLinearQatError::ScaleLenMismatch {
+                expected: shape.output_rows(),
+                actual: scales.len(),
+            });
+        }
+        _ => {}
     }
 
     Ok(())
@@ -435,6 +549,47 @@ fn derive_row_scale(
 mod tests {
     use super::*;
 
+    struct ScalarSteBackend;
+
+    impl TernarySteBackend for ScalarSteBackend {
+        type Tensor = Vec<f32>;
+
+        fn ternary_linear_ste(
+            &self,
+            spec: TernarySteLinear<'_>,
+            full_precision_weights: &Self::Tensor,
+            scale_factors: &Self::Tensor,
+            input: &Self::Tensor,
+        ) -> Self::Tensor {
+            assert_eq!(
+                full_precision_weights.len(),
+                spec.shape().output_rows() * spec.shape().input_cols()
+            );
+            assert_eq!(spec.thresholds().len(), spec.shape().output_rows());
+            assert_eq!(scale_factors.len(), spec.shape().output_rows());
+            assert_eq!(input.len(), spec.shape().input_cols());
+
+            full_precision_weights
+                .chunks_exact(spec.shape().input_cols())
+                .enumerate()
+                .map(|(row_index, row)| {
+                    let threshold = spec.thresholds()[row_index];
+                    let scale = scale_factors[row_index];
+                    let weighted_sum = row
+                        .iter()
+                        .zip(input.iter())
+                        .map(|(&weight, &input)| {
+                            f32::from(TernaryValue::from_weight(weight, threshold).as_i8())
+                                * scale
+                                * input
+                        })
+                        .sum::<f32>();
+                    weighted_sum + spec.bias().map_or(0.0, |bias| bias[row_index])
+                })
+                .collect()
+        }
+    }
+
     #[test]
     fn qat_ternary_forward_and_export_share_projection() {
         let layer = TernaryLinearQat::new(
@@ -446,19 +601,33 @@ mod tests {
         )
         .unwrap();
 
-        let output = layer.fake_quant_forward(&[1.0, 2.0, 4.0]).unwrap();
-        let (ternary_weights, scales) = layer.export_canonical();
+        let input = vec![1.0, 2.0, 4.0];
+        let train_weights = layer.full_precision_weights().to_vec();
+        let train_scales = layer
+            .scales()
+            .iter()
+            .map(|scale| scale.to_f32())
+            .collect::<Vec<_>>();
+        let output =
+            layer.fake_quant_forward(&ScalarSteBackend, &train_weights, &train_scales, &input);
+        let inference_output = layer.inference_forward(&input).unwrap();
+        let export = layer.export_canonical();
 
         assert_eq!(output, vec![0.75]);
+        assert_eq!(output, inference_output);
         assert_eq!(
-            ternary_weights.values(),
+            export.ternary_weights().values(),
             &[
                 TernaryValue::Negative,
                 TernaryValue::Zero,
                 TernaryValue::Positive,
             ]
         );
-        assert_eq!(scales.values(), &[Q8_8Scale::from_f32(0.25).unwrap()]);
+        assert_eq!(
+            export.scales().values(),
+            &[Q8_8Scale::from_f32(0.25).unwrap()]
+        );
+        assert_eq!(export.bias(), None);
         assert_eq!(layer.projected_weights().values(), &[-0.25, 0.0, 0.25]);
     }
 
@@ -469,6 +638,26 @@ mod tests {
         assert!(TernaryThreshold::new(f32::NAN).is_err());
         assert!(Q8_8Scale::from_f32(-0.1).is_err());
         assert!(Q8_8Scale::from_f32(f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn qat_ternary_rejects_empty_explicit_scales() {
+        let err = TernaryLinearQat::new(
+            MatrixShape::new(1, 2).unwrap(),
+            vec![1.0, -1.0],
+            None,
+            vec![TernaryThreshold::new(0.5).unwrap()],
+            vec![],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            TernaryLinearQatError::ScaleLenMismatch {
+                expected: 1,
+                actual: 0
+            }
+        );
     }
 
     #[test]
@@ -484,10 +673,10 @@ mod tests {
         )
         .unwrap();
 
-        let (ternary_weights, scales) = layer.export_canonical();
+        let export = layer.export_canonical();
 
         assert_eq!(
-            ternary_weights.values(),
+            export.ternary_weights().values(),
             &[
                 TernaryValue::Positive,
                 TernaryValue::Negative,
@@ -497,10 +686,14 @@ mod tests {
                 TernaryValue::Zero,
             ]
         );
-        assert_eq!(scales.values()[0], Q8_8Scale::from_f32(2.0).unwrap());
-        assert_eq!(scales.values()[1], Q8_8Scale::ZERO);
         assert_eq!(
-            layer.fake_quant_forward(&[1.0, 1.0, 1.0]).unwrap(),
+            export.scales().values()[0],
+            Q8_8Scale::from_f32(2.0).unwrap()
+        );
+        assert_eq!(export.scales().values()[1], Q8_8Scale::ZERO);
+        assert_eq!(export.bias().unwrap().values(), &[0.5, -0.5]);
+        assert_eq!(
+            layer.inference_forward(&[1.0, 1.0, 1.0]).unwrap(),
             vec![0.5, -0.5]
         );
     }
