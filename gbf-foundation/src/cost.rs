@@ -31,6 +31,16 @@ impl ByteCost {
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
         self.0.checked_sub(rhs.0).map(Self)
     }
+
+    #[must_use]
+    pub const fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
+
+    #[must_use]
+    pub const fn saturating_sub(self, rhs: Self) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
 }
 
 impl From<u64> for ByteCost {
@@ -49,8 +59,7 @@ impl Add for ByteCost {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        self.checked_add(rhs)
-            .expect("ByteCost addition overflowed u64")
+        self.saturating_add(rhs)
     }
 }
 
@@ -64,8 +73,7 @@ impl Sub for ByteCost {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        self.checked_sub(rhs)
-            .expect("ByteCost subtraction underflowed u64")
+        self.saturating_sub(rhs)
     }
 }
 
@@ -94,6 +102,15 @@ mod tests {
         assert_eq!((rom - overlay).as_u64(), 11);
         assert!(rom > overlay);
         assert_eq!(rom.to_string(), "16 bytes");
+    }
+
+    #[test]
+    fn byte_cost_add_sub_operators_saturate() {
+        assert_eq!(
+            (ByteCost::new(u64::MAX) + ByteCost::new(1)).as_u64(),
+            u64::MAX
+        );
+        assert_eq!((ByteCost::new(0) - ByteCost::new(1)).as_u64(), 0);
     }
 
     #[test]

@@ -1,4 +1,7 @@
-//! Quantization-aware training modules owned by the deployable model contract.
+//! Quantization-aware training semantics owned by the deployable model contract.
+//!
+//! These modules currently expose backend-independent scalar/reference cores.
+//! Burn tensor wrappers and autodiff STE adapters belong in `gbf-train`.
 
 pub mod activation;
 pub mod expert;
@@ -9,15 +12,12 @@ pub mod ternary;
 
 pub use activation::{
     ActFakeQuant, ActFakeQuantError, ActivationForwardMode, ActivationQuantFormat, ActivationRange,
-    ActivationRangeMode, EmaDecay,
+    ActivationRangeMode, ActivationRangeModeKind, EmaDecay,
 };
-pub use expert::ExpertBlockQat;
-pub use export::ExportVisitor;
 pub use norm::{
     AffineParams, LutSpec, NormApproxError, NormApproxPlan, NormApproxQat, NormClip,
     NormExportData, TileRmsSpec,
 };
-pub use router::Top1RouterQat;
 pub use ternary::{
     MatrixShape, Q8_8Scale, TernaryLinearQat, TernaryLinearQatError, TernaryThreshold, TernaryValue,
 };

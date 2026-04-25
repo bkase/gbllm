@@ -3,6 +3,14 @@
 use std::error::Error;
 use std::fmt;
 
+use gbf_artifact::norm_plan::{
+    AffineClipLutPlan as ArtifactAffineClipLutPlan, NormAffineParams as ArtifactNormAffineParams,
+    NormClipBounds as ArtifactNormClipBounds, NormExportParams as ArtifactNormExportParams,
+    NormLutSpec as ArtifactNormLutSpec, NormPlan as ArtifactNormPlan,
+    NormTileRmsSpec as ArtifactNormTileRmsSpec,
+    TileRmsThenAffineClipPlan as ArtifactTileRmsThenAffineClipPlan,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineParams {
     scale: f32,
@@ -110,7 +118,7 @@ impl LutSpec {
             return Err(NormApproxError::InvalidLutOrder { input_lo, input_hi });
         }
 
-        if entries < 2 {
+        if entries < 2 || entries > usize::from(u16::MAX) {
             return Err(NormApproxError::InvalidLutEntries(entries));
         }
 
@@ -147,11 +155,11 @@ pub struct TileRmsSpec {
 
 impl TileRmsSpec {
     pub fn new(tile_width: usize, epsilon: f32) -> Result<Self, NormApproxError> {
-        if tile_width == 0 {
+        if tile_width == 0 || tile_width > usize::from(u16::MAX) {
             return Err(NormApproxError::InvalidTileWidth(tile_width));
         }
 
-        if !epsilon.is_finite() || epsilon < 0.0 {
+        if !epsilon.is_finite() || epsilon <= 0.0 {
             return Err(NormApproxError::InvalidEpsilon(epsilon));
         }
 
@@ -186,17 +194,24 @@ pub enum NormApproxPlan {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormExportData {
-    plan: NormApproxPlan,
-    lut_values: Option<Vec<f32>>,
+    params: ArtifactNormExportParams,
 }
 
 impl NormExportData {
-    pub fn plan(&self) -> NormApproxPlan {
-        self.plan
+    pub fn params(&self) -> &ArtifactNormExportParams {
+        &self.params
     }
 
-    pub fn lut_values(&self) -> Option<&[f32]> {
-        self.lut_values.as_deref()
+    pub fn plan(&self) -> ArtifactNormPlan {
+        match &self.params {
+            ArtifactNormExportParams::None => ArtifactNormPlan::None,
+            ArtifactNormExportParams::AffineClipLut { plan, .. } => {
+                ArtifactNormPlan::AffineClipLut(*plan)
+            }
+            ArtifactNormExportParams::TileRmsThenAffineClip { plan } => {
+                ArtifactNormPlan::TileRmsThenAffineClip(*plan)
+            }
+        }
     }
 }
 
@@ -224,25 +239,37 @@ impl NormApproxQat {
                 .map(|value| apply_affine_clip(value, affine, clip))
                 .collect()),
             NormApproxPlan::TileRmsThenAffineClip { tile, affine, clip } => {
-                Ok(tile_rms_then_affine_clip(input, tile, affine, clip))
+                tile_rms_then_affine_clip(input, tile, affine, clip)
             }
         }
     }
 
     pub fn export_norm_params(&self) -> NormExportData {
-        let lut_values = match self.plan {
-            NormApproxPlan::AffineClipLut { affine, clip, lut } => Some(
-                (0..lut.entries())
-                    .map(|index| apply_affine_clip(lut.sample(index), affine, clip))
-                    .collect(),
-            ),
-            NormApproxPlan::TileRmsThenAffineClip { .. } => None,
+        let params = match self.plan {
+            NormApproxPlan::AffineClipLut { affine, clip, lut } => {
+                ArtifactNormExportParams::AffineClipLut {
+                    plan: ArtifactAffineClipLutPlan {
+                        affine: artifact_affine(affine),
+                        clip: artifact_clip(clip),
+                        lut: artifact_lut(lut),
+                    },
+                    lut_values: (0..lut.entries())
+                        .map(|index| apply_affine_clip(lut.sample(index), affine, clip))
+                        .collect(),
+                }
+            }
+            NormApproxPlan::TileRmsThenAffineClip { tile, affine, clip } => {
+                ArtifactNormExportParams::TileRmsThenAffineClip {
+                    plan: ArtifactTileRmsThenAffineClipPlan {
+                        tile: artifact_tile(tile),
+                        affine: artifact_affine(affine),
+                        clip: artifact_clip(clip),
+                    },
+                }
+            }
         };
 
-        NormExportData {
-            plan: self.plan,
-            lut_values,
-        }
+        NormExportData { params }
     }
 }
 
@@ -256,6 +283,7 @@ pub enum NormApproxError {
     InvalidLutEntries(usize),
     InvalidTileWidth(usize),
     InvalidEpsilon(f32),
+    RaggedTileInput { len: usize, tile_width: usize },
     NonFiniteInput { index: usize },
 }
 
@@ -279,15 +307,26 @@ impl fmt::Display for NormApproxError {
                 "norm LUT input range must satisfy input_lo < input_hi, got {input_lo} >= {input_hi}"
             ),
             Self::InvalidLutEntries(entries) => {
-                write!(f, "norm LUT must have at least 2 entries, got {entries}")
-            }
-            Self::InvalidTileWidth(tile_width) => {
-                write!(f, "norm tile width must be non-zero, got {tile_width}")
-            }
-            Self::InvalidEpsilon(epsilon) => {
                 write!(
                     f,
-                    "norm epsilon must be finite and non-negative, got {epsilon}"
+                    "norm LUT entries must be in [2, {}], got {entries}",
+                    u16::MAX
+                )
+            }
+            Self::InvalidTileWidth(tile_width) => {
+                write!(
+                    f,
+                    "norm tile width must be in [1, {}], got {tile_width}",
+                    u16::MAX
+                )
+            }
+            Self::InvalidEpsilon(epsilon) => {
+                write!(f, "norm epsilon must be finite and positive, got {epsilon}")
+            }
+            Self::RaggedTileInput { len, tile_width } => {
+                write!(
+                    f,
+                    "norm input length {len} is not divisible by tile width {tile_width}"
                 )
             }
             Self::NonFiniteInput { index } => {
@@ -311,13 +350,49 @@ fn apply_affine_clip(value: f32, affine: AffineParams, clip: NormClip) -> f32 {
     clip.apply(affine.apply(value))
 }
 
+fn artifact_affine(affine: AffineParams) -> ArtifactNormAffineParams {
+    ArtifactNormAffineParams {
+        scale: affine.scale(),
+        bias: affine.bias(),
+    }
+}
+
+fn artifact_clip(clip: NormClip) -> ArtifactNormClipBounds {
+    ArtifactNormClipBounds {
+        lo: clip.lo(),
+        hi: clip.hi(),
+    }
+}
+
+fn artifact_lut(lut: LutSpec) -> ArtifactNormLutSpec {
+    ArtifactNormLutSpec {
+        input_lo: lut.input_lo(),
+        input_hi: lut.input_hi(),
+        entries: lut.entries() as u16,
+    }
+}
+
+fn artifact_tile(tile: TileRmsSpec) -> ArtifactNormTileRmsSpec {
+    ArtifactNormTileRmsSpec {
+        tile_width: tile.tile_width() as u16,
+        epsilon: tile.epsilon(),
+    }
+}
+
 fn tile_rms_then_affine_clip(
     input: &[f32],
     tile: TileRmsSpec,
     affine: AffineParams,
     clip: NormClip,
-) -> Vec<f32> {
-    input
+) -> Result<Vec<f32>, NormApproxError> {
+    if !input.is_empty() && !input.len().is_multiple_of(tile.tile_width()) {
+        return Err(NormApproxError::RaggedTileInput {
+            len: input.len(),
+            tile_width: tile.tile_width(),
+        });
+    }
+
+    Ok(input
         .chunks(tile.tile_width())
         .flat_map(|chunk| {
             let mean_square =
@@ -328,7 +403,7 @@ fn tile_rms_then_affine_clip(
                 .copied()
                 .map(move |value| apply_affine_clip(value / rms, affine, clip))
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -349,29 +424,36 @@ mod tests {
         );
 
         let export = norm.export_norm_params();
+        assert!(matches!(export.plan(), ArtifactNormPlan::AffineClipLut(_)));
         assert!(matches!(
-            export.plan(),
-            NormApproxPlan::AffineClipLut { .. }
+            export.params(),
+            ArtifactNormExportParams::AffineClipLut { lut_values, .. }
+                if lut_values == &vec![-1.0, -1.0, 1.0]
         ));
-        assert_eq!(export.lut_values().unwrap(), &[-1.0, -1.0, 1.0]);
     }
 
     #[test]
     fn qat_norm_tile_rms_then_affine_clip_uses_per_tile_rms() {
         let norm = NormApproxQat::new(NormApproxPlan::TileRmsThenAffineClip {
-            tile: TileRmsSpec::new(2, 0.0).unwrap(),
+            tile: TileRmsSpec::new(2, 1.0).unwrap(),
             affine: AffineParams::new(1.0, 0.0).unwrap(),
             clip: NormClip::new(-2.0, 2.0).unwrap(),
         });
 
         let output = norm.forward(&[1.0, 1.0, 0.0, 2.0]).unwrap();
 
-        assert_eq!(output, vec![1.0, 1.0, 0.0, 2.0_f32.sqrt()]);
+        assert_close(output[0], 1.0 / 2.0_f32.sqrt());
+        assert_close(output[1], 1.0 / 2.0_f32.sqrt());
+        assert_eq!(output[2], 0.0);
+        assert_close(output[3], 2.0 / 3.0_f32.sqrt());
         assert!(matches!(
             norm.export_norm_params().plan(),
-            NormApproxPlan::TileRmsThenAffineClip { .. }
+            ArtifactNormPlan::TileRmsThenAffineClip(_)
         ));
-        assert_eq!(norm.export_norm_params().lut_values(), None);
+        assert!(matches!(
+            norm.export_norm_params().params(),
+            ArtifactNormExportParams::TileRmsThenAffineClip { .. }
+        ));
     }
 
     #[test]
@@ -383,6 +465,7 @@ mod tests {
         assert!(LutSpec::new(-1.0, 1.0, 1).is_err());
         assert!(LutSpec::new(1.0, -1.0, 2).is_err());
         assert!(TileRmsSpec::new(0, 0.0).is_err());
+        assert!(TileRmsSpec::new(1, 0.0).is_err());
         assert!(TileRmsSpec::new(1, -0.1).is_err());
     }
 
@@ -397,6 +480,41 @@ mod tests {
         assert_eq!(
             norm.forward(&[0.0, f32::NAN]),
             Err(NormApproxError::NonFiniteInput { index: 1 })
+        );
+    }
+
+    #[test]
+    fn qat_norm_rejects_ragged_tile_input() {
+        let norm = NormApproxQat::new(NormApproxPlan::TileRmsThenAffineClip {
+            tile: TileRmsSpec::new(2, 1.0).unwrap(),
+            affine: AffineParams::new(1.0, 0.0).unwrap(),
+            clip: NormClip::new(-2.0, 2.0).unwrap(),
+        });
+
+        assert_eq!(
+            norm.forward(&[1.0, 2.0, 3.0]),
+            Err(NormApproxError::RaggedTileInput {
+                len: 3,
+                tile_width: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn qat_norm_zero_tile_with_positive_epsilon_stays_finite() {
+        let norm = NormApproxQat::new(NormApproxPlan::TileRmsThenAffineClip {
+            tile: TileRmsSpec::new(2, 1.0).unwrap(),
+            affine: AffineParams::new(1.0, 0.0).unwrap(),
+            clip: NormClip::new(-2.0, 2.0).unwrap(),
+        });
+
+        assert_eq!(norm.forward(&[0.0, 0.0]).unwrap(), vec![0.0, 0.0]);
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-6,
+            "actual={actual} expected={expected}"
         );
     }
 }

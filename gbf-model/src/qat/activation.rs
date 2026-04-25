@@ -81,11 +81,36 @@ impl ActivationRangeMode {
         }
     }
 
+    fn kind(self) -> ActivationRangeModeKind {
+        match self {
+            Self::Fixed(_) => ActivationRangeModeKind::Fixed,
+            Self::Learned(_) => ActivationRangeModeKind::Learned,
+            Self::Ema { .. } => ActivationRangeModeKind::Ema,
+        }
+    }
+
     pub fn with_range(self, range: ActivationRange) -> Self {
         match self {
             Self::Fixed(_) => Self::Fixed(range),
             Self::Learned(_) => Self::Learned(range),
             Self::Ema { decay, .. } => Self::Ema { range, decay },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationRangeModeKind {
+    Fixed,
+    Learned,
+    Ema,
+}
+
+impl fmt::Display for ActivationRangeModeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fixed => f.write_str("fixed"),
+            Self::Learned => f.write_str("learned"),
+            Self::Ema => f.write_str("ema"),
         }
     }
 }
@@ -221,7 +246,7 @@ impl ActFakeQuant {
         self.quant_format
     }
 
-    pub fn update_ema_range(&mut self, observed: ActivationRange) {
+    pub fn update_ema_range(&mut self, observed: ActivationRange) -> Result<(), ActFakeQuantError> {
         if let ActivationRangeMode::Ema { range, decay } = self.range_mode {
             let keep = decay.value();
             let update = 1.0 - keep;
@@ -230,12 +255,27 @@ impl ActFakeQuant {
                 hi: range.hi() * keep + observed.hi() * update,
             };
             self.range_mode = ActivationRangeMode::Ema { range: next, decay };
+            Ok(())
+        } else {
+            Err(ActFakeQuantError::RangeModeMismatch {
+                expected: ActivationRangeModeKind::Ema,
+                actual: self.range_mode.kind(),
+            })
         }
     }
 
-    pub fn update_learned_range(&mut self, learned: ActivationRange) {
+    pub fn update_learned_range(
+        &mut self,
+        learned: ActivationRange,
+    ) -> Result<(), ActFakeQuantError> {
         if matches!(self.range_mode, ActivationRangeMode::Learned(_)) {
             self.range_mode = ActivationRangeMode::Learned(learned);
+            Ok(())
+        } else {
+            Err(ActFakeQuantError::RangeModeMismatch {
+                expected: ActivationRangeModeKind::Learned,
+                actual: self.range_mode.kind(),
+            })
         }
     }
 
@@ -251,10 +291,22 @@ impl ActFakeQuant {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActFakeQuantError {
-    InvalidRangeBound { name: &'static str, value: f32 },
-    InvalidRangeOrder { lo: f32, hi: f32 },
+    InvalidRangeBound {
+        name: &'static str,
+        value: f32,
+    },
+    InvalidRangeOrder {
+        lo: f32,
+        hi: f32,
+    },
     InvalidEmaDecay(f32),
-    NonFiniteInput { index: usize },
+    RangeModeMismatch {
+        expected: ActivationRangeModeKind,
+        actual: ActivationRangeModeKind,
+    },
+    NonFiniteInput {
+        index: usize,
+    },
 }
 
 impl fmt::Display for ActFakeQuantError {
@@ -268,6 +320,12 @@ impl fmt::Display for ActFakeQuantError {
             }
             Self::InvalidEmaDecay(value) => {
                 write!(f, "EMA decay must be finite and in [0, 1), got {value}")
+            }
+            Self::RangeModeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "activation range update expected {expected} mode, got {actual}"
+                )
             }
             Self::NonFiniteInput { index } => {
                 write!(f, "activation input at index {index} is not finite")
@@ -293,12 +351,20 @@ fn fake_quantize_value(
 ) -> f32 {
     let clamped = range.clamp(value);
     if quant_format.is_signed() {
-        let max_abs = range.lo().abs().max(range.hi().abs());
-        let scale = f32::from(quant_format.quant_steps()) / max_abs;
-        (clamped * scale).round() / scale
+        let qmax = f64::from(quant_format.quant_steps());
+        let max_abs = f64::from(range.lo().abs().max(range.hi().abs()));
+        let quantized = (f64::from(clamped) * qmax / max_abs)
+            .round()
+            .clamp(-qmax, qmax);
+        range.clamp((quantized * max_abs / qmax) as f32)
     } else {
-        let scale = f32::from(quant_format.quant_steps()) / (range.hi() - range.lo());
-        ((clamped - range.lo()) * scale).round() / scale + range.lo()
+        let qmax = f64::from(quant_format.quant_steps());
+        let lo = f64::from(range.lo());
+        let width = f64::from(range.hi()) - lo;
+        let quantized = ((f64::from(clamped) - lo) * qmax / width)
+            .round()
+            .clamp(0.0, qmax);
+        range.clamp((quantized * width / qmax + lo) as f32)
     }
 }
 
@@ -406,7 +472,9 @@ mod tests {
         )
         .unwrap();
 
-        quant.update_ema_range(ActivationRange::new(-3.0, 5.0).unwrap());
+        quant
+            .update_ema_range(ActivationRange::new(-3.0, 5.0).unwrap())
+            .unwrap();
 
         let range = quant.export_range();
         assert_eq!(range.lo(), -2.0);
@@ -441,10 +509,67 @@ mod tests {
         )
         .unwrap();
 
-        quant.update_learned_range(ActivationRange::new(-2.0, 3.0).unwrap());
+        quant
+            .update_learned_range(ActivationRange::new(-2.0, 3.0).unwrap())
+            .unwrap();
 
         let range = quant.export_range();
         assert_eq!(range.lo(), -2.0);
         assert_eq!(range.hi(), 3.0);
+    }
+
+    #[test]
+    fn qat_activation_signed_int8_clamps_after_asymmetric_dequantization() {
+        let quant = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(-1.0, 0.5).unwrap()),
+            ActivationQuantFormat::Int8,
+        )
+        .unwrap();
+
+        let output = quant
+            .inference_forward(&[0.5], ActivationForwardMode::Train)
+            .unwrap();
+
+        assert_eq!(output, vec![0.5]);
+    }
+
+    #[test]
+    fn qat_activation_tiny_ranges_do_not_produce_nan() {
+        let quant = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(-1.0e-40, 1.0e-40).unwrap()),
+            ActivationQuantFormat::Int8,
+        )
+        .unwrap();
+
+        let output = quant
+            .inference_forward(&[1.0e-40], ActivationForwardMode::Train)
+            .unwrap();
+
+        assert!(output[0].is_finite());
+        assert!(output[0] <= 1.0e-40);
+    }
+
+    #[test]
+    fn qat_activation_range_updates_reject_wrong_mode() {
+        let mut quant = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(-1.0, 1.0).unwrap()),
+            ActivationQuantFormat::Int8,
+        )
+        .unwrap();
+
+        assert_eq!(
+            quant.update_ema_range(ActivationRange::new(-2.0, 2.0).unwrap()),
+            Err(ActFakeQuantError::RangeModeMismatch {
+                expected: ActivationRangeModeKind::Ema,
+                actual: ActivationRangeModeKind::Fixed,
+            })
+        );
+        assert_eq!(
+            quant.update_learned_range(ActivationRange::new(-2.0, 2.0).unwrap()),
+            Err(ActFakeQuantError::RangeModeMismatch {
+                expected: ActivationRangeModeKind::Learned,
+                actual: ActivationRangeModeKind::Fixed,
+            })
+        );
     }
 }
