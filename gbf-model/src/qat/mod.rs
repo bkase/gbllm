@@ -7,7 +7,10 @@ pub mod norm;
 pub mod router;
 pub mod ternary;
 
-pub use activation::ActFakeQuant;
+pub use activation::{
+    ActFakeQuant, ActFakeQuantError, ActivationFakeQuantBackend, ActivationQuantFormat,
+    ActivationRange, ActivationRangeMode, ActivationSteSpec, EmaDecay,
+};
 pub use expert::ExpertBlockQat;
 pub use export::ExportVisitor;
 pub use norm::NormApproxQat;
