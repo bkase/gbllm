@@ -13,7 +13,10 @@ pub use activation::{
 };
 pub use expert::ExpertBlockQat;
 pub use export::ExportVisitor;
-pub use norm::NormApproxQat;
+pub use norm::{
+    AffineParams, LutSpec, NormApproxError, NormApproxPlan, NormApproxQat, NormClip,
+    NormExportData, TileRmsSpec,
+};
 pub use router::Top1RouterQat;
 pub use ternary::{
     MatrixShape, Q8_8Scale, TernaryLinearQat, TernaryLinearQatError, TernaryThreshold, TernaryValue,
