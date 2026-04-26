@@ -5,6 +5,7 @@ use std::fmt;
 
 use gbf_foundation::ByteCost;
 
+use crate::budget::{compute_expert_bytes, compute_glu_expert_bytes_for_diagnostic};
 use crate::qat::{
     ActFakeQuant, ActFakeQuantError, ActivationForwardMode, ActivationRange, MatrixShape,
     TernaryLinearQat, TernaryLinearQatError,
@@ -130,11 +131,13 @@ impl ExpertMlpConfig {
     }
 
     pub fn two_matrix_byte_cost(self) -> ByteCost {
-        expert_two_matrix_byte_cost(self.d_model as u32, self.d_ff as u32)
+        let plan = TernaryLinearQat::canonical_weight_plan();
+        compute_expert_bytes(&plan, self.d_model as u32, self.d_ff as u32)
     }
 
     pub fn glu_byte_cost(self) -> ByteCost {
-        expert_glu_byte_cost(self.d_model as u32, self.d_ff as u32)
+        let plan = TernaryLinearQat::canonical_weight_plan();
+        compute_glu_expert_bytes_for_diagnostic(&plan, self.d_model as u32, self.d_ff as u32)
     }
 }
 
@@ -1091,21 +1094,6 @@ fn matrix_count_for_variant(variant: ExpertMlpVariant) -> usize {
     }
 }
 
-fn expert_two_matrix_byte_cost(d_model: u32, d_ff: u32) -> ByteCost {
-    let plan = TernaryLinearQat::canonical_weight_plan();
-    let up = plan.compute_byte_cost(d_ff, d_model);
-    let down = plan.compute_byte_cost(d_model, d_ff);
-    up + down
-}
-
-fn expert_glu_byte_cost(d_model: u32, d_ff: u32) -> ByteCost {
-    let plan = TernaryLinearQat::canonical_weight_plan();
-    let up = plan.compute_byte_cost(d_ff, d_model);
-    let gate = plan.compute_byte_cost(d_ff, d_model);
-    let down = plan.compute_byte_cost(d_model, d_ff);
-    up + gate + down
-}
-
 fn gelu(value: f32) -> f32 {
     const SQRT_2_OVER_PI: f32 = 0.797_884_6;
     0.5 * value * (1.0 + (SQRT_2_OVER_PI * (value + 0.044_715 * value.powi(3))).tanh())
@@ -1167,8 +1155,8 @@ mod tests {
         assert_eq!(event.d_model(), 128);
         assert_eq!(event.d_ff(), 224);
         assert_eq!(event.ternary_linear_count(), 3);
-        assert_eq!(event.two_matrix_byte_cost(), ByteCost::new(15040));
-        assert_eq!(event.glu_byte_cost(), ByteCost::new(22656));
+        assert_eq!(event.two_matrix_byte_cost(), ByteCost::new(15090));
+        assert_eq!(event.glu_byte_cost(), ByteCost::new(22706));
         assert_eq!(event.extra_projection_byte_cost(), ByteCost::new(7616));
         assert!(event.message().contains("third projection"));
         assert_eq!(

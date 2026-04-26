@@ -38,6 +38,9 @@ If the artifact contract is not implemented yet, do not claim artifact agreement
 - Thread phase/activation/hardness options through every branch, including optional shared branches. Add a test that exercises the optional branch, not only the default path.
 - If a bead mentions F4 phased hardness, either implement the exact `Off`/`Soft`/`Hard` contract or explicitly move it to the phase-hardness owner bead. Local two-state shortcuts must be documented as local execution modes, not as F4 completion.
 - Document deterministic router conventions that affect artifacts or training traces, including top-1 tie break and default-rank clamping for tiny expert sets.
+- Budget and preflight beads must distinguish provisional estimates from artifact/compiler-backed exact costs. Name estimated metadata as estimated, state the exact owner when final packing is elsewhere, and add tests for both the formula and the fit/reject boundary.
+- Preflight budget APIs must reject invalid model dimensions instead of reporting zero-sized experts or routers as fitting. Keep raw arithmetic helpers separate from validated preflight/report entry points.
+- Unsupported QAT variants may expose config-only diagnostics, but must not expose public canonical budget/export/training helpers unless the executable path exists or the helper is explicitly rejected/moved in the support matrix.
 
 ## Support Matrix
 
