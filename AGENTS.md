@@ -98,4 +98,11 @@ git push                # Push to remote
 - Name placeholders explicitly when real policy, workload, manifest, compiler, or runtime contracts are still stubs, and create a follow-up owner before closing.
 - Scope artifact assertions to the artifact type that exists. `ArtifactCore` helpers must check core tensor/quant invariants, including tensor content-hash self-consistency; manifest validation needs a real manifest contract and test.
 
+### Structured Logging Beads
+
+- Closure must distinguish a logging schema/helper contract from adoption by real training, data, model, CLI, export, or runtime producers. If producer adoption is incomplete, create a named follow-up bead before closing.
+- Tests for logging event shape should include at least one subscriber-level capture of actual `tracing` fields, not only a mirrored test collector or source grep.
+- Canonical event names used by downstream tests should be constants in code. Do not introduce direct `tracing::*` call sites with ad hoc event names or load-bearing message strings.
+- Do not claim observability performance targets, such as logging overhead percentage, unless a benchmark or explicit gate measures them.
+
 <!-- end-br-agent-instructions -->

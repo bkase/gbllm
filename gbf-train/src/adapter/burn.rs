@@ -90,10 +90,10 @@ pub struct TracingMetricSink;
 impl MetricSink for TracingMetricSink {
     fn log_scalar(&self, metric: &ScalarMetric) {
         tracing::info!(
-            metric.name = %metric.name,
-            metric.value = metric.value,
-            metric.step = metric.step,
-            "training scalar metric"
+            event_name = crate::logging::EVENT_NAME_SCALAR_METRIC,
+            metric_name = %metric.name,
+            metric_value = metric.value,
+            step = metric.step,
         );
     }
 }
