@@ -99,6 +99,13 @@ git push                # Push to remote
 - When claiming parameter sharing or parameter-count reduction, add an owned-layer alias/count test and name a follow-up owner for export/artifact/budget sharing if that layer is not implemented.
 - Keep enum or named constructors as the primary API for model mode choices; bools should be derived queries or edge-adapter inputs.
 
+### Sequence-State Beads
+
+- Keep one authoritative sequence semantics contract. If crate dependencies require durable schema in `gbf-artifact`, re-export it from `gbf-model` and state that ownership movement explicitly in bead closure.
+- Export paths must consume `SequenceExportFacts` derived from model topology or a sequence block, not a free-standing enum supplied at finish time. Add a test that `ExportVisitor` carries those facts into both `ArtifactCore` and `ExportFacts`.
+- A sequence dispatch trait must use project-native activation/state types with shape and finiteness validation. Do not satisfy trait acceptance with fully unconstrained associated `Input`/`Output`/`State` types.
+- Policy/profile selector enums such as `SequenceSemanticsRef` are configuration references only until compile profiles consume them. Avoid derived ordering unless an ordering has executable policy meaning.
+
 ### Fixture Beads
 
 - Keep one source of truth for tiny fixtures. If a tiny model config names layers or paths, the model fixture should own the state that artifact/workload factories consume.

@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 
 use gbf_artifact::core::ArtifactCore;
+use gbf_artifact::sequence::SequenceSemanticsSpec;
 use gbf_artifact::tensor::CanonicalTensor;
 use gbf_model::config::{
     DenseFfnConfig, ModelTopologyConfig, MoeBlockConfig, MoeFfnConfig, SharedSequenceConfig,
@@ -21,7 +22,9 @@ pub const TINY_N_EXPERTS: usize = 2;
 pub const TINY_N_LAYERS: usize = 2;
 pub const TINY_VOCAB_SIZE: usize = 32;
 pub const TINY_MOE_BLOCK_INDEX: usize = 1;
-pub const TINY_BOUNDED_KV_STATE_WIDTH: usize = 4;
+pub const TINY_MAX_CONTEXT: u16 = 16;
+pub const TINY_KV_BYTES_PER_TOKEN: u16 = 4;
+pub const TINY_BOUNDED_KV_STATE_WIDTH: usize = TINY_KV_BYTES_PER_TOKEN as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TinyModelConfig {
@@ -196,12 +199,14 @@ impl TestTensor {
 
 pub fn tiny_moe_config() -> TinyModelConfig {
     let dense_block = MoeBlockConfig::dense_ffn(
-        SharedSequenceConfig::bounded_kv(TINY_D_MODEL, TINY_BOUNDED_KV_STATE_WIDTH).unwrap(),
+        SharedSequenceConfig::bounded_kv(TINY_D_MODEL, TINY_MAX_CONTEXT, TINY_KV_BYTES_PER_TOKEN)
+            .unwrap(),
         DenseFfnConfig::new(TINY_D_MODEL, TINY_D_FF).unwrap(),
     )
     .unwrap();
     let moe_block = MoeBlockConfig::moe_ffn(
-        SharedSequenceConfig::bounded_kv(TINY_D_MODEL, TINY_BOUNDED_KV_STATE_WIDTH).unwrap(),
+        SharedSequenceConfig::bounded_kv(TINY_D_MODEL, TINY_MAX_CONTEXT, TINY_KV_BYTES_PER_TOKEN)
+            .unwrap(),
         MoeFfnConfig::new(TINY_D_MODEL, TINY_D_FF, TINY_N_EXPERTS).unwrap(),
     )
     .unwrap();
@@ -248,7 +253,7 @@ pub fn make_tiny_exported_artifact() -> ExportedQatArtifact {
     let model = make_tiny_model();
     let config = model.config();
     let embedding = model.embedding();
-    let mut visitor = ExportVisitor::new();
+    let mut visitor = ExportVisitor::new(config.topology().sequence_export_facts());
 
     visitor
         .visit_embedding(
@@ -293,6 +298,10 @@ pub fn make_tiny_compile_request() -> TinyCompileRequestPlaceholder {
         fixture_artifact_core_hash: make_tiny_artifact().semantic_hash().to_string(),
         workload_name: "tiny-prompts".to_owned(),
     }
+}
+
+pub fn tiny_sequence_semantics() -> SequenceSemanticsSpec {
+    SequenceSemanticsSpec::bounded_kv(TINY_MAX_CONTEXT, TINY_KV_BYTES_PER_TOKEN).unwrap()
 }
 
 pub fn make_tiny_workload() -> TinyWorkloadManifestPlaceholder {
@@ -440,8 +449,12 @@ pub fn assert_artifact_core_valid(artifact: &ArtifactCore) {
             tensor.id
         );
     }
-    ArtifactCore::new(artifact.tensors().to_vec(), artifact.quant().clone())
-        .expect("tiny artifact must satisfy ArtifactCore invariants");
+    ArtifactCore::new(
+        artifact.tensors().to_vec(),
+        artifact.quant().clone(),
+        artifact.sequence_semantics(),
+    )
+    .expect("tiny artifact must satisfy ArtifactCore invariants");
 }
 
 pub fn assert_artifact_valid(artifact: &ArtifactCore) {
@@ -675,6 +688,7 @@ mod tests {
 
         assert_artifact_valid(&first);
         assert_eq!(first.semantic_hash(), second.semantic_hash());
+        assert_eq!(first.sequence_semantics(), tiny_sequence_semantics());
         assert!(
             first
                 .tensors()
@@ -749,7 +763,12 @@ mod tests {
         let artifact = make_tiny_artifact();
         let mut tensors = artifact.tensors().to_vec();
         tensors[0].content_hash = gbf_foundation::Hash256::ZERO;
-        let corrupted = ArtifactCore::new(tensors, artifact.quant().clone()).unwrap();
+        let corrupted = ArtifactCore::new(
+            tensors,
+            artifact.quant().clone(),
+            artifact.sequence_semantics(),
+        )
+        .unwrap();
 
         let panic =
             std::panic::catch_unwind(|| assert_artifact_core_valid(&corrupted)).unwrap_err();

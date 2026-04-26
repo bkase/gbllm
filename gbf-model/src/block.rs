@@ -269,6 +269,12 @@ mod tests {
             Err(ModelConfigError::EmptyDimension { field: "d_model" })
         );
         assert_eq!(
+            SharedSequenceConfig::bounded_kv(8, 0, 4),
+            Err(ModelConfigError::EmptyDimension {
+                field: "max_context"
+            })
+        );
+        assert_eq!(
             DenseFfnConfig::new(8, 0),
             Err(ModelConfigError::EmptyDimension { field: "d_ff" })
         );
@@ -301,6 +307,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn block_model_topology_requires_consistent_sequence_semantics() {
+        let err = ModelTopologyConfig::new(vec![dense_block(), linear_dense_block()]).unwrap_err();
+
+        assert_eq!(
+            err,
+            ModelConfigError::BlockSequenceSemanticsMismatch {
+                block_index: 1,
+                expected: dense_block().shared_sequence_block().sequence_semantics(),
+                actual: linear_dense_block()
+                    .shared_sequence_block()
+                    .sequence_semantics(),
+            }
+        );
+    }
+
     fn moe_block() -> MoeBlockConfig {
         MoeBlockConfig::moe_ffn(
             SharedSequenceConfig::linear_state(8, 4).unwrap(),
@@ -311,7 +333,15 @@ mod tests {
 
     fn dense_block() -> MoeBlockConfig {
         MoeBlockConfig::dense_ffn(
-            SharedSequenceConfig::bounded_kv(8, 6).unwrap(),
+            SharedSequenceConfig::bounded_kv(8, 16, 6).unwrap(),
+            DenseFfnConfig::new(8, 16).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn linear_dense_block() -> MoeBlockConfig {
+        MoeBlockConfig::dense_ffn(
+            SharedSequenceConfig::linear_state(8, 6).unwrap(),
             DenseFfnConfig::new(8, 16).unwrap(),
         )
         .unwrap()

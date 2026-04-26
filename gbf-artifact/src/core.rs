@@ -13,6 +13,7 @@ use crate::quant::{
     ActivationQuantFormatSpec, ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry,
     QuantSpec, TernaryQuantEntry, WeightQuantEntry,
 };
+use crate::sequence::SequenceSemanticsSpec;
 use crate::tensor::{
     CanonicalTensor, CanonicalTensorId, CanonicalTensorKind, TensorElementType, stable_digest,
 };
@@ -22,6 +23,7 @@ use crate::weight_plan::{
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactCore {
+    sequence_semantics: SequenceSemanticsSpec,
     tensors: Vec<CanonicalTensor>,
     quant: QuantSpec,
 }
@@ -30,6 +32,7 @@ impl ArtifactCore {
     pub fn new(
         mut tensors: Vec<CanonicalTensor>,
         quant: QuantSpec,
+        sequence_semantics: SequenceSemanticsSpec,
     ) -> Result<Self, ArtifactCoreError> {
         tensors.sort_by(|left, right| left.id.cmp(&right.id));
         let tensor_by_id = tensor_index(&tensors)?;
@@ -37,7 +40,15 @@ impl ArtifactCore {
         validate_quant_spec(&quant, &tensor_by_id)?;
         drop(tensor_by_id);
 
-        Ok(Self { tensors, quant })
+        Ok(Self {
+            sequence_semantics,
+            tensors,
+            quant,
+        })
+    }
+
+    pub fn sequence_semantics(&self) -> SequenceSemanticsSpec {
+        self.sequence_semantics
     }
 
     pub fn tensors(&self) -> &[CanonicalTensor] {
@@ -49,7 +60,11 @@ impl ArtifactCore {
     }
 
     pub fn semantic_hash(&self) -> Hash256 {
-        stable_digest(&artifact_core_semantic_bytes(&self.tensors, &self.quant))
+        stable_digest(&artifact_core_semantic_bytes(
+            self.sequence_semantics,
+            &self.tensors,
+            &self.quant,
+        ))
     }
 }
 
@@ -582,9 +597,14 @@ fn valid_range(range: ActivationRangeSpec) -> bool {
     range.lo.is_finite() && range.hi.is_finite() && range.lo < range.hi
 }
 
-fn artifact_core_semantic_bytes(tensors: &[CanonicalTensor], quant: &QuantSpec) -> Vec<u8> {
+fn artifact_core_semantic_bytes(
+    sequence_semantics: SequenceSemanticsSpec,
+    tensors: &[CanonicalTensor],
+    quant: &QuantSpec,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
-    push_bytes(&mut bytes, b"gbf.artifact.core.v1");
+    push_bytes(&mut bytes, b"gbf.artifact.core.v2");
+    push_sequence_semantics(&mut bytes, sequence_semantics);
 
     push_u64(&mut bytes, tensors.len() as u64);
     for tensor in tensors {
@@ -614,6 +634,20 @@ fn artifact_core_semantic_bytes(tensors: &[CanonicalTensor], quant: &QuantSpec) 
     }
 
     bytes
+}
+
+fn push_sequence_semantics(bytes: &mut Vec<u8>, semantics: SequenceSemanticsSpec) {
+    match semantics {
+        SequenceSemanticsSpec::LinearState(semantics) => {
+            push_u8(bytes, 0);
+            push_u16(bytes, semantics.state_bytes_per_layer());
+        }
+        SequenceSemanticsSpec::BoundedKv(semantics) => {
+            push_u8(bytes, 1);
+            push_u16(bytes, semantics.max_context());
+            push_u16(bytes, semantics.kv_bytes_per_token());
+        }
+    }
 }
 
 fn push_ternary_quant_entry(bytes: &mut Vec<u8>, entry: &TernaryQuantEntry) {
@@ -820,11 +854,41 @@ fn push_u64(bytes: &mut Vec<u8>, value: u64) {
 }
 
 #[cfg(test)]
+mod sequence_semantics {
+    use crate::sequence::SequenceSemanticsSpec;
+
+    use super::*;
+
+    #[test]
+    fn artifact_core_carries_sequence_semantics() {
+        let linear = ArtifactCore::new(
+            vec![],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::linear_state(8).unwrap(),
+        )
+        .unwrap();
+        let bounded = ArtifactCore::new(
+            vec![],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::bounded_kv(4, 2).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            linear.sequence_semantics(),
+            SequenceSemanticsSpec::linear_state(8).unwrap()
+        );
+        assert_ne!(linear.semantic_hash(), bounded.semantic_hash());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use crate::quant::{
         ActivationNonlinearitySpec, ActivationQuantFormatSpec, ActivationRangeModeSpec,
         ActivationRangeSpec, TernaryQuantEntry,
     };
+    use crate::sequence::SequenceSemanticsSpec;
     use crate::tensor::{
         CanonicalTensor, CanonicalTensorId, CanonicalTensorKind, CanonicalTensorLayout,
         CanonicalTensorPayload, CanonicalTensorShape, TensorElementType,
@@ -834,12 +898,44 @@ mod tests {
 
     #[test]
     fn artifact_core_hash_is_deterministic_for_same_payload() {
-        let core_a =
-            ArtifactCore::new(vec![fixture_tensor("layer.0.bias")], QuantSpec::default()).unwrap();
-        let core_b =
-            ArtifactCore::new(vec![fixture_tensor("layer.0.bias")], QuantSpec::default()).unwrap();
+        let core_a = ArtifactCore::new(
+            vec![fixture_tensor("layer.0.bias")],
+            QuantSpec::default(),
+            fixture_sequence(),
+        )
+        .unwrap();
+        let core_b = ArtifactCore::new(
+            vec![fixture_tensor("layer.0.bias")],
+            QuantSpec::default(),
+            fixture_sequence(),
+        )
+        .unwrap();
 
         assert_eq!(core_a.semantic_hash(), core_b.semantic_hash());
+    }
+
+    #[test]
+    fn artifact_core_sequence_semantics_are_part_of_identity() {
+        let tensors = vec![fixture_tensor("layer.0.bias")];
+        let quant = QuantSpec::default();
+        let linear = ArtifactCore::new(
+            tensors.clone(),
+            quant.clone(),
+            SequenceSemanticsSpec::linear_state(64).unwrap(),
+        )
+        .unwrap();
+        let bounded = ArtifactCore::new(
+            tensors,
+            quant,
+            SequenceSemanticsSpec::bounded_kv(16, 4).unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(linear.semantic_hash(), bounded.semantic_hash());
+        assert_eq!(
+            bounded.sequence_semantics(),
+            SequenceSemanticsSpec::bounded_kv(16, 4).unwrap()
+        );
     }
 
     #[test]
@@ -850,6 +946,7 @@ mod tests {
                 fixture_tensor("layer.0.bias"),
             ],
             QuantSpec::default(),
+            fixture_sequence(),
         )
         .unwrap_err();
 
@@ -880,7 +977,7 @@ mod tests {
             vec![],
         );
 
-        let err = ArtifactCore::new(vec![], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -902,7 +999,7 @@ mod tests {
         let scale = q8_8_tensor("projection.scale", &[2], vec![256, 256]);
         let quant = fixture_ternary_quant();
 
-        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![weight, scale], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -920,7 +1017,7 @@ mod tests {
         let scale = q8_8_tensor("projection.scale", &[3], vec![256, 256, 256]);
         let quant = fixture_ternary_quant();
 
-        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![weight, scale], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -940,7 +1037,7 @@ mod tests {
         quant.ternary_weight_plans[0].plan.scale_format = ScaleFormat::Q4_4;
         quant.weight_quant[0].ternary_plan = Some(quant.ternary_weight_plans[0].plan);
 
-        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![weight, scale], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -962,7 +1059,7 @@ mod tests {
             norm_plans: vec![],
         };
 
-        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![weight, scale], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -991,7 +1088,7 @@ mod tests {
             vec![],
         );
 
-        let err = ArtifactCore::new(vec![tensor], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![tensor], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -1008,7 +1105,7 @@ mod tests {
         let mut quant = fixture_ternary_quant();
         quant.weight_quant[0].ternary_plan = Some(QuantSpec::default_expert_ternary_plan());
 
-        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![weight, scale], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -1027,7 +1124,8 @@ mod tests {
             vec![0.0],
         );
 
-        let err = ArtifactCore::new(vec![tensor], QuantSpec::default()).unwrap_err();
+        let err =
+            ArtifactCore::new(vec![tensor], QuantSpec::default(), fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -1055,7 +1153,7 @@ mod tests {
             vec![],
         );
 
-        let err = ArtifactCore::new(vec![tensor], quant).unwrap_err();
+        let err = ArtifactCore::new(vec![tensor], quant, fixture_sequence()).unwrap_err();
 
         assert_eq!(
             err,
@@ -1093,6 +1191,7 @@ mod tests {
                 vec![0.0],
             )],
             QuantSpec::default(),
+            fixture_sequence(),
         )
         .unwrap();
         let negative = ArtifactCore::new(
@@ -1103,6 +1202,7 @@ mod tests {
                 vec![-0.0],
             )],
             QuantSpec::default(),
+            fixture_sequence(),
         )
         .unwrap();
 
@@ -1135,6 +1235,7 @@ mod tests {
                 }],
                 vec![],
             ),
+            fixture_sequence(),
         )
         .unwrap()
     }
@@ -1160,6 +1261,10 @@ mod tests {
 
     fn fixture_tensor(id: &str) -> CanonicalTensor {
         float_tensor(id, CanonicalTensorKind::Bias, &[1], vec![1.0])
+    }
+
+    fn fixture_sequence() -> SequenceSemanticsSpec {
+        SequenceSemanticsSpec::bounded_kv(16, 4).unwrap()
     }
 
     fn ternary_tensor(id: &str, dims: &[usize], values: Vec<i8>) -> CanonicalTensor {

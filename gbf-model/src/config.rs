@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelTopologyConfig {
     blocks: Vec<MoeBlockConfig>,
@@ -15,12 +17,20 @@ impl ModelTopologyConfig {
         }
 
         let d_model = blocks[0].d_model();
+        let sequence_semantics = blocks[0].shared_sequence_block().sequence_semantics();
         for (block_index, block) in blocks.iter().enumerate() {
             if block.d_model() != d_model {
                 return Err(ModelConfigError::BlockModelDimMismatch {
                     block_index,
                     expected: d_model,
                     actual: block.d_model(),
+                });
+            }
+            if block.shared_sequence_block().sequence_semantics() != sequence_semantics {
+                return Err(ModelConfigError::BlockSequenceSemanticsMismatch {
+                    block_index,
+                    expected: sequence_semantics,
+                    actual: block.shared_sequence_block().sequence_semantics(),
                 });
             }
         }
@@ -34,6 +44,14 @@ impl ModelTopologyConfig {
 
     pub fn d_model(&self) -> usize {
         self.blocks[0].d_model()
+    }
+
+    pub fn sequence_semantics(&self) -> SequenceSemanticsSpec {
+        self.blocks[0].shared_sequence_block().sequence_semantics()
+    }
+
+    pub fn sequence_export_facts(&self) -> SequenceExportFacts {
+        SequenceExportFacts::for_spec(self.sequence_semantics())
     }
 }
 
@@ -93,36 +111,59 @@ impl MoeBlockConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedSequenceConfig {
-    kind: SharedSequenceKind,
     d_model: usize,
-    state_width: usize,
+    semantics: SequenceSemanticsSpec,
 }
 
 impl SharedSequenceConfig {
-    pub fn linear_state(d_model: usize, state_width: usize) -> Result<Self, ModelConfigError> {
-        Self::new(SharedSequenceKind::LinearState, d_model, state_width)
-    }
-
-    pub fn bounded_kv(d_model: usize, state_width: usize) -> Result<Self, ModelConfigError> {
-        Self::new(SharedSequenceKind::BoundedKv, d_model, state_width)
-    }
-
-    fn new(
-        kind: SharedSequenceKind,
+    pub fn linear_state(
         d_model: usize,
-        state_width: usize,
+        state_bytes_per_layer: u16,
     ) -> Result<Self, ModelConfigError> {
-        validate_nonzero("d_model", d_model)?;
-        validate_nonzero("state_width", state_width)?;
-        Ok(Self {
-            kind,
+        Self::new(
             d_model,
-            state_width,
-        })
+            SequenceSemanticsSpec::linear_state(state_bytes_per_layer).map_err(|_| {
+                ModelConfigError::EmptyDimension {
+                    field: "state_bytes_per_layer",
+                }
+            })?,
+        )
+    }
+
+    pub fn bounded_kv(
+        d_model: usize,
+        max_context: u16,
+        kv_bytes_per_token: u16,
+    ) -> Result<Self, ModelConfigError> {
+        Self::new(
+            d_model,
+            SequenceSemanticsSpec::bounded_kv(max_context, kv_bytes_per_token).map_err(|err| {
+                match err {
+                    crate::sequence::SequenceSemanticsError::ZeroField { field } => {
+                        ModelConfigError::EmptyDimension { field }
+                    }
+                    crate::sequence::SequenceSemanticsError::StateSizeMismatch { .. } => {
+                        unreachable!("bounded-kv constructor does not accept measured state size")
+                    }
+                }
+            })?,
+        )
+    }
+
+    fn new(d_model: usize, semantics: SequenceSemanticsSpec) -> Result<Self, ModelConfigError> {
+        validate_nonzero("d_model", d_model)?;
+        validate_nonzero(
+            "sequence_state_bytes",
+            semantics.state_size().bytes_per_layer as usize,
+        )?;
+        Ok(Self { d_model, semantics })
     }
 
     pub fn kind(&self) -> SharedSequenceKind {
-        self.kind
+        match self.semantics {
+            SequenceSemanticsSpec::LinearState(_) => SharedSequenceKind::LinearState,
+            SequenceSemanticsSpec::BoundedKv(_) => SharedSequenceKind::BoundedKv,
+        }
     }
 
     pub fn d_model(&self) -> usize {
@@ -130,7 +171,22 @@ impl SharedSequenceConfig {
     }
 
     pub fn state_width(&self) -> usize {
-        self.state_width
+        match self.semantics {
+            SequenceSemanticsSpec::LinearState(semantics) => {
+                usize::from(semantics.state_bytes_per_layer())
+            }
+            SequenceSemanticsSpec::BoundedKv(semantics) => {
+                usize::from(semantics.kv_bytes_per_token())
+            }
+        }
+    }
+
+    pub fn sequence_semantics(&self) -> SequenceSemanticsSpec {
+        self.semantics
+    }
+
+    pub fn sequence_export_facts(&self) -> SequenceExportFacts {
+        SequenceExportFacts::for_spec(self.semantics)
     }
 }
 
@@ -236,6 +292,11 @@ pub enum ModelConfigError {
         expected: usize,
         actual: usize,
     },
+    BlockSequenceSemanticsMismatch {
+        block_index: usize,
+        expected: SequenceSemanticsSpec,
+        actual: SequenceSemanticsSpec,
+    },
 }
 
 impl fmt::Display for ModelConfigError {
@@ -258,6 +319,14 @@ impl fmt::Display for ModelConfigError {
             } => write!(
                 f,
                 "block {block_index} d_model mismatch: expected {expected}, got {actual}"
+            ),
+            Self::BlockSequenceSemanticsMismatch {
+                block_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "block {block_index} sequence semantics mismatch: expected {expected:?}, got {actual:?}"
             ),
         }
     }

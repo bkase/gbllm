@@ -13,6 +13,7 @@ use gbf_artifact::quant::{
     ActivationQuantFormatSpec, ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry,
     QuantSpec, TernaryQuantEntry, WeightQuantEntry,
 };
+use gbf_artifact::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
 use gbf_artifact::tensor::{
     CanonicalTensor, CanonicalTensorError, CanonicalTensorId, CanonicalTensorKind,
     CanonicalTensorLayout, CanonicalTensorPayload, CanonicalTensorShape, TensorElementType,
@@ -69,8 +70,9 @@ pub enum QatModuleRef<'a> {
     DenseBranchProjection(&'a DenseBranchProjection),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ExportVisitor {
+    sequence_facts: SequenceExportFacts,
     tensors: BTreeMap<CanonicalTensorId, CanonicalTensor>,
     weight_quant: BTreeMap<ArtifactPath, WeightQuantEntry>,
     ternary_weight_plans: BTreeMap<ArtifactPath, TernaryQuantEntry>,
@@ -81,8 +83,25 @@ pub struct ExportVisitor {
 }
 
 impl ExportVisitor {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(sequence_facts: SequenceExportFacts) -> Self {
+        Self {
+            sequence_facts,
+            tensors: BTreeMap::new(),
+            weight_quant: BTreeMap::new(),
+            ternary_weight_plans: BTreeMap::new(),
+            activation_quant: BTreeMap::new(),
+            norm_plans: BTreeMap::new(),
+            activation_ranges: BTreeMap::new(),
+            visited_modules: BTreeSet::new(),
+        }
+    }
+
+    pub fn sequence_semantics(&self) -> SequenceSemanticsSpec {
+        self.sequence_facts.spec()
+    }
+
+    pub fn sequence_facts(&self) -> &SequenceExportFacts {
+        &self.sequence_facts
     }
 
     pub fn visit_module(
@@ -211,8 +230,15 @@ impl ExportVisitor {
             self.activation_quant.into_values().collect(),
             self.norm_plans.into_values().collect(),
         );
-        let core = ArtifactCore::new(self.tensors.into_values().collect(), quant)?;
-        let facts = ExportFacts::new(self.activation_ranges.into_values().collect());
+        let core = ArtifactCore::new(
+            self.tensors.into_values().collect(),
+            quant,
+            self.sequence_facts.spec(),
+        )?;
+        let facts = ExportFacts::new(
+            self.activation_ranges.into_values().collect(),
+            self.sequence_facts,
+        );
 
         Ok(ExportedQatArtifact {
             core,
@@ -674,7 +700,7 @@ mod tests {
 
         let first = fixture_export();
 
-        let mut second = ExportVisitor::new();
+        let mut second = export_visitor();
         second
             .visit_classifier("classifier", 2, 2, &[0.4, 0.3, 0.2, 0.1])
             .unwrap();
@@ -699,11 +725,13 @@ mod tests {
 
         assert_eq!(
             export.artifact_core_hash().to_string(),
-            "0433ea7763ffb239608c630538b459fad385856fcee464feaf12f67bebf6fe6e"
+            "982598560fb7cfdb069031edbab6b9b9ee9c9490dd0d88ae364512bc148442eb"
         );
         assert_eq!(export.core.tensors().len(), 17);
         assert_eq!(export.facts.activation_ranges.len(), 2);
+        assert_eq!(export.facts.sequence.spec(), fixture_sequence());
         assert_eq!(export.core.quant().weight_quant().len(), 8);
+        assert_eq!(export.core.sequence_semantics(), fixture_sequence());
     }
 
     #[test]
@@ -712,7 +740,7 @@ mod tests {
         let router = fixture_router();
         let norm = fixture_norm();
 
-        let mut visitor = ExportVisitor::new();
+        let mut visitor = export_visitor();
         visitor
             .visit_module("block.0.ffn", QatModuleRef::ExpertBlock(&block))
             .unwrap();
@@ -777,7 +805,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut visitor = ExportVisitor::new();
+        let mut visitor = export_visitor();
         visitor.visit_ternary_linear("projection", &layer).unwrap();
         let export = visitor.finish().unwrap();
 
@@ -828,7 +856,7 @@ mod tests {
         let router = fixture_router();
         let norm = fixture_norm();
 
-        let mut visitor = ExportVisitor::new();
+        let mut visitor = export_visitor();
         visitor.visit_expert_block("block.0.ffn", &block).unwrap();
         visitor.visit_router("block.0.router", &router).unwrap();
         visitor.visit_norm("block.0.norm", &norm).unwrap();
@@ -872,13 +900,13 @@ mod tests {
 
     #[test]
     fn qat_export_visitor_encodes_activation_eval_passthrough_in_core_quant() {
-        let mut quantized = ExportVisitor::new();
+        let mut quantized = export_visitor();
         quantized
             .visit_activation("activation", &activation())
             .unwrap();
         let quantized = quantized.finish().unwrap();
 
-        let mut passthrough = ExportVisitor::new();
+        let mut passthrough = export_visitor();
         passthrough
             .visit_activation("activation", &activation().with_eval_passthrough(true))
             .unwrap();
@@ -899,11 +927,11 @@ mod tests {
         let relu = fixture_expert();
         let gelu = fixture_gelu_expert();
 
-        let mut relu_export = ExportVisitor::new();
+        let mut relu_export = export_visitor();
         relu_export.visit_expert("expert", &relu).unwrap();
         let relu_export = relu_export.finish().unwrap();
 
-        let mut gelu_export = ExportVisitor::new();
+        let mut gelu_export = export_visitor();
         gelu_export.visit_expert("expert", &gelu).unwrap();
         let gelu_export = gelu_export.finish().unwrap();
 
@@ -928,6 +956,21 @@ mod tests {
     }
 
     #[test]
+    fn qat_export_visitor_records_sequence_export_facts() {
+        let sequence_facts =
+            SequenceExportFacts::for_spec(SequenceSemanticsSpec::linear_state(64).unwrap());
+        let mut visitor = ExportVisitor::new(sequence_facts.clone());
+        visitor
+            .visit_activation("activation", &activation())
+            .unwrap();
+
+        let export = visitor.finish().unwrap();
+
+        assert_eq!(export.core.sequence_semantics(), sequence_facts.spec());
+        assert_eq!(export.facts.sequence, sequence_facts);
+    }
+
+    #[test]
     fn qat_export_visitor_supports_each_qat_module_ref_variant() {
         let ternary = ternary_linear(1, 1, vec![1.0], None);
         let activation = activation();
@@ -939,7 +982,7 @@ mod tests {
         let dense =
             DenseBranchProjection::new(MatrixShape::new(1, 1).unwrap(), vec![1.0], None).unwrap();
 
-        let mut visitor = ExportVisitor::new();
+        let mut visitor = export_visitor();
         visitor
             .visit_module("module.ternary", QatModuleRef::TernaryLinear(&ternary))
             .unwrap();
@@ -992,7 +1035,7 @@ mod tests {
     #[test]
     fn qat_export_visitor_rejects_duplicate_activation_paths() {
         let activation = activation();
-        let mut visitor = ExportVisitor::new();
+        let mut visitor = export_visitor();
         visitor
             .visit_activation("dup.activation", &activation)
             .unwrap();
@@ -1011,7 +1054,7 @@ mod tests {
 
     #[test]
     fn qat_export_visitor_rejects_non_finite_raw_float_tensors() {
-        let mut visitor = ExportVisitor::new();
+        let mut visitor = export_visitor();
 
         assert!(matches!(
             visitor.visit_embedding("embedding", 1, 1, &[f32::NAN]),
@@ -1061,7 +1104,7 @@ mod tests {
     }
 
     fn fixture_export() -> ExportedQatArtifact {
-        let mut visitor = ExportVisitor::new();
+        let mut visitor = export_visitor();
         visitor
             .visit_expert_block("block.0.ffn", &fixture_expert_block())
             .unwrap();
@@ -1076,6 +1119,14 @@ mod tests {
             .visit_classifier("classifier", 2, 2, &[0.4, 0.3, 0.2, 0.1])
             .unwrap();
         visitor.finish().unwrap()
+    }
+
+    fn export_visitor() -> ExportVisitor {
+        ExportVisitor::new(SequenceExportFacts::for_spec(fixture_sequence()))
+    }
+
+    fn fixture_sequence() -> SequenceSemanticsSpec {
+        SequenceSemanticsSpec::bounded_kv(16, 4).unwrap()
     }
 
     fn fixture_expert_block() -> ExpertBlockQat {

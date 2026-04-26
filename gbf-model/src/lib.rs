@@ -8,3 +8,4 @@ pub mod embeddings;
 pub mod expert;
 pub mod qat;
 pub mod router;
+pub mod sequence;
