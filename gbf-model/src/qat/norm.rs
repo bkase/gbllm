@@ -219,7 +219,6 @@ impl NormExportData {
 
     pub fn plan(&self) -> ArtifactNormPlan {
         match &self.params {
-            ArtifactNormExportParams::None => ArtifactNormPlan::None,
             ArtifactNormExportParams::AffineClipLut { plan, .. } => {
                 ArtifactNormPlan::AffineClipLut(*plan)
             }

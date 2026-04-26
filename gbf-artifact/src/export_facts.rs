@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::ArtifactPath;
-use crate::quant::ActivationQuantFormatSpec;
+use crate::quant::{ActivationEvalModeSpec, ActivationQuantFormatSpec, ActivationRangeSpec};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ExportFacts {
@@ -19,15 +19,7 @@ impl ExportFacts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RangeDigest {
     pub activation: ArtifactPath,
-    pub lo: f32,
-    pub hi: f32,
-    pub mode: RangeDigestMode,
+    pub range: ActivationRangeSpec,
     pub quant_format: ActivationQuantFormatSpec,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum RangeDigestMode {
-    Fixed,
-    Learned,
-    Ema,
+    pub eval_mode: ActivationEvalModeSpec,
 }

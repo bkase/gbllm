@@ -415,4 +415,36 @@ mod tests {
             CanonicalTensorError::InvalidTernaryValue { index: 0, value: 2 }
         );
     }
+
+    #[test]
+    fn canonical_tensor_rejects_non_finite_float_payloads_for_all_float_kinds() {
+        let kinds = [
+            CanonicalTensorKind::Bias,
+            CanonicalTensorKind::RouterWeight,
+            CanonicalTensorKind::RouterBias,
+            CanonicalTensorKind::DenseWeight,
+            CanonicalTensorKind::DenseBias,
+            CanonicalTensorKind::Embedding,
+            CanonicalTensorKind::Classifier,
+            CanonicalTensorKind::NormLut,
+            CanonicalTensorKind::SharedDenseAlpha,
+        ];
+
+        for (kind_index, kind) in kinds.into_iter().enumerate() {
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let err = CanonicalTensor::new(
+                    CanonicalTensorId::new(format!("tensor.{kind_index}")).unwrap(),
+                    kind,
+                    CanonicalTensorLayout::new(
+                        CanonicalTensorShape::from_usize_dims(&[3]).unwrap(),
+                        TensorElementType::Float32,
+                    ),
+                    CanonicalTensorPayload::F32(vec![1.0, value, 2.0]),
+                )
+                .unwrap_err();
+
+                assert_eq!(err, CanonicalTensorError::NonFiniteFloat { index: 1 });
+            }
+        }
+    }
 }

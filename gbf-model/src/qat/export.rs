@@ -1,15 +1,16 @@
 //! Deterministic export visitor for backend-independent QAT modules.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
 use gbf_artifact::core::{ArtifactCore, ArtifactCoreError};
-use gbf_artifact::export_facts::{ExportFacts, RangeDigest, RangeDigestMode};
+use gbf_artifact::export_facts::{ExportFacts, RangeDigest};
 use gbf_artifact::ids::{ArtifactPath, ArtifactPathError};
 use gbf_artifact::norm_plan::NormExportParams;
 use gbf_artifact::quant::{
-    ActivationQuantEntry, ActivationQuantFormatSpec, NormQuantEntry, QuantSpec, TernaryQuantEntry,
+    ActivationEvalModeSpec, ActivationQuantEntry, ActivationQuantFormatSpec,
+    ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry, QuantSpec, TernaryQuantEntry,
 };
 use gbf_artifact::tensor::{
     CanonicalTensor, CanonicalTensorError, CanonicalTensorId, CanonicalTensorKind,
@@ -68,12 +69,12 @@ pub enum QatModuleRef<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub struct ExportVisitor {
-    tensors: Vec<CanonicalTensor>,
-    ternary_weight_plans: Vec<TernaryQuantEntry>,
-    activation_quant: Vec<ActivationQuantEntry>,
-    norm_plans: Vec<NormQuantEntry>,
-    activation_ranges: Vec<RangeDigest>,
-    visited_modules: Vec<VisitedModule>,
+    tensors: BTreeMap<CanonicalTensorId, CanonicalTensor>,
+    ternary_weight_plans: BTreeMap<ArtifactPath, TernaryQuantEntry>,
+    activation_quant: BTreeMap<ArtifactPath, ActivationQuantEntry>,
+    norm_plans: BTreeMap<ArtifactPath, NormQuantEntry>,
+    activation_ranges: BTreeMap<ArtifactPath, RangeDigest>,
+    visited_modules: BTreeSet<VisitedModule>,
 }
 
 impl ExportVisitor {
@@ -188,50 +189,19 @@ impl ExportVisitor {
         self.add_float_tensor(path, CanonicalTensorKind::Classifier, &[rows, cols], values)
     }
 
-    pub fn finish(mut self) -> Result<ExportedQatArtifact, ExportVisitorError> {
-        self.tensors.sort_by(|left, right| left.id.cmp(&right.id));
-        self.ternary_weight_plans
-            .sort_by(|left, right| left.projection.cmp(&right.projection));
-        self.activation_quant
-            .sort_by(|left, right| left.activation.cmp(&right.activation));
-        self.norm_plans
-            .sort_by(|left, right| left.norm.cmp(&right.norm));
-        self.activation_ranges
-            .sort_by(|left, right| left.activation.cmp(&right.activation));
-        self.visited_modules
-            .sort_by(|left, right| left.path.cmp(&right.path).then(left.kind.cmp(&right.kind)));
-
-        ensure_unique(
-            "ternary projection",
-            self.ternary_weight_plans
-                .iter()
-                .map(|entry| &entry.projection),
-        )?;
-        ensure_unique(
-            "activation quant entry",
-            self.activation_quant.iter().map(|entry| &entry.activation),
-        )?;
-        ensure_unique(
-            "norm entry",
-            self.norm_plans.iter().map(|entry| &entry.norm),
-        )?;
-        ensure_unique(
-            "activation range",
-            self.activation_ranges.iter().map(|range| &range.activation),
-        )?;
-
+    pub fn finish(self) -> Result<ExportedQatArtifact, ExportVisitorError> {
         let quant = QuantSpec::new(
-            self.ternary_weight_plans,
-            self.activation_quant,
-            self.norm_plans,
+            self.ternary_weight_plans.into_values().collect(),
+            self.activation_quant.into_values().collect(),
+            self.norm_plans.into_values().collect(),
         );
-        let core = ArtifactCore::new(self.tensors, quant)?;
-        let facts = ExportFacts::new(self.activation_ranges);
+        let core = ArtifactCore::new(self.tensors.into_values().collect(), quant)?;
+        let facts = ExportFacts::new(self.activation_ranges.into_values().collect());
 
         Ok(ExportedQatArtifact {
             core,
             facts,
-            visited_modules: self.visited_modules,
+            visited_modules: self.visited_modules.into_iter().collect(),
         })
     }
 
@@ -334,13 +304,19 @@ impl ExportVisitor {
             )?;
         }
 
-        self.ternary_weight_plans.push(TernaryQuantEntry {
-            projection: path,
+        let entry = TernaryQuantEntry {
+            projection: path.clone(),
             weight: weight_id,
             scale: scale_id,
             bias: bias_id,
             plan: export.plan(),
-        });
+        };
+        insert_unique(
+            &mut self.ternary_weight_plans,
+            path,
+            entry,
+            "ternary projection",
+        )?;
 
         Ok(())
     }
@@ -353,18 +329,35 @@ impl ExportVisitor {
         self.mark_visited(path.clone(), VisitedModuleKind::Activation);
 
         let range = activation.export_range();
-        let quant_format = activation_quant_format(activation.quant_format());
-        self.activation_ranges.push(RangeDigest {
-            activation: path.clone(),
+        let range = ActivationRangeSpec {
             lo: range.lo(),
             hi: range.hi(),
-            mode: range_digest_mode(activation.range_mode().kind()),
-            quant_format,
-        });
-        self.activation_quant.push(ActivationQuantEntry {
-            activation: path,
-            quant_format,
-        });
+            mode: activation_range_mode(activation.range_mode().kind()),
+        };
+        let quant_format = activation_quant_format(activation.quant_format());
+        let eval_mode = activation_eval_mode(activation.eval_passthrough());
+        insert_unique(
+            &mut self.activation_ranges,
+            path.clone(),
+            RangeDigest {
+                activation: path.clone(),
+                range,
+                quant_format,
+                eval_mode,
+            },
+            "activation range",
+        )?;
+        insert_unique(
+            &mut self.activation_quant,
+            path.clone(),
+            ActivationQuantEntry {
+                activation: path,
+                range,
+                quant_format,
+                eval_mode,
+            },
+            "activation quant entry",
+        )?;
 
         Ok(())
     }
@@ -388,14 +381,15 @@ impl ExportVisitor {
                 )?;
                 Some(lut_id)
             }
-            NormExportParams::None | NormExportParams::TileRmsThenAffineClip { .. } => None,
+            NormExportParams::TileRmsThenAffineClip { .. } => None,
         };
 
-        self.norm_plans.push(NormQuantEntry {
-            norm: path,
+        let entry = NormQuantEntry {
+            norm: path.clone(),
             plan: export.plan(),
             lut,
-        });
+        };
+        insert_unique(&mut self.norm_plans, path, entry, "norm entry")?;
 
         Ok(())
     }
@@ -495,13 +489,13 @@ impl ExportVisitor {
     ) -> Result<(), ExportVisitorError> {
         let layout =
             CanonicalTensorLayout::new(CanonicalTensorShape::from_usize_dims(dims)?, element_type);
-        self.tensors
-            .push(CanonicalTensor::new(id, kind, layout, payload)?);
+        let tensor = CanonicalTensor::new(id.clone(), kind, layout, payload)?;
+        insert_unique(&mut self.tensors, id, tensor, "tensor")?;
         Ok(())
     }
 
     fn mark_visited(&mut self, path: ArtifactPath, kind: VisitedModuleKind) {
-        self.visited_modules.push(VisitedModule { path, kind });
+        self.visited_modules.insert(VisitedModule { path, kind });
     }
 }
 
@@ -553,18 +547,14 @@ fn artifact_path(value: &str) -> Result<ArtifactPath, ExportVisitorError> {
     Ok(ArtifactPath::new(value)?)
 }
 
-fn ensure_unique<'a>(
+fn insert_unique<T>(
+    values: &mut BTreeMap<ArtifactPath, T>,
+    path: ArtifactPath,
+    value: T,
     kind: &'static str,
-    paths: impl Iterator<Item = &'a ArtifactPath>,
 ) -> Result<(), ExportVisitorError> {
-    let mut seen = BTreeSet::new();
-    for path in paths {
-        if !seen.insert(path.clone()) {
-            return Err(ExportVisitorError::DuplicatePath {
-                kind,
-                path: path.clone(),
-            });
-        }
+    if values.insert(path.clone(), value).is_some() {
+        return Err(ExportVisitorError::DuplicatePath { kind, path });
     }
 
     Ok(())
@@ -578,11 +568,19 @@ fn activation_quant_format(format: ActivationQuantFormat) -> ActivationQuantForm
     }
 }
 
-fn range_digest_mode(kind: ActivationRangeModeKind) -> RangeDigestMode {
+fn activation_range_mode(kind: ActivationRangeModeKind) -> ActivationRangeModeSpec {
     match kind {
-        ActivationRangeModeKind::Fixed => RangeDigestMode::Fixed,
-        ActivationRangeModeKind::Learned => RangeDigestMode::Learned,
-        ActivationRangeModeKind::Ema => RangeDigestMode::Ema,
+        ActivationRangeModeKind::Fixed => ActivationRangeModeSpec::Fixed,
+        ActivationRangeModeKind::Learned => ActivationRangeModeSpec::Learned,
+        ActivationRangeModeKind::Ema => ActivationRangeModeSpec::Ema,
+    }
+}
+
+fn activation_eval_mode(eval_passthrough: bool) -> ActivationEvalModeSpec {
+    if eval_passthrough {
+        ActivationEvalModeSpec::Passthrough
+    } else {
+        ActivationEvalModeSpec::Quantized
     }
 }
 
@@ -590,6 +588,7 @@ fn range_digest_mode(kind: ActivationRangeModeKind) -> RangeDigestMode {
 mod tests {
     use std::collections::BTreeSet;
 
+    use gbf_artifact::quant::{ActivationEvalModeSpec, ActivationRangeModeSpec};
     use gbf_artifact::tensor::{CanonicalTensorKind, CanonicalTensorPayload};
 
     use super::*;
@@ -601,24 +600,11 @@ mod tests {
 
     #[test]
     fn qat_export_visitor_builds_deterministic_artifact_for_same_modules() {
-        let block_a = fixture_expert_block();
         let block_b = fixture_expert_block();
-        let router_a = fixture_router();
         let router_b = fixture_router();
-        let norm_a = fixture_norm();
         let norm_b = fixture_norm();
 
-        let mut first = ExportVisitor::new();
-        first.visit_expert_block("block.0.ffn", &block_a).unwrap();
-        first.visit_router("block.0.router", &router_a).unwrap();
-        first.visit_norm("block.0.norm", &norm_a).unwrap();
-        first
-            .visit_embedding("token_embedding", 2, 2, &[0.1, 0.2, 0.3, 0.4])
-            .unwrap();
-        first
-            .visit_classifier("classifier", 2, 2, &[0.4, 0.3, 0.2, 0.1])
-            .unwrap();
-        let first = first.finish().unwrap();
+        let first = fixture_export();
 
         let mut second = ExportVisitor::new();
         second
@@ -637,6 +623,18 @@ mod tests {
             serde_json::to_vec(&first).unwrap(),
             serde_json::to_vec(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn qat_export_visitor_has_committed_golden_core_hash() {
+        let export = fixture_export();
+
+        assert_eq!(
+            export.artifact_core_hash().to_string(),
+            "ebf1a07f473d37174fa11f79a743f6290251eb277441e8fc868bda4deea476e2"
+        );
+        assert_eq!(export.core.tensors().len(), 17);
+        assert_eq!(export.facts.activation_ranges.len(), 2);
     }
 
     #[test]
@@ -667,6 +665,8 @@ mod tests {
         assert!(kinds.contains(&VisitedModuleKind::Router));
         assert!(kinds.contains(&VisitedModuleKind::Expert));
         assert!(kinds.contains(&VisitedModuleKind::ExpertBlock));
+        assert!(kinds.contains(&VisitedModuleKind::SharedDenseBranch));
+        assert!(kinds.contains(&VisitedModuleKind::DenseBranchProjection));
 
         let range_paths = export
             .facts
@@ -683,8 +683,8 @@ mod tests {
             ]
         );
         assert!(matches!(
-            export.facts.activation_ranges.last().unwrap().mode,
-            RangeDigestMode::Ema
+            export.facts.activation_ranges.last().unwrap().range.mode,
+            ActivationRangeModeSpec::Ema
         ));
     }
 
@@ -712,7 +712,7 @@ mod tests {
             )
         );
 
-        let quant = &export.core.quant.ternary_weight_plans[0];
+        let quant = &export.core.quant().ternary_weight_plans()[0];
         assert_eq!(quant.weight.as_str(), "projection.weight");
         assert_eq!(quant.scale.as_str(), "projection.scale");
         assert_eq!(quant.bias.as_ref().unwrap().as_str(), "projection.bias");
@@ -747,22 +747,108 @@ mod tests {
     }
 
     #[test]
-    fn qat_export_visitor_rejects_duplicate_paths() {
+    fn qat_export_visitor_encodes_activation_eval_passthrough_in_core_quant() {
+        let mut quantized = ExportVisitor::new();
+        quantized
+            .visit_activation("activation", &activation())
+            .unwrap();
+        let quantized = quantized.finish().unwrap();
+
+        let mut passthrough = ExportVisitor::new();
+        passthrough
+            .visit_activation("activation", &activation().with_eval_passthrough(true))
+            .unwrap();
+        let passthrough = passthrough.finish().unwrap();
+
+        assert_ne!(
+            quantized.artifact_core_hash(),
+            passthrough.artifact_core_hash()
+        );
+        assert_eq!(
+            passthrough.core.quant().activation_quant()[0].eval_mode,
+            ActivationEvalModeSpec::Passthrough
+        );
+    }
+
+    #[test]
+    fn qat_export_visitor_supports_each_qat_module_ref_variant() {
+        let ternary = ternary_linear(1, 1, vec![1.0], None);
+        let activation = activation();
+        let norm = fixture_norm();
+        let router = fixture_router();
+        let expert = fixture_expert();
+        let block = fixture_expert_block();
+        let shared_dense = fixture_shared_dense();
+        let dense =
+            DenseBranchProjection::new(MatrixShape::new(1, 1).unwrap(), vec![1.0], None).unwrap();
+
+        let mut visitor = ExportVisitor::new();
+        visitor
+            .visit_module("module.ternary", QatModuleRef::TernaryLinear(&ternary))
+            .unwrap();
+        visitor
+            .visit_module("module.activation", QatModuleRef::Activation(&activation))
+            .unwrap();
+        visitor
+            .visit_module("module.norm", QatModuleRef::Norm(&norm))
+            .unwrap();
+        visitor
+            .visit_module("module.router", QatModuleRef::Router(&router))
+            .unwrap();
+        visitor
+            .visit_module("module.expert", QatModuleRef::Expert(&expert))
+            .unwrap();
+        visitor
+            .visit_module("module.block", QatModuleRef::ExpertBlock(&block))
+            .unwrap();
+        visitor
+            .visit_module(
+                "module.shared",
+                QatModuleRef::SharedDenseBranch(&shared_dense),
+            )
+            .unwrap();
+        visitor
+            .visit_module("module.dense", QatModuleRef::DenseBranchProjection(&dense))
+            .unwrap();
+        let export = visitor.finish().unwrap();
+
+        let kinds = export
+            .visited_modules
+            .iter()
+            .map(|module| module.kind)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                VisitedModuleKind::TernaryLinear,
+                VisitedModuleKind::Activation,
+                VisitedModuleKind::Norm,
+                VisitedModuleKind::Router,
+                VisitedModuleKind::Expert,
+                VisitedModuleKind::ExpertBlock,
+                VisitedModuleKind::SharedDenseBranch,
+                VisitedModuleKind::DenseBranchProjection,
+            ])
+        );
+    }
+
+    #[test]
+    fn qat_export_visitor_rejects_duplicate_activation_paths() {
         let activation = activation();
         let mut visitor = ExportVisitor::new();
         visitor
             .visit_activation("dup.activation", &activation)
             .unwrap();
-        visitor
+        let err = visitor
             .visit_activation("dup.activation", &activation)
-            .unwrap();
+            .unwrap_err();
 
         assert_eq!(
-            visitor.finish(),
-            Err(ExportVisitorError::DuplicatePath {
-                kind: "activation quant entry",
+            err,
+            ExportVisitorError::DuplicatePath {
+                kind: "activation range",
                 path: ArtifactPath::new("dup.activation").unwrap()
-            })
+            }
         );
     }
 
@@ -781,10 +867,28 @@ mod tests {
     fn tensor<'a>(export: &'a ExportedQatArtifact, id: &str) -> &'a CanonicalTensor {
         export
             .core
-            .tensors
+            .tensors()
             .iter()
             .find(|tensor| tensor.id.as_str() == id)
             .unwrap_or_else(|| panic!("missing tensor {id}"))
+    }
+
+    fn fixture_export() -> ExportedQatArtifact {
+        let mut visitor = ExportVisitor::new();
+        visitor
+            .visit_expert_block("block.0.ffn", &fixture_expert_block())
+            .unwrap();
+        visitor
+            .visit_router("block.0.router", &fixture_router())
+            .unwrap();
+        visitor.visit_norm("block.0.norm", &fixture_norm()).unwrap();
+        visitor
+            .visit_embedding("token_embedding", 2, 2, &[0.1, 0.2, 0.3, 0.4])
+            .unwrap();
+        visitor
+            .visit_classifier("classifier", 2, 2, &[0.4, 0.3, 0.2, 0.1])
+            .unwrap();
+        visitor.finish().unwrap()
     }
 
     fn fixture_expert_block() -> ExpertBlockQat {

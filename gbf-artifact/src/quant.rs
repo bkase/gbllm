@@ -20,11 +20,39 @@ impl QuantSpec {
         activation_quant: Vec<ActivationQuantEntry>,
         norm_plans: Vec<NormQuantEntry>,
     ) -> Self {
-        Self {
+        let mut spec = Self {
             ternary_weight_plans,
             activation_quant,
             norm_plans,
-        }
+        };
+        spec.sort_canonical();
+        spec
+    }
+
+    pub fn ternary_weight_plans(&self) -> &[TernaryQuantEntry] {
+        &self.ternary_weight_plans
+    }
+
+    pub fn activation_quant(&self) -> &[ActivationQuantEntry] {
+        &self.activation_quant
+    }
+
+    pub fn norm_plans(&self) -> &[NormQuantEntry] {
+        &self.norm_plans
+    }
+
+    pub(crate) fn canonicalized(mut self) -> Self {
+        self.sort_canonical();
+        self
+    }
+
+    fn sort_canonical(&mut self) {
+        self.ternary_weight_plans
+            .sort_by(|left, right| left.projection.cmp(&right.projection));
+        self.activation_quant
+            .sort_by(|left, right| left.activation.cmp(&right.activation));
+        self.norm_plans
+            .sort_by(|left, right| left.norm.cmp(&right.norm));
     }
 }
 
@@ -40,7 +68,9 @@ pub struct TernaryQuantEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActivationQuantEntry {
     pub activation: ArtifactPath,
+    pub range: ActivationRangeSpec,
     pub quant_format: ActivationQuantFormatSpec,
+    pub eval_mode: ActivationEvalModeSpec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -48,6 +78,26 @@ pub enum ActivationQuantFormatSpec {
     Int8,
     UInt8,
     UInt4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ActivationRangeSpec {
+    pub lo: f32,
+    pub hi: f32,
+    pub mode: ActivationRangeModeSpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ActivationRangeModeSpec {
+    Fixed,
+    Learned,
+    Ema,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ActivationEvalModeSpec {
+    Quantized,
+    Passthrough,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

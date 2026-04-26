@@ -228,6 +228,10 @@ impl ActFakeQuant {
         self.quant_format
     }
 
+    pub fn eval_passthrough(&self) -> bool {
+        self.eval_passthrough
+    }
+
     pub fn forward_spec(&self, mode: ActivationForwardMode) -> ActivationFakeQuantSpec {
         ActivationFakeQuantSpec {
             range: self.range_mode.range(),

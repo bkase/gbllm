@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NormPlan {
-    None,
     AffineClipLut(AffineClipLutPlan),
     TileRmsThenAffineClip(TileRmsThenAffineClipPlan),
 }
@@ -50,7 +49,6 @@ pub struct NormTileRmsSpec {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NormExportParams {
-    None,
     AffineClipLut {
         plan: AffineClipLutPlan,
         lut_values: Vec<f32>,
