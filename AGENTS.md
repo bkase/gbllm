@@ -80,4 +80,10 @@ git push                # Push to remote
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
 
+### Model Topology Beads
+
+- For topology/config beads, state in closure whether the bead owns only shape/topology or executable forward behavior.
+- Do not derive `Deserialize` for constructor-validated model config types unless deserialization goes through the same validation boundary.
+- Prefer enum-backed topology choices over bool flags when invalid combinations must be unrepresentable; test both dense and routed paths directly.
+
 <!-- end-br-agent-instructions -->
