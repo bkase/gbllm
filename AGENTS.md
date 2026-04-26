@@ -99,6 +99,13 @@ git push                # Push to remote
 - When claiming parameter sharing or parameter-count reduction, add an owned-layer alias/count test and name a follow-up owner for export/artifact/budget sharing if that layer is not implemented.
 - Keep enum or named constructors as the primary API for model mode choices; bools should be derived queries or edge-adapter inputs.
 
+### ASM / ISA Beads
+
+- State whether an `Instr`/AsmIR type is symbolic pre-layout IR, post-relaxation concrete machine IR, or a separate adapter between them. Move symbolic labels, relocations, pseudo-ops, and branch relaxation to their owning bead instead of letting concrete instruction types imply that lifecycle.
+- Distinguish legal CPU encodings from canonical project encodings. If a shorter/canonical form is required, document the rejected non-canonical legal form and test the constructor or boundary that enforces it.
+- Do not derive `Deserialize` for constructor-validated newtypes unless serde is routed through the same validation boundary, for example with `#[serde(try_from = ...)]`. Add at least one negative deserialization test for every private-field newtype whose constructor rejects values.
+- When citing filtered cargo-test commands in closure, confirm the command actually ran tests in the current patch. A passing filter with `running 0 tests` is not evidence.
+
 ### Sequence-State Beads
 
 - Keep one authoritative sequence semantics contract. If crate dependencies require durable schema in `gbf-artifact`, re-export it from `gbf-model` and state that ownership movement explicitly in bead closure.
