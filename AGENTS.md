@@ -86,4 +86,10 @@ git push                # Push to remote
 - Do not derive `Deserialize` for constructor-validated model config types unless deserialization goes through the same validation boundary.
 - Prefer enum-backed topology choices over bool flags when invalid combinations must be unrepresentable; test both dense and routed paths directly.
 
+### Model Semantics Beads
+
+- For scalar `gbf-model` semantics that do not own Burn, export, artifact, or budget paths, name those unsupported boundaries in closure and do not claim them complete.
+- When claiming parameter sharing or parameter-count reduction, add an owned-layer alias/count test and name a follow-up owner for export/artifact/budget sharing if that layer is not implemented.
+- Keep enum or named constructors as the primary API for model mode choices; bools should be derived queries or edge-adapter inputs.
+
 <!-- end-br-agent-instructions -->
