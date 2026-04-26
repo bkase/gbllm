@@ -105,6 +105,10 @@ git push                # Push to remote
 - Distinguish legal CPU encodings from canonical project encodings. If a shorter/canonical form is required, document the rejected non-canonical legal form and test the constructor or boundary that enforces it.
 - Do not derive `Deserialize` for constructor-validated newtypes unless serde is routed through the same validation boundary, for example with `#[serde(try_from = ...)]`. Add at least one negative deserialization test for every private-field newtype whose constructor rejects values.
 - When citing filtered cargo-test commands in closure, confirm the command actually ran tests in the current patch. A passing filter with `running 0 tests` is not evidence.
+- When a bead supersedes an older `planv0.md` sketch, state the supersession or mapping in code docs and closure. Do not let a self-referential enum list stand in for plan alignment.
+- Symbol names must be built from validated segments, not by joining raw caller strings and validating afterward. Add collision tests for dotted helper arguments.
+- Symbol tables should allow address aliases unless the bead explicitly owns a primary-symbol-only table. Reverse lookup APIs must return all names for an address.
+- If a report/schema type derives serde and contains maps, verify JSON serialization directly. Avoid non-string map keys in JSON-facing structures, or provide an explicit stable representation.
 
 ### Sequence-State Beads
 
