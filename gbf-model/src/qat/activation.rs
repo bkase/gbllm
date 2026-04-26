@@ -81,7 +81,7 @@ impl ActivationRangeMode {
         }
     }
 
-    fn kind(self) -> ActivationRangeModeKind {
+    pub fn kind(self) -> ActivationRangeModeKind {
         match self {
             Self::Fixed(_) => ActivationRangeModeKind::Fixed,
             Self::Learned(_) => ActivationRangeModeKind::Learned,
@@ -117,9 +117,12 @@ impl fmt::Display for ActivationRangeModeKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationQuantFormat {
+    /// Symmetric signed 8-bit quantization with zero preserved exactly.
     Int8,
+    /// Affine unsigned 8-bit quantization over the configured activation range.
     UInt8,
-    Int4,
+    /// Affine unsigned 4-bit quantization over the configured activation range.
+    UInt4,
 }
 
 impl ActivationQuantFormat {
@@ -127,7 +130,7 @@ impl ActivationQuantFormat {
         match self {
             Self::UInt8 => 255,
             Self::Int8 => 127,
-            Self::Int4 => 15,
+            Self::UInt4 => 15,
         }
     }
 
@@ -158,22 +161,13 @@ impl ActivationFakeQuantSpec {
         self.quant_format
     }
 
+    pub fn quant_steps(self) -> u16 {
+        self.quant_format.quant_steps()
+    }
+
     pub fn enabled(self) -> bool {
         self.enabled
     }
-}
-
-#[cfg(test)]
-trait ActivationFakeQuantBackend {
-    type Tensor;
-
-    /// Apply clamp + fake quantization while preserving STE gradients through
-    /// the backend-owned input tensor.
-    fn activation_fake_quant_ste(
-        &self,
-        spec: ActivationFakeQuantSpec,
-        input: &Self::Tensor,
-    ) -> Self::Tensor;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,16 +196,6 @@ impl ActFakeQuant {
     pub fn with_eval_passthrough(mut self, eval_passthrough: bool) -> Self {
         self.eval_passthrough = eval_passthrough;
         self
-    }
-
-    #[cfg(test)]
-    fn forward<B: ActivationFakeQuantBackend>(
-        &self,
-        backend: &B,
-        input: &B::Tensor,
-        mode: ActivationForwardMode,
-    ) -> B::Tensor {
-        backend.activation_fake_quant_ste(self.forward_spec(mode), input)
     }
 
     pub fn inference_forward(
@@ -369,28 +353,6 @@ fn fake_quantize_value(
 mod tests {
     use super::*;
 
-    struct ScalarActivationBackend;
-
-    impl ActivationFakeQuantBackend for ScalarActivationBackend {
-        type Tensor = Vec<f32>;
-
-        fn activation_fake_quant_ste(
-            &self,
-            spec: ActivationFakeQuantSpec,
-            input: &Self::Tensor,
-        ) -> Self::Tensor {
-            if !spec.enabled() {
-                return input.clone();
-            }
-
-            input
-                .iter()
-                .copied()
-                .map(|value| fake_quantize_value(value, spec.range(), spec.quant_format()))
-                .collect()
-        }
-    }
-
     #[test]
     fn qat_activation_forward_clamps_and_quantizes_in_range() {
         let quant = ActFakeQuant::new(
@@ -400,21 +362,13 @@ mod tests {
         .unwrap();
         let input = vec![-2.0, -0.25, 0.25, 2.0];
 
-        let output = quant.forward(
-            &ScalarActivationBackend,
-            &input,
-            ActivationForwardMode::Train,
-        );
+        let output = quant
+            .inference_forward(&input, ActivationForwardMode::Train)
+            .unwrap();
 
         assert!(output.iter().all(|value| (-1.0..=1.0).contains(value)));
         assert_eq!(output[0], -1.0);
         assert_eq!(output[3], 1.0);
-        assert_eq!(
-            output,
-            quant
-                .inference_forward(&input, ActivationForwardMode::Train)
-                .unwrap()
-        );
     }
 
     #[test]
@@ -442,14 +396,6 @@ mod tests {
         .with_eval_passthrough(true);
         let input = vec![-1.0, 0.25, 2.0];
 
-        assert_eq!(
-            quant.forward(
-                &ScalarActivationBackend,
-                &input,
-                ActivationForwardMode::Eval
-            ),
-            input
-        );
         assert_eq!(
             quant
                 .inference_forward(&input, ActivationForwardMode::Eval)
@@ -568,5 +514,20 @@ mod tests {
                 actual: ActivationRangeModeKind::Fixed,
             })
         );
+    }
+
+    #[test]
+    fn qat_activation_spec_exposes_quant_steps_from_model_contract() {
+        let quant = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(0.0, 1.0).unwrap()),
+            ActivationQuantFormat::UInt4,
+        )
+        .unwrap();
+
+        let spec = quant.forward_spec(ActivationForwardMode::Train);
+
+        assert!(spec.enabled());
+        assert_eq!(spec.quant_steps(), 15);
+        assert_eq!(spec.quant_format(), ActivationQuantFormat::UInt4);
     }
 }

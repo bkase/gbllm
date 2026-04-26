@@ -1,6 +1,12 @@
 //! Burn-backed activation fake-quantization adapter.
 
-use gbf_model::qat::{ActFakeQuant, ActivationForwardMode, ActivationQuantFormat, ActivationRange};
+use std::error::Error;
+use std::fmt;
+
+use gbf_model::qat::{
+    ActFakeQuant, ActivationForwardMode, ActivationQuantFormat, ActivationRange,
+    ActivationRangeMode, ActivationRangeModeKind,
+};
 
 use crate::adapter::burn::{BurnBackend, BurnFloatTensor, ste_clamp, ste_round};
 
@@ -10,9 +16,14 @@ pub struct ActFakeQuantBurnQat {
 }
 
 impl ActFakeQuantBurnQat {
-    #[must_use]
-    pub fn from_core(core: ActFakeQuant) -> Self {
-        Self { core }
+    pub fn from_core(core: ActFakeQuant) -> Result<Self, ActFakeQuantBurnQatError> {
+        if !matches!(core.range_mode(), ActivationRangeMode::Fixed(_)) {
+            return Err(ActFakeQuantBurnQatError::UnsupportedRangeMode {
+                mode: core.range_mode().kind(),
+            });
+        }
+
+        Ok(Self { core })
     }
 
     #[must_use]
@@ -40,20 +51,46 @@ impl ActFakeQuantBurnQat {
             return input;
         }
 
+        let qmax = f32::from(spec.quant_steps());
         match spec.quant_format() {
-            ActivationQuantFormat::Int8 => fake_quant_signed(input, spec.range(), 127.0),
-            ActivationQuantFormat::UInt8 => fake_quant_unsigned(input, spec.range(), 255.0),
-            ActivationQuantFormat::Int4 => fake_quant_unsigned(input, spec.range(), 15.0),
+            ActivationQuantFormat::Int8 => fake_quant_signed(input, spec.range(), qmax),
+            ActivationQuantFormat::UInt8 | ActivationQuantFormat::UInt4 => {
+                fake_quant_unsigned(input, spec.range(), qmax)
+            }
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActFakeQuantBurnQatError {
+    UnsupportedRangeMode { mode: ActivationRangeModeKind },
+}
+
+impl fmt::Display for ActFakeQuantBurnQatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedRangeMode { mode } => {
+                write!(
+                    f,
+                    "Burn activation fake-quant currently supports fixed ranges only, got {mode}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for ActFakeQuantBurnQatError {}
 
 fn fake_quant_signed<B: BurnBackend, const D: usize>(
     input: BurnFloatTensor<B, D>,
     range: ActivationRange,
     qmax: f32,
 ) -> BurnFloatTensor<B, D> {
-    let max_abs = range.lo().abs().max(range.hi().abs());
+    let max_abs = range
+        .lo()
+        .abs()
+        .max(range.hi().abs())
+        .max(f32::MIN_POSITIVE);
     let clamped = ste_clamp(input, range.lo(), range.hi());
     let quantized = ste_clamp(ste_round((clamped / max_abs) * qmax), -qmax, qmax);
     ste_clamp((quantized / qmax) * max_abs, range.lo(), range.hi())
@@ -64,7 +101,7 @@ fn fake_quant_unsigned<B: BurnBackend, const D: usize>(
     range: ActivationRange,
     qmax: f32,
 ) -> BurnFloatTensor<B, D> {
-    let width = range.hi() - range.lo();
+    let width = (range.hi() - range.lo()).max(f32::MIN_POSITIVE);
     let clamped = ste_clamp(input, range.lo(), range.hi());
     let normalized = (clamped - range.lo()) / width;
     let quantized = ste_clamp(ste_round(normalized * qmax), 0.0, qmax);
@@ -95,7 +132,7 @@ mod tests {
             ActivationQuantFormat::Int8,
         )
         .unwrap();
-        let layer = ActFakeQuantBurnQat::from_core(core.clone());
+        let layer = ActFakeQuantBurnQat::from_core(core.clone()).unwrap();
         let input = vec![-2.0, -0.25, 0.0, 0.25, 2.0];
         let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [5], &device).unwrap();
 
@@ -119,7 +156,7 @@ mod tests {
         )
         .unwrap()
         .with_eval_passthrough(true);
-        let layer = ActFakeQuantBurnQat::from_core(core);
+        let layer = ActFakeQuantBurnQat::from_core(core).unwrap();
         let input = vec![-1.0, 0.25, 2.0];
         let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [3], &device).unwrap();
 
@@ -129,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn burn_activation_ste_preserves_input_gradients() {
+    fn burn_activation_uses_clipped_input_gradients() {
         type B = BurnNdArrayAutodiffBackend;
 
         let device = BurnDevice::<B>::default();
@@ -138,7 +175,7 @@ mod tests {
             ActivationQuantFormat::UInt8,
         )
         .unwrap();
-        let layer = ActFakeQuantBurnQat::from_core(core);
+        let layer = ActFakeQuantBurnQat::from_core(core).unwrap();
         let input = float_tensor_from_vec::<B, 1>(vec![-2.0, -0.25, 0.25, 2.0], [4], &device)
             .unwrap()
             .require_grad();
@@ -149,27 +186,92 @@ mod tests {
 
         assert_eq!(
             float_tensor_into_vec(input_grad).unwrap(),
-            vec![1.0, 1.0, 1.0, 1.0]
+            vec![0.0, 1.0, 1.0, 0.0]
         );
     }
 
     #[test]
-    fn burn_activation_exports_current_ema_range_from_core() {
-        let mut core = ActFakeQuant::new(
+    fn burn_activation_rejects_dynamic_range_modes_until_state_is_owned() {
+        let learned = ActFakeQuant::new(
+            ActivationRangeMode::Learned(ActivationRange::new(-1.0, 1.0).unwrap()),
+            ActivationQuantFormat::UInt4,
+        )
+        .unwrap();
+        let ema = ActFakeQuant::new(
             ActivationRangeMode::Ema {
                 range: ActivationRange::new(-1.0, 1.0).unwrap(),
                 decay: EmaDecay::new(0.25).unwrap(),
             },
-            ActivationQuantFormat::Int4,
+            ActivationQuantFormat::UInt8,
         )
         .unwrap();
-        core.update_ema_range(ActivationRange::new(-5.0, 3.0).unwrap())
-            .unwrap();
-        let layer = ActFakeQuantBurnQat::from_core(core);
-        let range = layer.export_range();
 
-        assert_eq!(range.lo(), -4.0);
-        assert_eq!(range.hi(), 2.5);
-        assert_eq!(layer.quant_format(), ActivationQuantFormat::Int4);
+        assert_eq!(
+            ActFakeQuantBurnQat::from_core(learned),
+            Err(ActFakeQuantBurnQatError::UnsupportedRangeMode {
+                mode: ActivationRangeModeKind::Learned
+            })
+        );
+        assert_eq!(
+            ActFakeQuantBurnQat::from_core(ema),
+            Err(ActFakeQuantBurnQatError::UnsupportedRangeMode {
+                mode: ActivationRangeModeKind::Ema
+            })
+        );
+    }
+
+    #[test]
+    fn burn_activation_uint4_forward_matches_core_scalar_projection() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let core = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(-0.25, 0.75).unwrap()),
+            ActivationQuantFormat::UInt4,
+        )
+        .unwrap();
+        let layer = ActFakeQuantBurnQat::from_core(core.clone()).unwrap();
+        let input = vec![-0.25, -0.15, 0.25, 0.45, 0.75];
+        let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [5], &device).unwrap();
+
+        let output = layer.fake_quant_forward(tensor, ActivationForwardMode::Train);
+
+        assert_close(
+            &float_tensor_into_vec(output).unwrap(),
+            &core
+                .inference_forward(&input, ActivationForwardMode::Train)
+                .unwrap(),
+            f32::EPSILON,
+        );
+    }
+
+    #[test]
+    fn burn_activation_tiny_ranges_stay_finite() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let core = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(-1.0e-40, 1.0e-40).unwrap()),
+            ActivationQuantFormat::Int8,
+        )
+        .unwrap();
+        let layer = ActFakeQuantBurnQat::from_core(core).unwrap();
+        let tensor = float_tensor_from_vec::<B, 1>(vec![1.0e-40], [1], &device).unwrap();
+
+        let output = layer.fake_quant_forward(tensor, ActivationForwardMode::Train);
+        let values = float_tensor_into_vec(output).unwrap();
+
+        assert!(values[0].is_finite());
+        assert!((-1.0e-40..=1.0e-40).contains(&values[0]));
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "{actual} != {expected} within {tolerance}"
+            );
+        }
     }
 }

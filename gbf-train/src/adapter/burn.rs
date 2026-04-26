@@ -176,7 +176,7 @@ where
     input.clone() + (projected - input).detach()
 }
 
-/// Clamp in the forward pass while preserving identity gradients.
+/// Clamp in the forward pass with clipped gradients outside the clamp range.
 pub fn ste_clamp<B, const D: usize>(
     input: BurnFloatTensor<B, D>,
     lo: f32,
@@ -185,8 +185,7 @@ pub fn ste_clamp<B, const D: usize>(
 where
     B: BurnBackend,
 {
-    let projected = input.clone().clamp(lo, hi);
-    ste_replace_forward(input, projected)
+    input.clamp(lo, hi)
 }
 
 /// Round in the forward pass while preserving identity gradients.
@@ -298,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn ste_replace_preserves_identity_gradient() {
+    fn ste_round_preserves_identity_gradient() {
         let device = BurnDevice::<BurnNdArrayAutodiffBackend>::default();
         let input =
             float_tensor_from_vec::<BurnNdArrayAutodiffBackend, 1>(vec![0.2, 1.8], [2], &device)
@@ -310,6 +309,27 @@ mod tests {
         let grad = input.grad(&gradients).expect("gradient should exist");
 
         assert_eq!(float_tensor_into_vec(grad).unwrap(), vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn ste_clamp_zeroes_gradients_outside_bounds() {
+        let device = BurnDevice::<BurnNdArrayAutodiffBackend>::default();
+        let input = float_tensor_from_vec::<BurnNdArrayAutodiffBackend, 1>(
+            vec![-2.0, -0.25, 0.25, 2.0],
+            [4],
+            &device,
+        )
+        .unwrap()
+        .require_grad();
+
+        let output = ste_clamp(input.clone(), -1.0, 1.0).sum();
+        let gradients = output.backward();
+        let grad = input.grad(&gradients).expect("gradient should exist");
+
+        assert_eq!(
+            float_tensor_into_vec(grad).unwrap(),
+            vec![0.0, 1.0, 1.0, 0.0]
+        );
     }
 
     #[test]
