@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feedback Harness Reflection"
+  short_description: "Extract guides and sensors from feedback"
+  default_prompt: "Use $feedback-harness-reflection to reflect on recent feedback and add reusable guides and sensors."
