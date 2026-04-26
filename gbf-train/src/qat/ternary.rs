@@ -3,7 +3,10 @@
 use std::error::Error;
 use std::fmt;
 
-use gbf_model::qat::{Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError};
+use gbf_artifact::weight_plan::TernaryWeightPlan;
+use gbf_model::qat::{
+    MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError,
+};
 
 use crate::adapter::burn::{
     BurnAdapterError, BurnBackend, BurnDevice, BurnFloatTensor, BurnModule, BurnParam, burn_linear,
@@ -14,6 +17,7 @@ use crate::adapter::burn::{
 #[derive(BurnModule, Debug)]
 pub struct TernaryLinearBurnQat<B: BurnBackend> {
     full_precision_weights: BurnParam<BurnFloatTensor<B, 2>>,
+    thresholds: BurnParam<BurnFloatTensor<B, 1>>,
     scale_factors: BurnParam<BurnFloatTensor<B, 1>>,
     bias: Option<BurnParam<BurnFloatTensor<B, 1>>>,
     #[module(skip)]
@@ -31,6 +35,14 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
             [shape.output_rows(), shape.input_cols()],
             device,
         )?;
+        let thresholds = float_tensor_from_vec(
+            core.thresholds()
+                .iter()
+                .map(|threshold| threshold.value())
+                .collect::<Vec<_>>(),
+            [shape.output_rows()],
+            device,
+        )?;
         let scale_factors = float_tensor_from_vec(
             core.scales()
                 .iter()
@@ -46,18 +58,27 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
 
         Ok(Self {
             full_precision_weights: BurnParam::from_tensor(full_precision_weights),
+            thresholds: BurnParam::from_tensor(thresholds),
             scale_factors: BurnParam::from_tensor(scale_factors),
             bias: bias.map(BurnParam::from_tensor),
             core,
         })
     }
 
-    pub fn core(&self) -> &TernaryLinearQat {
-        &self.core
+    pub fn plan(&self) -> TernaryWeightPlan {
+        self.core.plan()
+    }
+
+    pub fn shape(&self) -> MatrixShape {
+        self.core.shape()
     }
 
     pub fn full_precision_weights(&self) -> BurnFloatTensor<B, 2> {
         self.full_precision_weights.val()
+    }
+
+    pub fn thresholds(&self) -> BurnFloatTensor<B, 1> {
+        self.thresholds.val()
     }
 
     pub fn scale_factors(&self) -> BurnFloatTensor<B, 1> {
@@ -68,24 +89,30 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
         self.bias.as_ref().map(BurnParam::val)
     }
 
-    pub fn fake_quant_forward(
+    pub fn fake_quant_forward<const D: usize>(
         &self,
-        input: BurnFloatTensor<B, 1>,
-    ) -> Result<BurnFloatTensor<B, 1>, TernaryLinearBurnQatError> {
+        input: BurnFloatTensor<B, D>,
+    ) -> Result<BurnFloatTensor<B, D>, TernaryLinearBurnQatError> {
         let shape = self.core.shape();
         let input_shape = float_tensor_shape(&input);
-        if input_shape != [shape.input_cols()] {
-            return Err(TernaryLinearBurnQatError::InputShapeMismatch {
-                expected: [shape.input_cols()],
-                actual: input_shape,
+        let actual_last_dim = *input_shape
+            .last()
+            .expect("Burn tensors always carry a rank in their type");
+        if actual_last_dim != shape.input_cols() {
+            return Err(TernaryLinearBurnQatError::InputLastDimMismatch {
+                expected: shape.input_cols(),
+                actual: actual_last_dim,
+                shape: input_shape.to_vec(),
             });
         }
 
         let weights = self.full_precision_weights();
-        let device = weights.device();
-        let thresholds = threshold_tensor(&self.core, &device)?;
-        let hard_symbols = hard_ternary_symbols(weights.clone(), thresholds);
-        let symbols = ste_replace_forward(weights, hard_symbols);
+        let thresholds =
+            threshold_tensor(&self.core, fake_quant_q8_8_nonnegative(self.thresholds()));
+        let hard_symbols = hard_ternary_symbols(weights.clone(), thresholds.clone());
+        let weight_sign = weights.clone().sign().detach();
+        let surrogate_symbols = weights.clone() - thresholds * weight_sign;
+        let symbols = ste_replace_forward(surrogate_symbols, hard_symbols);
         let scales = fake_quant_q8_8_scales(self.scale_factors())
             .reshape([shape.output_rows(), 1])
             .repeat_dim(1, shape.input_cols());
@@ -100,6 +127,7 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
 
     pub fn export_canonical(&self) -> Result<TernaryLinearExport, TernaryLinearBurnQatError> {
         let weights = float_tensor_into_vec(self.full_precision_weights().detach())?;
+        let thresholds = float_tensor_into_vec(self.thresholds().detach())?;
         let scales = float_tensor_into_vec(self.scale_factors().detach())?;
         let bias = self
             .bias()
@@ -107,7 +135,7 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
             .transpose()?;
 
         self.core
-            .export_canonical_from_trained_state(&weights, &scales, bias.as_deref())
+            .export_canonical_from_trained_state(&weights, &thresholds, &scales, bias.as_deref())
             .map_err(TernaryLinearBurnQatError::Model)
     }
 }
@@ -116,9 +144,10 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
 pub enum TernaryLinearBurnQatError {
     Adapter(BurnAdapterError),
     Model(TernaryLinearQatError),
-    InputShapeMismatch {
-        expected: [usize; 1],
-        actual: [usize; 1],
+    InputLastDimMismatch {
+        expected: usize,
+        actual: usize,
+        shape: Vec<usize>,
     },
 }
 
@@ -127,10 +156,14 @@ impl fmt::Display for TernaryLinearBurnQatError {
         match self {
             Self::Adapter(error) => write!(f, "{error}"),
             Self::Model(error) => write!(f, "{error}"),
-            Self::InputShapeMismatch { expected, actual } => {
+            Self::InputLastDimMismatch {
+                expected,
+                actual,
+                shape,
+            } => {
                 write!(
                     f,
-                    "input shape mismatch: expected {expected:?}, got {actual:?}"
+                    "input last dimension mismatch: expected {expected}, got {actual} in shape {shape:?}"
                 )
             }
         }
@@ -153,15 +186,12 @@ impl From<TernaryLinearQatError> for TernaryLinearBurnQatError {
 
 fn threshold_tensor<B: BurnBackend>(
     core: &TernaryLinearQat,
-    device: &BurnDevice<B>,
-) -> Result<BurnFloatTensor<B, 2>, BurnAdapterError> {
+    thresholds: BurnFloatTensor<B, 1>,
+) -> BurnFloatTensor<B, 2> {
     let shape = core.shape();
-    let mut values = Vec::with_capacity(shape.weight_len());
-    for threshold in core.thresholds() {
-        values.extend(std::iter::repeat_n(threshold.value(), shape.input_cols()));
-    }
-
-    float_tensor_from_vec(values, [shape.output_rows(), shape.input_cols()], device)
+    thresholds
+        .reshape([shape.output_rows(), 1])
+        .repeat_dim(1, shape.input_cols())
 }
 
 fn hard_ternary_symbols<B: BurnBackend>(
@@ -179,6 +209,13 @@ fn hard_ternary_symbols<B: BurnBackend>(
 
 fn fake_quant_q8_8_scales<B: BurnBackend>(scales: BurnFloatTensor<B, 1>) -> BurnFloatTensor<B, 1> {
     let clamped = ste_clamp(scales, Q8_8Scale::ZERO.to_f32(), Q8_8Scale::MAX.to_f32());
+    ste_round(clamped * Q8_8Scale::QUANTIZATION_SCALE) / Q8_8Scale::QUANTIZATION_SCALE
+}
+
+fn fake_quant_q8_8_nonnegative<B: BurnBackend>(
+    values: BurnFloatTensor<B, 1>,
+) -> BurnFloatTensor<B, 1> {
+    let clamped = ste_clamp(values, Q8_8Scale::ZERO.to_f32(), Q8_8Scale::MAX.to_f32());
     ste_round(clamped * Q8_8Scale::QUANTIZATION_SCALE) / Q8_8Scale::QUANTIZATION_SCALE
 }
 
@@ -213,6 +250,10 @@ mod tests {
             .full_precision_weights()
             .grad(&gradients)
             .expect("weight gradient should exist");
+        let threshold_grad = layer
+            .thresholds()
+            .grad(&gradients)
+            .expect("threshold gradient should exist");
         let scale_grad = layer
             .scale_factors()
             .grad(&gradients)
@@ -224,6 +265,7 @@ mod tests {
             float_tensor_into_vec(weight_grad).unwrap(),
             vec![0.25, 0.5, 1.0]
         );
+        assert_eq!(float_tensor_into_vec(threshold_grad).unwrap(), vec![-0.25]);
         assert_eq!(float_tensor_into_vec(scale_grad).unwrap(), vec![3.0]);
         assert_eq!(
             export.ternary_values(),
@@ -234,6 +276,86 @@ mod tests {
             ]
         );
         assert_eq!(export.projected_weights(), vec![-0.25, 0.0, 0.25]);
+    }
+
+    #[test]
+    fn burn_ternary_batched_forward_uses_burn_linear_shape_rules() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let core = TernaryLinearQat::new(
+            MatrixShape::new(2, 3).unwrap(),
+            vec![-2.0, -0.1, 0.6, 0.25, 0.75, -0.8],
+            Some(vec![0.5, -0.25]),
+            vec![
+                TernaryThreshold::new(0.5).unwrap(),
+                TernaryThreshold::new(0.5).unwrap(),
+            ],
+            vec![
+                Q8_8Scale::from_f32(0.25).unwrap(),
+                Q8_8Scale::from_f32(0.5).unwrap(),
+            ],
+        )
+        .unwrap();
+        let layer = TernaryLinearBurnQat::<B>::from_core(core, &device).unwrap();
+        let input =
+            float_tensor_from_vec::<B, 2>(vec![1.0, 2.0, 4.0, 0.0, 1.0, -1.0], [2, 3], &device)
+                .unwrap();
+
+        let output = layer.fake_quant_forward(input).unwrap();
+
+        assert_eq!(float_tensor_shape(&output), [2, 2]);
+        assert_eq!(
+            float_tensor_into_vec(output).unwrap(),
+            vec![1.25, -1.25, 0.25, 0.75]
+        );
+    }
+
+    #[test]
+    fn burn_ternary_export_matches_core_projection_for_edge_cases() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let thresholds = [0.0, 0.5, 1.25];
+        let scales = [0.25, 1.0, 3.5];
+
+        for threshold in thresholds {
+            let step = 1.0 / Q8_8Scale::QUANTIZATION_SCALE;
+            let weights = vec![
+                -threshold - step,
+                -threshold,
+                -0.0,
+                0.0,
+                threshold,
+                threshold + step,
+            ];
+
+            for scale in scales {
+                let core = TernaryLinearQat::new(
+                    MatrixShape::new(1, weights.len()).unwrap(),
+                    weights.clone(),
+                    Some(vec![0.125]),
+                    vec![TernaryThreshold::from_f32_clamped_q8_8(threshold).unwrap()],
+                    vec![Q8_8Scale::from_f32(scale).unwrap()],
+                )
+                .unwrap();
+                let core_export = core.export_canonical();
+                let burn_export = TernaryLinearBurnQat::<B>::from_core(core, &device)
+                    .unwrap()
+                    .export_canonical()
+                    .unwrap();
+
+                assert_eq!(burn_export.plan(), core_export.plan());
+                assert_eq!(burn_export.shape(), core_export.shape());
+                assert_eq!(burn_export.ternary_values(), core_export.ternary_values());
+                assert_eq!(burn_export.scales(), core_export.scales());
+                assert_eq!(burn_export.bias_values(), core_export.bias_values());
+                assert_eq!(
+                    burn_export.projected_weights(),
+                    core_export.projected_weights()
+                );
+            }
+        }
     }
 
     #[test]
@@ -254,10 +376,12 @@ mod tests {
 
         assert!(matches!(
             layer.fake_quant_forward(input),
-            Err(TernaryLinearBurnQatError::InputShapeMismatch {
-                expected: [3],
-                actual: [2],
+            Err(TernaryLinearBurnQatError::InputLastDimMismatch {
+                expected: 3,
+                actual: 2,
+                shape,
             })
+            if shape == vec![2]
         ));
     }
 }

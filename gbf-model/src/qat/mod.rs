@@ -20,5 +20,5 @@ pub use norm::{
 };
 pub use ternary::{
     MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError,
-    TernaryThreshold, TernaryValue,
+    TernaryThreshold, TernaryValue, project_ternary_values,
 };

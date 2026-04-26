@@ -66,6 +66,7 @@ impl Q8_8Scale {
         Self { raw }
     }
 
+    /// Strict conversion for explicit artifact-scale values.
     pub fn from_f32(value: f32) -> Result<Self, TernaryLinearQatError> {
         if !value.is_finite() || value < 0.0 {
             return Err(TernaryLinearQatError::InvalidScale(value));
@@ -79,6 +80,7 @@ impl Q8_8Scale {
         Ok(Self { raw: raw as u16 })
     }
 
+    /// Training/export fake-quant conversion: clamp to representable Q8_8.
     pub fn from_f32_clamped(value: f32) -> Result<Self, TernaryLinearQatError> {
         if !value.is_finite() {
             return Err(TernaryLinearQatError::InvalidScale(value));
@@ -108,6 +110,11 @@ impl TernaryThreshold {
         }
 
         Ok(Self { value })
+    }
+
+    pub fn from_f32_clamped_q8_8(value: f32) -> Result<Self, TernaryLinearQatError> {
+        let quantized = Q8_8Scale::from_f32_clamped(value)?;
+        Self::new(quantized.to_f32())
     }
 
     pub fn value(self) -> f32 {
@@ -143,6 +150,10 @@ impl TernaryValue {
     }
 }
 
+/// Pre-export ternary projection data.
+///
+/// This is not the final artifact tensor container; `ExportVisitor` owns
+/// conversion into artifact canonical tensors once that boundary exists.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TernaryLinearExport {
     plan: TernaryWeightPlan,
@@ -366,6 +377,7 @@ impl TernaryLinearQat {
     pub fn export_canonical_from_trained_state(
         &self,
         full_precision_weights: &[f32],
+        thresholds: &[f32],
         scale_factors: &[f32],
         bias: Option<&[f32]>,
     ) -> Result<TernaryLinearExport, TernaryLinearQatError> {
@@ -381,12 +393,17 @@ impl TernaryLinearQat {
             .copied()
             .map(Q8_8Scale::from_f32_clamped)
             .collect::<Result<Vec<_>, _>>()?;
+        let thresholds = thresholds
+            .iter()
+            .copied()
+            .map(TernaryThreshold::from_f32_clamped_q8_8)
+            .collect::<Result<Vec<_>, _>>()?;
 
         validate_shape_state(
             self.shape,
             full_precision_weights,
             bias,
-            &self.thresholds,
+            &thresholds,
             &scales,
             ScaleValidation::RequirePerRow,
         )?;
@@ -395,7 +412,7 @@ impl TernaryLinearQat {
             self.plan,
             self.shape,
             full_precision_weights,
-            &self.thresholds,
+            &thresholds,
             &scales,
             bias,
         ))
@@ -517,20 +534,53 @@ impl fmt::Display for TernaryLinearQatError {
 impl Error for TernaryLinearQatError {}
 
 fn validate_weight_plan(plan: TernaryWeightPlan) -> Result<(), TernaryLinearQatError> {
-    let supported_threshold = matches!(
-        plan.threshold,
-        ThresholdPlan::FixedQ8_8 | ThresholdPlan::AnnealedGlobalThenPerOutputRow
-    );
-
     if plan.encoding == WeightEncoding::Ternary2
         && plan.scale_granularity == ScaleGranularity::PerOutputRow
         && plan.scale_format == ScaleFormat::Q8_8
-        && supported_threshold
+        && plan.threshold == ThresholdPlan::FixedQ8_8
     {
         Ok(())
     } else {
         Err(TernaryLinearQatError::UnsupportedWeightPlan { plan })
     }
+}
+
+pub fn project_ternary_values(
+    shape: MatrixShape,
+    full_precision_weights: &[f32],
+    thresholds: &[TernaryThreshold],
+) -> Result<Vec<TernaryValue>, TernaryLinearQatError> {
+    if full_precision_weights.len() != shape.weight_len() {
+        return Err(TernaryLinearQatError::WeightLenMismatch {
+            expected: shape.weight_len(),
+            actual: full_precision_weights.len(),
+        });
+    }
+
+    if let Some(index) = full_precision_weights
+        .iter()
+        .position(|value| !value.is_finite())
+    {
+        return Err(TernaryLinearQatError::NonFiniteWeight { index });
+    }
+
+    if thresholds.len() != shape.output_rows() {
+        return Err(TernaryLinearQatError::ThresholdLenMismatch {
+            expected: shape.output_rows(),
+            actual: thresholds.len(),
+        });
+    }
+
+    Ok(full_precision_weights
+        .chunks_exact(shape.input_cols())
+        .enumerate()
+        .flat_map(|(row_index, row)| {
+            let threshold = thresholds[row_index];
+            row.iter()
+                .copied()
+                .map(move |weight| TernaryValue::from_weight(weight, threshold))
+        })
+        .collect())
 }
 
 fn build_export(
@@ -541,16 +591,8 @@ fn build_export(
     scales: &[Q8_8Scale],
     bias: Option<&[f32]>,
 ) -> TernaryLinearExport {
-    let ternary_values = full_precision_weights
-        .chunks_exact(shape.input_cols())
-        .enumerate()
-        .flat_map(|(row_index, row)| {
-            let threshold = thresholds[row_index];
-            row.iter()
-                .copied()
-                .map(move |weight| TernaryValue::from_weight(weight, threshold))
-        })
-        .collect();
+    let ternary_values = project_ternary_values(shape, full_precision_weights, thresholds)
+        .expect("validated ternary export state");
 
     TernaryLinearExport {
         plan,
@@ -722,6 +764,27 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, TernaryLinearQatError::UnsupportedWeightPlan { plan });
+
+        let annealed = TernaryWeightPlan::new(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::PerOutputRow,
+            ScaleFormat::Q8_8,
+            ThresholdPlan::AnnealedGlobalThenPerOutputRow,
+        );
+        let err = TernaryLinearQat::new_with_plan(
+            annealed,
+            MatrixShape::new(1, 2).unwrap(),
+            vec![1.0, -1.0],
+            None,
+            vec![TernaryThreshold::new(0.5).unwrap()],
+            vec![Q8_8Scale::from_f32(1.0).unwrap()],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            TernaryLinearQatError::UnsupportedWeightPlan { plan: annealed }
+        );
     }
 
     #[test]
@@ -756,7 +819,7 @@ mod tests {
         .unwrap();
 
         let export = layer
-            .export_canonical_from_trained_state(&[0.75, -0.75], &[0.5], Some(&[0.25]))
+            .export_canonical_from_trained_state(&[0.75, -0.75], &[0.5], &[0.5], Some(&[0.25]))
             .unwrap();
 
         assert_eq!(

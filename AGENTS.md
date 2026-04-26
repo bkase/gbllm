@@ -51,8 +51,8 @@ Before the first commit in a fresh clone, run `./scripts/install-hooks.sh`.
 
 A pre-commit hook automatically runs on every `git commit`. Do NOT run it manually — just commit and it gates you. The hook runs (fail-fast):
 1. `cargo fmt --check --all`
-2. `cargo clippy --workspace -- -D warnings`
-3. `cargo test --workspace`
+2. `cargo clippy --workspace --all-features -- -D warnings`
+3. `cargo test --workspace --all-features`
 
 There is no escape hatch. If tests fail, fix them.
 
