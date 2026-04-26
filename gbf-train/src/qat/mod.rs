@@ -10,6 +10,6 @@ pub mod ternary;
 #[cfg(feature = "burn-adapter")]
 pub use activation::{ActFakeQuantBurnQat, ActFakeQuantBurnQatError};
 #[cfg(feature = "burn-adapter")]
-pub use norm::{NormApproxBurnQat, NormApproxBurnQatError};
+pub use norm::{NormApproxBurnPlan, NormApproxBurnQat, NormApproxBurnQatError};
 #[cfg(feature = "burn-adapter")]
 pub use ternary::{TernaryLinearBurnQat, TernaryLinearBurnQatError};

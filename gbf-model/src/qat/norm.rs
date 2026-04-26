@@ -93,6 +93,8 @@ impl NormClip {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LutSpec {
+    // Pre-affine input sampling domain for the deployable lookup table.
+    // These bounds are intentionally separate from the output clip bounds.
     input_lo: f32,
     input_hi: f32,
     entries: usize,
@@ -139,6 +141,19 @@ impl LutSpec {
 
     pub fn entries(self) -> usize {
         self.entries
+    }
+
+    pub fn nearest_index(self, value: f32) -> usize {
+        if value <= self.input_lo {
+            return 0;
+        }
+
+        if value >= self.input_hi {
+            return self.entries - 1;
+        }
+
+        let step = (self.input_hi - self.input_lo) / (self.entries - 1) as f32;
+        ((value - self.input_lo) / step).round() as usize
     }
 
     fn sample(self, index: usize) -> f32 {
@@ -233,10 +248,10 @@ impl NormApproxQat {
         validate_input(input)?;
 
         match self.plan {
-            NormApproxPlan::AffineClipLut { affine, clip, .. } => Ok(input
+            NormApproxPlan::AffineClipLut { affine, clip, lut } => Ok(input
                 .iter()
                 .copied()
-                .map(|value| apply_affine_clip(value, affine, clip))
+                .map(|value| apply_affine_clip_lut(value, affine, clip, lut))
                 .collect()),
             NormApproxPlan::TileRmsThenAffineClip { tile, affine, clip } => {
                 tile_rms_then_affine_clip(input, tile, affine, clip)
@@ -253,9 +268,7 @@ impl NormApproxQat {
                         clip: artifact_clip(clip),
                         lut: artifact_lut(lut),
                     },
-                    lut_values: (0..lut.entries())
-                        .map(|index| apply_affine_clip(lut.sample(index), affine, clip))
-                        .collect(),
+                    lut_values: affine_clip_lut_values(affine, clip, lut),
                 }
             }
             NormApproxPlan::TileRmsThenAffineClip { tile, affine, clip } => {
@@ -350,6 +363,17 @@ fn apply_affine_clip(value: f32, affine: AffineParams, clip: NormClip) -> f32 {
     clip.apply(affine.apply(value))
 }
 
+fn affine_clip_lut_values(affine: AffineParams, clip: NormClip, lut: LutSpec) -> Vec<f32> {
+    (0..lut.entries())
+        .map(|index| apply_affine_clip(lut.sample(index), affine, clip))
+        .collect()
+}
+
+fn apply_affine_clip_lut(value: f32, affine: AffineParams, clip: NormClip, lut: LutSpec) -> f32 {
+    let values = affine_clip_lut_values(affine, clip, lut);
+    values[lut.nearest_index(value)]
+}
+
 fn artifact_affine(affine: AffineParams) -> ArtifactNormAffineParams {
     ArtifactNormAffineParams {
         scale: affine.scale(),
@@ -418,11 +442,6 @@ mod tests {
             lut: LutSpec::new(-1.0, 1.0, 3).unwrap(),
         });
 
-        assert_eq!(
-            norm.forward(&[-1.0, 0.0, 0.75]).unwrap(),
-            vec![-1.0, -1.0, 0.5]
-        );
-
         let export = norm.export_norm_params();
         assert!(matches!(export.plan(), ArtifactNormPlan::AffineClipLut(_)));
         assert!(matches!(
@@ -430,6 +449,25 @@ mod tests {
             ArtifactNormExportParams::AffineClipLut { lut_values, .. }
                 if lut_values == &vec![-1.0, -1.0, 1.0]
         ));
+        assert_eq!(
+            norm.forward(&[-1.0, 0.0, 0.75]).unwrap(),
+            vec![-1.0, -1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn qat_norm_affine_clip_lut_forward_uses_nearest_exported_entry() {
+        let norm = NormApproxQat::new(NormApproxPlan::AffineClipLut {
+            affine: AffineParams::new(1.0, 0.0).unwrap(),
+            clip: NormClip::new(-2.0, 2.0).unwrap(),
+            lut: LutSpec::new(-1.0, 1.0, 5).unwrap(),
+        });
+
+        assert_eq!(
+            norm.forward(&[-2.0, -0.76, -0.74, -0.26, 0.26, 1.2])
+                .unwrap(),
+            vec![-1.0, -1.0, -0.5, -0.5, 0.5, 1.0]
+        );
     }
 
     #[test]
@@ -503,12 +541,25 @@ mod tests {
     #[test]
     fn qat_norm_zero_tile_with_positive_epsilon_stays_finite() {
         let norm = NormApproxQat::new(NormApproxPlan::TileRmsThenAffineClip {
-            tile: TileRmsSpec::new(2, 1.0).unwrap(),
+            tile: TileRmsSpec::new(2, 1.0e-5).unwrap(),
             affine: AffineParams::new(1.0, 0.0).unwrap(),
             clip: NormClip::new(-2.0, 2.0).unwrap(),
         });
 
         assert_eq!(norm.forward(&[0.0, 0.0]).unwrap(), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn qat_norm_tile_rms_tiny_positive_epsilon_stays_finite() {
+        let norm = NormApproxQat::new(NormApproxPlan::TileRmsThenAffineClip {
+            tile: TileRmsSpec::new(2, 1.0e-12).unwrap(),
+            affine: AffineParams::new(1.0, 0.0).unwrap(),
+            clip: NormClip::new(-2.0, 2.0).unwrap(),
+        });
+
+        let output = norm.forward(&[1.0e-6, -1.0e-6]).unwrap();
+
+        assert!(output.iter().all(|value| value.is_finite()));
     }
 
     fn assert_close(actual: f32, expected: f32) {
