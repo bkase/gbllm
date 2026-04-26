@@ -174,6 +174,8 @@ pub struct ActivationQuantEntry {
     pub range: ActivationRangeSpec,
     pub quant_format: ActivationQuantFormatSpec,
     pub eval_mode: ActivationEvalModeSpec,
+    #[serde(default)]
+    pub nonlinearity: ActivationNonlinearitySpec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -201,6 +203,17 @@ pub enum ActivationRangeModeSpec {
 pub enum ActivationEvalModeSpec {
     Quantized,
     Passthrough,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum ActivationNonlinearitySpec {
+    #[default]
+    Identity,
+    Relu,
+    GeluClip,
+    SiluClip,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -324,6 +337,53 @@ mod tests {
             )],
             vec![],
             vec![],
+            vec![],
+        );
+
+        let encoded = serde_json::to_string(&spec).unwrap();
+        let decoded: QuantSpec = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, spec);
+    }
+
+    #[test]
+    fn activation_quant_deserializes_missing_nonlinearity_as_identity() {
+        let encoded = r#"{
+            "weight_quant": [],
+            "ternary_weight_plans": [],
+            "activation_quant": [{
+                "activation": "expert.activation",
+                "range": { "lo": -1.0, "hi": 1.0, "mode": "Fixed" },
+                "quant_format": "Int8",
+                "eval_mode": "Quantized"
+            }],
+            "norm_plans": []
+        }"#;
+
+        let decoded: QuantSpec = serde_json::from_str(encoded).unwrap();
+
+        assert_eq!(
+            decoded.activation_quant()[0].nonlinearity,
+            ActivationNonlinearitySpec::Identity
+        );
+    }
+
+    #[test]
+    fn activation_quant_round_trips_explicit_nonlinearity() {
+        let spec = QuantSpec::new_with_weight_quant(
+            vec![],
+            vec![],
+            vec![ActivationQuantEntry {
+                activation: ArtifactPath::new("expert.activation").unwrap(),
+                range: ActivationRangeSpec {
+                    lo: -1.0,
+                    hi: 1.0,
+                    mode: ActivationRangeModeSpec::Fixed,
+                },
+                quant_format: ActivationQuantFormatSpec::Int8,
+                eval_mode: ActivationEvalModeSpec::Quantized,
+                nonlinearity: ActivationNonlinearitySpec::GeluClip,
+            }],
             vec![],
         );
 

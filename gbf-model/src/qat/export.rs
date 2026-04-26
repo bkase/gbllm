@@ -9,9 +9,9 @@ use gbf_artifact::export_facts::{ExportFacts, RangeDigest};
 use gbf_artifact::ids::{ArtifactPath, ArtifactPathError};
 use gbf_artifact::norm_plan::NormExportParams;
 use gbf_artifact::quant::{
-    ActivationEvalModeSpec, ActivationQuantEntry, ActivationQuantFormatSpec,
-    ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry, QuantSpec, TernaryQuantEntry,
-    WeightQuantEntry,
+    ActivationEvalModeSpec, ActivationNonlinearitySpec, ActivationQuantEntry,
+    ActivationQuantFormatSpec, ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry,
+    QuantSpec, TernaryQuantEntry, WeightQuantEntry,
 };
 use gbf_artifact::tensor::{
     CanonicalTensor, CanonicalTensorError, CanonicalTensorId, CanonicalTensorKind,
@@ -21,8 +21,9 @@ use gbf_foundation::Hash256;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActFakeQuant, ActivationQuantFormat, ActivationRangeModeKind, DenseBranchProjection,
-    ExpertBlockQat, ExpertQat, NormApproxQat, SharedDenseBranch, TernaryLinearQat, Top1RouterQat,
+    ActFakeQuant, ActivationQuantFormat, ActivationRangeModeKind, ClippedActivationKind,
+    DenseBranchProjection, ExpertBlockQat, ExpertQat, NormApproxQat, SharedDenseBranch,
+    TernaryLinearQat, Top1RouterQat,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -247,7 +248,11 @@ impl ExportVisitor {
     ) -> Result<(), ExportVisitorError> {
         self.mark_visited(path.clone(), VisitedModuleKind::Expert);
         self.visit_ternary_linear_at(path.join("up")?, expert.up_projection())?;
-        self.visit_activation_at(path.join("activation")?, expert.activation())?;
+        self.visit_activation_with_nonlinearity_at(
+            path.join("activation")?,
+            expert.activation(),
+            activation_nonlinearity(expert.clipped_activation().kind()),
+        )?;
         self.visit_ternary_linear_at(path.join("down")?, expert.down_projection())
     }
 
@@ -344,6 +349,19 @@ impl ExportVisitor {
         path: ArtifactPath,
         activation: &ActFakeQuant,
     ) -> Result<(), ExportVisitorError> {
+        self.visit_activation_with_nonlinearity_at(
+            path,
+            activation,
+            ActivationNonlinearitySpec::Identity,
+        )
+    }
+
+    fn visit_activation_with_nonlinearity_at(
+        &mut self,
+        path: ArtifactPath,
+        activation: &ActFakeQuant,
+        nonlinearity: ActivationNonlinearitySpec,
+    ) -> Result<(), ExportVisitorError> {
         self.mark_visited(path.clone(), VisitedModuleKind::Activation);
 
         let range = activation.export_range();
@@ -373,6 +391,7 @@ impl ExportVisitor {
                 range,
                 quant_format,
                 eval_mode,
+                nonlinearity,
             },
             "activation quant entry",
         )?;
@@ -623,18 +642,28 @@ fn activation_eval_mode(eval_passthrough: bool) -> ActivationEvalModeSpec {
     }
 }
 
+fn activation_nonlinearity(kind: ClippedActivationKind) -> ActivationNonlinearitySpec {
+    match kind {
+        ClippedActivationKind::Relu => ActivationNonlinearitySpec::Relu,
+        ClippedActivationKind::GeluClip => ActivationNonlinearitySpec::GeluClip,
+        ClippedActivationKind::SiluClip => ActivationNonlinearitySpec::SiluClip,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use gbf_artifact::quant::{ActivationEvalModeSpec, ActivationRangeModeSpec};
+    use gbf_artifact::quant::{
+        ActivationEvalModeSpec, ActivationNonlinearitySpec, ActivationRangeModeSpec,
+    };
     use gbf_artifact::tensor::{CanonicalTensorKind, CanonicalTensorPayload, TensorElementType};
 
     use super::*;
     use crate::qat::{
         ActivationQuantFormat, ActivationRange, ActivationRangeMode, AffineParams,
-        DenseBranchProjection, EmaDecay, LutSpec, MatrixShape, NormApproxPlan, NormClip, Q8_8Scale,
-        RouterShape, TernaryThreshold,
+        ClippedActivation, DenseBranchProjection, EmaDecay, LutSpec, MatrixShape, NormApproxPlan,
+        NormClip, Q8_8Scale, RouterShape, TernaryThreshold,
     };
 
     #[test]
@@ -670,7 +699,7 @@ mod tests {
 
         assert_eq!(
             export.artifact_core_hash().to_string(),
-            "01d7a9d0049502e260a3db9898eba92ec5f5e28f3a499e3b7fcc2e55e3a00d28"
+            "0433ea7763ffb239608c630538b459fad385856fcee464feaf12f67bebf6fe6e"
         );
         assert_eq!(export.core.tensors().len(), 17);
         assert_eq!(export.facts.activation_ranges.len(), 2);
@@ -866,6 +895,39 @@ mod tests {
     }
 
     #[test]
+    fn qat_export_visitor_encodes_expert_clipped_activation_kind() {
+        let relu = fixture_expert();
+        let gelu = fixture_gelu_expert();
+
+        let mut relu_export = ExportVisitor::new();
+        relu_export.visit_expert("expert", &relu).unwrap();
+        let relu_export = relu_export.finish().unwrap();
+
+        let mut gelu_export = ExportVisitor::new();
+        gelu_export.visit_expert("expert", &gelu).unwrap();
+        let gelu_export = gelu_export.finish().unwrap();
+
+        let relu_block = ExpertBlockQat::new(vec![relu.clone()], None).unwrap();
+        let gelu_block = ExpertBlockQat::new(vec![gelu.clone()], None).unwrap();
+        assert_ne!(
+            relu_block.forward(&[2.0, -2.0], 0).unwrap(),
+            gelu_block.forward(&[2.0, -2.0], 0).unwrap()
+        );
+        assert_ne!(
+            relu_export.artifact_core_hash(),
+            gelu_export.artifact_core_hash()
+        );
+        assert_eq!(
+            relu_export.core.quant().activation_quant()[0].nonlinearity,
+            ActivationNonlinearitySpec::Relu
+        );
+        assert_eq!(
+            gelu_export.core.quant().activation_quant()[0].nonlinearity,
+            ActivationNonlinearitySpec::GeluClip
+        );
+    }
+
+    #[test]
     fn qat_export_visitor_supports_each_qat_module_ref_variant() {
         let ternary = ternary_linear(1, 1, vec![1.0], None);
         let activation = activation();
@@ -1031,6 +1093,32 @@ mod tests {
                 ],
                 None,
             ),
+            activation(),
+            ternary_linear(
+                2,
+                2,
+                vec![
+                    1.0, 0.0, //
+                    0.0, -1.0,
+                ],
+                Some(vec![0.0, 0.0]),
+            ),
+        )
+        .unwrap()
+    }
+
+    fn fixture_gelu_expert() -> ExpertQat {
+        ExpertQat::new_with_clipped_activation(
+            ternary_linear(
+                2,
+                2,
+                vec![
+                    1.0, 0.0, //
+                    0.0, 1.0,
+                ],
+                None,
+            ),
+            ClippedActivation::gelu_clip(),
             activation(),
             ternary_linear(
                 2,

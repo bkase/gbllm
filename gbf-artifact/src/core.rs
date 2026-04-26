@@ -9,9 +9,9 @@ use gbf_foundation::Hash256;
 use crate::ids::ArtifactPath;
 use crate::norm_plan::{AffineClipLutPlan, NormPlan, TileRmsThenAffineClipPlan};
 use crate::quant::{
-    ActivationEvalModeSpec, ActivationQuantEntry, ActivationQuantFormatSpec,
-    ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry, QuantSpec, TernaryQuantEntry,
-    WeightQuantEntry,
+    ActivationEvalModeSpec, ActivationNonlinearitySpec, ActivationQuantEntry,
+    ActivationQuantFormatSpec, ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry,
+    QuantSpec, TernaryQuantEntry, WeightQuantEntry,
 };
 use crate::tensor::{
     CanonicalTensor, CanonicalTensorId, CanonicalTensorKind, TensorElementType, stable_digest,
@@ -641,6 +641,7 @@ fn push_activation_quant_entry(bytes: &mut Vec<u8>, entry: &ActivationQuantEntry
     push_activation_range(bytes, entry.range);
     push_activation_quant_format(bytes, entry.quant_format);
     push_activation_eval_mode(bytes, entry.eval_mode);
+    push_activation_nonlinearity(bytes, entry.nonlinearity);
 }
 
 fn push_norm_quant_entry(bytes: &mut Vec<u8>, entry: &NormQuantEntry) {
@@ -752,6 +753,16 @@ fn push_activation_eval_mode(bytes: &mut Vec<u8>, mode: ActivationEvalModeSpec) 
     push_u8(bytes, tag);
 }
 
+fn push_activation_nonlinearity(bytes: &mut Vec<u8>, nonlinearity: ActivationNonlinearitySpec) {
+    let tag = match nonlinearity {
+        ActivationNonlinearitySpec::Identity => 0,
+        ActivationNonlinearitySpec::Relu => 1,
+        ActivationNonlinearitySpec::GeluClip => 2,
+        ActivationNonlinearitySpec::SiluClip => 3,
+    };
+    push_u8(bytes, tag);
+}
+
 fn push_tensor_kind(bytes: &mut Vec<u8>, kind: CanonicalTensorKind) {
     let tag = match kind {
         CanonicalTensorKind::TernaryWeight => 0,
@@ -811,7 +822,8 @@ fn push_u64(bytes: &mut Vec<u8>, value: u64) {
 #[cfg(test)]
 mod tests {
     use crate::quant::{
-        ActivationQuantFormatSpec, ActivationRangeModeSpec, ActivationRangeSpec, TernaryQuantEntry,
+        ActivationNonlinearitySpec, ActivationQuantFormatSpec, ActivationRangeModeSpec,
+        ActivationRangeSpec, TernaryQuantEntry,
     };
     use crate::tensor::{
         CanonicalTensor, CanonicalTensorId, CanonicalTensorKind, CanonicalTensorLayout,
@@ -1063,6 +1075,15 @@ mod tests {
     }
 
     #[test]
+    fn artifact_core_activation_nonlinearity_is_part_of_identity() {
+        let base = activation_core_with_nonlinearity(-1.0, 1.0, ActivationNonlinearitySpec::Relu);
+        let changed =
+            activation_core_with_nonlinearity(-1.0, 1.0, ActivationNonlinearitySpec::GeluClip);
+
+        assert_ne!(base.semantic_hash(), changed.semantic_hash());
+    }
+
+    #[test]
     fn artifact_core_canonical_hash_preserves_float_sign_bits() {
         let positive = ArtifactCore::new(
             vec![float_tensor(
@@ -1089,6 +1110,14 @@ mod tests {
     }
 
     fn activation_core(lo: f32, hi: f32) -> ArtifactCore {
+        activation_core_with_nonlinearity(lo, hi, ActivationNonlinearitySpec::Identity)
+    }
+
+    fn activation_core_with_nonlinearity(
+        lo: f32,
+        hi: f32,
+        nonlinearity: ActivationNonlinearitySpec,
+    ) -> ArtifactCore {
         ArtifactCore::new(
             vec![],
             QuantSpec::new(
@@ -1102,6 +1131,7 @@ mod tests {
                     },
                     quant_format: ActivationQuantFormatSpec::Int8,
                     eval_mode: ActivationEvalModeSpec::Quantized,
+                    nonlinearity,
                 }],
                 vec![],
             ),

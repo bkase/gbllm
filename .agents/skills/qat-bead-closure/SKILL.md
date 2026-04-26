@@ -24,6 +24,8 @@ If the artifact contract is not implemented yet, do not claim artifact agreement
 - Do not call inline floats, structs, or `Vec<f32>` "first-class tensors". First-class tensor claims require `CanonicalTensor` handles or an explicit moved-acceptance owner such as `bd-g90`/`bd-209`.
 - If a bead's literal acceptance wants a gradient proof in `gbf-model`, satisfy it through `gbf-train --features burn-adapter` only when the closure states the architectural move, references the Burn-adapter boundary, and names the exact Burn test.
 - A deployable approximation's training forward must match the exported behavior for every supported path, or the support matrix must mark the mismatch as moved/rejected and name the owning bead.
+- If QAT forward semantics add or change a nonlinearity, activation clip, phase behavior, or other non-weight operation, encode it in export/artifact identity or reject that path with a focused test. Do not let scalar forward behavior and exported artifact semantics diverge silently.
+- Keep one authoritative range owner for activation/nonlinearity behavior. If a pre-quant nonlinearity and fake-quant step both use a range, validate or derive one from the other and document which one exports.
 - Artifact schema summaries must be bidirectionally consistent with their detailed records. If one field says a weight is ternary, another record must provide the required scale/bias metadata, and tests must prove both missing-summary and missing-detail rejection paths.
 - When a bead is mostly proving behavior implemented by an earlier bead, state the earlier owner and add a stronger regression oracle rather than reclosing the same claim.
 - Artifact tensor encoding must match the declared quant plan. If a public plan exposes formats or granularities that the current tensor model cannot encode, reject them at the artifact boundary and create or cite the owner bead for support.
@@ -73,7 +75,7 @@ If no exact gate exists, add one before closing the bead or leave the bead open.
 
 ## No Future Variant Acceptance
 
-Do not accept enum variants, plan variants, strategies, or schedules that imply future behavior until the implementation and tests exist. Examples include annealing modes, learned thresholds, future artifact encodings, or unsupported lowering plans.
+Do not accept enum variants, plan variants, strategies, or schedules that imply future behavior until the implementation and tests exist. Examples include annealing modes, learned thresholds, future artifact encodings, or unsupported lowering plans. Config-only variants must be named as config-only in the support matrix and must be rejected at executable/export/Burn boundaries with tests unless those paths are implemented.
 
 Path-specific rule: a public variant is only accepted on paths where it works today. For every public variant, strategy, or schedule, one of these must be true for each advertised path (`scalar/model`, `Burn training`, `export/artifact`):
 

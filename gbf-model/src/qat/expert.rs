@@ -3,9 +3,11 @@
 use std::error::Error;
 use std::fmt;
 
+use gbf_foundation::ByteCost;
+
 use crate::qat::{
-    ActFakeQuant, ActFakeQuantError, ActivationForwardMode, MatrixShape, TernaryLinearQat,
-    TernaryLinearQatError,
+    ActFakeQuant, ActFakeQuantError, ActivationForwardMode, ActivationRange, MatrixShape,
+    TernaryLinearQat, TernaryLinearQatError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +53,222 @@ impl ExpertForwardOptions {
     pub fn with_activation(mut self, activation: ActivationForwardMode) -> Self {
         self.activation = activation;
         self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpertMlpVariant {
+    TwoMatrix,
+    GatedLinearUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpertMlpConfig {
+    d_model: usize,
+    d_ff: usize,
+    variant: ExpertMlpVariant,
+}
+
+impl ExpertMlpConfig {
+    pub fn default_two_matrix(d_model: usize, d_ff: usize) -> Result<Self, ExpertBlockQatError> {
+        Self::new(d_model, d_ff, ExpertMlpVariant::TwoMatrix)
+    }
+
+    pub fn glu_explicit(
+        d_model: usize,
+        d_ff: usize,
+    ) -> Result<(Self, ExpertMlpConfigEvent), ExpertBlockQatError> {
+        let config = Self::new(d_model, d_ff, ExpertMlpVariant::GatedLinearUnit)?;
+        Ok((config, ExpertMlpConfigEvent::glu_bank_fit_warning(config)))
+    }
+
+    fn new(
+        d_model: usize,
+        d_ff: usize,
+        variant: ExpertMlpVariant,
+    ) -> Result<Self, ExpertBlockQatError> {
+        validate_nonzero_dimension("d_model", d_model)?;
+        validate_nonzero_dimension("d_ff", d_ff)?;
+        validate_budget_dimension("d_model", d_model)?;
+        validate_budget_dimension("d_ff", d_ff)?;
+
+        let matrix_count = matrix_count_for_variant(variant);
+        d_model
+            .checked_mul(d_ff)
+            .and_then(|matrix_params| matrix_params.checked_mul(matrix_count))
+            .ok_or(ExpertBlockQatError::ExpertParameterCountOverflow {
+                d_model,
+                d_ff,
+                matrix_count,
+            })?;
+
+        Ok(Self {
+            d_model,
+            d_ff,
+            variant,
+        })
+    }
+
+    pub fn d_model(self) -> usize {
+        self.d_model
+    }
+
+    pub fn d_ff(self) -> usize {
+        self.d_ff
+    }
+
+    pub fn variant(self) -> ExpertMlpVariant {
+        self.variant
+    }
+
+    pub fn ternary_linear_count(self) -> usize {
+        matrix_count_for_variant(self.variant)
+    }
+
+    pub fn parameter_count(self) -> usize {
+        self.d_model * self.d_ff * self.ternary_linear_count()
+    }
+
+    pub fn two_matrix_byte_cost(self) -> ByteCost {
+        expert_two_matrix_byte_cost(self.d_model as u32, self.d_ff as u32)
+    }
+
+    pub fn glu_byte_cost(self) -> ByteCost {
+        expert_glu_byte_cost(self.d_model as u32, self.d_ff as u32)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpertMlpConfigEventLevel {
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpertMlpConfigEventCode {
+    GluBankFitWarning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpertMlpConfigEvent {
+    level: ExpertMlpConfigEventLevel,
+    code: ExpertMlpConfigEventCode,
+    variant: ExpertMlpVariant,
+    d_model: usize,
+    d_ff: usize,
+    ternary_linear_count: usize,
+    two_matrix_byte_cost: ByteCost,
+    glu_byte_cost: ByteCost,
+    message: &'static str,
+}
+
+impl ExpertMlpConfigEvent {
+    fn glu_bank_fit_warning(config: ExpertMlpConfig) -> Self {
+        Self {
+            level: ExpertMlpConfigEventLevel::Warning,
+            code: ExpertMlpConfigEventCode::GluBankFitWarning,
+            variant: config.variant(),
+            d_model: config.d_model(),
+            d_ff: config.d_ff(),
+            ternary_linear_count: config.ternary_linear_count(),
+            two_matrix_byte_cost: config.two_matrix_byte_cost(),
+            glu_byte_cost: config.glu_byte_cost(),
+            message: "GLU experts add a third projection; check the three-matrix byte cost against the ExpertBank budget before enabling execution",
+        }
+    }
+
+    pub fn level(self) -> ExpertMlpConfigEventLevel {
+        self.level
+    }
+
+    pub fn code(self) -> ExpertMlpConfigEventCode {
+        self.code
+    }
+
+    pub fn variant(self) -> ExpertMlpVariant {
+        self.variant
+    }
+
+    pub fn d_model(self) -> usize {
+        self.d_model
+    }
+
+    pub fn d_ff(self) -> usize {
+        self.d_ff
+    }
+
+    pub fn ternary_linear_count(self) -> usize {
+        self.ternary_linear_count
+    }
+
+    pub fn two_matrix_byte_cost(self) -> ByteCost {
+        self.two_matrix_byte_cost
+    }
+
+    pub fn glu_byte_cost(self) -> ByteCost {
+        self.glu_byte_cost
+    }
+
+    pub fn extra_projection_byte_cost(self) -> ByteCost {
+        self.glu_byte_cost - self.two_matrix_byte_cost
+    }
+
+    pub fn message(self) -> &'static str {
+        self.message
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClippedActivationKind {
+    Relu,
+    GeluClip,
+    SiluClip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClippedActivation {
+    kind: ClippedActivationKind,
+}
+
+impl ClippedActivation {
+    pub fn new(kind: ClippedActivationKind) -> Self {
+        Self { kind }
+    }
+
+    pub fn relu() -> Self {
+        Self::new(ClippedActivationKind::Relu)
+    }
+
+    pub fn gelu_clip() -> Self {
+        Self::new(ClippedActivationKind::GeluClip)
+    }
+
+    pub fn silu_clip() -> Self {
+        Self::new(ClippedActivationKind::SiluClip)
+    }
+
+    pub fn kind(self) -> ClippedActivationKind {
+        self.kind
+    }
+
+    pub fn forward(
+        &self,
+        input: &[f32],
+        range: ActivationRange,
+    ) -> Result<Vec<f32>, ExpertBlockQatError> {
+        validate_finite("clipped activation input", input)?;
+        Ok(input
+            .iter()
+            .map(|&value| self.apply(value, range))
+            .collect())
+    }
+
+    fn apply(self, value: f32, range: ActivationRange) -> f32 {
+        let activated = match self.kind {
+            ClippedActivationKind::Relu => value.max(0.0),
+            ClippedActivationKind::GeluClip => gelu(value),
+            ClippedActivationKind::SiluClip => silu(value),
+        };
+        range.clamp(activated)
     }
 }
 
@@ -148,11 +366,88 @@ impl ExpertBlockQat {
             })
             .collect())
     }
+
+    pub fn forward_batch(
+        &self,
+        input: &[f32],
+        expert_ids: &[usize],
+    ) -> Result<ExpertBatchOutput, ExpertBlockQatError> {
+        self.forward_batch_with_options(
+            input,
+            expert_ids,
+            ExpertForwardOptions::hard_quantized_train(),
+        )
+    }
+
+    pub fn forward_batch_with_options(
+        &self,
+        input: &[f32],
+        expert_ids: &[usize],
+        options: ExpertForwardOptions,
+    ) -> Result<ExpertBatchOutput, ExpertBlockQatError> {
+        let d_model = self.d_model();
+        if !input.len().is_multiple_of(d_model) {
+            return Err(ExpertBlockQatError::BatchInputLenMismatch {
+                d_model,
+                actual: input.len(),
+            });
+        }
+        validate_finite("expert batch input", input)?;
+
+        let batch_size = input.len() / d_model;
+        if expert_ids.len() != batch_size {
+            return Err(ExpertBlockQatError::ExpertIdLenMismatch {
+                expected: batch_size,
+                actual: expert_ids.len(),
+            });
+        }
+
+        let mut values = Vec::with_capacity(input.len());
+        for (row, &expert_id) in input.chunks_exact(d_model).zip(expert_ids) {
+            values.extend(self.forward_with_options(row, expert_id, options)?);
+        }
+
+        Ok(ExpertBatchOutput {
+            batch_size,
+            d_model,
+            values,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpertBatchOutput {
+    batch_size: usize,
+    d_model: usize,
+    values: Vec<f32>,
+}
+
+impl ExpertBatchOutput {
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    pub fn d_model(&self) -> usize {
+        self.d_model
+    }
+
+    pub fn shape(&self) -> [usize; 2] {
+        [self.batch_size, self.d_model]
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    pub fn into_values(self) -> Vec<f32> {
+        self.values
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpertQat {
     up_projection: TernaryLinearQat,
+    clipped_activation: ClippedActivation,
     activation: ActFakeQuant,
     down_projection: TernaryLinearQat,
 }
@@ -160,6 +455,21 @@ pub struct ExpertQat {
 impl ExpertQat {
     pub fn new(
         up_projection: TernaryLinearQat,
+        activation: ActFakeQuant,
+        down_projection: TernaryLinearQat,
+    ) -> Result<Self, ExpertBlockQatError> {
+        let clipped_activation = ClippedActivation::relu();
+        Self::new_with_clipped_activation(
+            up_projection,
+            clipped_activation,
+            activation,
+            down_projection,
+        )
+    }
+
+    pub fn new_with_clipped_activation(
+        up_projection: TernaryLinearQat,
+        clipped_activation: ClippedActivation,
         activation: ActFakeQuant,
         down_projection: TernaryLinearQat,
     ) -> Result<Self, ExpertBlockQatError> {
@@ -182,9 +492,21 @@ impl ExpertQat {
 
         Ok(Self {
             up_projection,
+            clipped_activation,
             activation,
             down_projection,
         })
+    }
+
+    pub fn new_for_config(
+        config: ExpertMlpConfig,
+        up_projection: TernaryLinearQat,
+        activation: ActFakeQuant,
+        down_projection: TernaryLinearQat,
+    ) -> Result<Self, ExpertBlockQatError> {
+        let expert = Self::new(up_projection, activation, down_projection)?;
+        expert.validate_config(config)?;
+        Ok(expert)
     }
 
     pub fn up_projection(&self) -> &TernaryLinearQat {
@@ -193,6 +515,10 @@ impl ExpertQat {
 
     pub fn activation(&self) -> &ActFakeQuant {
         &self.activation
+    }
+
+    pub fn clipped_activation(&self) -> ClippedActivation {
+        self.clipped_activation
     }
 
     pub fn down_projection(&self) -> &TernaryLinearQat {
@@ -207,6 +533,20 @@ impl ExpertQat {
         self.up_projection.shape().output_rows()
     }
 
+    pub fn ternary_linear_count(&self) -> usize {
+        2
+    }
+
+    pub fn validate_config(&self, config: ExpertMlpConfig) -> Result<(), ExpertBlockQatError> {
+        if config.variant() != ExpertMlpVariant::TwoMatrix {
+            return Err(ExpertBlockQatError::UnsupportedExpertMlpVariant {
+                variant: config.variant(),
+            });
+        }
+        validate_config_dimension("d_model", config.d_model(), self.d_model())?;
+        validate_config_dimension("d_ff", config.d_ff(), self.d_ff())
+    }
+
     fn forward_delta(
         &self,
         input: &[f32],
@@ -218,9 +558,12 @@ impl ExpertQat {
             }
             ExpertQatForwardMode::HardQuantized => self.up_projection.inference_forward(input)?,
         };
+        let clipped = self
+            .clipped_activation
+            .forward(&hidden, self.activation.export_range())?;
         let activated = self
             .activation
-            .inference_forward(&hidden, options.activation())?;
+            .inference_forward(&clipped, options.activation())?;
         let output = match options.expert_qat() {
             ExpertQatForwardMode::FullPrecision => {
                 full_precision_linear(&self.down_projection, &activated)
@@ -409,6 +752,26 @@ pub enum ExpertBlockQatError {
         expected: usize,
         actual: usize,
     },
+    EmptyExpertDimension {
+        field: &'static str,
+    },
+    ExpertParameterCountOverflow {
+        d_model: usize,
+        d_ff: usize,
+        matrix_count: usize,
+    },
+    ExpertDimensionExceedsBudgetFormula {
+        field: &'static str,
+        value: usize,
+    },
+    UnsupportedExpertMlpVariant {
+        variant: ExpertMlpVariant,
+    },
+    ExpertConfigDimMismatch {
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
     DenseWeightLenMismatch {
         name: &'static str,
         expected: usize,
@@ -429,6 +792,14 @@ pub enum ExpertBlockQatError {
     },
     InvalidSharedAlpha(f32),
     InputLenMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    BatchInputLenMismatch {
+        d_model: usize,
+        actual: usize,
+    },
+    ExpertIdLenMismatch {
         expected: usize,
         actual: usize,
     },
@@ -491,6 +862,31 @@ impl fmt::Display for ExpertBlockQatError {
                 f,
                 "shared dense d_model mismatch: expected {expected}, got {actual}"
             ),
+            Self::EmptyExpertDimension { field } => write!(f, "{field} must be nonzero"),
+            Self::ExpertParameterCountOverflow {
+                d_model,
+                d_ff,
+                matrix_count,
+            } => write!(
+                f,
+                "expert parameter count overflows for d_model={d_model}, d_ff={d_ff}, matrices={matrix_count}"
+            ),
+            Self::ExpertDimensionExceedsBudgetFormula { field, value } => write!(
+                f,
+                "{field}={value} exceeds the u32 range used by expert byte-cost formulas"
+            ),
+            Self::UnsupportedExpertMlpVariant { variant } => write!(
+                f,
+                "expert MLP variant {variant:?} is not supported by the executable QAT expert path"
+            ),
+            Self::ExpertConfigDimMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "expert config {field} mismatch: expected {expected}, got {actual}"
+            ),
             Self::DenseWeightLenMismatch {
                 name,
                 expected,
@@ -519,6 +915,14 @@ impl fmt::Display for ExpertBlockQatError {
             Self::InputLenMismatch { expected, actual } => write!(
                 f,
                 "expert block input length mismatch: expected {expected}, got {actual}"
+            ),
+            Self::BatchInputLenMismatch { d_model, actual } => write!(
+                f,
+                "expert batch input length {actual} is not a multiple of d_model {d_model}"
+            ),
+            Self::ExpertIdLenMismatch { expected, actual } => write!(
+                f,
+                "expert id batch length mismatch: expected {expected}, got {actual}"
             ),
             Self::NonFiniteInput { name, index } => {
                 write!(f, "{name} value at index {index} is not finite")
@@ -645,6 +1049,72 @@ fn validate_finite(name: &'static str, values: &[f32]) -> Result<(), ExpertBlock
     Ok(())
 }
 
+fn validate_nonzero_dimension(
+    field: &'static str,
+    value: usize,
+) -> Result<(), ExpertBlockQatError> {
+    if value == 0 {
+        return Err(ExpertBlockQatError::EmptyExpertDimension { field });
+    }
+
+    Ok(())
+}
+
+fn validate_budget_dimension(field: &'static str, value: usize) -> Result<(), ExpertBlockQatError> {
+    if value > u32::MAX as usize {
+        return Err(ExpertBlockQatError::ExpertDimensionExceedsBudgetFormula { field, value });
+    }
+
+    Ok(())
+}
+
+fn validate_config_dimension(
+    field: &'static str,
+    expected: usize,
+    actual: usize,
+) -> Result<(), ExpertBlockQatError> {
+    if expected != actual {
+        return Err(ExpertBlockQatError::ExpertConfigDimMismatch {
+            field,
+            expected,
+            actual,
+        });
+    }
+
+    Ok(())
+}
+
+fn matrix_count_for_variant(variant: ExpertMlpVariant) -> usize {
+    match variant {
+        ExpertMlpVariant::TwoMatrix => 2,
+        ExpertMlpVariant::GatedLinearUnit => 3,
+    }
+}
+
+fn expert_two_matrix_byte_cost(d_model: u32, d_ff: u32) -> ByteCost {
+    let plan = TernaryLinearQat::canonical_weight_plan();
+    let up = plan.compute_byte_cost(d_ff, d_model);
+    let down = plan.compute_byte_cost(d_model, d_ff);
+    up + down
+}
+
+fn expert_glu_byte_cost(d_model: u32, d_ff: u32) -> ByteCost {
+    let plan = TernaryLinearQat::canonical_weight_plan();
+    let up = plan.compute_byte_cost(d_ff, d_model);
+    let gate = plan.compute_byte_cost(d_ff, d_model);
+    let down = plan.compute_byte_cost(d_model, d_ff);
+    up + gate + down
+}
+
+fn gelu(value: f32) -> f32 {
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
+    0.5 * value * (1.0 + (SQRT_2_OVER_PI * (value + 0.044_715 * value.powi(3))).tanh())
+}
+
+fn silu(value: f32) -> f32 {
+    value / (1.0 + (-value).exp())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::qat::{
@@ -652,6 +1122,105 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn qat_expert_default_layout_has_exactly_two_ternary_layers_and_relu_clip() {
+        let config = ExpertMlpConfig::default_two_matrix(2, 3).unwrap();
+        let expert = fixture_expert();
+
+        assert_eq!(config.variant(), ExpertMlpVariant::TwoMatrix);
+        assert_eq!(config.ternary_linear_count(), 2);
+        assert_eq!(config.parameter_count(), 2 * 3 * 2);
+        expert.validate_config(config).unwrap();
+        assert_eq!(expert.ternary_linear_count(), 2);
+        assert_eq!(expert.up_projection().shape().input_cols(), 2);
+        assert_eq!(expert.up_projection().shape().output_rows(), 3);
+        assert_eq!(expert.down_projection().shape().input_cols(), 3);
+        assert_eq!(expert.down_projection().shape().output_rows(), 2);
+        assert_eq!(
+            expert.clipped_activation().kind(),
+            ClippedActivationKind::Relu
+        );
+        assert_eq!(
+            expert.validate_config(ExpertMlpConfig::default_two_matrix(4, 3).unwrap()),
+            Err(ExpertBlockQatError::ExpertConfigDimMismatch {
+                field: "d_model",
+                expected: 4,
+                actual: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn qat_expert_glu_variant_requires_explicit_opt_in_and_structured_warning() {
+        let default = ExpertMlpConfig::default_two_matrix(128, 224).unwrap();
+        let (glu, event) = ExpertMlpConfig::glu_explicit(128, 224).unwrap();
+
+        assert_eq!(default.variant(), ExpertMlpVariant::TwoMatrix);
+        assert_eq!(default.ternary_linear_count(), 2);
+        assert_eq!(glu.variant(), ExpertMlpVariant::GatedLinearUnit);
+        assert_eq!(glu.ternary_linear_count(), 3);
+        assert_eq!(glu.parameter_count(), 128 * 224 * 3);
+        assert_eq!(event.level(), ExpertMlpConfigEventLevel::Warning);
+        assert_eq!(event.code(), ExpertMlpConfigEventCode::GluBankFitWarning);
+        assert_eq!(event.variant(), ExpertMlpVariant::GatedLinearUnit);
+        assert_eq!(event.d_model(), 128);
+        assert_eq!(event.d_ff(), 224);
+        assert_eq!(event.ternary_linear_count(), 3);
+        assert_eq!(event.two_matrix_byte_cost(), ByteCost::new(15040));
+        assert_eq!(event.glu_byte_cost(), ByteCost::new(22656));
+        assert_eq!(event.extra_projection_byte_cost(), ByteCost::new(7616));
+        assert!(event.message().contains("third projection"));
+        assert_eq!(
+            fixture_expert().validate_config(glu),
+            Err(ExpertBlockQatError::UnsupportedExpertMlpVariant {
+                variant: ExpertMlpVariant::GatedLinearUnit,
+            })
+        );
+        assert_eq!(
+            ExpertMlpConfig::default_two_matrix(0, 224),
+            Err(ExpertBlockQatError::EmptyExpertDimension { field: "d_model" })
+        );
+    }
+
+    #[test]
+    fn qat_expert_clipped_activation_variants_clamp_to_declared_range() {
+        let range = ActivationRange::new(-0.25, 1.0).unwrap();
+
+        let relu = ClippedActivation::relu();
+        assert_eq!(
+            relu.forward(&[-2.0, 0.5, 2.0], range).unwrap(),
+            vec![0.0, 0.5, 1.0]
+        );
+
+        let gelu = ClippedActivation::gelu_clip();
+        assert_close(
+            &gelu.forward(&[-2.0, 2.0], range).unwrap(),
+            &[-0.045_402, 1.0],
+            1.0e-5,
+        );
+
+        let silu = ClippedActivation::silu_clip();
+        assert_close(
+            &silu.forward(&[-2.0, 2.0], range).unwrap(),
+            &[-0.238_406, 1.0],
+            1.0e-5,
+        );
+    }
+
+    #[test]
+    fn qat_expert_non_default_clipped_activation_changes_scalar_forward() {
+        let relu = ExpertBlockQat::new(vec![fixture_expert()], None).unwrap();
+        let gelu = ExpertBlockQat::new(vec![fixture_gelu_expert()], None).unwrap();
+        let input = vec![2.0, -2.0];
+
+        let relu_output = relu.forward(&input, 0).unwrap();
+        let gelu_output = gelu.forward(&input, 0).unwrap();
+
+        assert_eq!(relu_output, vec![3.0, -2.0]);
+        assert_ne!(relu_output, gelu_output);
+        assert!(gelu_output.iter().all(|value| value.is_finite()));
+    }
 
     #[test]
     fn qat_expert_composes_up_activation_down_and_residual() {
@@ -664,13 +1233,44 @@ mod tests {
     }
 
     #[test]
-    fn qat_expert_activation_boundary_is_between_up_and_down_projection() {
+    fn qat_expert_clipped_activation_boundary_is_between_up_and_down_projection() {
         let block = ExpertBlockQat::new(vec![fixture_expert()], None).unwrap();
         let input = vec![2.0, -2.0];
 
         let output = block.forward(&input, 0).unwrap();
 
-        assert_eq!(output, vec![3.0, -1.0]);
+        assert_eq!(output, vec![3.0, -2.0]);
+    }
+
+    #[test]
+    fn qat_expert_batch_forward_shape_is_batch_by_model_dim() {
+        let block =
+            ExpertBlockQat::new(vec![fixture_expert(), fixture_gelu_expert()], None).unwrap();
+
+        let output = block
+            .forward_batch(&[1.0, 2.0, 2.0, -2.0], &[0, 1])
+            .unwrap();
+
+        assert_eq!(output.shape(), [2, 2]);
+        assert_eq!(output.batch_size(), 2);
+        assert_eq!(output.d_model(), 2);
+        assert_eq!(&output.values()[0..2], &[2.0, 1.0]);
+        assert_ne!(&output.values()[2..4], &[3.0, -2.0]);
+
+        assert_eq!(
+            block.forward_batch(&[1.0, 2.0, 3.0], &[0]),
+            Err(ExpertBlockQatError::BatchInputLenMismatch {
+                d_model: 2,
+                actual: 3,
+            })
+        );
+        assert_eq!(
+            block.forward_batch(&[1.0, 2.0, 3.0, 4.0], &[0]),
+            Err(ExpertBlockQatError::ExpertIdLenMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        );
     }
 
     #[test]
@@ -800,6 +1400,33 @@ mod tests {
                 ],
                 Some(vec![0.0, 0.0, 0.0]),
             ),
+            activation(),
+            ternary_linear(
+                2,
+                3,
+                vec![
+                    1.0, 0.0, 0.0, //
+                    0.0, -1.0, 0.0,
+                ],
+                Some(vec![0.0, 0.0]),
+            ),
+        )
+        .unwrap()
+    }
+
+    fn fixture_gelu_expert() -> ExpertQat {
+        ExpertQat::new_with_clipped_activation(
+            ternary_linear(
+                3,
+                2,
+                vec![
+                    1.0, 0.0, //
+                    0.0, 1.0, //
+                    0.25, 0.25,
+                ],
+                Some(vec![0.0, 0.0, 0.0]),
+            ),
+            ClippedActivation::gelu_clip(),
             activation(),
             ternary_linear(
                 2,

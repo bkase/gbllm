@@ -15,8 +15,10 @@ pub use activation::{
     ActivationQuantFormat, ActivationRange, ActivationRangeMode, ActivationRangeModeKind, EmaDecay,
 };
 pub use expert::{
-    DenseBranchProjection, ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertQat,
-    ExpertQatForwardMode, SharedDenseBranch,
+    ClippedActivation, ClippedActivationKind, DenseBranchProjection, ExpertBatchOutput,
+    ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertMlpConfig,
+    ExpertMlpConfigEvent, ExpertMlpConfigEventCode, ExpertMlpConfigEventLevel, ExpertMlpVariant,
+    ExpertQat, ExpertQatForwardMode, SharedDenseBranch,
 };
 pub use export::{
     ExportVisitor, ExportVisitorError, ExportedQatArtifact, QatModuleRef, VisitedModule,
