@@ -134,7 +134,7 @@ impl ExpertBlockQat {
         let shared_delta = self
             .shared_dense
             .as_ref()
-            .map(|shared_dense| shared_dense.forward(input))
+            .map(|shared_dense| shared_dense.forward(input, options.activation()))
             .transpose()?;
 
         Ok(input
@@ -301,7 +301,11 @@ impl SharedDenseBranch {
         Ok(())
     }
 
-    fn forward(&self, input: &[f32]) -> Result<Vec<f32>, ExpertBlockQatError> {
+    fn forward(
+        &self,
+        input: &[f32],
+        activation_mode: ActivationForwardMode,
+    ) -> Result<Vec<f32>, ExpertBlockQatError> {
         let hidden = dense_linear(
             self.up_projection.shape(),
             self.up_projection.weights(),
@@ -310,7 +314,7 @@ impl SharedDenseBranch {
         )?;
         let activated = self
             .activation
-            .inference_forward(&hidden, ActivationForwardMode::Train)?;
+            .inference_forward(&hidden, activation_mode)?;
         let output = dense_linear(
             self.down_projection.shape(),
             self.down_projection.weights(),
@@ -704,6 +708,34 @@ mod tests {
         let output = block.forward(&input, 0).unwrap();
 
         assert_eq!(output, vec![2.0, 1.0]);
+    }
+
+    #[test]
+    fn qat_expert_shared_dense_branch_honors_activation_phase_mode() {
+        let shared = SharedDenseBranch::new(
+            DenseBranchProjection::new(MatrixShape::new(1, 2).unwrap(), vec![2.0, 2.0], None)
+                .unwrap(),
+            activation().with_eval_passthrough(true),
+            DenseBranchProjection::new(MatrixShape::new(2, 1).unwrap(), vec![1.0, 1.0], None)
+                .unwrap(),
+            1.0,
+        )
+        .unwrap();
+        let block = ExpertBlockQat::new(vec![fixture_expert()], Some(shared)).unwrap();
+        let input = vec![1.0, 1.0];
+
+        let train = block.forward(&input, 0).unwrap();
+        let eval = block
+            .forward_with_options(
+                &input,
+                0,
+                ExpertForwardOptions::hard_quantized_train()
+                    .with_activation(ActivationForwardMode::Eval),
+            )
+            .unwrap();
+
+        assert_eq!(train, vec![3.0, 1.0]);
+        assert_eq!(eval, vec![6.0, 4.0]);
     }
 
     #[test]

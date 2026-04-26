@@ -66,42 +66,48 @@ impl RouterShape {
     }
 }
 
+/// Default low-rank router bottleneck.
+///
+/// The architectural target is `min(n_experts / 4, 8)`, but rank zero is not a
+/// valid matrix dimension, so tiny expert sets clamp to rank one.
 pub fn default_router_rank(n_experts: usize) -> usize {
     (n_experts / 4).clamp(1, 8)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouterTrainMode {
+    /// Produce a soft expert distribution for router-side training losses.
     SoftTop1,
+    /// Produce one-hot dispatch weights for top-1 expert execution.
     HardTop1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RouterAuxLossWeights {
-    balance: f32,
+    token_balance_proxy: f32,
     z_loss: f32,
     temporal_smoothness: f32,
 }
 
 impl RouterAuxLossWeights {
     pub fn new(
-        balance: f32,
+        token_balance_proxy: f32,
         z_loss: f32,
         temporal_smoothness: f32,
     ) -> Result<Self, Top1RouterQatError> {
-        validate_nonnegative_finite("balance loss weight", balance)?;
+        validate_nonnegative_finite("token balance proxy loss weight", token_balance_proxy)?;
         validate_nonnegative_finite("z-loss weight", z_loss)?;
         validate_nonnegative_finite("temporal smoothness loss weight", temporal_smoothness)?;
 
         Ok(Self {
-            balance,
+            token_balance_proxy,
             z_loss,
             temporal_smoothness,
         })
     }
 
-    pub fn balance(self) -> f32 {
-        self.balance
+    pub fn token_balance_proxy(self) -> f32 {
+        self.token_balance_proxy
     }
 
     pub fn z_loss(self) -> f32 {
@@ -116,7 +122,7 @@ impl RouterAuxLossWeights {
 impl Default for RouterAuxLossWeights {
     fn default() -> Self {
         Self {
-            balance: 1.0,
+            token_balance_proxy: 1.0,
             z_loss: 1.0,
             temporal_smoothness: 1.0,
         }
@@ -125,14 +131,18 @@ impl Default for RouterAuxLossWeights {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RouterAuxLosses {
-    balance_loss: f32,
+    token_balance_proxy_loss: f32,
     z_loss: f32,
     temporal_smoothness_loss: f32,
 }
 
 impl RouterAuxLosses {
-    pub fn balance_loss(self) -> f32 {
-        self.balance_loss
+    /// Single-token proxy for load balancing.
+    ///
+    /// The standard batch/token load-balance objective is implemented by the
+    /// training loss owner, where batch expert fractions are available.
+    pub fn token_balance_proxy_loss(self) -> f32 {
+        self.token_balance_proxy_loss
     }
 
     pub fn z_loss(self) -> f32 {
@@ -144,7 +154,7 @@ impl RouterAuxLosses {
     }
 
     pub fn weighted_sum(self, weights: RouterAuxLossWeights) -> f32 {
-        self.balance_loss * weights.balance()
+        self.token_balance_proxy_loss * weights.token_balance_proxy()
             + self.z_loss * weights.z_loss()
             + self.temporal_smoothness_loss * weights.temporal_smoothness()
     }
@@ -206,6 +216,7 @@ impl RouterForwardOptions {
 pub struct RouterForwardOutput {
     expert_index: usize,
     routing_weights: Vec<f32>,
+    soft_probs: Vec<f32>,
     aux_losses: RouterAuxLosses,
     logits: Vec<f32>,
 }
@@ -217,6 +228,10 @@ impl RouterForwardOutput {
 
     pub fn routing_weights(&self) -> &[f32] {
         &self.routing_weights
+    }
+
+    pub fn soft_probs(&self) -> &[f32] {
+        &self.soft_probs
     }
 
     pub fn aux_losses(&self) -> RouterAuxLosses {
@@ -335,7 +350,7 @@ impl Top1RouterQat {
     ) -> Result<RouterForwardOutput, Top1RouterQatError> {
         let output =
             self.forward_stateless(input, self.previous_distribution.as_deref(), options)?;
-        self.previous_distribution = Some(output.routing_weights.clone());
+        self.previous_distribution = Some(output.soft_probs.clone());
         Ok(output)
     }
 
@@ -356,6 +371,7 @@ impl Top1RouterQat {
             input,
             self.input_bias.as_deref(),
         );
+        validate_computed_values("router hidden activation", &hidden)?;
         let base_logits = matvec(
             self.shape.n_experts(),
             self.shape.rank(),
@@ -363,20 +379,23 @@ impl Top1RouterQat {
             &hidden,
             self.expert_bias.as_deref(),
         );
+        validate_computed_values("router base logits", &base_logits)?;
         let logits = apply_router_training_noise(&base_logits, options);
+        validate_computed_values("router logits", &logits)?;
         let masked_logits = mask_dropped_experts(&logits, options);
-        let soft_probs = softmax(&masked_logits);
+        let soft_probs = softmax(&masked_logits)?;
         let expert_index = top1_index(&masked_logits);
         let routing_weights = match options.mode() {
             RouterTrainMode::SoftTop1 => soft_probs.clone(),
             RouterTrainMode::HardTop1 => one_hot(self.shape.n_experts(), expert_index),
         };
         let aux_losses =
-            self.compute_aux_losses(&logits, &soft_probs, expert_index, previous_distribution);
+            self.compute_aux_losses(&logits, &soft_probs, expert_index, previous_distribution)?;
 
         Ok(RouterForwardOutput {
             expert_index,
             routing_weights,
+            soft_probs,
             aux_losses,
             logits,
         })
@@ -428,10 +447,10 @@ impl Top1RouterQat {
         soft_probs: &[f32],
         expert_index: usize,
         previous_distribution: Option<&[f32]>,
-    ) -> RouterAuxLosses {
-        let z = logsumexp(logits);
+    ) -> Result<RouterAuxLosses, Top1RouterQatError> {
+        let z = logsumexp(logits)?;
         let z_loss = z * z;
-        let balance_loss = soft_probs[expert_index] * self.shape.n_experts() as f32;
+        let token_balance_proxy_loss = soft_probs[expert_index] * self.shape.n_experts() as f32;
         let temporal_smoothness_loss = previous_distribution.map_or(0.0, |previous| {
             let dot = soft_probs
                 .iter()
@@ -441,11 +460,22 @@ impl Top1RouterQat {
             (1.0 - dot).clamp(0.0, 1.0)
         });
 
-        RouterAuxLosses {
-            balance_loss,
+        let losses = RouterAuxLosses {
+            token_balance_proxy_loss,
             z_loss,
             temporal_smoothness_loss,
-        }
+        };
+        validate_aux_loss(
+            "token balance proxy loss",
+            losses.token_balance_proxy_loss(),
+        )?;
+        validate_aux_loss("router z-loss", losses.z_loss())?;
+        validate_aux_loss(
+            "temporal smoothness loss",
+            losses.temporal_smoothness_loss(),
+        )?;
+
+        Ok(losses)
     }
 }
 
@@ -504,6 +534,20 @@ pub enum Top1RouterQatError {
     },
     NonFiniteLogitJitter {
         index: usize,
+    },
+    NonFiniteRouterComputation {
+        name: &'static str,
+        index: usize,
+    },
+    InvalidSoftmaxNormalization {
+        sum: f32,
+    },
+    NonFiniteRoutingProbability {
+        index: usize,
+    },
+    NonFiniteAuxLoss {
+        name: &'static str,
+        value: f32,
     },
     AllExpertsDropped,
 }
@@ -570,6 +614,18 @@ impl fmt::Display for Top1RouterQatError {
             Self::NonFiniteLogitJitter { index } => {
                 write!(f, "logit jitter value at index {index} is not finite")
             }
+            Self::NonFiniteRouterComputation { name, index } => {
+                write!(f, "{name} value at index {index} is not finite")
+            }
+            Self::InvalidSoftmaxNormalization { sum } => {
+                write!(f, "router softmax normalization sum is invalid: {sum}")
+            }
+            Self::NonFiniteRoutingProbability { index } => {
+                write!(f, "routing probability at index {index} is not finite")
+            }
+            Self::NonFiniteAuxLoss { name, value } => {
+                write!(f, "{name} is not finite: {value}")
+            }
             Self::AllExpertsDropped => f.write_str("router dropout cannot drop all experts"),
         }
     }
@@ -624,6 +680,22 @@ fn validate_bias(
 fn validate_nonnegative_finite(name: &'static str, value: f32) -> Result<(), Top1RouterQatError> {
     if !value.is_finite() || value < 0.0 {
         return Err(Top1RouterQatError::NonFiniteLossWeight { name, value });
+    }
+
+    Ok(())
+}
+
+fn validate_computed_values(name: &'static str, values: &[f32]) -> Result<(), Top1RouterQatError> {
+    if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+        return Err(Top1RouterQatError::NonFiniteRouterComputation { name, index });
+    }
+
+    Ok(())
+}
+
+fn validate_aux_loss(name: &'static str, value: f32) -> Result<(), Top1RouterQatError> {
+    if !value.is_finite() {
+        return Err(Top1RouterQatError::NonFiniteAuxLoss { name, value });
     }
 
     Ok(())
@@ -700,7 +772,7 @@ fn mask_dropped_experts(logits: &[f32], options: &RouterForwardOptions) -> Vec<f
         .collect()
 }
 
-fn softmax(logits: &[f32]) -> Vec<f32> {
+fn softmax(logits: &[f32]) -> Result<Vec<f32>, Top1RouterQatError> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exp_values = logits
         .iter()
@@ -713,8 +785,19 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
         })
         .collect::<Vec<_>>();
     let sum = exp_values.iter().sum::<f32>();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(Top1RouterQatError::InvalidSoftmaxNormalization { sum });
+    }
 
-    exp_values.into_iter().map(|value| value / sum).collect()
+    let probs = exp_values
+        .into_iter()
+        .map(|value| value / sum)
+        .collect::<Vec<_>>();
+    if let Some(index) = probs.iter().position(|value| !value.is_finite()) {
+        return Err(Top1RouterQatError::NonFiniteRoutingProbability { index });
+    }
+
+    Ok(probs)
 }
 
 fn top1_index(logits: &[f32]) -> usize {
@@ -722,9 +805,17 @@ fn top1_index(logits: &[f32]) -> usize {
         .iter()
         .copied()
         .enumerate()
-        .max_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs))
-        .map(|(index, _)| index)
-        .expect("validated non-empty expert logits")
+        .fold(
+            (0, f32::NEG_INFINITY),
+            |(best_index, best_value), (index, value)| {
+                if value > best_value {
+                    (index, value)
+                } else {
+                    (best_index, best_value)
+                }
+            },
+        )
+        .0
 }
 
 fn one_hot(len: usize, index: usize) -> Vec<f32> {
@@ -733,10 +824,18 @@ fn one_hot(len: usize, index: usize) -> Vec<f32> {
     values
 }
 
-fn logsumexp(logits: &[f32]) -> f32 {
+fn logsumexp(logits: &[f32]) -> Result<f32, Top1RouterQatError> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exp_sum = logits.iter().map(|&logit| (logit - max).exp()).sum::<f32>();
-    max + exp_sum.ln()
+    let value = max + exp_sum.ln();
+    if !value.is_finite() {
+        return Err(Top1RouterQatError::NonFiniteAuxLoss {
+            name: "router logsumexp",
+            value,
+        });
+    }
+
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -762,14 +861,12 @@ mod tests {
 
         assert_eq!(output.expert_index(), 1);
         assert_eq!(output.routing_weights(), &[0.0, 1.0, 0.0, 0.0]);
+        assert!((output.soft_probs().iter().sum::<f32>() - 1.0).abs() < 1.0e-6);
         assert!(output.aux_losses().z_loss().is_finite());
         assert!(output.aux_losses().z_loss() > 0.0);
-        assert!(output.aux_losses().balance_loss() > 0.0);
+        assert!(output.aux_losses().token_balance_proxy_loss() > 0.0);
         assert_eq!(output.aux_losses().temporal_smoothness_loss(), 0.0);
-        assert_eq!(
-            router.previous_distribution(),
-            Some([0.0, 1.0, 0.0, 0.0].as_slice())
-        );
+        assert_eq!(router.previous_distribution(), Some(output.soft_probs()));
     }
 
     #[test]
@@ -783,6 +880,7 @@ mod tests {
 
         assert_eq!(output.expert_index(), 1);
         assert!((output.routing_weights().iter().sum::<f32>() - 1.0).abs() < 1.0e-6);
+        assert_eq!(output.routing_weights(), output.soft_probs());
         assert!(output.routing_weights()[1] > output.routing_weights()[0]);
         assert!(output.routing_weights()[1] < 1.0);
     }
@@ -807,16 +905,27 @@ mod tests {
     fn qat_router_temporal_smoothness_uses_previous_distribution_at_boundary() {
         let mut router = fixture_router();
         let first = router.forward(&[1.0, 2.0, -1.0]).unwrap();
+        let first_soft_probs = first.soft_probs().to_vec();
         let second = router.forward(&[-1.0, 0.5, 2.0]).unwrap();
 
         assert_eq!(first.expert_index(), 1);
         assert_eq!(second.expert_index(), 2);
+        assert_ne!(first.routing_weights(), first.soft_probs());
+        assert_ne!(
+            router.previous_distribution(),
+            Some(first.routing_weights())
+        );
         assert!(
             (0.0..=1.0).contains(&second.aux_losses().temporal_smoothness_loss()),
             "temporal smoothness loss should stay normalized"
         );
+        assert_ne!(
+            router.previous_distribution(),
+            Some(first_soft_probs.as_slice())
+        );
 
         router.reset_sequence();
+        assert_eq!(router.previous_distribution(), None);
         let after_reset = router.forward(&[-1.0, 0.5, 2.0]).unwrap();
         assert_eq!(after_reset.aux_losses().temporal_smoothness_loss(), 0.0);
     }
@@ -833,8 +942,52 @@ mod tests {
 
         assert_eq!(
             aux.weighted_sum(weights),
-            aux.balance_loss() * 2.0 + aux.z_loss() * 3.0 + aux.temporal_smoothness_loss() * 4.0
+            aux.token_balance_proxy_loss() * 2.0
+                + aux.z_loss() * 3.0
+                + aux.temporal_smoothness_loss() * 4.0
         );
+    }
+
+    #[test]
+    fn qat_router_rejects_non_finite_computed_logits_without_advancing_state() {
+        let mut router = Top1RouterQat::new(
+            RouterShape::new(1, 2, 1).unwrap(),
+            vec![f32::MAX],
+            None,
+            vec![f32::MAX, 1.0],
+            None,
+        )
+        .unwrap();
+
+        let err = router.forward(&[2.0]).unwrap_err();
+
+        assert_eq!(
+            err,
+            Top1RouterQatError::NonFiniteRouterComputation {
+                name: "router hidden activation",
+                index: 0
+            }
+        );
+        assert_eq!(router.previous_distribution(), None);
+    }
+
+    #[test]
+    fn qat_router_top1_tiebreak_uses_lowest_expert_index() {
+        let router = Top1RouterQat::new(
+            RouterShape::new(1, 3, 1).unwrap(),
+            vec![1.0],
+            None,
+            vec![1.0, 1.0, 1.0],
+            None,
+        )
+        .unwrap();
+
+        let output = router
+            .forward_stateless(&[1.0], None, &RouterForwardOptions::hard_top1(3))
+            .unwrap();
+
+        assert_eq!(output.expert_index(), 0);
+        assert_eq!(output.routing_weights(), &[1.0, 0.0, 0.0]);
     }
 
     #[test]
