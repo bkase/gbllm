@@ -11,6 +11,7 @@ use crate::norm_plan::{AffineClipLutPlan, NormPlan, TileRmsThenAffineClipPlan};
 use crate::quant::{
     ActivationEvalModeSpec, ActivationQuantEntry, ActivationQuantFormatSpec,
     ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry, QuantSpec, TernaryQuantEntry,
+    WeightQuantEntry,
 };
 use crate::tensor::{
     CanonicalTensor, CanonicalTensorId, CanonicalTensorKind, TensorElementType, stable_digest,
@@ -99,6 +100,15 @@ pub enum ArtifactCoreError {
         norm: ArtifactPath,
         lut: CanonicalTensorId,
     },
+    MissingWeightQuantEntry {
+        weight: ArtifactPath,
+    },
+    MissingTernaryQuantEntry {
+        weight: ArtifactPath,
+    },
+    WeightQuantPlanMismatch {
+        projection: ArtifactPath,
+    },
     InvalidQuantPlan {
         path: ArtifactPath,
         reason: &'static str,
@@ -152,6 +162,21 @@ impl fmt::Display for ArtifactCoreError {
             Self::UnexpectedNormLut { norm, lut } => {
                 write!(f, "norm {norm} must not reference LUT tensor {lut}")
             }
+            Self::MissingWeightQuantEntry { weight } => {
+                write!(f, "weight {weight} is missing a weight quant entry")
+            }
+            Self::MissingTernaryQuantEntry { weight } => {
+                write!(
+                    f,
+                    "weight {weight} declares ternary quantization without ternary projection metadata"
+                )
+            }
+            Self::WeightQuantPlanMismatch { projection } => {
+                write!(
+                    f,
+                    "ternary projection {projection} does not match its weight quant entry"
+                )
+            }
             Self::InvalidQuantPlan { path, reason } => {
                 write!(f, "quant plan {path} is invalid: {reason}")
             }
@@ -180,15 +205,77 @@ fn validate_quant_spec(
     quant: &QuantSpec,
     tensors: &BTreeMap<CanonicalTensorId, &CanonicalTensor>,
 ) -> Result<(), ArtifactCoreError> {
-    let mut ternary_entries = BTreeSet::new();
+    let mut ternary_entries = BTreeMap::new();
     for entry in quant.ternary_weight_plans() {
-        if !ternary_entries.insert(entry.projection.clone()) {
+        if ternary_entries
+            .insert(entry.projection.clone(), entry)
+            .is_some()
+        {
             return Err(ArtifactCoreError::DuplicateQuantEntry {
                 kind: "ternary projection",
                 path: entry.projection.clone(),
             });
         }
         validate_ternary_entry(entry, tensors)?;
+    }
+
+    let mut weight_entries = BTreeMap::new();
+    let mut weight_entries_by_tensor = BTreeMap::new();
+    for entry in quant.weight_quant() {
+        if weight_entries.insert(entry.weight.clone(), entry).is_some() {
+            return Err(ArtifactCoreError::DuplicateQuantEntry {
+                kind: "weight quant",
+                path: entry.weight.clone(),
+            });
+        }
+        if weight_entries_by_tensor
+            .insert(entry.tensor.clone(), entry)
+            .is_some()
+        {
+            return Err(ArtifactCoreError::DuplicateQuantEntry {
+                kind: "weight quant tensor",
+                path: entry.tensor.clone(),
+            });
+        }
+        validate_weight_quant_entry(entry, tensors)?;
+    }
+
+    for (projection, entry) in &ternary_entries {
+        let Some(weight_entry) = weight_entries.get(projection) else {
+            return Err(ArtifactCoreError::MissingWeightQuantEntry {
+                weight: projection.clone(),
+            });
+        };
+        if weight_entry.tensor != entry.weight || weight_entry.ternary_plan != Some(entry.plan) {
+            return Err(ArtifactCoreError::WeightQuantPlanMismatch {
+                projection: projection.clone(),
+            });
+        }
+    }
+
+    for (weight, entry) in &weight_entries {
+        if let Some(plan) = entry.ternary_plan {
+            let Some(ternary_entry) = ternary_entries.get(weight) else {
+                return Err(ArtifactCoreError::MissingTernaryQuantEntry {
+                    weight: weight.clone(),
+                });
+            };
+            if ternary_entry.weight != entry.tensor || ternary_entry.plan != plan {
+                return Err(ArtifactCoreError::WeightQuantPlanMismatch {
+                    projection: weight.clone(),
+                });
+            }
+        }
+    }
+
+    for tensor in tensors.values() {
+        if is_deployable_weight_kind(tensor.kind)
+            && !weight_entries_by_tensor.contains_key(&tensor.id)
+        {
+            return Err(ArtifactCoreError::MissingWeightQuantEntry {
+                weight: tensor.id.clone(),
+            });
+        }
     }
 
     let mut activation_entries = BTreeSet::new();
@@ -211,6 +298,57 @@ fn validate_quant_spec(
             });
         }
         validate_norm_entry(entry, tensors)?;
+    }
+
+    Ok(())
+}
+
+fn is_deployable_weight_kind(kind: CanonicalTensorKind) -> bool {
+    matches!(
+        kind,
+        CanonicalTensorKind::TernaryWeight
+            | CanonicalTensorKind::RouterWeight
+            | CanonicalTensorKind::DenseWeight
+            | CanonicalTensorKind::Embedding
+            | CanonicalTensorKind::Classifier
+    )
+}
+
+fn validate_weight_quant_entry(
+    entry: &WeightQuantEntry,
+    tensors: &BTreeMap<CanonicalTensorId, &CanonicalTensor>,
+) -> Result<(), ArtifactCoreError> {
+    let tensor = require_tensor(tensors, &entry.tensor, "weight quant")?;
+    match entry.ternary_plan {
+        Some(_) => {
+            expect_tensor(
+                tensor,
+                CanonicalTensorKind::TernaryWeight,
+                TensorElementType::TernaryI2,
+            )?;
+            expect_rank(tensor, 2)?;
+        }
+        None => {
+            if tensor.layout.element_type != TensorElementType::Float32 {
+                return Err(ArtifactCoreError::TensorElementTypeMismatch {
+                    id: tensor.id.clone(),
+                    expected: TensorElementType::Float32,
+                    actual: tensor.layout.element_type,
+                });
+            }
+            if !matches!(
+                tensor.kind,
+                CanonicalTensorKind::RouterWeight
+                    | CanonicalTensorKind::DenseWeight
+                    | CanonicalTensorKind::Embedding
+                    | CanonicalTensorKind::Classifier
+            ) {
+                return Err(ArtifactCoreError::InvalidQuantPlan {
+                    path: entry.weight.clone(),
+                    reason: "full-precision weight quant entries must reference deployable weight tensors",
+                });
+            }
+        }
     }
 
     Ok(())
@@ -453,6 +591,11 @@ fn artifact_core_semantic_bytes(tensors: &[CanonicalTensor], quant: &QuantSpec) 
         push_ternary_quant_entry(&mut bytes, entry);
     }
 
+    push_u64(&mut bytes, quant.weight_quant().len() as u64);
+    for entry in quant.weight_quant() {
+        push_weight_quant_entry(&mut bytes, entry);
+    }
+
     push_u64(&mut bytes, quant.activation_quant().len() as u64);
     for entry in quant.activation_quant() {
         push_activation_quant_entry(&mut bytes, entry);
@@ -472,6 +615,18 @@ fn push_ternary_quant_entry(bytes: &mut Vec<u8>, entry: &TernaryQuantEntry) {
     push_path(bytes, &entry.scale);
     push_optional_path(bytes, entry.bias.as_ref());
     push_ternary_weight_plan(bytes, entry.plan);
+}
+
+fn push_weight_quant_entry(bytes: &mut Vec<u8>, entry: &WeightQuantEntry) {
+    push_path(bytes, &entry.weight);
+    push_path(bytes, &entry.tensor);
+    match entry.ternary_plan {
+        Some(plan) => {
+            push_u8(bytes, 1);
+            push_ternary_weight_plan(bytes, plan);
+        }
+        None => push_u8(bytes, 0),
+    }
 }
 
 fn push_activation_quant_entry(bytes: &mut Vec<u8>, entry: &ActivationQuantEntry) {
@@ -661,11 +816,9 @@ mod tests {
     #[test]
     fn artifact_core_hash_is_deterministic_for_same_payload() {
         let core_a =
-            ArtifactCore::new(vec![fixture_tensor("layer.0.weight")], QuantSpec::default())
-                .unwrap();
+            ArtifactCore::new(vec![fixture_tensor("layer.0.bias")], QuantSpec::default()).unwrap();
         let core_b =
-            ArtifactCore::new(vec![fixture_tensor("layer.0.weight")], QuantSpec::default())
-                .unwrap();
+            ArtifactCore::new(vec![fixture_tensor("layer.0.bias")], QuantSpec::default()).unwrap();
 
         assert_eq!(core_a.semantic_hash(), core_b.semantic_hash());
     }
@@ -674,8 +827,8 @@ mod tests {
     fn artifact_core_rejects_duplicate_tensor_ids() {
         let err = ArtifactCore::new(
             vec![
-                fixture_tensor("layer.0.weight"),
-                fixture_tensor("layer.0.weight"),
+                fixture_tensor("layer.0.bias"),
+                fixture_tensor("layer.0.bias"),
             ],
             QuantSpec::default(),
         )
@@ -684,7 +837,7 @@ mod tests {
         assert_eq!(
             err,
             ArtifactCoreError::DuplicateTensor {
-                id: CanonicalTensorId::new("layer.0.weight").unwrap()
+                id: CanonicalTensorId::new("layer.0.bias").unwrap()
             }
         );
     }
@@ -756,6 +909,121 @@ mod tests {
                 id: CanonicalTensorId::new("projection.scale").unwrap(),
                 expected: vec![2],
                 actual: vec![3]
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_core_rejects_ternary_plan_without_weight_quant_entry() {
+        let weight = ternary_tensor("projection.weight", &[2, 2], vec![1, 0, -1, 1]);
+        let scale = q8_8_tensor("projection.scale", &[2], vec![256, 256]);
+        let quant = QuantSpec {
+            weight_quant: vec![],
+            ternary_weight_plans: fixture_ternary_quant().ternary_weight_plans().to_vec(),
+            activation_quant: vec![],
+            norm_plans: vec![],
+        };
+
+        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+
+        assert_eq!(
+            err,
+            ArtifactCoreError::MissingWeightQuantEntry {
+                weight: ArtifactPath::new("projection").unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_core_rejects_ternary_weight_quant_without_projection_metadata() {
+        let tensor = ternary_tensor("projection.weight", &[2, 2], vec![1, 0, -1, 1]);
+        let quant = QuantSpec::new_with_weight_quant(
+            vec![WeightQuantEntry::ternary(
+                ArtifactPath::new("projection").unwrap(),
+                CanonicalTensorId::new("projection.weight").unwrap(),
+                TernaryWeightPlan::new(
+                    WeightEncoding::Ternary2,
+                    ScaleGranularity::PerOutputRow,
+                    ScaleFormat::Q8_8,
+                    ThresholdPlan::FixedQ8_8,
+                ),
+            )],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let err = ArtifactCore::new(vec![tensor], quant).unwrap_err();
+
+        assert_eq!(
+            err,
+            ArtifactCoreError::MissingTernaryQuantEntry {
+                weight: ArtifactPath::new("projection").unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_core_rejects_weight_quant_plan_mismatch() {
+        let weight = ternary_tensor("projection.weight", &[2, 2], vec![1, 0, -1, 1]);
+        let scale = q8_8_tensor("projection.scale", &[2], vec![256, 256]);
+        let mut quant = fixture_ternary_quant();
+        quant.weight_quant[0].ternary_plan = Some(QuantSpec::default_expert_ternary_plan());
+
+        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+
+        assert_eq!(
+            err,
+            ArtifactCoreError::WeightQuantPlanMismatch {
+                projection: ArtifactPath::new("projection").unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_core_rejects_deployable_weight_without_weight_quant_entry() {
+        let tensor = float_tensor(
+            "token_embedding",
+            CanonicalTensorKind::Embedding,
+            &[1, 1],
+            vec![0.0],
+        );
+
+        let err = ArtifactCore::new(vec![tensor], QuantSpec::default()).unwrap_err();
+
+        assert_eq!(
+            err,
+            ArtifactCoreError::MissingWeightQuantEntry {
+                weight: ArtifactPath::new("token_embedding").unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_core_rejects_full_precision_quant_entry_for_non_weight_tensor() {
+        let tensor = float_tensor(
+            "projection.bias",
+            CanonicalTensorKind::Bias,
+            &[1],
+            vec![0.0],
+        );
+        let quant = QuantSpec::new_with_weight_quant(
+            vec![WeightQuantEntry::full_precision(
+                ArtifactPath::new("projection").unwrap(),
+                CanonicalTensorId::new("projection.bias").unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let err = ArtifactCore::new(vec![tensor], quant).unwrap_err();
+
+        assert_eq!(
+            err,
+            ArtifactCoreError::InvalidQuantPlan {
+                path: ArtifactPath::new("projection").unwrap(),
+                reason: "full-precision weight quant entries must reference deployable weight tensors"
             }
         );
     }
@@ -835,7 +1103,7 @@ mod tests {
     }
 
     fn fixture_tensor(id: &str) -> CanonicalTensor {
-        ternary_tensor(id, &[1, 1], vec![1])
+        float_tensor(id, CanonicalTensorKind::Bias, &[1], vec![1.0])
     }
 
     fn ternary_tensor(id: &str, dims: &[usize], values: Vec<i8>) -> CanonicalTensor {

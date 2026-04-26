@@ -11,6 +11,7 @@ use gbf_artifact::norm_plan::NormExportParams;
 use gbf_artifact::quant::{
     ActivationEvalModeSpec, ActivationQuantEntry, ActivationQuantFormatSpec,
     ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry, QuantSpec, TernaryQuantEntry,
+    WeightQuantEntry,
 };
 use gbf_artifact::tensor::{
     CanonicalTensor, CanonicalTensorError, CanonicalTensorId, CanonicalTensorKind,
@@ -70,6 +71,7 @@ pub enum QatModuleRef<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct ExportVisitor {
     tensors: BTreeMap<CanonicalTensorId, CanonicalTensor>,
+    weight_quant: BTreeMap<ArtifactPath, WeightQuantEntry>,
     ternary_weight_plans: BTreeMap<ArtifactPath, TernaryQuantEntry>,
     activation_quant: BTreeMap<ArtifactPath, ActivationQuantEntry>,
     norm_plans: BTreeMap<ArtifactPath, NormQuantEntry>,
@@ -175,7 +177,13 @@ impl ExportVisitor {
         values: &[f32],
     ) -> Result<(), ExportVisitorError> {
         let path = artifact_path(prefix)?;
-        self.add_float_tensor(path, CanonicalTensorKind::Embedding, &[rows, cols], values)
+        self.add_float_tensor(
+            path.clone(),
+            CanonicalTensorKind::Embedding,
+            &[rows, cols],
+            values,
+        )?;
+        self.add_weight_quant(WeightQuantEntry::full_precision(path.clone(), path))
     }
 
     pub fn visit_classifier(
@@ -186,11 +194,18 @@ impl ExportVisitor {
         values: &[f32],
     ) -> Result<(), ExportVisitorError> {
         let path = artifact_path(prefix)?;
-        self.add_float_tensor(path, CanonicalTensorKind::Classifier, &[rows, cols], values)
+        self.add_float_tensor(
+            path.clone(),
+            CanonicalTensorKind::Classifier,
+            &[rows, cols],
+            values,
+        )?;
+        self.add_weight_quant(WeightQuantEntry::full_precision(path.clone(), path))
     }
 
     pub fn finish(self) -> Result<ExportedQatArtifact, ExportVisitorError> {
-        let quant = QuantSpec::new(
+        let quant = QuantSpec::new_with_weight_quant(
+            self.weight_quant.into_values().collect(),
             self.ternary_weight_plans.into_values().collect(),
             self.activation_quant.into_values().collect(),
             self.norm_plans.into_values().collect(),
@@ -311,12 +326,15 @@ impl ExportVisitor {
             bias: bias_id,
             plan: export.plan(),
         };
+        let weight_quant =
+            WeightQuantEntry::ternary(entry.projection.clone(), entry.weight.clone(), entry.plan);
         insert_unique(
             &mut self.ternary_weight_plans,
             path,
             entry,
             "ternary projection",
         )?;
+        self.add_weight_quant(weight_quant)?;
 
         Ok(())
     }
@@ -403,12 +421,17 @@ impl ExportVisitor {
 
         let shape = router.shape();
         let input_projection = path.join("input_projection")?;
+        let input_weight = input_projection.join("weight")?;
         self.add_float_tensor(
-            input_projection.join("weight")?,
+            input_weight.clone(),
             CanonicalTensorKind::RouterWeight,
             &[shape.rank(), shape.d_model()],
             router.input_projection(),
         )?;
+        self.add_weight_quant(WeightQuantEntry::full_precision(
+            input_projection.clone(),
+            input_weight,
+        ))?;
         if let Some(bias) = router.input_bias() {
             self.add_float_tensor(
                 input_projection.join("bias")?,
@@ -419,12 +442,17 @@ impl ExportVisitor {
         }
 
         let expert_projection = path.join("expert_projection")?;
+        let expert_weight = expert_projection.join("weight")?;
         self.add_float_tensor(
-            expert_projection.join("weight")?,
+            expert_weight.clone(),
             CanonicalTensorKind::RouterWeight,
             &[shape.n_experts(), shape.rank()],
             router.expert_projection(),
         )?;
+        self.add_weight_quant(WeightQuantEntry::full_precision(
+            expert_projection.clone(),
+            expert_weight,
+        ))?;
         if let Some(bias) = router.expert_bias() {
             self.add_float_tensor(
                 expert_projection.join("bias")?,
@@ -445,12 +473,14 @@ impl ExportVisitor {
         self.mark_visited(path.clone(), VisitedModuleKind::DenseBranchProjection);
 
         let shape = projection.shape();
+        let weight = path.join("weight")?;
         self.add_float_tensor(
-            path.join("weight")?,
+            weight.clone(),
             CanonicalTensorKind::DenseWeight,
             &[shape.output_rows(), shape.input_cols()],
             projection.weights(),
         )?;
+        self.add_weight_quant(WeightQuantEntry::full_precision(path.clone(), weight))?;
         if let Some(bias) = projection.bias() {
             self.add_float_tensor(
                 path.join("bias")?,
@@ -492,6 +522,15 @@ impl ExportVisitor {
         let tensor = CanonicalTensor::new(id.clone(), kind, layout, payload)?;
         insert_unique(&mut self.tensors, id, tensor, "tensor")?;
         Ok(())
+    }
+
+    fn add_weight_quant(&mut self, entry: WeightQuantEntry) -> Result<(), ExportVisitorError> {
+        insert_unique(
+            &mut self.weight_quant,
+            entry.weight.clone(),
+            entry,
+            "weight quant entry",
+        )
     }
 
     fn mark_visited(&mut self, path: ArtifactPath, kind: VisitedModuleKind) {
@@ -631,10 +670,11 @@ mod tests {
 
         assert_eq!(
             export.artifact_core_hash().to_string(),
-            "ebf1a07f473d37174fa11f79a743f6290251eb277441e8fc868bda4deea476e2"
+            "01d7a9d0049502e260a3db9898eba92ec5f5e28f3a499e3b7fcc2e55e3a00d28"
         );
         assert_eq!(export.core.tensors().len(), 17);
         assert_eq!(export.facts.activation_ranges.len(), 2);
+        assert_eq!(export.core.quant().weight_quant().len(), 8);
     }
 
     #[test]
@@ -716,6 +756,12 @@ mod tests {
         assert_eq!(quant.weight.as_str(), "projection.weight");
         assert_eq!(quant.scale.as_str(), "projection.scale");
         assert_eq!(quant.bias.as_ref().unwrap().as_str(), "projection.bias");
+        assert_eq!(quant.plan, QuantSpec::default_expert_ternary_plan());
+
+        let weight_quant = &export.core.quant().weight_quant()[0];
+        assert_eq!(weight_quant.weight.as_str(), "projection");
+        assert_eq!(weight_quant.tensor.as_str(), "projection.weight");
+        assert_eq!(weight_quant.ternary_plan, Some(quant.plan));
     }
 
     #[test]
@@ -744,6 +790,26 @@ mod tests {
             tensor(&export, "block.0.norm.lut").payload,
             CanonicalTensorPayload::F32(vec![-1.0, -1.0, 1.0])
         );
+        let full_precision_weights = export
+            .core
+            .quant()
+            .weight_quant()
+            .iter()
+            .filter(|entry| entry.ternary_plan.is_none())
+            .map(|entry| entry.weight.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(full_precision_weights.contains("block.0.router.input_projection"));
+        assert!(full_precision_weights.contains("block.0.router.expert_projection"));
+        assert!(full_precision_weights.contains("block.0.ffn.shared_dense.up"));
+        assert!(full_precision_weights.contains("block.0.ffn.shared_dense.down"));
+
+        let export = fixture_export();
+        let embedding = weight_quant(&export, "token_embedding");
+        assert_eq!(embedding.tensor.as_str(), "token_embedding");
+        assert_eq!(embedding.ternary_plan, None);
+        let classifier = weight_quant(&export, "classifier");
+        assert_eq!(classifier.tensor.as_str(), "classifier");
+        assert_eq!(classifier.ternary_plan, None);
     }
 
     #[test]
@@ -871,6 +937,16 @@ mod tests {
             .iter()
             .find(|tensor| tensor.id.as_str() == id)
             .unwrap_or_else(|| panic!("missing tensor {id}"))
+    }
+
+    fn weight_quant<'a>(export: &'a ExportedQatArtifact, id: &str) -> &'a WeightQuantEntry {
+        export
+            .core
+            .quant()
+            .weight_quant()
+            .iter()
+            .find(|entry| entry.weight.as_str() == id)
+            .unwrap_or_else(|| panic!("missing weight quant entry {id}"))
     }
 
     fn fixture_export() -> ExportedQatArtifact {

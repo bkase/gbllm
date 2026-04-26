@@ -1,17 +1,53 @@
 //! Artifact quantization references.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ids::ArtifactPath;
 use crate::norm_plan::NormPlan;
 use crate::tensor::CanonicalTensorId;
-use crate::weight_plan::TernaryWeightPlan;
+use crate::weight_plan::{
+    ScaleFormat, ScaleGranularity, TernaryWeightPlan, ThresholdPlan, WeightEncoding,
+};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct QuantSpec {
+    pub weight_quant: Vec<WeightQuantEntry>,
     pub ternary_weight_plans: Vec<TernaryQuantEntry>,
     pub activation_quant: Vec<ActivationQuantEntry>,
     pub norm_plans: Vec<NormQuantEntry>,
+}
+
+impl<'de> Deserialize<'de> for QuantSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct QuantSpecSerde {
+            weight_quant: Option<Vec<WeightQuantEntry>>,
+            #[serde(default)]
+            ternary_weight_plans: Vec<TernaryQuantEntry>,
+            #[serde(default)]
+            activation_quant: Vec<ActivationQuantEntry>,
+            #[serde(default)]
+            norm_plans: Vec<NormQuantEntry>,
+        }
+
+        let raw = QuantSpecSerde::deserialize(deserializer)?;
+        let weight_quant = raw.weight_quant.unwrap_or_else(|| {
+            raw.ternary_weight_plans
+                .iter()
+                .map(WeightQuantEntry::from_ternary)
+                .collect()
+        });
+
+        Ok(Self::new_with_weight_quant(
+            weight_quant,
+            raw.ternary_weight_plans,
+            raw.activation_quant,
+            raw.norm_plans,
+        ))
+    }
 }
 
 impl QuantSpec {
@@ -20,13 +56,45 @@ impl QuantSpec {
         activation_quant: Vec<ActivationQuantEntry>,
         norm_plans: Vec<NormQuantEntry>,
     ) -> Self {
+        let weight_quant = ternary_weight_plans
+            .iter()
+            .map(WeightQuantEntry::from_ternary)
+            .collect();
+        Self::new_with_weight_quant(
+            weight_quant,
+            ternary_weight_plans,
+            activation_quant,
+            norm_plans,
+        )
+    }
+
+    pub fn new_with_weight_quant(
+        weight_quant: Vec<WeightQuantEntry>,
+        ternary_weight_plans: Vec<TernaryQuantEntry>,
+        activation_quant: Vec<ActivationQuantEntry>,
+        norm_plans: Vec<NormQuantEntry>,
+    ) -> Self {
         let mut spec = Self {
+            weight_quant,
             ternary_weight_plans,
             activation_quant,
             norm_plans,
         };
         spec.sort_canonical();
         spec
+    }
+
+    pub fn default_expert_ternary_plan() -> TernaryWeightPlan {
+        TernaryWeightPlan::new(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::PerOutputRow,
+            ScaleFormat::Q8_8,
+            ThresholdPlan::AnnealedGlobalThenPerOutputRow,
+        )
+    }
+
+    pub fn weight_quant(&self) -> &[WeightQuantEntry] {
+        &self.weight_quant
     }
 
     pub fn ternary_weight_plans(&self) -> &[TernaryQuantEntry] {
@@ -47,12 +115,47 @@ impl QuantSpec {
     }
 
     fn sort_canonical(&mut self) {
+        self.weight_quant
+            .sort_by(|left, right| left.weight.cmp(&right.weight));
         self.ternary_weight_plans
             .sort_by(|left, right| left.projection.cmp(&right.projection));
         self.activation_quant
             .sort_by(|left, right| left.activation.cmp(&right.activation));
         self.norm_plans
             .sort_by(|left, right| left.norm.cmp(&right.norm));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WeightQuantEntry {
+    pub weight: ArtifactPath,
+    pub tensor: CanonicalTensorId,
+    pub ternary_plan: Option<TernaryWeightPlan>,
+}
+
+impl WeightQuantEntry {
+    pub fn full_precision(weight: ArtifactPath, tensor: CanonicalTensorId) -> Self {
+        Self {
+            weight,
+            tensor,
+            ternary_plan: None,
+        }
+    }
+
+    pub fn ternary(
+        weight: ArtifactPath,
+        tensor: CanonicalTensorId,
+        plan: TernaryWeightPlan,
+    ) -> Self {
+        Self {
+            weight,
+            tensor,
+            ternary_plan: Some(plan),
+        }
+    }
+
+    fn from_ternary(entry: &TernaryQuantEntry) -> Self {
+        Self::ternary(entry.projection.clone(), entry.weight.clone(), entry.plan)
     }
 }
 
@@ -105,4 +208,128 @@ pub struct NormQuantEntry {
     pub norm: ArtifactPath,
     pub plan: NormPlan,
     pub lut: Option<CanonicalTensorId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quant_spec_default_expert_plan_matches_training_contract() {
+        assert_eq!(
+            QuantSpec::default_expert_ternary_plan(),
+            TernaryWeightPlan::new(
+                WeightEncoding::Ternary2,
+                ScaleGranularity::PerOutputRow,
+                ScaleFormat::Q8_8,
+                ThresholdPlan::AnnealedGlobalThenPerOutputRow,
+            )
+        );
+    }
+
+    #[test]
+    fn quant_spec_represents_mixed_precision_weight_groups() {
+        let ternary = TernaryQuantEntry {
+            projection: ArtifactPath::new("expert.0.up").unwrap(),
+            weight: CanonicalTensorId::new("expert.0.up.weight").unwrap(),
+            scale: CanonicalTensorId::new("expert.0.up.scale").unwrap(),
+            bias: None,
+            plan: QuantSpec::default_expert_ternary_plan(),
+        };
+        let spec = QuantSpec::new_with_weight_quant(
+            vec![
+                WeightQuantEntry::full_precision(
+                    ArtifactPath::new("token_embedding").unwrap(),
+                    CanonicalTensorId::new("token_embedding").unwrap(),
+                ),
+                WeightQuantEntry::from_ternary(&ternary),
+            ],
+            vec![ternary],
+            vec![],
+            vec![],
+        );
+
+        assert_eq!(spec.weight_quant().len(), 2);
+        assert_eq!(
+            spec.weight_quant()[0].weight,
+            ArtifactPath::new("expert.0.up").unwrap()
+        );
+        assert_eq!(
+            spec.weight_quant()[0].ternary_plan,
+            Some(QuantSpec::default_expert_ternary_plan())
+        );
+        assert_eq!(
+            spec.weight_quant()[1],
+            WeightQuantEntry::full_precision(
+                ArtifactPath::new("token_embedding").unwrap(),
+                CanonicalTensorId::new("token_embedding").unwrap(),
+            )
+        );
+    }
+
+    #[test]
+    fn quant_spec_new_derives_weight_quant_from_ternary_entries() {
+        let ternary = TernaryQuantEntry {
+            projection: ArtifactPath::new("expert.0.down").unwrap(),
+            weight: CanonicalTensorId::new("expert.0.down.weight").unwrap(),
+            scale: CanonicalTensorId::new("expert.0.down.scale").unwrap(),
+            bias: None,
+            plan: QuantSpec::default_expert_ternary_plan(),
+        };
+        let spec = QuantSpec::new(vec![ternary.clone()], vec![], vec![]);
+
+        assert_eq!(
+            spec.weight_quant(),
+            &[WeightQuantEntry::from_ternary(&ternary)]
+        );
+    }
+
+    #[test]
+    fn quant_spec_deserializes_missing_weight_quant_from_ternary_entries() {
+        let encoded = r#"{
+            "ternary_weight_plans": [{
+                "projection": "expert.0.up",
+                "weight": "expert.0.up.weight",
+                "scale": "expert.0.up.scale",
+                "bias": null,
+                "plan": {
+                    "encoding": "Ternary2",
+                    "scale_granularity": "PerOutputRow",
+                    "scale_format": "Q8_8",
+                    "threshold": "AnnealedGlobalThenPerOutputRow"
+                }
+            }],
+            "activation_quant": [],
+            "norm_plans": []
+        }"#;
+
+        let spec: QuantSpec = serde_json::from_str(encoded).unwrap();
+
+        assert_eq!(
+            spec.weight_quant(),
+            &[WeightQuantEntry::ternary(
+                ArtifactPath::new("expert.0.up").unwrap(),
+                CanonicalTensorId::new("expert.0.up.weight").unwrap(),
+                QuantSpec::default_expert_ternary_plan(),
+            )]
+        );
+    }
+
+    #[test]
+    fn quant_spec_round_trips_explicit_weight_quant_entries() {
+        let spec = QuantSpec::new_with_weight_quant(
+            vec![WeightQuantEntry::full_precision(
+                ArtifactPath::new("classifier").unwrap(),
+                CanonicalTensorId::new("classifier").unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let encoded = serde_json::to_string(&spec).unwrap();
+        let decoded: QuantSpec = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, spec);
+    }
 }

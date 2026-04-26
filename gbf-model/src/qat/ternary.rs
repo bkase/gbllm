@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
+use gbf_artifact::quant::QuantSpec;
 use gbf_artifact::weight_plan::{
     ScaleFormat, ScaleGranularity, TernaryWeightPlan, ThresholdPlan, WeightEncoding,
 };
@@ -205,12 +206,7 @@ pub struct TernaryLinearQat {
 
 impl TernaryLinearQat {
     pub fn canonical_weight_plan() -> TernaryWeightPlan {
-        TernaryWeightPlan::new(
-            WeightEncoding::Ternary2,
-            ScaleGranularity::PerOutputRow,
-            ScaleFormat::Q8_8,
-            ThresholdPlan::FixedQ8_8,
-        )
+        QuantSpec::default_expert_ternary_plan()
     }
 
     pub fn new(
@@ -534,10 +530,14 @@ impl fmt::Display for TernaryLinearQatError {
 impl Error for TernaryLinearQatError {}
 
 fn validate_weight_plan(plan: TernaryWeightPlan) -> Result<(), TernaryLinearQatError> {
+    let supported_threshold = matches!(
+        plan.threshold,
+        ThresholdPlan::FixedQ8_8 | ThresholdPlan::AnnealedGlobalThenPerOutputRow
+    );
     if plan.encoding == WeightEncoding::Ternary2
         && plan.scale_granularity == ScaleGranularity::PerOutputRow
         && plan.scale_format == ScaleFormat::Q8_8
-        && plan.threshold == ThresholdPlan::FixedQ8_8
+        && supported_threshold
     {
         Ok(())
     } else {
@@ -771,7 +771,7 @@ mod tests {
             ScaleFormat::Q8_8,
             ThresholdPlan::AnnealedGlobalThenPerOutputRow,
         );
-        let err = TernaryLinearQat::new_with_plan(
+        let layer = TernaryLinearQat::new_with_plan(
             annealed,
             MatrixShape::new(1, 2).unwrap(),
             vec![1.0, -1.0],
@@ -779,11 +779,16 @@ mod tests {
             vec![TernaryThreshold::new(0.5).unwrap()],
             vec![Q8_8Scale::from_f32(1.0).unwrap()],
         )
-        .unwrap_err();
+        .unwrap();
 
+        assert_eq!(layer.export_canonical().plan(), annealed);
+    }
+
+    #[test]
+    fn qat_ternary_default_plan_matches_artifact_expert_default() {
         assert_eq!(
-            err,
-            TernaryLinearQatError::UnsupportedWeightPlan { plan: annealed }
+            TernaryLinearQat::canonical_weight_plan(),
+            QuantSpec::default_expert_ternary_plan()
         );
     }
 
