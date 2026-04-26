@@ -358,6 +358,13 @@ fn validate_ternary_entry(
     entry: &TernaryQuantEntry,
     tensors: &BTreeMap<CanonicalTensorId, &CanonicalTensor>,
 ) -> Result<(), ArtifactCoreError> {
+    if entry.plan.scale_format != ScaleFormat::Q8_8 {
+        return Err(ArtifactCoreError::InvalidQuantPlan {
+            path: entry.projection.clone(),
+            reason: "only Q8_8 ternary scale tensors are supported today",
+        });
+    }
+
     let weight = require_tensor(tensors, &entry.weight, "ternary weight")?;
     expect_tensor(
         weight,
@@ -909,6 +916,25 @@ mod tests {
                 id: CanonicalTensorId::new("projection.scale").unwrap(),
                 expected: vec![2],
                 actual: vec![3]
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_core_rejects_declared_non_q8_8_scale_formats_until_tensor_encoding_exists() {
+        let weight = ternary_tensor("projection.weight", &[2, 2], vec![1, 0, -1, 1]);
+        let scale = q8_8_tensor("projection.scale", &[2], vec![256, 256]);
+        let mut quant = fixture_ternary_quant();
+        quant.ternary_weight_plans[0].plan.scale_format = ScaleFormat::Q4_4;
+        quant.weight_quant[0].ternary_plan = Some(quant.ternary_weight_plans[0].plan);
+
+        let err = ArtifactCore::new(vec![weight, scale], quant).unwrap_err();
+
+        assert_eq!(
+            err,
+            ArtifactCoreError::InvalidQuantPlan {
+                path: ArtifactPath::new("projection").unwrap(),
+                reason: "only Q8_8 ternary scale tensors are supported today"
             }
         );
     }

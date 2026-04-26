@@ -628,7 +628,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use gbf_artifact::quant::{ActivationEvalModeSpec, ActivationRangeModeSpec};
-    use gbf_artifact::tensor::{CanonicalTensorKind, CanonicalTensorPayload};
+    use gbf_artifact::tensor::{CanonicalTensorKind, CanonicalTensorPayload, TensorElementType};
 
     use super::*;
     use crate::qat::{
@@ -730,32 +730,61 @@ mod tests {
 
     #[test]
     fn qat_export_visitor_emits_scale_tensors_separately_from_ternary_weights() {
-        let layer = ternary_linear(2, 2, vec![1.0, -1.0, 0.25, 0.75], Some(vec![0.1, -0.1]));
+        let layer = TernaryLinearQat::new(
+            MatrixShape::new(2, 3).unwrap(),
+            vec![
+                1.0, -1.0, 0.25, //
+                0.75, -0.75, 0.0,
+            ],
+            None,
+            vec![
+                TernaryThreshold::new(0.5).unwrap(),
+                TernaryThreshold::new(0.5).unwrap(),
+            ],
+            vec![
+                Q8_8Scale::from_f32(0.5).unwrap(),
+                Q8_8Scale::from_f32(2.0).unwrap(),
+            ],
+        )
+        .unwrap();
 
         let mut visitor = ExportVisitor::new();
         visitor.visit_ternary_linear("projection", &layer).unwrap();
         let export = visitor.finish().unwrap();
 
+        let tensor_ids = export
+            .core
+            .tensors()
+            .iter()
+            .map(|tensor| tensor.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tensor_ids, vec!["projection.scale", "projection.weight"]);
+
         let weight = tensor(&export, "projection.weight");
         let scale = tensor(&export, "projection.scale");
         assert_eq!(weight.kind, CanonicalTensorKind::TernaryWeight);
         assert_eq!(scale.kind, CanonicalTensorKind::TernaryScale);
-        assert_eq!(weight.layout.shape.dims(), &[2, 2]);
+        assert_eq!(weight.layout.shape.dims(), &[2, 3]);
         assert_eq!(scale.layout.shape.dims(), &[2]);
+        assert_eq!(scale.layout.element_type, TensorElementType::Q8_8);
         assert_eq!(
             scale.payload.as_u16_slice(),
             Some(
                 &[
-                    Q8_8Scale::from_f32(1.0).unwrap().raw(),
-                    Q8_8Scale::from_f32(1.0).unwrap().raw(),
+                    Q8_8Scale::from_f32(0.5).unwrap().raw(),
+                    Q8_8Scale::from_f32(2.0).unwrap().raw(),
                 ][..]
             )
+        );
+        assert_eq!(
+            reconstruct_projected_weights(weight, scale),
+            layer.export_canonical().projected_weights()
         );
 
         let quant = &export.core.quant().ternary_weight_plans()[0];
         assert_eq!(quant.weight.as_str(), "projection.weight");
         assert_eq!(quant.scale.as_str(), "projection.scale");
-        assert_eq!(quant.bias.as_ref().unwrap().as_str(), "projection.bias");
+        assert!(quant.bias.is_none());
         assert_eq!(quant.plan, QuantSpec::default_expert_ternary_plan());
 
         let weight_quant = &export.core.quant().weight_quant()[0];
@@ -937,6 +966,26 @@ mod tests {
             .iter()
             .find(|tensor| tensor.id.as_str() == id)
             .unwrap_or_else(|| panic!("missing tensor {id}"))
+    }
+
+    fn reconstruct_projected_weights(
+        weight: &CanonicalTensor,
+        scale: &CanonicalTensor,
+    ) -> Vec<f32> {
+        let rows = weight.layout.shape.dims()[0] as usize;
+        let cols = weight.layout.shape.dims()[1] as usize;
+        let weights = weight.payload.as_i8_slice().unwrap();
+        let scales = scale.payload.as_u16_slice().unwrap();
+
+        assert_eq!(scales.len(), rows);
+        weights
+            .chunks_exact(cols)
+            .zip(scales)
+            .flat_map(|(row, &scale)| {
+                let scale = Q8_8Scale::from_raw(scale).to_f32();
+                row.iter().map(move |&value| f32::from(value) * scale)
+            })
+            .collect()
     }
 
     fn weight_quant<'a>(export: &'a ExportedQatArtifact, id: &str) -> &'a WeightQuantEntry {
