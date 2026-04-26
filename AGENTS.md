@@ -105,6 +105,10 @@ git push                # Push to remote
 - Export paths must consume `SequenceExportFacts` derived from model topology or a sequence block, not a free-standing enum supplied at finish time. Add a test that `ExportVisitor` carries those facts into both `ArtifactCore` and `ExportFacts`.
 - A sequence dispatch trait must use project-native activation/state types with shape and finiteness validation. Do not satisfy trait acceptance with fully unconstrained associated `Input`/`Output`/`State` types.
 - Policy/profile selector enums such as `SequenceSemanticsRef` are configuration references only until compile profiles consume them. Avoid derived ordering unless an ordering has executable policy meaning.
+- For executable sequence blocks, define batch/state semantics before closure. If `SequenceState` is one shared buffer, reject `batch > 1` and test the rejection; only accept batches after state is explicitly batch-shaped.
+- Do not put artifact path naming or fabricated tensor handles in runtime block config. Sequence parameter handles must come from an `ExportVisitor` path that actually emits matching `ArtifactCore` tensors, with a test that every handle resolves to a tensor id.
+- Fixed recurrence/update behavior needs a literal value-level oracle test over at least two tokens. If the update law is only a placeholder or research variant, narrow the closure and avoid claiming numeric semantics beyond scaffolding.
+- Keep scalar sequence kernels, Burn/autodiff gradient paths, `TrainPhaseSpec` hardness scheduling, and shadow-compile A/B fixture adoption as separate claims with separate gates or explicit moved-to beads.
 
 ### Fixture Beads
 

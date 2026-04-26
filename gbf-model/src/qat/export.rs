@@ -13,7 +13,7 @@ use gbf_artifact::quant::{
     ActivationQuantFormatSpec, ActivationRangeModeSpec, ActivationRangeSpec, NormQuantEntry,
     QuantSpec, TernaryQuantEntry, WeightQuantEntry,
 };
-use gbf_artifact::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
+use gbf_artifact::sequence::{SequenceExportFacts, SequenceSemanticsError, SequenceSemanticsSpec};
 use gbf_artifact::tensor::{
     CanonicalTensor, CanonicalTensorError, CanonicalTensorId, CanonicalTensorKind,
     CanonicalTensorLayout, CanonicalTensorPayload, CanonicalTensorShape, TensorElementType,
@@ -23,9 +23,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ActFakeQuant, ActivationQuantFormat, ActivationRangeModeKind, ClippedActivationKind,
-    DenseBranchProjection, ExpertBlockQat, ExpertQat, NormApproxQat, SharedDenseBranch,
-    TernaryLinearQat, Top1RouterQat,
+    DenseBranchProjection, ExpertBlockQat, ExpertQat, NormApproxPlan, NormApproxQat,
+    SharedDenseBranch, TernaryLinearQat, Top1RouterQat,
 };
+use crate::sequence::LinearStateBlock;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExportedQatArtifact {
@@ -56,6 +57,7 @@ pub enum VisitedModuleKind {
     ExpertBlock,
     SharedDenseBranch,
     DenseBranchProjection,
+    LinearStateBlock,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +70,7 @@ pub enum QatModuleRef<'a> {
     ExpertBlock(&'a ExpertBlockQat),
     SharedDenseBranch(&'a SharedDenseBranch),
     DenseBranchProjection(&'a DenseBranchProjection),
+    LinearStateBlock(&'a LinearStateBlock),
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +82,7 @@ pub struct ExportVisitor {
     activation_quant: BTreeMap<ArtifactPath, ActivationQuantEntry>,
     norm_plans: BTreeMap<ArtifactPath, NormQuantEntry>,
     activation_ranges: BTreeMap<ArtifactPath, RangeDigest>,
+    sequence_tensor_handles: BTreeSet<CanonicalTensorId>,
     visited_modules: BTreeSet<VisitedModule>,
 }
 
@@ -92,6 +96,7 @@ impl ExportVisitor {
             activation_quant: BTreeMap::new(),
             norm_plans: BTreeMap::new(),
             activation_ranges: BTreeMap::new(),
+            sequence_tensor_handles: BTreeSet::new(),
             visited_modules: BTreeSet::new(),
         }
     }
@@ -123,6 +128,7 @@ impl ExportVisitor {
             QatModuleRef::DenseBranchProjection(projection) => {
                 self.visit_dense_projection(prefix, projection)
             }
+            QatModuleRef::LinearStateBlock(block) => self.visit_linear_state_block(prefix, block),
         }
     }
 
@@ -189,6 +195,15 @@ impl ExportVisitor {
         self.visit_dense_projection_at(path, projection)
     }
 
+    pub fn visit_linear_state_block(
+        &mut self,
+        prefix: &str,
+        block: &LinearStateBlock,
+    ) -> Result<(), ExportVisitorError> {
+        let path = artifact_path(prefix)?;
+        self.visit_linear_state_block_at(path, block)
+    }
+
     pub fn visit_embedding(
         &mut self,
         prefix: &str,
@@ -224,6 +239,8 @@ impl ExportVisitor {
     }
 
     pub fn finish(self) -> Result<ExportedQatArtifact, ExportVisitorError> {
+        let sequence_facts =
+            sequence_facts_with_handles(self.sequence_facts, self.sequence_tensor_handles)?;
         let quant = QuantSpec::new_with_weight_quant(
             self.weight_quant.into_values().collect(),
             self.ternary_weight_plans.into_values().collect(),
@@ -233,11 +250,11 @@ impl ExportVisitor {
         let core = ArtifactCore::new(
             self.tensors.into_values().collect(),
             quant,
-            self.sequence_facts.spec(),
+            sequence_facts.spec(),
         )?;
         let facts = ExportFacts::new(
             self.activation_ranges.into_values().collect(),
-            self.sequence_facts,
+            sequence_facts,
         );
 
         Ok(ExportedQatArtifact {
@@ -265,6 +282,37 @@ impl ExportVisitor {
         }
 
         Ok(())
+    }
+
+    fn visit_linear_state_block_at(
+        &mut self,
+        path: ArtifactPath,
+        block: &LinearStateBlock,
+    ) -> Result<(), ExportVisitorError> {
+        if self.sequence_facts.spec() != block.spec() {
+            return Err(ExportVisitorError::SequenceSpecMismatch {
+                expected: self.sequence_facts.spec(),
+                actual: block.spec(),
+            });
+        }
+
+        self.mark_visited(path.clone(), VisitedModuleKind::LinearStateBlock);
+
+        let input_norm = path.join("input_norm")?;
+        self.visit_norm_at(input_norm.clone(), block.input_norm())?;
+        self.record_norm_tensor_handles(input_norm, block.input_norm())?;
+
+        self.visit_activation_at(path.join("input_activation")?, block.input_activation())?;
+
+        let input_to_state = path.join("input_to_state")?;
+        self.visit_ternary_linear_at(input_to_state.clone(), block.input_to_state())?;
+        self.record_ternary_tensor_handles(input_to_state, block.input_to_state())?;
+
+        let state_to_output = path.join("state_to_output")?;
+        self.visit_ternary_linear_at(state_to_output.clone(), block.state_to_output())?;
+        self.record_ternary_tensor_handles(state_to_output, block.state_to_output())?;
+
+        self.visit_activation_at(path.join("output_activation")?, block.output_activation())
     }
 
     fn visit_expert_at(
@@ -581,6 +629,30 @@ impl ExportVisitor {
     fn mark_visited(&mut self, path: ArtifactPath, kind: VisitedModuleKind) {
         self.visited_modules.insert(VisitedModule { path, kind });
     }
+
+    fn record_ternary_tensor_handles(
+        &mut self,
+        path: ArtifactPath,
+        layer: &TernaryLinearQat,
+    ) -> Result<(), ExportVisitorError> {
+        self.sequence_tensor_handles.insert(path.join("weight")?);
+        self.sequence_tensor_handles.insert(path.join("scale")?);
+        if layer.bias().is_some() {
+            self.sequence_tensor_handles.insert(path.join("bias")?);
+        }
+        Ok(())
+    }
+
+    fn record_norm_tensor_handles(
+        &mut self,
+        path: ArtifactPath,
+        norm: &NormApproxQat,
+    ) -> Result<(), ExportVisitorError> {
+        if matches!(norm.plan(), NormApproxPlan::AffineClipLut { .. }) {
+            self.sequence_tensor_handles.insert(path.join("lut")?);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,6 +660,11 @@ pub enum ExportVisitorError {
     ArtifactPath(ArtifactPathError),
     Tensor(CanonicalTensorError),
     ArtifactCore(ArtifactCoreError),
+    SequenceSemantics(SequenceSemanticsError),
+    SequenceSpecMismatch {
+        expected: SequenceSemanticsSpec,
+        actual: SequenceSemanticsSpec,
+    },
     DuplicatePath {
         kind: &'static str,
         path: ArtifactPath,
@@ -600,6 +677,11 @@ impl fmt::Display for ExportVisitorError {
             Self::ArtifactPath(error) => write!(f, "{error}"),
             Self::Tensor(error) => write!(f, "{error}"),
             Self::ArtifactCore(error) => write!(f, "{error}"),
+            Self::SequenceSemantics(error) => write!(f, "{error}"),
+            Self::SequenceSpecMismatch { expected, actual } => write!(
+                f,
+                "sequence spec mismatch: visitor expected {expected:?}, block has {actual:?}"
+            ),
             Self::DuplicatePath { kind, path } => {
                 write!(f, "duplicate {kind} path {path}")
             }
@@ -627,6 +709,12 @@ impl From<ArtifactCoreError> for ExportVisitorError {
     }
 }
 
+impl From<SequenceSemanticsError> for ExportVisitorError {
+    fn from(error: SequenceSemanticsError) -> Self {
+        Self::SequenceSemantics(error)
+    }
+}
+
 fn artifact_path(value: &str) -> Result<ArtifactPath, ExportVisitorError> {
     Ok(ArtifactPath::new(value)?)
 }
@@ -642,6 +730,23 @@ fn insert_unique<T>(
     }
 
     Ok(())
+}
+
+fn sequence_facts_with_handles(
+    facts: SequenceExportFacts,
+    handles: BTreeSet<CanonicalTensorId>,
+) -> Result<SequenceExportFacts, ExportVisitorError> {
+    let mut all_handles = facts
+        .canonical_tensor_handles()
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    all_handles.extend(handles);
+    Ok(SequenceExportFacts::new(
+        facts.spec(),
+        facts.measured_state_size(),
+        all_handles.into_iter().collect(),
+    )?)
 }
 
 fn activation_quant_format(format: ActivationQuantFormat) -> ActivationQuantFormatSpec {
@@ -691,6 +796,7 @@ mod tests {
         ClippedActivation, DenseBranchProjection, EmaDecay, LutSpec, MatrixShape, NormApproxPlan,
         NormClip, Q8_8Scale, RouterShape, TernaryThreshold,
     };
+    use crate::sequence::LinearStateBlockConfig;
 
     #[test]
     fn qat_export_visitor_builds_deterministic_artifact_for_same_modules() {
@@ -971,6 +1077,64 @@ mod tests {
     }
 
     #[test]
+    fn qat_export_visitor_walks_linear_state_block_and_records_real_sequence_handles() {
+        let block = fixture_linear_state_block();
+        let mut visitor = ExportVisitor::new(SequenceExportFacts::for_spec(block.spec()));
+        visitor
+            .visit_linear_state_block("block.0.sequence", &block)
+            .unwrap();
+
+        let export = visitor.finish().unwrap();
+        let tensor_ids = export
+            .core
+            .tensors()
+            .iter()
+            .map(|tensor| tensor.id.clone())
+            .collect::<BTreeSet<_>>();
+        let handles = export
+            .facts
+            .sequence
+            .canonical_tensor_handles()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            handles,
+            vec![
+                "block.0.sequence.input_norm.lut",
+                "block.0.sequence.input_to_state.scale",
+                "block.0.sequence.input_to_state.weight",
+                "block.0.sequence.state_to_output.scale",
+                "block.0.sequence.state_to_output.weight",
+            ]
+        );
+        for handle in export.facts.sequence.canonical_tensor_handles() {
+            assert!(tensor_ids.contains(handle), "missing tensor for {handle}");
+        }
+        assert!(
+            export
+                .visited_modules
+                .iter()
+                .any(|module| module.kind == VisitedModuleKind::LinearStateBlock)
+        );
+    }
+
+    #[test]
+    fn qat_export_visitor_rejects_linear_state_sequence_mismatch() {
+        let block = fixture_linear_state_block();
+        let mut visitor = export_visitor();
+        let err = visitor
+            .visit_linear_state_block("block.0.sequence", &block)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ExportVisitorError::SequenceSpecMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn qat_export_visitor_supports_each_qat_module_ref_variant() {
         let ternary = ternary_linear(1, 1, vec![1.0], None);
         let activation = activation();
@@ -981,8 +1145,9 @@ mod tests {
         let shared_dense = fixture_shared_dense();
         let dense =
             DenseBranchProjection::new(MatrixShape::new(1, 1).unwrap(), vec![1.0], None).unwrap();
+        let linear_state = fixture_linear_state_block();
 
-        let mut visitor = export_visitor();
+        let mut visitor = ExportVisitor::new(SequenceExportFacts::for_spec(linear_state.spec()));
         visitor
             .visit_module("module.ternary", QatModuleRef::TernaryLinear(&ternary))
             .unwrap();
@@ -1010,6 +1175,12 @@ mod tests {
         visitor
             .visit_module("module.dense", QatModuleRef::DenseBranchProjection(&dense))
             .unwrap();
+        visitor
+            .visit_module(
+                "module.linear_state",
+                QatModuleRef::LinearStateBlock(&linear_state),
+            )
+            .unwrap();
         let export = visitor.finish().unwrap();
 
         let kinds = export
@@ -1028,6 +1199,7 @@ mod tests {
                 VisitedModuleKind::ExpertBlock,
                 VisitedModuleKind::SharedDenseBranch,
                 VisitedModuleKind::DenseBranchProjection,
+                VisitedModuleKind::LinearStateBlock,
             ])
         );
     }
@@ -1211,6 +1383,26 @@ mod tests {
             Some(vec![0.1]),
             vec![1.0, -1.0],
             Some(vec![0.0, 0.25]),
+        )
+        .unwrap()
+    }
+
+    fn fixture_linear_state_block() -> LinearStateBlock {
+        let mut input_to_state = vec![0.0; 16 * 2];
+        input_to_state[0] = 1.0;
+        input_to_state[3] = 1.0;
+
+        let mut state_to_output = vec![0.0; 2 * 16];
+        state_to_output[0] = 1.0;
+        state_to_output[17] = 1.0;
+
+        LinearStateBlock::new(
+            LinearStateBlockConfig::new(2, 64).unwrap(),
+            fixture_norm(),
+            activation(),
+            ternary_linear(16, 2, input_to_state, None),
+            ternary_linear(2, 16, state_to_output, None),
+            activation(),
         )
         .unwrap()
     }
