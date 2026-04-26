@@ -25,6 +25,12 @@ If the artifact contract is not implemented yet, do not claim artifact agreement
 - If a bead's literal acceptance wants a gradient proof in `gbf-model`, satisfy it through `gbf-train --features burn-adapter` only when the closure states the architectural move, references the Burn-adapter boundary, and names the exact Burn test.
 - A deployable approximation's training forward must match the exported behavior for every supported path, or the support matrix must mark the mismatch as moved/rejected and name the owning bead.
 - Burn adapters must not hide stale learnable state inside embedded scalar cores. Split non-learnable plan shape from learnable tensors, or document one authoritative source per field and guard it with an export-from-trained-state test.
+- A moved Burn training path must name a concrete adapter owner for the exact public behavior. Do not cite a closed generic adapter-containment bead as the owner for newly introduced router/expert/quantizer adapters; create or follow a live owner bead first, and cite that bead in the support matrix.
+- Do not call a scalar single-token router term `balance_loss` or `load_balance_loss` if the standard batch/token MoE objective is elsewhere. Name it as a proxy and cite the bead that owns the standard loss.
+- If a QAT forward mutates sequence, temporal, EMA, or cache state, add tests proving failure does not advance state and that the stored state has the documented semantics. For routers, keep soft routing probabilities separate from hard dispatch weights.
+- Thread phase/activation/hardness options through every branch, including optional shared branches. Add a test that exercises the optional branch, not only the default path.
+- If a bead mentions F4 phased hardness, either implement the exact `Off`/`Soft`/`Hard` contract or explicitly move it to the phase-hardness owner bead. Local two-state shortcuts must be documented as local execution modes, not as F4 completion.
+- Document deterministic router conventions that affect artifacts or training traces, including top-1 tie break and default-rank clamping for tiny expert sets.
 
 ## Support Matrix
 

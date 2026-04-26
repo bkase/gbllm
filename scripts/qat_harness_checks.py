@@ -12,6 +12,7 @@ from typing import Any
 
 HARNESS_START_ISO = "2026-04-26T10:47"
 STRICT_QAT_CLAIM_START_ISO = "2026-04-26T11:18"
+REVIEW_GUARDRAIL_START_ISO = "2026-04-26T12:00"
 ISSUE_ID_RE = re.compile(r"\bbd-[a-z0-9]+\b")
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 LOWERING_CLAIM_RE = re.compile(
@@ -26,6 +27,14 @@ LOWERING_GATE_RE = re.compile(
 )
 FIRST_CLASS_TENSOR_RE = re.compile(r"\bfirst-class tensors?\b", re.IGNORECASE)
 FIRST_CLASS_OWNER_RE = re.compile(r"\bbd-(?:g90|209)\b|CanonicalTensor")
+BURN_MOVED_ROW_GENERIC_OWNER_RE = re.compile(
+    r"^\|[^|]*\|[^|]*\|\s*moved\s*\|[^|]*\|[^|]*\bbd-1mv\b",
+    re.IGNORECASE,
+)
+ROUTER_BALANCE_CLAIM_RE = re.compile(
+    r"\b(?:balance_loss|balance loss|load-balance loss|load balance loss)\b",
+    re.IGNORECASE,
+)
 OWNER_KEYWORDS = (
     "moved to",
     "moved into",
@@ -46,6 +55,7 @@ def main() -> int:
     violations.extend(lint_qat_closures(issues))
     violations.extend(lint_strict_qat_claims(issues))
     violations.extend(lint_acceptance_owners(issues, by_id))
+    violations.extend(lint_review_guardrails(issues, by_id))
 
     if violations:
         print("QAT harness checks failed:", file=sys.stderr)
@@ -134,6 +144,89 @@ def is_strict_closed_qat_issue(issue: dict[str, Any]) -> bool:
         and "qat" in labels
         and closed_at >= STRICT_QAT_CLAIM_START_ISO
     )
+
+
+def is_review_guardrail_closed_qat_issue(issue: dict[str, Any]) -> bool:
+    labels = set(issue.get("labels", []))
+    closed_at = issue.get("closed_at") or ""
+    return (
+        issue.get("status") == "closed"
+        and "qat" in labels
+        and closed_at >= REVIEW_GUARDRAIL_START_ISO
+    )
+
+
+def lint_review_guardrails(
+    issues: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
+) -> list[str]:
+    violations = []
+    for issue in issues:
+        if not is_review_guardrail_closed_qat_issue(issue):
+            continue
+
+        text = issue_text(issue)
+        violations.extend(lint_generic_burn_adapter_owner(issue, text, by_id))
+        violations.extend(lint_unqualified_router_balance_claim(issue, text))
+
+    return violations
+
+
+def lint_generic_burn_adapter_owner(
+    issue: dict[str, Any], text: str, by_id: dict[str, dict[str, Any]]
+) -> list[str]:
+    violations = []
+    for line in text.splitlines():
+        if not BURN_MOVED_ROW_GENERIC_OWNER_RE.search(line):
+            continue
+
+        if has_concrete_router_expert_burn_owner(text, by_id):
+            continue
+
+        violations.append(
+            f"{issue['id']} moves a Burn training support-matrix row to generic closed owner bd-1mv; "
+            "create/cite a concrete router/expert Burn adapter owner bead instead"
+        )
+
+    return violations
+
+
+def has_concrete_router_expert_burn_owner(
+    text: str, by_id: dict[str, dict[str, Any]]
+) -> bool:
+    owner_ids = sorted(set(ISSUE_ID_RE.findall(text)))
+    for owner_id in owner_ids:
+        owner = by_id.get(owner_id)
+        if owner is None or owner.get("deleted_at") or owner.get("status") == "closed":
+            continue
+
+        owner_text = issue_text(owner)
+        if (
+            "Top1RouterQat" in owner_text
+            and "ExpertBlockQat" in owner_text
+            and "Burn adapter" in owner_text
+        ):
+            return True
+
+    return False
+
+
+def lint_unqualified_router_balance_claim(
+    issue: dict[str, Any], text: str
+) -> list[str]:
+    if "Top1RouterQat" not in text:
+        return []
+
+    if not ROUTER_BALANCE_CLAIM_RE.search(text):
+        return []
+
+    lowered = text.lower()
+    if "proxy" in lowered and "bd-1b3" in text:
+        return []
+
+    return [
+        f"{issue['id']} claims router balance/load-balance behavior without naming it as a proxy "
+        "or citing bd-1b3 as the standard batch/token loss owner"
+    ]
 
 
 def lint_acceptance_owners(
