@@ -60,6 +60,13 @@ There is no escape hatch. If tests fail, fix them.
 
 - For QAT bead implementation, review, or closure, use `.agents/skills/qat-bead-closure/SKILL.md` before closing. Closure comments must include the QAT checklist, a claim-to-gate matrix, and the no future variant acceptance rule.
 
+### QAT Test Beads
+
+- Before creating a moved-acceptance owner, search existing open beads and enrich the existing owner when one already names the behavior. Router/expert Burn adapter work is owned by `bd-1ptv` unless that bead is explicitly superseded.
+- Keep scalar module tests, Burn adapter gradient tests, artifact byte agreement, and phase-hardness scheduling as separate claims. If a QAT test bead only proves scalar or pre-export behavior, move artifact agreement to `bd-g90`/`bd-12c`/`bd-22o`, router/expert Burn gradients to `bd-1ptv`, and Off/Soft/Hard annealing semantics to `bd-2uw`.
+- Test oracles should be independent of the production helper under review. Prefer literal expected values or separately computed reference formulas over calling the same projection/export helper the test is meant to verify.
+- Do not call a pre-export `export_canonical` reconstruction an artifact round trip. Artifact round trips require `ArtifactCore` or serialized artifact bytes and a dedicated gate.
+
 ### Session Protocol
 
 **Before ending any session, run this checklist:**

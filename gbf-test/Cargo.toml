@@ -10,7 +10,7 @@ gbf-artifact = { path = "../gbf-artifact" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-model = { path = "../gbf-model" }
 gbf-oracle = { path = "../gbf-oracle" }
-gbf-train = { path = "../gbf-train" }
+gbf-train = { path = "../gbf-train", features = ["burn-adapter"] }
 gbf-verify = { path = "../gbf-verify" }
 serde.workspace = true
 serde_json.workspace = true
