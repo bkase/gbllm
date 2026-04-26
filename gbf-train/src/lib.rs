@@ -5,4 +5,5 @@ pub mod logging;
 pub mod loss;
 pub mod phase;
 pub mod preflight;
+pub mod qat;
 pub mod shadow;

@@ -1,0 +1,7 @@
+//! Burn-backed QAT adapters.
+
+#[cfg(feature = "burn-adapter")]
+pub mod ternary;
+
+#[cfg(feature = "burn-adapter")]
+pub use ternary::{TernaryLinearBurnQat, TernaryLinearBurnQatError};

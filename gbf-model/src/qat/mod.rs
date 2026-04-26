@@ -19,5 +19,6 @@ pub use norm::{
     NormExportData, TileRmsSpec,
 };
 pub use ternary::{
-    MatrixShape, Q8_8Scale, TernaryLinearQat, TernaryLinearQatError, TernaryThreshold, TernaryValue,
+    MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError,
+    TernaryThreshold, TernaryValue,
 };

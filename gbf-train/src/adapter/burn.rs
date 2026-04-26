@@ -25,6 +25,7 @@ pub use burn::tensor::{
         AutodiffBackend as BurnAutodiffBackend, Backend as BurnBackend,
         ExecutionError as BurnExecutionError,
     },
+    module::linear as burn_linear,
 };
 
 /// Burn autodiff backend decorator pinned behind this adapter.
