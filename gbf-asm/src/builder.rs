@@ -5,20 +5,23 @@
 //! provenance to every emitted item.
 //!
 //! Output is symbolic pre-layout section IR. This layer records label markers,
-//! alignment directives, and pseudo-op intent; it does not perform relocation,
-//! branch relaxation, far-call thunk insertion, privilege/effect validation, or
-//! final byte lowering.
+//! alignment directives, and pseudo-op intent. It performs local section
+//! privilege/effect validation for typed instructions, pseudo-ops, and opaque
+//! raw bytes; it does not perform relocation, branch relaxation, far-call thunk
+//! insertion, dynamic-address reachability proofs, or final byte lowering.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU16;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
+use crate::effect::{MachineEffect, classify_effect, classify_pseudo_op};
 use crate::isa::Instr;
 use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
-    BankLeaseSpec, LeaseId, MbcBankClass, ProbeLevel, PseudoOp, Section, SectionId, SectionItem,
-    SectionRole, SymbolId, TraceProbeId, YieldKind,
+    BankLeaseSpec, LeaseId, MbcBankClass, PrivilegeViolation, ProbeLevel, PseudoOp, Section,
+    SectionId, SectionItem, SectionPrivilege, SectionPrivilegeError, SectionRole, SymbolId,
+    TraceProbeId, YieldKind,
 };
 use crate::symbols::SymbolName;
 
@@ -26,11 +29,24 @@ use crate::symbols::SymbolName;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuilderError {
     ZeroAlignment,
-    DuplicateLabel { name: SymbolName },
+    DuplicateLabel {
+        name: SymbolName,
+    },
     TooManyLabels,
-    DuplicateLease { lease_id: LeaseId },
-    UnknownLease { lease_id: LeaseId },
-    SramBankOutOfRange { bank: u8 },
+    DuplicateLease {
+        lease_id: LeaseId,
+    },
+    UnknownLease {
+        lease_id: LeaseId,
+    },
+    SramBankOutOfRange {
+        bank: u8,
+    },
+    PrivilegeViolation {
+        effect: MachineEffect,
+        violation: PrivilegeViolation,
+    },
+    SectionPrivilegeViolation(SectionPrivilegeError),
 }
 
 impl fmt::Display for BuilderError {
@@ -47,6 +63,19 @@ impl fmt::Display for BuilderError {
             }
             Self::SramBankOutOfRange { bank } => {
                 write!(f, "SRAM bank {bank} is outside MBC5 range 0..=15")
+            }
+            Self::PrivilegeViolation { effect, violation } => {
+                write!(
+                    f,
+                    "section privilege rejected effect {effect:?}: {violation:?}"
+                )
+            }
+            Self::SectionPrivilegeViolation(error) => {
+                write!(
+                    f,
+                    "section privilege rejected existing item {} with effect {:?}: {:?}",
+                    error.item_index, error.effect, error.violation
+                )
             }
         }
     }
@@ -86,9 +115,37 @@ impl Builder {
         &self.cur_provenance
     }
 
+    #[must_use]
+    pub fn with_section_privilege(mut self, privilege: SectionPrivilege) -> Self {
+        self.try_set_section_privilege(privilege)
+            .expect("section privilege rejected an existing item");
+        self
+    }
+
+    pub fn set_section_privilege(&mut self, privilege: SectionPrivilege) {
+        self.try_set_section_privilege(privilege)
+            .expect("section privilege rejected an existing item");
+    }
+
+    pub fn try_set_section_privilege(
+        &mut self,
+        privilege: SectionPrivilege,
+    ) -> Result<(), BuilderError> {
+        self.section
+            .set_privilege(privilege)
+            .map_err(BuilderError::SectionPrivilegeViolation)
+    }
+
     pub fn emit(&mut self, instr: Instr) {
+        self.try_emit(instr)
+            .expect("section privilege rejected instruction in Builder::emit");
+    }
+
+    pub fn try_emit(&mut self, instr: Instr) -> Result<(), BuilderError> {
+        self.validate_effect(classify_effect(&instr))?;
         self.section
             .push(SectionItem::instr(instr, self.cur_provenance.clone()));
+        Ok(())
     }
 
     pub fn db(&mut self, byte: u8) {
@@ -150,8 +207,15 @@ impl Builder {
     /// boot headers, CPU quirks, and temporary bring-up gaps that have explicit
     /// review coverage.
     pub fn raw(&mut self, bytes: Vec<u8>) {
+        self.try_raw(bytes)
+            .expect("section privilege rejected opaque raw bytes");
+    }
+
+    pub fn try_raw(&mut self, bytes: Vec<u8>) -> Result<(), BuilderError> {
+        self.validate_effect(MachineEffect::OpaqueBytes)?;
         self.section
             .push(SectionItem::raw(bytes, self.cur_provenance.clone()));
+        Ok(())
     }
 
     pub fn with_provenance<R>(
@@ -175,12 +239,14 @@ impl Builder {
     }
 
     pub fn try_bank_lease(&mut self, lease: BankLeaseSpec) -> Result<(), BuilderError> {
+        let op = PseudoOp::BankLease(lease.clone());
+        self.validate_effect(classify_pseudo_op(&op))?;
         let lease_id = lease.lease_id();
         if !self.active_leases.insert(lease_id) {
             return Err(BuilderError::DuplicateLease { lease_id });
         }
 
-        self.pseudo(PseudoOp::BankLease(lease));
+        self.pseudo_unchecked(op);
         Ok(())
     }
 
@@ -190,11 +256,13 @@ impl Builder {
     }
 
     pub fn try_bank_release(&mut self, lease_id: LeaseId) -> Result<(), BuilderError> {
+        let op = PseudoOp::BankRelease { lease_id };
+        self.validate_effect(classify_pseudo_op(&op))?;
         if !self.active_leases.remove(&lease_id) {
             return Err(BuilderError::UnknownLease { lease_id });
         }
 
-        self.pseudo(PseudoOp::BankRelease { lease_id });
+        self.pseudo_unchecked(op);
         Ok(())
     }
 
@@ -208,6 +276,11 @@ impl Builder {
         target: SymbolName,
         lease_chain: &[LeaseId],
     ) -> Result<(), BuilderError> {
+        let op = PseudoOp::FarCall {
+            target,
+            lease_chain: lease_chain.to_vec(),
+        };
+        self.validate_effect(classify_pseudo_op(&op))?;
         for lease_id in lease_chain {
             if !self.active_leases.contains(lease_id) {
                 return Err(BuilderError::UnknownLease {
@@ -216,19 +289,30 @@ impl Builder {
             }
         }
 
-        self.pseudo(PseudoOp::FarCall {
-            target,
-            lease_chain: lease_chain.to_vec(),
-        });
+        self.pseudo_unchecked(op);
         Ok(())
     }
 
     pub fn yield_op(&mut self, kind: YieldKind) {
-        self.pseudo(PseudoOp::Yield { kind });
+        self.try_yield_op(kind)
+            .expect("section privilege rejected yield pseudo-op");
+    }
+
+    pub fn try_yield_op(&mut self, kind: YieldKind) -> Result<(), BuilderError> {
+        self.pseudo(PseudoOp::Yield { kind })
     }
 
     pub fn trace_probe(&mut self, id: TraceProbeId, level: ProbeLevel) {
-        self.pseudo(PseudoOp::TraceProbe { id, level });
+        self.try_trace_probe(id, level)
+            .expect("section privilege rejected trace-probe pseudo-op");
+    }
+
+    pub fn try_trace_probe(
+        &mut self,
+        id: TraceProbeId,
+        level: ProbeLevel,
+    ) -> Result<(), BuilderError> {
+        self.pseudo(PseudoOp::TraceProbe { id, level })
     }
 
     pub fn assert_bank(&mut self, expected: MbcBankClass, expected_n: u8) {
@@ -241,14 +325,16 @@ impl Builder {
         expected: MbcBankClass,
         expected_n: u8,
     ) -> Result<(), BuilderError> {
+        let op = PseudoOp::AssertBank {
+            expected,
+            expected_n,
+        };
+        self.validate_effect(classify_pseudo_op(&op))?;
         if expected == MbcBankClass::Sram && u16::from(expected_n) > BankLeaseSpec::MAX_SRAM_BANK {
             return Err(BuilderError::SramBankOutOfRange { bank: expected_n });
         }
 
-        self.pseudo(PseudoOp::AssertBank {
-            expected,
-            expected_n,
-        });
+        self.pseudo_unchecked(op);
         Ok(())
     }
 
@@ -256,7 +342,20 @@ impl Builder {
         self.section
     }
 
-    fn pseudo(&mut self, op: PseudoOp) {
+    fn validate_effect(&self, effect: MachineEffect) -> Result<(), BuilderError> {
+        self.section
+            .privilege()
+            .check_effect(effect)
+            .map_err(|violation| BuilderError::PrivilegeViolation { effect, violation })
+    }
+
+    fn pseudo(&mut self, op: PseudoOp) -> Result<(), BuilderError> {
+        self.validate_effect(classify_pseudo_op(&op))?;
+        self.pseudo_unchecked(op);
+        Ok(())
+    }
+
+    fn pseudo_unchecked(&mut self, op: PseudoOp) {
         self.section
             .push(SectionItem::pseudo(op, self.cur_provenance.clone()));
     }
@@ -331,7 +430,8 @@ fn provenance_recorded() {
     let mut builder = Builder::new(
         SectionRole::CommonBank,
         SymbolName::kernel("copy", 1).expect("section name"),
-    );
+    )
+    .with_section_privilege(SectionPrivilege::privileged());
     builder.emit(Instr::Nop);
     builder.with_provenance(storage_provenance.clone(), |builder| {
         builder.db(0xAA);
@@ -359,7 +459,8 @@ fn pseudo_ops_dont_panic() {
     let mut builder = Builder::new(
         SectionRole::CommonBank,
         SymbolName::runtime("banking", "ops").expect("section name"),
-    );
+    )
+    .with_section_privilege(SectionPrivilege::privileged());
     let lease = LeaseId::new(7);
     let target = SymbolName::runtime("expert", "enter").expect("target");
     builder.bank_lease(BankLeaseSpec::new(lease, MbcBankClass::Rom, 12).expect("lease"));
@@ -443,7 +544,8 @@ fn builder_validates_lease_lifecycle_and_bank_ranges() {
     let mut builder = Builder::new(
         SectionRole::CommonBank,
         SymbolName::runtime("banking", "validation").expect("section name"),
-    );
+    )
+    .with_section_privilege(SectionPrivilege::privileged());
     let lease = LeaseId::new(4);
 
     assert!(BankLeaseSpec::new(lease, MbcBankClass::Rom, 512).is_err());
@@ -483,6 +585,95 @@ fn builder_validates_lease_lifecycle_and_bank_ranges() {
             &[lease]
         ),
         Err(BuilderError::UnknownLease { lease_id: lease })
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn builder_rejects_privileged_effects_in_normal_sections() {
+    use crate::effect::{MbcRegisterClass, PrivilegeClass};
+    use crate::isa::DirectAddr;
+
+    let mut builder = Builder::new(
+        SectionRole::CommonBank,
+        SymbolName::kernel("normal_privilege", 0).expect("section name"),
+    );
+    let addr = DirectAddr::new(0x2000).expect("mbc register address");
+    assert_eq!(
+        builder.try_emit(Instr::LdDirectFromA { addr }),
+        Err(BuilderError::PrivilegeViolation {
+            effect: MachineEffect::StoreToMbcRegister {
+                reg: MbcRegisterClass::RomBankLow,
+            },
+            violation: PrivilegeViolation::RequiredPrivilege {
+                required: PrivilegeClass::Privileged,
+                section: PrivilegeClass::Normal,
+            },
+        })
+    );
+
+    builder.set_section_privilege(SectionPrivilege::privileged());
+    builder
+        .try_emit(Instr::LdDirectFromA { addr })
+        .expect("privileged section accepts mbc write");
+    assert_eq!(builder.finish().items().len(), 1);
+}
+
+#[cfg(test)]
+#[test]
+fn builder_rejects_raw_bytes_in_normal_sections() {
+    use crate::effect::PrivilegeClass;
+
+    let mut builder = Builder::new(
+        SectionRole::CommonBank,
+        SymbolName::kernel("raw_privilege", 0).expect("section name"),
+    );
+    assert_eq!(
+        builder.try_raw(vec![0xF3]),
+        Err(BuilderError::PrivilegeViolation {
+            effect: MachineEffect::OpaqueBytes,
+            violation: PrivilegeViolation::RequiredPrivilege {
+                required: PrivilegeClass::Privileged,
+                section: PrivilegeClass::Normal,
+            },
+        })
+    );
+
+    builder.set_section_privilege(SectionPrivilege::privileged());
+    builder.try_raw(vec![0xF3]).expect("privileged raw");
+    assert_eq!(builder.finish().items().len(), 1);
+}
+
+#[cfg(test)]
+#[test]
+fn builder_revalidates_existing_items_when_privilege_changes() {
+    use crate::effect::{MbcRegisterClass, PrivilegeClass};
+    use crate::isa::DirectAddr;
+
+    let mut builder = Builder::new(
+        SectionRole::CommonBank,
+        SymbolName::kernel("privilege_downgrade", 0).expect("section name"),
+    )
+    .with_section_privilege(SectionPrivilege::privileged());
+    let addr = DirectAddr::new(0x2000).expect("mbc register address");
+    builder
+        .try_emit(Instr::LdDirectFromA { addr })
+        .expect("privileged section accepts mbc write");
+
+    assert_eq!(
+        builder.try_set_section_privilege(SectionPrivilege::normal()),
+        Err(BuilderError::SectionPrivilegeViolation(
+            crate::section::SectionPrivilegeError {
+                item_index: 0,
+                effect: MachineEffect::StoreToMbcRegister {
+                    reg: MbcRegisterClass::RomBankLow,
+                },
+                violation: PrivilegeViolation::RequiredPrivilege {
+                    required: PrivilegeClass::Privileged,
+                    section: PrivilegeClass::Normal,
+                },
+            }
+        ))
     );
 }
 

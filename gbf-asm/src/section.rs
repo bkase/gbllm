@@ -1,10 +1,15 @@
 //! Typed assembly sections and section items.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 
+use crate::effect::{
+    MachineEffect, MachineEffectKind, PrivilegeClass, classify_effect, classify_pseudo_op,
+    privilege_of,
+};
 use crate::isa::Instr;
 use crate::provenance::InstrProvenance;
 use crate::symbols::SymbolName;
@@ -57,6 +62,126 @@ impl SectionRole {
             Self::OamOwnedByUi => "oam_owned_by_ui",
             Self::HeaderCartridge => "header_cartridge",
         }
+    }
+}
+
+/// Why a section privilege policy rejected an effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PrivilegeViolation {
+    RequiredPrivilege {
+        required: PrivilegeClass,
+        section: PrivilegeClass,
+    },
+    InterruptDisabledNotAllowed,
+    EffectKindNotAllowed {
+        kind: MachineEffectKind,
+    },
+}
+
+/// Existing section item rejected by a replacement privilege policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SectionPrivilegeError {
+    pub item_index: usize,
+    pub effect: MachineEffect,
+    pub violation: PrivilegeViolation,
+}
+
+/// Section-level privilege and effect policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SectionPrivilege {
+    pub default_privilege: PrivilegeClass,
+    pub allows_interrupt_disabled: bool,
+    pub allowed_effects: Option<BTreeSet<MachineEffectKind>>,
+}
+
+impl Default for SectionPrivilege {
+    fn default() -> Self {
+        Self::normal()
+    }
+}
+
+impl SectionPrivilege {
+    #[must_use]
+    pub fn normal() -> Self {
+        Self {
+            default_privilege: PrivilegeClass::Normal,
+            allows_interrupt_disabled: false,
+            allowed_effects: None,
+        }
+    }
+
+    #[must_use]
+    pub fn privileged() -> Self {
+        Self {
+            default_privilege: PrivilegeClass::Privileged,
+            allows_interrupt_disabled: true,
+            allowed_effects: None,
+        }
+    }
+
+    #[must_use]
+    pub fn interrupt_handler() -> Self {
+        Self {
+            default_privilege: PrivilegeClass::InterruptHandler,
+            allows_interrupt_disabled: false,
+            allowed_effects: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_allows_interrupt_disabled(mut self, allows_interrupt_disabled: bool) -> Self {
+        self.allows_interrupt_disabled = allows_interrupt_disabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_allowed_effects(
+        mut self,
+        allowed_effects: impl IntoIterator<Item = MachineEffectKind>,
+    ) -> Self {
+        self.allowed_effects = Some(allowed_effects.into_iter().collect());
+        self
+    }
+
+    pub fn check_effect(&self, effect: MachineEffect) -> Result<(), PrivilegeViolation> {
+        let kind = effect.kind();
+        if let Some(allowed_effects) = &self.allowed_effects
+            && !allowed_effects.contains(&kind)
+        {
+            return Err(PrivilegeViolation::EffectKindNotAllowed { kind });
+        }
+
+        if effect.disables_interrupts() && !self.allows_interrupt_disabled {
+            return Err(PrivilegeViolation::InterruptDisabledNotAllowed);
+        }
+
+        let required = privilege_of(&effect);
+        if self.allows_privilege(required) {
+            Ok(())
+        } else {
+            Err(PrivilegeViolation::RequiredPrivilege {
+                required,
+                section: self.default_privilege,
+            })
+        }
+    }
+
+    #[must_use]
+    pub fn permits_effect(&self, effect: MachineEffect) -> bool {
+        self.check_effect(effect).is_ok()
+    }
+
+    #[must_use]
+    pub const fn allows_privilege(&self, required: PrivilegeClass) -> bool {
+        matches!(
+            (self.default_privilege, required),
+            (_, PrivilegeClass::Normal)
+                | (PrivilegeClass::Privileged, PrivilegeClass::Privileged)
+                | (
+                    PrivilegeClass::InterruptHandler,
+                    PrivilegeClass::InterruptHandler
+                )
+        )
     }
 }
 
@@ -369,6 +494,16 @@ impl SectionItem {
     }
 
     #[must_use]
+    pub fn machine_effect(&self) -> Option<MachineEffect> {
+        match self {
+            Self::Instr { instr, .. } => Some(classify_effect(instr)),
+            Self::Pseudo { op, .. } => Some(classify_pseudo_op(op)),
+            Self::Raw { .. } => Some(MachineEffect::OpaqueBytes),
+            Self::Label { .. } | Self::Db { .. } | Self::Dw { .. } | Self::Align { .. } => None,
+        }
+    }
+
+    #[must_use]
     pub fn fixed_byte_len(&self) -> Option<u32> {
         match self {
             Self::Label { .. } => Some(0),
@@ -387,6 +522,8 @@ pub struct Section {
     id: SectionId,
     role: SectionRole,
     name: SymbolName,
+    #[serde(default)]
+    privilege: SectionPrivilege,
     items: Vec<SectionItem>,
     align: NonZeroU16,
     size_hint_bytes: Option<u32>,
@@ -398,6 +535,7 @@ impl Section {
             id,
             role,
             name,
+            privilege: SectionPrivilege::default(),
             items: Vec::new(),
             align,
             size_hint_bytes: None,
@@ -408,6 +546,36 @@ impl Section {
     pub fn with_size_hint_bytes(mut self, size_hint_bytes: u32) -> Self {
         self.size_hint_bytes = Some(size_hint_bytes);
         self
+    }
+
+    pub fn with_privilege(mut self, privilege: SectionPrivilege) -> Self {
+        self.try_set_privilege(privilege)
+            .expect("section privilege rejected an existing item");
+        self
+    }
+
+    pub fn try_with_privilege(
+        mut self,
+        privilege: SectionPrivilege,
+    ) -> Result<Self, SectionPrivilegeError> {
+        self.try_set_privilege(privilege)?;
+        Ok(self)
+    }
+
+    pub(crate) fn set_privilege(
+        &mut self,
+        privilege: SectionPrivilege,
+    ) -> Result<(), SectionPrivilegeError> {
+        self.try_set_privilege(privilege)
+    }
+
+    fn try_set_privilege(
+        &mut self,
+        privilege: SectionPrivilege,
+    ) -> Result<(), SectionPrivilegeError> {
+        validate_items_for_privilege(&self.items, &privilege)?;
+        self.privilege = privilege;
+        Ok(())
     }
 
     pub(crate) fn push(&mut self, item: SectionItem) {
@@ -427,6 +595,11 @@ impl Section {
     #[must_use]
     pub fn name(&self) -> &SymbolName {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn privilege(&self) -> &SectionPrivilege {
+        &self.privilege
     }
 
     #[must_use]
@@ -450,6 +623,25 @@ impl Section {
             .iter()
             .try_fold(0u32, |acc, item| item.fixed_byte_len().map(|len| acc + len))
     }
+}
+
+fn validate_items_for_privilege(
+    items: &[SectionItem],
+    privilege: &SectionPrivilege,
+) -> Result<(), SectionPrivilegeError> {
+    for (item_index, item) in items.iter().enumerate() {
+        let Some(effect) = item.machine_effect() else {
+            continue;
+        };
+        if let Err(violation) = privilege.check_effect(effect) {
+            return Err(SectionPrivilegeError {
+                item_index,
+                effect,
+                violation,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -508,7 +700,76 @@ fn role_exhaustive() {
 
 #[cfg(test)]
 #[test]
+fn privilege_inheritance() {
+    use crate::effect::{MachineEffect, MbcRegisterClass};
+
+    let privileged_effect = MachineEffect::StoreToMbcRegister {
+        reg: MbcRegisterClass::RomBankLow,
+    };
+    let normal_section = Section::new(
+        SectionId::new(1),
+        SectionRole::CommonBank,
+        SymbolName::kernel("normal", 0).expect("section name"),
+        NonZeroU16::new(1).expect("nonzero align"),
+    );
+    assert_eq!(
+        normal_section.privilege(),
+        &SectionPrivilege {
+            default_privilege: PrivilegeClass::Normal,
+            allows_interrupt_disabled: false,
+            allowed_effects: None,
+        }
+    );
+    assert_eq!(
+        normal_section.privilege().check_effect(privileged_effect),
+        Err(PrivilegeViolation::RequiredPrivilege {
+            required: PrivilegeClass::Privileged,
+            section: PrivilegeClass::Normal,
+        })
+    );
+
+    let privileged_section = normal_section
+        .clone()
+        .with_privilege(SectionPrivilege::privileged());
+    assert!(
+        privileged_section
+            .privilege()
+            .permits_effect(privileged_effect)
+    );
+
+    let restricted_section = privileged_section.with_privilege(
+        SectionPrivilege::privileged().with_allowed_effects([MachineEffectKind::PureCompute]),
+    );
+    assert_eq!(
+        restricted_section
+            .privilege()
+            .check_effect(privileged_effect),
+        Err(PrivilegeViolation::EffectKindNotAllowed {
+            kind: MachineEffectKind::StoreToMbcRegister,
+        })
+    );
+
+    let isr_section = SectionPrivilege::interrupt_handler();
+    assert!(isr_section.permits_effect(MachineEffect::Reti));
+    assert_eq!(
+        SectionPrivilege::normal().check_effect(MachineEffect::Reti),
+        Err(PrivilegeViolation::RequiredPrivilege {
+            required: PrivilegeClass::InterruptHandler,
+            section: PrivilegeClass::Normal,
+        })
+    );
+    assert_eq!(
+        isr_section.check_effect(MachineEffect::InterruptControl(
+            crate::effect::InterruptControlOp::DisableInterrupts
+        )),
+        Err(PrivilegeViolation::InterruptDisabledNotAllowed)
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn section_items_carry_provenance_and_size() {
+    use crate::effect::{MachineEffect, SystemCallKind};
     use crate::isa::Instr;
     use crate::provenance::{InstrProvenance, PlanningStage};
 
@@ -534,6 +795,12 @@ fn section_items_carry_provenance_and_size() {
         provenance.clone(),
     ));
     assert_eq!(section.fixed_item_bytes(), None);
+    assert_eq!(
+        section.items()[3].machine_effect(),
+        Some(MachineEffect::SystemCall(SystemCallKind::Yield))
+    );
+    let raw = SectionItem::raw(vec![0xF3], provenance);
+    assert_eq!(raw.machine_effect(), Some(MachineEffect::OpaqueBytes));
 
     let encoded = serde_json::to_string(&section).expect("section serializes");
     let decoded: Section = serde_json::from_str(&encoded).expect("section deserializes");
