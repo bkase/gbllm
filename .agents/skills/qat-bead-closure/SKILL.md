@@ -18,6 +18,14 @@ Every QAT bead closure comment must answer these explicitly:
 
 If the artifact contract is not implemented yet, do not claim artifact agreement. State the narrower pre-export contract and create or follow the bead that owns the artifact contract.
 
+## Claim Discipline
+
+- Do not claim exact compiler/runtime lowering agreement unless the closure cites a compiler, oracle, or codegen gate that exercises that lowering. If the lowering gate does not exist yet, mark the claim as `moved` and name the owning bead, typically `bd-g90` for ExportVisitor materialization or `bd-12c` for ArtifactOracle agreement.
+- Do not call inline floats, structs, or `Vec<f32>` "first-class tensors". First-class tensor claims require `CanonicalTensor` handles or an explicit moved-acceptance owner such as `bd-g90`/`bd-209`.
+- If a bead's literal acceptance wants a gradient proof in `gbf-model`, satisfy it through `gbf-train --features burn-adapter` only when the closure states the architectural move, references the Burn-adapter boundary, and names the exact Burn test.
+- A deployable approximation's training forward must match the exported behavior for every supported path, or the support matrix must mark the mismatch as moved/rejected and name the owning bead.
+- Burn adapters must not hide stale learnable state inside embedded scalar cores. Split non-learnable plan shape from learnable tensors, or document one authoritative source per field and guard it with an export-from-trained-state test.
+
 ## Support Matrix
 
 Every QAT bead closure must include a path support matrix. Use `supported`, `rejected`, `moved`, or `not applicable`; do not leave a path implicit.

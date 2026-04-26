@@ -11,8 +11,21 @@ from typing import Any
 
 
 HARNESS_START_ISO = "2026-04-26T10:47"
+STRICT_QAT_CLAIM_START_ISO = "2026-04-26T11:18"
 ISSUE_ID_RE = re.compile(r"\bbd-[a-z0-9]+\b")
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+LOWERING_CLAIM_RE = re.compile(
+    r"(exact(?:ly)?\s+match(?:es|ing)?\s+(?:the\s+)?(?:compiler|runtime|lowering)"
+    r"|(?:compiler|runtime)\s+lowering\s+(?:agreement|exact))",
+    re.IGNORECASE,
+)
+LOWERING_OWNER_RE = re.compile(r"\bbd-(?:g90|12c)\b")
+LOWERING_GATE_RE = re.compile(
+    r"`(?:cargo test -p gbf-(?:codegen|test|verify|oracle)[^`]*"
+    r"|cargo test --workspace --all-features[^`]*)`"
+)
+FIRST_CLASS_TENSOR_RE = re.compile(r"\bfirst-class tensors?\b", re.IGNORECASE)
+FIRST_CLASS_OWNER_RE = re.compile(r"\bbd-(?:g90|209)\b|CanonicalTensor")
 OWNER_KEYWORDS = (
     "moved to",
     "moved into",
@@ -31,6 +44,7 @@ def main() -> int:
 
     violations: list[str] = []
     violations.extend(lint_qat_closures(issues))
+    violations.extend(lint_strict_qat_claims(issues))
     violations.extend(lint_acceptance_owners(issues, by_id))
 
     if violations:
@@ -80,6 +94,28 @@ def lint_qat_closures(issues: list[dict[str, Any]]) -> list[str]:
     return violations
 
 
+def lint_strict_qat_claims(issues: list[dict[str, Any]]) -> list[str]:
+    violations = []
+    for issue in issues:
+        if not is_strict_closed_qat_issue(issue):
+            continue
+
+        closure = closure_text(issue)
+        if LOWERING_CLAIM_RE.search(closure) and not (
+            LOWERING_GATE_RE.search(closure) or LOWERING_OWNER_RE.search(closure)
+        ):
+            violations.append(
+                f"{issue['id']} claims exact compiler/runtime lowering without a codegen/oracle gate or moved owner bd-g90/bd-12c"
+            )
+
+        if FIRST_CLASS_TENSOR_RE.search(closure) and not FIRST_CLASS_OWNER_RE.search(closure):
+            violations.append(
+                f"{issue['id']} claims first-class tensor export without CanonicalTensor or moved owner bd-g90/bd-209"
+            )
+
+    return violations
+
+
 def is_post_harness_closed_qat_issue(issue: dict[str, Any]) -> bool:
     labels = set(issue.get("labels", []))
     closed_at = issue.get("closed_at") or ""
@@ -87,6 +123,16 @@ def is_post_harness_closed_qat_issue(issue: dict[str, Any]) -> bool:
         issue.get("status") == "closed"
         and "qat" in labels
         and closed_at >= HARNESS_START_ISO
+    )
+
+
+def is_strict_closed_qat_issue(issue: dict[str, Any]) -> bool:
+    labels = set(issue.get("labels", []))
+    closed_at = issue.get("closed_at") or ""
+    return (
+        issue.get("status") == "closed"
+        and "qat" in labels
+        and closed_at >= STRICT_QAT_CLAIM_START_ISO
     )
 
 
@@ -155,6 +201,12 @@ def issue_text(issue: dict[str, Any]) -> str:
         issue.get("acceptance_criteria", ""),
         issue.get("close_reason", ""),
     ]
+    parts.extend(comment.get("text", "") for comment in issue.get("comments", []))
+    return "\n".join(parts)
+
+
+def closure_text(issue: dict[str, Any]) -> str:
+    parts = [issue.get("close_reason", "")]
     parts.extend(comment.get("text", "") for comment in issue.get("comments", []))
     return "\n".join(parts)
 
