@@ -56,6 +56,10 @@ A pre-commit hook automatically runs on every `git commit`. Do NOT run it manual
 
 There is no escape hatch. If tests fail, fix them.
 
+### Project Skills
+
+- For QAT bead implementation, review, or closure, use `.agents/skills/qat-bead-closure/SKILL.md` before closing. Closure comments must include the QAT checklist, a claim-to-gate matrix, and the no future variant acceptance rule.
+
 ### Session Protocol
 
 **Before ending any session, run this checklist:**
