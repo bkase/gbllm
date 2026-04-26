@@ -18,6 +18,10 @@ pub use expert::{
     DenseBranchProjection, ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertQat,
     ExpertQatForwardMode, SharedDenseBranch,
 };
+pub use export::{
+    ExportVisitor, ExportVisitorError, ExportedQatArtifact, QatModuleRef, VisitedModule,
+    VisitedModuleKind,
+};
 pub use norm::{
     AffineParams, LutSpec, NormApproxError, NormApproxPlan, NormApproxQat, NormClip,
     NormExportData, TileRmsSpec,

@@ -290,6 +290,18 @@ impl SharedDenseBranch {
         self.down_projection.shape()
     }
 
+    pub fn up_projection(&self) -> &DenseBranchProjection {
+        &self.up_projection
+    }
+
+    pub fn activation(&self) -> &ActFakeQuant {
+        &self.activation
+    }
+
+    pub fn down_projection(&self) -> &DenseBranchProjection {
+        &self.down_projection
+    }
+
     pub fn validate_d_model(&self, expected: usize) -> Result<(), ExpertBlockQatError> {
         if self.up_projection.shape().input_cols() != expected {
             return Err(ExpertBlockQatError::SharedModelDimMismatch {
