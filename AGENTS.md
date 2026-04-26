@@ -92,4 +92,10 @@ git push                # Push to remote
 - When claiming parameter sharing or parameter-count reduction, add an owned-layer alias/count test and name a follow-up owner for export/artifact/budget sharing if that layer is not implemented.
 - Keep enum or named constructors as the primary API for model mode choices; bools should be derived queries or edge-adapter inputs.
 
+### Fixture Beads
+
+- Keep one source of truth for tiny fixtures. If a tiny model config names layers or paths, the model fixture should own the state that artifact/workload factories consume.
+- Name placeholders explicitly when real policy, workload, manifest, compiler, or runtime contracts are still stubs, and create a follow-up owner before closing.
+- Scope artifact assertions to the artifact type that exists. `ArtifactCore` helpers must check core tensor/quant invariants, including tensor content-hash self-consistency; manifest validation needs a real manifest contract and test.
+
 <!-- end-br-agent-instructions -->
