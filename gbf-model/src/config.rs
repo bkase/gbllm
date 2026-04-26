@@ -5,6 +5,9 @@ use std::fmt;
 
 use crate::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
 
+const BOUNDED_KV_SLOT_BYTES: u16 = 4;
+const BOUNDED_KV_MIN_RECORD_BYTES: u16 = 2 * BOUNDED_KV_SLOT_BYTES;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelTopologyConfig {
     blocks: Vec<MoeBlockConfig>,
@@ -135,19 +138,17 @@ impl SharedSequenceConfig {
         max_context: u16,
         kv_bytes_per_token: u16,
     ) -> Result<Self, ModelConfigError> {
-        Self::new(
-            d_model,
-            SequenceSemanticsSpec::bounded_kv(max_context, kv_bytes_per_token).map_err(|err| {
-                match err {
-                    crate::sequence::SequenceSemanticsError::ZeroField { field } => {
-                        ModelConfigError::EmptyDimension { field }
-                    }
-                    crate::sequence::SequenceSemanticsError::StateSizeMismatch { .. } => {
-                        unreachable!("bounded-kv constructor does not accept measured state size")
-                    }
+        let semantics = SequenceSemanticsSpec::bounded_kv(max_context, kv_bytes_per_token)
+            .map_err(|err| match err {
+                crate::sequence::SequenceSemanticsError::ZeroField { field } => {
+                    ModelConfigError::EmptyDimension { field }
                 }
-            })?,
-        )
+                crate::sequence::SequenceSemanticsError::StateSizeMismatch { .. } => {
+                    unreachable!("bounded-kv constructor does not accept measured state size")
+                }
+            })?;
+        validate_executable_bounded_kv_layout(kv_bytes_per_token)?;
+        Self::new(d_model, semantics)
     }
 
     fn new(d_model: usize, semantics: SequenceSemanticsSpec) -> Result<Self, ModelConfigError> {
@@ -282,6 +283,11 @@ pub enum ModelConfigError {
     EmptyDimension {
         field: &'static str,
     },
+    InvalidSequenceStateLayout {
+        field: &'static str,
+        value: u16,
+        reason: &'static str,
+    },
     FfnModelDimMismatch {
         path: &'static str,
         expected: usize,
@@ -304,6 +310,11 @@ impl fmt::Display for ModelConfigError {
         match self {
             Self::EmptyBlockSet => f.write_str("model topology must contain at least one block"),
             Self::EmptyDimension { field } => write!(f, "{field} must be nonzero"),
+            Self::InvalidSequenceStateLayout {
+                field,
+                value,
+                reason,
+            } => write!(f, "{field}={value} has invalid sequence layout: {reason}"),
             Self::FfnModelDimMismatch {
                 path,
                 expected,
@@ -338,6 +349,28 @@ fn validate_nonzero(field: &'static str, value: usize) -> Result<(), ModelConfig
     if value == 0 {
         return Err(ModelConfigError::EmptyDimension { field });
     }
+    Ok(())
+}
+
+fn validate_executable_bounded_kv_layout(kv_bytes_per_token: u16) -> Result<(), ModelConfigError> {
+    if kv_bytes_per_token == 0 {
+        return Ok(());
+    }
+    if !kv_bytes_per_token.is_multiple_of(BOUNDED_KV_SLOT_BYTES) {
+        return Err(ModelConfigError::InvalidSequenceStateLayout {
+            field: "kv_bytes_per_token",
+            value: kv_bytes_per_token,
+            reason: "must be divisible by 4 for f32-backed bounded-kv records",
+        });
+    }
+    if kv_bytes_per_token < BOUNDED_KV_MIN_RECORD_BYTES {
+        return Err(ModelConfigError::InvalidSequenceStateLayout {
+            field: "kv_bytes_per_token",
+            value: kv_bytes_per_token,
+            reason: "must reserve one f32 validity flag and one f32 tied key/value payload",
+        });
+    }
+
     Ok(())
 }
 

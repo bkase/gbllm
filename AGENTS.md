@@ -109,6 +109,9 @@ git push                # Push to remote
 - Do not put artifact path naming or fabricated tensor handles in runtime block config. Sequence parameter handles must come from an `ExportVisitor` path that actually emits matching `ArtifactCore` tensors, with a test that every handle resolves to a tensor id.
 - Fixed recurrence/update behavior needs a literal value-level oracle test over at least two tokens. If the update law is only a placeholder or research variant, narrow the closure and avoid claiming numeric semantics beyond scaffolding.
 - Keep scalar sequence kernels, Burn/autodiff gradient paths, `TrainPhaseSpec` hardness scheduling, and shadow-compile A/B fixture adoption as separate claims with separate gates or explicit moved-to beads.
+- When a sequence block imposes an executable byte-record layout, align model topology validation and tiny fixtures with that layout. Durable artifact schema may stay broader, but model config must reject layouts the executable block cannot instantiate.
+- Byte-backed sequence state must validate canonical persisted form before mutation. For cache-like records, test validity flags, contiguous live records, empty-record zeroing, sliding/truncation behavior, and failed-forward atomicity.
+- If a v1 sequence block uses a simplified mechanism such as tied key/value payloads or record metadata inside `*_bytes_per_token`, name that explicitly in docs, tests, and closure; do not let the public wording imply a richer KV layout.
 
 ### Fixture Beads
 

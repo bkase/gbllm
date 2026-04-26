@@ -26,7 +26,7 @@ use super::{
     DenseBranchProjection, ExpertBlockQat, ExpertQat, NormApproxPlan, NormApproxQat,
     SharedDenseBranch, TernaryLinearQat, Top1RouterQat,
 };
-use crate::sequence::LinearStateBlock;
+use crate::sequence::{BoundedKvBlock, LinearStateBlock};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExportedQatArtifact {
@@ -58,6 +58,7 @@ pub enum VisitedModuleKind {
     SharedDenseBranch,
     DenseBranchProjection,
     LinearStateBlock,
+    BoundedKvBlock,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +72,7 @@ pub enum QatModuleRef<'a> {
     SharedDenseBranch(&'a SharedDenseBranch),
     DenseBranchProjection(&'a DenseBranchProjection),
     LinearStateBlock(&'a LinearStateBlock),
+    BoundedKvBlock(&'a BoundedKvBlock),
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +131,7 @@ impl ExportVisitor {
                 self.visit_dense_projection(prefix, projection)
             }
             QatModuleRef::LinearStateBlock(block) => self.visit_linear_state_block(prefix, block),
+            QatModuleRef::BoundedKvBlock(block) => self.visit_bounded_kv_block(prefix, block),
         }
     }
 
@@ -202,6 +205,15 @@ impl ExportVisitor {
     ) -> Result<(), ExportVisitorError> {
         let path = artifact_path(prefix)?;
         self.visit_linear_state_block_at(path, block)
+    }
+
+    pub fn visit_bounded_kv_block(
+        &mut self,
+        prefix: &str,
+        block: &BoundedKvBlock,
+    ) -> Result<(), ExportVisitorError> {
+        let path = artifact_path(prefix)?;
+        self.visit_bounded_kv_block_at(path, block)
     }
 
     pub fn visit_embedding(
@@ -311,6 +323,41 @@ impl ExportVisitor {
         let state_to_output = path.join("state_to_output")?;
         self.visit_ternary_linear_at(state_to_output.clone(), block.state_to_output())?;
         self.record_ternary_tensor_handles(state_to_output, block.state_to_output())?;
+
+        self.visit_activation_at(path.join("output_activation")?, block.output_activation())
+    }
+
+    fn visit_bounded_kv_block_at(
+        &mut self,
+        path: ArtifactPath,
+        block: &BoundedKvBlock,
+    ) -> Result<(), ExportVisitorError> {
+        if self.sequence_facts.spec() != block.spec() {
+            return Err(ExportVisitorError::SequenceSpecMismatch {
+                expected: self.sequence_facts.spec(),
+                actual: block.spec(),
+            });
+        }
+
+        self.mark_visited(path.clone(), VisitedModuleKind::BoundedKvBlock);
+
+        let input_norm = path.join("input_norm")?;
+        self.visit_norm_at(input_norm.clone(), block.input_norm())?;
+        self.record_norm_tensor_handles(input_norm, block.input_norm())?;
+
+        self.visit_activation_at(path.join("input_activation")?, block.input_activation())?;
+
+        let query_projection = path.join("query_projection")?;
+        self.visit_ternary_linear_at(query_projection.clone(), block.query_projection())?;
+        self.record_ternary_tensor_handles(query_projection, block.query_projection())?;
+
+        let kv_projection = path.join("kv_projection")?;
+        self.visit_ternary_linear_at(kv_projection.clone(), block.kv_projection())?;
+        self.record_ternary_tensor_handles(kv_projection, block.kv_projection())?;
+
+        let output_projection = path.join("output_projection")?;
+        self.visit_ternary_linear_at(output_projection.clone(), block.output_projection())?;
+        self.record_ternary_tensor_handles(output_projection, block.output_projection())?;
 
         self.visit_activation_at(path.join("output_activation")?, block.output_activation())
     }
@@ -796,7 +843,7 @@ mod tests {
         ClippedActivation, DenseBranchProjection, EmaDecay, LutSpec, MatrixShape, NormApproxPlan,
         NormClip, Q8_8Scale, RouterShape, TernaryThreshold,
     };
-    use crate::sequence::LinearStateBlockConfig;
+    use crate::sequence::{BoundedKvBlockConfig, LinearStateBlockConfig, SequenceBlock};
 
     #[test]
     fn qat_export_visitor_builds_deterministic_artifact_for_same_modules() {
@@ -831,7 +878,7 @@ mod tests {
 
         assert_eq!(
             export.artifact_core_hash().to_string(),
-            "982598560fb7cfdb069031edbab6b9b9ee9c9490dd0d88ae364512bc148442eb"
+            "c1e77d89a82a888a53cfe9a8871fa1148dd4080228c486ea82ad3c16a6ce75f5"
         );
         assert_eq!(export.core.tensors().len(), 17);
         assert_eq!(export.facts.activation_ranges.len(), 2);
@@ -1135,6 +1182,85 @@ mod tests {
     }
 
     #[test]
+    fn qat_export_visitor_walks_bounded_kv_block_and_records_real_sequence_handles() {
+        let block = fixture_bounded_kv_block();
+        let mut visitor = ExportVisitor::new(SequenceExportFacts::for_spec(block.spec()));
+        visitor
+            .visit_bounded_kv_block("block.0.sequence", &block)
+            .unwrap();
+
+        let export = visitor.finish().unwrap();
+        let tensor_ids = export
+            .core
+            .tensors()
+            .iter()
+            .map(|tensor| tensor.id.clone())
+            .collect::<BTreeSet<_>>();
+        let handles = export
+            .facts
+            .sequence
+            .canonical_tensor_handles()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            handles,
+            vec![
+                "block.0.sequence.input_norm.lut",
+                "block.0.sequence.kv_projection.scale",
+                "block.0.sequence.kv_projection.weight",
+                "block.0.sequence.output_projection.scale",
+                "block.0.sequence.output_projection.weight",
+                "block.0.sequence.query_projection.scale",
+                "block.0.sequence.query_projection.weight",
+            ]
+        );
+        assert_eq!(export.core.sequence_semantics(), block.spec());
+        assert_eq!(
+            export.facts.sequence.measured_state_size(),
+            block.state_size()
+        );
+        let activation_paths = export
+            .core
+            .quant()
+            .activation_quant()
+            .iter()
+            .map(|entry| entry.activation.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            activation_paths,
+            vec![
+                "block.0.sequence.input_activation",
+                "block.0.sequence.output_activation",
+            ]
+        );
+        for handle in export.facts.sequence.canonical_tensor_handles() {
+            assert!(tensor_ids.contains(handle), "missing tensor for {handle}");
+        }
+        assert!(
+            export
+                .visited_modules
+                .iter()
+                .any(|module| module.kind == VisitedModuleKind::BoundedKvBlock)
+        );
+    }
+
+    #[test]
+    fn qat_export_visitor_rejects_bounded_kv_sequence_mismatch() {
+        let block = fixture_bounded_kv_block();
+        let mut visitor = export_visitor();
+        let err = visitor
+            .visit_bounded_kv_block("block.0.sequence", &block)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ExportVisitorError::SequenceSpecMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn qat_export_visitor_supports_each_qat_module_ref_variant() {
         let ternary = ternary_linear(1, 1, vec![1.0], None);
         let activation = activation();
@@ -1146,6 +1272,7 @@ mod tests {
         let dense =
             DenseBranchProjection::new(MatrixShape::new(1, 1).unwrap(), vec![1.0], None).unwrap();
         let linear_state = fixture_linear_state_block();
+        let bounded_kv = fixture_bounded_kv_block();
 
         let mut visitor = ExportVisitor::new(SequenceExportFacts::for_spec(linear_state.spec()));
         visitor
@@ -1201,6 +1328,23 @@ mod tests {
                 VisitedModuleKind::DenseBranchProjection,
                 VisitedModuleKind::LinearStateBlock,
             ])
+        );
+
+        let mut bounded_visitor =
+            ExportVisitor::new(SequenceExportFacts::for_spec(bounded_kv.spec()));
+        bounded_visitor
+            .visit_module(
+                "module.bounded_kv",
+                QatModuleRef::BoundedKvBlock(&bounded_kv),
+            )
+            .unwrap();
+        let bounded_export = bounded_visitor.finish().unwrap();
+
+        assert!(
+            bounded_export
+                .visited_modules
+                .iter()
+                .any(|module| module.kind == VisitedModuleKind::BoundedKvBlock)
         );
     }
 
@@ -1298,7 +1442,7 @@ mod tests {
     }
 
     fn fixture_sequence() -> SequenceSemanticsSpec {
-        SequenceSemanticsSpec::bounded_kv(16, 4).unwrap()
+        SequenceSemanticsSpec::bounded_kv(16, 8).unwrap()
     }
 
     fn fixture_expert_block() -> ExpertBlockQat {
@@ -1402,6 +1546,19 @@ mod tests {
             activation(),
             ternary_linear(16, 2, input_to_state, None),
             ternary_linear(2, 16, state_to_output, None),
+            activation(),
+        )
+        .unwrap()
+    }
+
+    fn fixture_bounded_kv_block() -> BoundedKvBlock {
+        BoundedKvBlock::new(
+            BoundedKvBlockConfig::new(2, 32, 8).unwrap(),
+            fixture_norm(),
+            activation(),
+            ternary_linear(1, 2, vec![0.0, 0.0], None),
+            ternary_linear(1, 2, vec![1.0, 1.0], None),
+            ternary_linear(2, 1, vec![1.0, -1.0], None),
             activation(),
         )
         .unwrap()

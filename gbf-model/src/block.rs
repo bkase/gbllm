@@ -209,7 +209,7 @@ mod tests {
                 BlockExecutionStage::SharedSequence(SharedSequenceStage {
                     kind: SharedSequenceKind::BoundedKv,
                     d_model: 8,
-                    state_width: 6,
+                    state_width: 8,
                 }),
                 BlockExecutionStage::DenseFfn(DenseFfnStage {
                     d_model: 8,
@@ -275,6 +275,22 @@ mod tests {
             })
         );
         assert_eq!(
+            SharedSequenceConfig::bounded_kv(8, 16, 6),
+            Err(ModelConfigError::InvalidSequenceStateLayout {
+                field: "kv_bytes_per_token",
+                value: 6,
+                reason: "must be divisible by 4 for f32-backed bounded-kv records",
+            })
+        );
+        assert_eq!(
+            SharedSequenceConfig::bounded_kv(8, 16, 4),
+            Err(ModelConfigError::InvalidSequenceStateLayout {
+                field: "kv_bytes_per_token",
+                value: 4,
+                reason: "must reserve one f32 validity flag and one f32 tied key/value payload",
+            })
+        );
+        assert_eq!(
             DenseFfnConfig::new(8, 0),
             Err(ModelConfigError::EmptyDimension { field: "d_ff" })
         );
@@ -333,7 +349,7 @@ mod tests {
 
     fn dense_block() -> MoeBlockConfig {
         MoeBlockConfig::dense_ffn(
-            SharedSequenceConfig::bounded_kv(8, 16, 6).unwrap(),
+            SharedSequenceConfig::bounded_kv(8, 16, 8).unwrap(),
             DenseFfnConfig::new(8, 16).unwrap(),
         )
         .unwrap()

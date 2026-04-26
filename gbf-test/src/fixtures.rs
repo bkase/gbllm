@@ -23,7 +23,7 @@ pub const TINY_N_LAYERS: usize = 2;
 pub const TINY_VOCAB_SIZE: usize = 32;
 pub const TINY_MOE_BLOCK_INDEX: usize = 1;
 pub const TINY_MAX_CONTEXT: u16 = 16;
-pub const TINY_KV_BYTES_PER_TOKEN: u16 = 4;
+pub const TINY_KV_BYTES_PER_TOKEN: u16 = 8;
 pub const TINY_BOUNDED_KV_STATE_WIDTH: usize = TINY_KV_BYTES_PER_TOKEN as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
