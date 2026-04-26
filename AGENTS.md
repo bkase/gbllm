@@ -109,6 +109,11 @@ git push                # Push to remote
 - Symbol names must be built from validated segments, not by joining raw caller strings and validating afterward. Add collision tests for dotted helper arguments.
 - Symbol tables should allow address aliases unless the bead explicitly owns a primary-symbol-only table. Reverse lookup APIs must return all names for an address.
 - If a report/schema type derives serde and contains maps, verify JSON serialization directly. Avoid non-string map keys in JSON-facing structures, or provide an explicit stable representation.
+- Builder beads emit symbolic pre-layout section IR. They may record concrete `Instr`s, labels, alignment directives, pseudo-op intent, and raw escape hatches, but closure must move relocation, branch relaxation, far-call thunking, final align padding, byte lowering, and privilege/effect validation to their owner beads.
+- Raw byte escape hatches must not be publicly constructible through multiple paths. Keep raw constructors crate-private or guarded, keep section mutation behind builder APIs, and add a raw-specific test or closure note for the audit surface.
+- Do not model unknown-width symbolic items as zero-byte fixed size. Size APIs for alignments, pseudo-ops, relocations, or runtime-lowered markers should return `None`/unknown or be explicitly named as lower bounds.
+- Pseudo-op tests must assert exact payloads, not only that pseudo-op calls do not panic. If a builder tracks lease-like state, test duplicate, unknown, released, and range-error paths.
+- Provenance-scope helpers that temporarily mutate builder state must restore that state on normal return and caught panic.
 
 ### Sequence-State Beads
 
