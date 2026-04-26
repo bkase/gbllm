@@ -142,25 +142,23 @@ pub enum ActivationForwardMode {
     Eval,
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy)]
-struct ActivationSteSpec {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActivationFakeQuantSpec {
     range: ActivationRange,
     quant_format: ActivationQuantFormat,
     enabled: bool,
 }
 
-#[cfg(test)]
-impl ActivationSteSpec {
-    fn range(self) -> ActivationRange {
+impl ActivationFakeQuantSpec {
+    pub fn range(self) -> ActivationRange {
         self.range
     }
 
-    fn quant_format(self) -> ActivationQuantFormat {
+    pub fn quant_format(self) -> ActivationQuantFormat {
         self.quant_format
     }
 
-    fn enabled(self) -> bool {
+    pub fn enabled(self) -> bool {
         self.enabled
     }
 }
@@ -173,7 +171,7 @@ trait ActivationFakeQuantBackend {
     /// the backend-owned input tensor.
     fn activation_fake_quant_ste(
         &self,
-        spec: ActivationSteSpec,
+        spec: ActivationFakeQuantSpec,
         input: &Self::Tensor,
     ) -> Self::Tensor;
 }
@@ -213,7 +211,7 @@ impl ActFakeQuant {
         input: &B::Tensor,
         mode: ActivationForwardMode,
     ) -> B::Tensor {
-        backend.activation_fake_quant_ste(self.ste_spec(mode), input)
+        backend.activation_fake_quant_ste(self.forward_spec(mode), input)
     }
 
     pub fn inference_forward(
@@ -246,6 +244,14 @@ impl ActFakeQuant {
         self.quant_format
     }
 
+    pub fn forward_spec(&self, mode: ActivationForwardMode) -> ActivationFakeQuantSpec {
+        ActivationFakeQuantSpec {
+            range: self.range_mode.range(),
+            quant_format: self.quant_format,
+            enabled: mode == ActivationForwardMode::Train || !self.eval_passthrough,
+        }
+    }
+
     pub fn update_ema_range(&mut self, observed: ActivationRange) -> Result<(), ActFakeQuantError> {
         if let ActivationRangeMode::Ema { range, decay } = self.range_mode {
             let keep = decay.value();
@@ -276,15 +282,6 @@ impl ActFakeQuant {
                 expected: ActivationRangeModeKind::Learned,
                 actual: self.range_mode.kind(),
             })
-        }
-    }
-
-    #[cfg(test)]
-    fn ste_spec(&self, mode: ActivationForwardMode) -> ActivationSteSpec {
-        ActivationSteSpec {
-            range: self.range_mode.range(),
-            quant_format: self.quant_format,
-            enabled: mode == ActivationForwardMode::Train || !self.eval_passthrough,
         }
     }
 }
@@ -379,7 +376,7 @@ mod tests {
 
         fn activation_fake_quant_ste(
             &self,
-            spec: ActivationSteSpec,
+            spec: ActivationFakeQuantSpec,
             input: &Self::Tensor,
         ) -> Self::Tensor {
             if !spec.enabled() {

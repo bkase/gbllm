@@ -11,8 +11,8 @@ pub mod router;
 pub mod ternary;
 
 pub use activation::{
-    ActFakeQuant, ActFakeQuantError, ActivationForwardMode, ActivationQuantFormat, ActivationRange,
-    ActivationRangeMode, ActivationRangeModeKind, EmaDecay,
+    ActFakeQuant, ActFakeQuantError, ActivationFakeQuantSpec, ActivationForwardMode,
+    ActivationQuantFormat, ActivationRange, ActivationRangeMode, ActivationRangeModeKind, EmaDecay,
 };
 pub use norm::{
     AffineParams, LutSpec, NormApproxError, NormApproxPlan, NormApproxQat, NormClip,
