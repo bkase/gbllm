@@ -69,6 +69,43 @@ fn model_does_not_export_final_artifact_tensor_types_before_artifact_owns_them()
     );
 }
 
+#[test]
+fn qat_modules_do_not_hide_test_only_backend_seams() {
+    let root = workspace_root();
+    let scan_roots = ["gbf-model/src/qat", "gbf-train/src/qat"];
+
+    let mut violations = Vec::new();
+    for scan_root in scan_roots {
+        for file in rust_files(&root.join(scan_root)) {
+            let lines = read_lines(&file);
+            for (line_index, line) in lines.iter().enumerate() {
+                if !strip_line_comment(line).contains("#[cfg(test)]") {
+                    continue;
+                }
+
+                let window_end = lines.len().min(line_index + 8);
+                for (offset, candidate) in lines[line_index + 1..window_end].iter().enumerate() {
+                    let code = strip_line_comment(candidate).trim();
+                    if is_test_only_backend_seam(code) {
+                        violations.push(format!(
+                            "{}:{}: {}",
+                            display_path(&root, &file),
+                            line_index + offset + 2,
+                            code
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "QAT modules must not keep test-only backend seams; expose a real adapter seam or keep tests scalar-only:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -135,6 +172,24 @@ fn exports_final_artifact_tensor_type(line: &str) -> bool {
             "CanonicalArtifact",
             "ArtifactCanonical",
             "FinalArtifact",
+        ]
+        .iter()
+        .any(|name| code.contains(name))
+}
+
+fn is_test_only_backend_seam(code: &str) -> bool {
+    let declares_type = code.starts_with("trait ")
+        || code.starts_with("pub trait ")
+        || code.starts_with("struct ")
+        || code.starts_with("pub struct ");
+
+    declares_type
+        && [
+            "Backend",
+            "SteBackend",
+            "FakeQuantBackend",
+            "TensorBackend",
+            "AdapterBackend",
         ]
         .iter()
         .any(|name| code.contains(name))

@@ -146,6 +146,31 @@ mod tests {
     }
 
     #[test]
+    fn burn_activation_accepts_fixed_range_for_all_quant_formats() {
+        let formats = [
+            ActivationQuantFormat::Int8,
+            ActivationQuantFormat::UInt8,
+            ActivationQuantFormat::UInt4,
+        ];
+
+        for format in formats {
+            let core = ActFakeQuant::new(
+                ActivationRangeMode::Fixed(ActivationRange::new(-1.0, 1.0).unwrap()),
+                format,
+            )
+            .unwrap();
+
+            let layer = ActFakeQuantBurnQat::from_core(core).unwrap();
+
+            assert_eq!(layer.quant_format(), format);
+            assert_eq!(
+                layer.export_range(),
+                ActivationRange::new(-1.0, 1.0).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn burn_activation_eval_passthrough_returns_input_when_configured() {
         type B = BurnNdArrayBackend;
 
@@ -250,19 +275,32 @@ mod tests {
         type B = BurnNdArrayBackend;
 
         let device = BurnDevice::<B>::default();
-        let core = ActFakeQuant::new(
-            ActivationRangeMode::Fixed(ActivationRange::new(-1.0e-40, 1.0e-40).unwrap()),
-            ActivationQuantFormat::Int8,
-        )
-        .unwrap();
-        let layer = ActFakeQuantBurnQat::from_core(core).unwrap();
-        let tensor = float_tensor_from_vec::<B, 1>(vec![1.0e-40], [1], &device).unwrap();
+        let cases = [
+            (
+                ActivationRange::new(-1.0e-40, 1.0e-40).unwrap(),
+                ActivationQuantFormat::Int8,
+            ),
+            (
+                ActivationRange::new(0.0, 1.0e-40).unwrap(),
+                ActivationQuantFormat::UInt8,
+            ),
+            (
+                ActivationRange::new(0.0, 1.0e-40).unwrap(),
+                ActivationQuantFormat::UInt4,
+            ),
+        ];
 
-        let output = layer.fake_quant_forward(tensor, ActivationForwardMode::Train);
-        let values = float_tensor_into_vec(output).unwrap();
+        for (range, format) in cases {
+            let core = ActFakeQuant::new(ActivationRangeMode::Fixed(range), format).unwrap();
+            let layer = ActFakeQuantBurnQat::from_core(core).unwrap();
+            let tensor = float_tensor_from_vec::<B, 1>(vec![range.hi()], [1], &device).unwrap();
 
-        assert!(values[0].is_finite());
-        assert!((-1.0e-40..=1.0e-40).contains(&values[0]));
+            let output = layer.fake_quant_forward(tensor, ActivationForwardMode::Train);
+            let values = float_tensor_into_vec(output).unwrap();
+
+            assert!(values[0].is_finite());
+            assert!((range.lo()..=range.hi()).contains(&values[0]));
+        }
     }
 
     fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {

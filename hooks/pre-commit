@@ -4,6 +4,12 @@
 # Must complete in <2 minutes (CONSTITUTION §II.1)
 set -euo pipefail
 
+# Stage 0: project harness sensors (fast, deterministic)
+if ! python3 scripts/qat_harness_checks.py; then
+    echo "pre-commit: QAT harness checks failed."
+    exit 1
+fi
+
 # Stage 1: formatting (instant)
 if ! cargo fmt --check --all 2>/dev/null; then
     echo "pre-commit: cargo fmt failed. Run 'cargo fmt --all' to fix."
