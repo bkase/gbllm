@@ -5,11 +5,12 @@ use std::fmt;
 
 use gbf_artifact::weight_plan::TernaryWeightPlan;
 use gbf_foundation::ByteCost;
+use serde::{Deserialize, Serialize};
 
 pub const ESTIMATED_EXPERT_TILE_HEADER_BYTES: ByteCost = ByteCost::new(32);
 pub const ESTIMATED_EXPERT_ALIGNMENT_PADDING_BYTES: ByteCost = ByteCost::new(18);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpertBudgetMetadata {
     tile_header_bytes: ByteCost,
     alignment_padding_bytes: ByteCost,
@@ -54,7 +55,7 @@ impl Default for ExpertBudgetMetadata {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpertByteBreakdown {
     d_model: u32,
     d_ff: u32,
@@ -201,7 +202,7 @@ pub(crate) fn compute_glu_expert_bytes_for_diagnostic(
         + ExpertBudgetMetadata::default().total()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaticBudgetReport {
     expert: ExpertByteBreakdown,
     expert_slot_usable_bytes: Option<ByteCost>,
@@ -277,7 +278,7 @@ fn validate_nonzero(field: &'static str, value: u32) -> Result<(), ExpertBudgetE
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExpertSlotFit {
     Fits { slack: ByteCost },
     Exceeds { over_by: ByteCost },
@@ -341,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_static_report_uses_canonical_compute_function() {
+    fn static_budget_report_uses_canonical_compute_function() {
         let plan = default_plan();
         let report = StaticBudgetReport::for_expert(&plan, 128, 224, Some(ByteCost::new(16_384)));
 
@@ -367,6 +368,22 @@ mod tests {
             })
         );
         assert_eq!(over_budget.fits_expert_slot(), Some(false));
+    }
+
+    #[test]
+    fn static_budget_report_is_structured_json_with_selected_byte_limit() {
+        let plan = default_plan();
+        let report = StaticBudgetReport::for_expert(&plan, 128, 224, Some(ByteCost::new(16_384)));
+
+        let encoded = serde_json::to_string(&report).expect("report serializes");
+        let decoded: StaticBudgetReport =
+            serde_json::from_str(&encoded).expect("report deserializes");
+        let value = serde_json::to_value(decoded).expect("report converts to JSON value");
+
+        assert_eq!(decoded, report);
+        assert_eq!(value["expert"]["d_model"], 128);
+        assert_eq!(value["expert"]["d_ff"], 224);
+        assert_eq!(value["expert_slot_usable_bytes"], 16_384);
     }
 
     #[test]
