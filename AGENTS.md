@@ -101,5 +101,8 @@ git push                # Push to remote
 - If a loss claim depends on Burn autodiff, closure must cite a feature-enabled gate such as `cargo test -p gbf-train --features burn-adapter -- <loss_test>`.
 - When a filtered test target is introduced by the patch, report the number of tests run and avoid claiming red-before-green unless you actually ran the pre-patch check.
 - Do not claim phase-boundary adoption or training-loop logging from a standalone loss helper. Name the integration bead that owns the real caller.
+- Loss config helpers must distinguish raw TOML config from phase-effective config. Scalar diagnostic totals/logging helpers are not differentiable Burn training-loss composers.
+- Do not give raw per-term diagnostic collections an implicit all-zero default; enabled lambdas can otherwise hide missing raw loss computation. If zeros are intentional, require explicit fields or a named contribution helper.
+- Logging helper closure must cite subscriber-level capture for event shape and move real producer/dashboard adoption to a named owner bead when no executable producer exists.
 
 <!-- end-br-agent-instructions -->
