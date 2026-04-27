@@ -1,12 +1,14 @@
 //! Explicit phased-training schedule contracts.
 //!
 //! This module owns the config schema and validation for the canonical five
-//! F4 training phases. The training-loop scheduler and per-module hardness
-//! application are separate executable concerns owned by later F4 beads.
+//! F4 training phases. Router phase behavior stays on `RouterTrainMode`
+//! because router transitions control dispatch selection rather than numeric
+//! quantization hardness.
 
 use std::error::Error;
 use std::fmt;
 
+pub use gbf_model::qat::QuantHardness;
 use gbf_model::qat::RouterTrainMode;
 use serde::{Deserialize, Serialize};
 
@@ -144,28 +146,6 @@ impl<'de> Deserialize<'de> for TrainPhaseSpec {
             raw.router_mode,
         )
         .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuantHardness {
-    /// Disable the quantized path for this phase component.
-    Off,
-    /// Enable train-time soft/fake quantization. Exact execution mapping is
-    /// owned by the phase-hardness controller.
-    Soft,
-    /// Require the hard quantized path for this phase component.
-    Hard,
-}
-
-impl fmt::Display for QuantHardness {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Off => f.write_str("off"),
-            Self::Soft => f.write_str("soft"),
-            Self::Hard => f.write_str("hard"),
-        }
     }
 }
 

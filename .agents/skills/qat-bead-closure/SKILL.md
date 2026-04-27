@@ -42,6 +42,7 @@ Before rerunning the harness after a corrective close, search the bead's existin
 - For independent reference packer/oracle beads, keep projection, quantization, and byte packing as separate claims unless the public plan carries the concrete values needed for all three. Byte packing should consume canonical artifact payloads; mark production-vs-reference byte agreement as moved until a production materializer emits comparable bytes.
 - Do not call a pre-export `export_canonical` reconstruction an artifact round trip. Artifact round trips require `ArtifactCore` or serialized artifact bytes and a dedicated gate.
 - For F4 phase/config beads, state whether the type is a canonical five-phase schedule or a generic timeline. Canonical schedules must reject wrong phase count, non-zero start, noncanonical order, gaps, overlaps, zero-length ranges, and step overflow with focused tests.
+- For phase hardness/mode beads, prove live phase transitions on already-constructed model or Burn adapter state. Construction-time initialization tests are not enough for a claim that a scheduler can change modes at phase boundaries.
 
 ## Claim Discipline
 
@@ -65,6 +66,7 @@ Before rerunning the harness after a corrective close, search the bead's existin
 - Do not call a scalar single-token router term `balance_loss` or `load_balance_loss` if the standard batch/token MoE objective is elsewhere. Name it as a proxy and cite the bead that owns the standard loss.
 - If a QAT forward mutates sequence, temporal, EMA, or cache state, add tests proving failure does not advance state and that the stored state has the documented semantics. For routers, keep soft routing probabilities separate from hard dispatch weights.
 - Thread phase/activation/hardness options through every branch, including optional shared branches. Add a test that exercises the optional branch, not only the default path.
+- Keep router dispatch mode and numeric quantization hardness separate unless the public API explicitly unifies them. If router behavior stays on `RouterTrainMode`, the support matrix must say so instead of implying `QuantHardness::Off/Soft/Hard` applies to the router.
 - For optional QAT branch or stability-profile beads, prove both surfaces named by the bead: the architecture/config/topology surface must carry the `Option` and default it off, while executable QAT state must prove the branch math. A concrete `Option<BranchState>` on the module alone is not a config gate.
 - If an optional branch initializes with zero scale/gate/alpha, add a Burn gradient test proving the trainable scale/gate/alpha still receives gradient at initialization. Do not claim branch weights receive gradient at step zero unless the test proves it.
 - If a branch is described as small or common-bank resident, enforce a relative-width/budget boundary or mark common-bank accounting as moved with a named owner.

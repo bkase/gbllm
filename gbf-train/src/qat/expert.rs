@@ -6,7 +6,7 @@ use std::fmt;
 use gbf_model::qat::{
     ActivationForwardMode, ClippedActivation, ClippedActivationKind, DenseBranchProjection,
     ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertQat, ExpertQatForwardMode,
-    MatrixShape, SharedDenseBranch,
+    MatrixShape, QatHardnessControl, QuantHardness, SharedDenseBranch,
 };
 
 use crate::adapter::burn::{
@@ -60,6 +60,15 @@ impl<B: BurnBackend> ExpertBlockBurnQat<B> {
     #[must_use]
     pub fn d_model(&self) -> usize {
         self.experts[0].d_model()
+    }
+
+    pub fn set_hardness(&mut self, expert_qat: QuantHardness, activation_qat: QuantHardness) {
+        for expert in &mut self.experts {
+            expert.set_hardness(expert_qat, activation_qat);
+        }
+        if let Some(shared_dense) = &mut self.shared_dense {
+            shared_dense.set_hardness(activation_qat);
+        }
     }
 
     pub fn forward(
@@ -186,6 +195,12 @@ impl<B: BurnBackend> ExpertBurnQat<B> {
         self.up_projection.shape().input_cols()
     }
 
+    pub fn set_hardness(&mut self, expert_qat: QuantHardness, activation_qat: QuantHardness) {
+        self.up_projection.set_hardness(expert_qat);
+        self.activation.set_hardness(activation_qat);
+        self.down_projection.set_hardness(expert_qat);
+    }
+
     fn forward_delta(
         &self,
         input: BurnFloatTensor<B, 1>,
@@ -269,6 +284,10 @@ impl<B: BurnBackend> SharedDenseBurnBranch<B> {
     #[must_use]
     pub fn down_projection(&self) -> &DenseBranchBurnProjection<B> {
         &self.down_projection
+    }
+
+    pub fn set_hardness(&mut self, activation_qat: QuantHardness) {
+        self.activation.set_hardness(activation_qat);
     }
 
     fn forward(
@@ -578,6 +597,55 @@ mod tests {
             )
             .unwrap();
         assert_ne!(train, eval);
+    }
+
+    #[test]
+    fn burn_expert_hardness_can_change_after_adapter_construction() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let mut core = fixture_block(0.5);
+        let mut layer = ExpertBlockBurnQat::<B>::from_core(core.clone(), &device).unwrap();
+        let input = vec![0.25, 0.5];
+
+        let hard_options =
+            ExpertForwardOptions::for_hardness(QuantHardness::Hard, QuantHardness::Hard);
+        let hard_tensor = float_tensor_from_vec::<B, 1>(input.clone(), [2], &device).unwrap();
+        let hard = layer.forward(hard_tensor, 0, hard_options).unwrap();
+        let hard_values = float_tensor_into_vec(hard).unwrap();
+        assert_close(
+            &hard_values,
+            &core.forward_with_options(&input, 0, hard_options).unwrap(),
+            1.0e-6,
+        );
+
+        core.set_hardness(QuantHardness::Soft, QuantHardness::Soft);
+        layer.set_hardness(QuantHardness::Soft, QuantHardness::Soft);
+        let soft_options =
+            ExpertForwardOptions::for_hardness(QuantHardness::Soft, QuantHardness::Soft);
+        let soft_tensor = float_tensor_from_vec::<B, 1>(input.clone(), [2], &device).unwrap();
+        let soft = layer.forward(soft_tensor, 0, soft_options).unwrap();
+        let soft_values = float_tensor_into_vec(soft).unwrap();
+        assert_close(
+            &soft_values,
+            &core.forward_with_options(&input, 0, soft_options).unwrap(),
+            1.0e-6,
+        );
+
+        core.set_hardness(QuantHardness::Off, QuantHardness::Off);
+        layer.set_hardness(QuantHardness::Off, QuantHardness::Off);
+        let off_options =
+            ExpertForwardOptions::for_hardness(QuantHardness::Off, QuantHardness::Off);
+        let off_tensor = float_tensor_from_vec::<B, 1>(input.clone(), [2], &device).unwrap();
+        let off = layer.forward(off_tensor, 0, off_options).unwrap();
+        let off_values = float_tensor_into_vec(off).unwrap();
+        assert_close(
+            &off_values,
+            &core.forward_with_options(&input, 0, off_options).unwrap(),
+            1.0e-6,
+        );
+        assert_ne!(hard_values, soft_values);
+        assert_ne!(soft_values, off_values);
     }
 
     #[test]

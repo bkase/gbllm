@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use super::{QatHardnessControl, QuantHardness};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ActivationRange {
     lo: f32,
@@ -141,6 +143,7 @@ impl ActivationQuantFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationForwardMode {
+    Passthrough,
     Train,
     Eval,
 }
@@ -149,6 +152,7 @@ pub enum ActivationForwardMode {
 pub struct ActivationFakeQuantSpec {
     range: ActivationRange,
     quant_format: ActivationQuantFormat,
+    hardness: QuantHardness,
     enabled: bool,
 }
 
@@ -159,6 +163,10 @@ impl ActivationFakeQuantSpec {
 
     pub fn quant_format(self) -> ActivationQuantFormat {
         self.quant_format
+    }
+
+    pub fn hardness(self) -> QuantHardness {
+        self.hardness
     }
 
     pub fn quant_steps(self) -> u16 {
@@ -175,6 +183,7 @@ pub struct ActFakeQuant {
     range_mode: ActivationRangeMode,
     quant_format: ActivationQuantFormat,
     eval_passthrough: bool,
+    hardness: QuantHardness,
 }
 
 impl ActFakeQuant {
@@ -190,6 +199,7 @@ impl ActFakeQuant {
             range_mode,
             quant_format,
             eval_passthrough: false,
+            hardness: QuantHardness::Hard,
         })
     }
 
@@ -205,14 +215,25 @@ impl ActFakeQuant {
     ) -> Result<Vec<f32>, ActFakeQuantError> {
         validate_input(input)?;
 
-        if mode == ActivationForwardMode::Eval && self.eval_passthrough {
+        if self.hardness == QuantHardness::Off
+            || mode == ActivationForwardMode::Passthrough
+            || mode == ActivationForwardMode::Eval && self.eval_passthrough
+        {
             return Ok(input.to_vec());
         }
 
         Ok(input
             .iter()
             .copied()
-            .map(|value| fake_quantize_value(value, self.export_range(), self.quant_format))
+            .map(|value| match self.hardness {
+                QuantHardness::Off => unreachable!("off hardness returns before quantized path"),
+                QuantHardness::Soft => {
+                    soft_fake_quantize_value(value, self.export_range(), self.quant_format)
+                }
+                QuantHardness::Hard => {
+                    fake_quantize_value(value, self.export_range(), self.quant_format)
+                }
+            })
             .collect())
     }
 
@@ -236,7 +257,10 @@ impl ActFakeQuant {
         ActivationFakeQuantSpec {
             range: self.range_mode.range(),
             quant_format: self.quant_format,
-            enabled: mode == ActivationForwardMode::Train || !self.eval_passthrough,
+            hardness: self.hardness,
+            enabled: self.hardness != QuantHardness::Off
+                && mode != ActivationForwardMode::Passthrough
+                && (mode == ActivationForwardMode::Train || !self.eval_passthrough),
         }
     }
 
@@ -271,6 +295,16 @@ impl ActFakeQuant {
                 actual: self.range_mode.kind(),
             })
         }
+    }
+}
+
+impl QatHardnessControl for ActFakeQuant {
+    fn hardness(&self) -> QuantHardness {
+        self.hardness
+    }
+
+    fn set_hardness(&mut self, hardness: QuantHardness) {
+        self.hardness = hardness;
     }
 }
 
@@ -351,6 +385,17 @@ fn fake_quantize_value(
             .clamp(0.0, qmax);
         range.clamp((quantized * width / qmax + lo) as f32)
     }
+}
+
+fn soft_fake_quantize_value(
+    value: f32,
+    range: ActivationRange,
+    quant_format: ActivationQuantFormat,
+) -> f32 {
+    let clamped = range.clamp(value);
+    let quantized = fake_quantize_value(value, range, quant_format);
+
+    range.clamp((clamped + quantized) / 2.0)
 }
 
 #[cfg(test)]

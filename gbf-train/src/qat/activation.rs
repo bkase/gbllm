@@ -5,7 +5,7 @@ use std::fmt;
 
 use gbf_model::qat::{
     ActFakeQuant, ActivationForwardMode, ActivationQuantFormat, ActivationRange,
-    ActivationRangeMode, ActivationRangeModeKind,
+    ActivationRangeMode, ActivationRangeModeKind, QatHardnessControl, QuantHardness,
 };
 
 use crate::adapter::burn::{BurnBackend, BurnFloatTensor, ste_clamp, ste_round};
@@ -52,12 +52,29 @@ impl ActFakeQuantBurnQat {
         }
 
         let qmax = f32::from(spec.quant_steps());
-        match spec.quant_format() {
+        let clamped_input = input.clone().clamp(spec.range().lo(), spec.range().hi());
+        let hard = match spec.quant_format() {
             ActivationQuantFormat::Int8 => fake_quant_signed(input, spec.range(), qmax),
             ActivationQuantFormat::UInt8 | ActivationQuantFormat::UInt4 => {
                 fake_quant_unsigned(input, spec.range(), qmax)
             }
+        };
+
+        match spec.hardness() {
+            QuantHardness::Off => unreachable!("off hardness disables activation fake quant"),
+            QuantHardness::Soft => (clamped_input + hard) / 2.0,
+            QuantHardness::Hard => hard,
         }
+    }
+}
+
+impl QatHardnessControl for ActFakeQuantBurnQat {
+    fn hardness(&self) -> QuantHardness {
+        self.core.hardness()
+    }
+
+    fn set_hardness(&mut self, hardness: QuantHardness) {
+        self.core.set_hardness(hardness);
     }
 }
 
@@ -258,6 +275,32 @@ mod tests {
         let layer = ActFakeQuantBurnQat::from_core(core.clone()).unwrap();
         let input = vec![-0.25, -0.15, 0.25, 0.45, 0.75];
         let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [5], &device).unwrap();
+
+        let output = layer.fake_quant_forward(tensor, ActivationForwardMode::Train);
+
+        assert_close(
+            &float_tensor_into_vec(output).unwrap(),
+            &core
+                .inference_forward(&input, ActivationForwardMode::Train)
+                .unwrap(),
+            f32::EPSILON,
+        );
+    }
+
+    #[test]
+    fn burn_activation_soft_forward_matches_core_scalar_projection() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let mut core = ActFakeQuant::new(
+            ActivationRangeMode::Fixed(ActivationRange::new(0.0, 1.0).unwrap()),
+            ActivationQuantFormat::UInt4,
+        )
+        .unwrap();
+        core.set_hardness(QuantHardness::Soft);
+        let layer = ActFakeQuantBurnQat::from_core(core.clone()).unwrap();
+        let input = vec![-1.0, 0.5, 2.0];
+        let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [3], &device).unwrap();
 
         let output = layer.fake_quant_forward(tensor, ActivationForwardMode::Train);
 

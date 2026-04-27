@@ -8,6 +8,8 @@ use gbf_artifact::weight_plan::{
     ScaleFormat, ScaleGranularity, TernaryWeightPlan, ThresholdPlan, WeightEncoding,
 };
 
+use super::{DEFAULT_SOFT_TERNARY_TEMPERATURE, QatHardnessControl, QuantHardness};
+
 const Q8_8_SCALE: f32 = 256.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +204,7 @@ pub struct TernaryLinearQat {
     bias: Option<Vec<f32>>,
     thresholds: Vec<TernaryThreshold>,
     scales: Vec<Q8_8Scale>,
+    hardness: QuantHardness,
 }
 
 impl TernaryLinearQat {
@@ -251,6 +254,7 @@ impl TernaryLinearQat {
             bias,
             thresholds,
             scales,
+            hardness: QuantHardness::Hard,
         })
     }
 
@@ -338,25 +342,11 @@ impl TernaryLinearQat {
             return Err(TernaryLinearQatError::NonFiniteInput { index });
         }
 
-        let output = self
-            .full_precision_weights
-            .chunks_exact(self.shape.input_cols())
-            .enumerate()
-            .map(|(row_index, row)| {
-                let threshold = self.thresholds[row_index];
-                let scale = self.scales[row_index];
-                let weighted_sum = row
-                    .iter()
-                    .zip(x.iter())
-                    .map(|(&weight, &input)| {
-                        TernaryValue::from_weight(weight, threshold).scaled(scale) * input
-                    })
-                    .sum::<f32>();
-                weighted_sum + self.bias.as_ref().map_or(0.0, |bias| bias[row_index])
-            })
-            .collect();
-
-        Ok(output)
+        Ok(match self.hardness {
+            QuantHardness::Off => self.full_precision_forward_unchecked(x),
+            QuantHardness::Soft => self.soft_quantized_forward_unchecked(x),
+            QuantHardness::Hard => self.hard_quantized_forward_unchecked(x),
+        })
     }
 
     pub fn export_canonical(&self) -> TernaryLinearExport {
@@ -416,6 +406,69 @@ impl TernaryLinearQat {
 
     pub fn projected_weights(&self) -> Vec<f32> {
         self.export_canonical().projected_weights()
+    }
+
+    fn full_precision_forward_unchecked(&self, x: &[f32]) -> Vec<f32> {
+        self.full_precision_weights
+            .chunks_exact(self.shape.input_cols())
+            .enumerate()
+            .map(|(row_index, row)| {
+                let weighted_sum = row
+                    .iter()
+                    .zip(x.iter())
+                    .map(|(&weight, &input)| weight * input)
+                    .sum::<f32>();
+                weighted_sum + self.bias.as_ref().map_or(0.0, |bias| bias[row_index])
+            })
+            .collect()
+    }
+
+    fn soft_quantized_forward_unchecked(&self, x: &[f32]) -> Vec<f32> {
+        self.full_precision_weights
+            .chunks_exact(self.shape.input_cols())
+            .enumerate()
+            .map(|(row_index, row)| {
+                let threshold = self.thresholds[row_index];
+                let scale = self.scales[row_index];
+                let weighted_sum = row
+                    .iter()
+                    .zip(x.iter())
+                    .map(|(&weight, &input)| {
+                        soft_ternary_symbol(weight, threshold) * scale.to_f32() * input
+                    })
+                    .sum::<f32>();
+                weighted_sum + self.bias.as_ref().map_or(0.0, |bias| bias[row_index])
+            })
+            .collect()
+    }
+
+    fn hard_quantized_forward_unchecked(&self, x: &[f32]) -> Vec<f32> {
+        self.full_precision_weights
+            .chunks_exact(self.shape.input_cols())
+            .enumerate()
+            .map(|(row_index, row)| {
+                let threshold = self.thresholds[row_index];
+                let scale = self.scales[row_index];
+                let weighted_sum = row
+                    .iter()
+                    .zip(x.iter())
+                    .map(|(&weight, &input)| {
+                        TernaryValue::from_weight(weight, threshold).scaled(scale) * input
+                    })
+                    .sum::<f32>();
+                weighted_sum + self.bias.as_ref().map_or(0.0, |bias| bias[row_index])
+            })
+            .collect()
+    }
+}
+
+impl QatHardnessControl for TernaryLinearQat {
+    fn hardness(&self) -> QuantHardness {
+        self.hardness
+    }
+
+    fn set_hardness(&mut self, hardness: QuantHardness) {
+        self.hardness = hardness;
     }
 }
 
@@ -581,6 +634,17 @@ pub fn project_ternary_values(
                 .map(move |weight| TernaryValue::from_weight(weight, threshold))
         })
         .collect())
+}
+
+fn soft_ternary_symbol(weight: f32, threshold: TernaryThreshold) -> f32 {
+    let positive = sigmoid((weight - threshold.value()) * DEFAULT_SOFT_TERNARY_TEMPERATURE);
+    let negative = sigmoid((-weight - threshold.value()) * DEFAULT_SOFT_TERNARY_TEMPERATURE);
+
+    positive - negative
+}
+
+fn sigmoid(value: f32) -> f32 {
+    1.0 / (1.0 + (-value).exp())
 }
 
 fn build_export(

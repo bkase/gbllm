@@ -6,6 +6,7 @@
 pub mod activation;
 pub mod expert;
 pub mod export;
+pub mod hardness;
 pub mod norm;
 pub mod router;
 pub mod ternary;
@@ -23,6 +24,9 @@ pub use expert::{
 pub use export::{
     ExportVisitor, ExportVisitorError, ExportedQatArtifact, QatModuleRef, VisitedModule,
     VisitedModuleKind,
+};
+pub use hardness::{
+    DEFAULT_SOFT_BLEND, DEFAULT_SOFT_TERNARY_TEMPERATURE, QatHardnessControl, QuantHardness,
 };
 pub use norm::{
     AffineParams, LutSpec, NormApproxError, NormApproxPlan, NormApproxQat, NormClip,

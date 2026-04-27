@@ -8,7 +8,7 @@ use gbf_foundation::ByteCost;
 use crate::budget::{compute_expert_bytes, compute_glu_expert_bytes_for_diagnostic};
 use crate::qat::{
     ActFakeQuant, ActFakeQuantError, ActivationForwardMode, ActivationRange, MatrixShape,
-    TernaryLinearQat, TernaryLinearQatError,
+    QatHardnessControl, QuantHardness, TernaryLinearQat, TernaryLinearQatError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,26 @@ impl ExpertForwardOptions {
         Self {
             expert_qat: ExpertQatForwardMode::FullPrecision,
             activation: ActivationForwardMode::Train,
+        }
+    }
+
+    /// Maps phase hardness fields to expert execution switches.
+    ///
+    /// Callers that want `Soft`/`Hard` projection behavior should also apply
+    /// the same phase hardness to the expert block state.
+    pub fn for_hardness(expert_qat: QuantHardness, activation_qat: QuantHardness) -> Self {
+        let expert_qat = match expert_qat {
+            QuantHardness::Off => ExpertQatForwardMode::FullPrecision,
+            QuantHardness::Soft | QuantHardness::Hard => ExpertQatForwardMode::HardQuantized,
+        };
+        let activation = match activation_qat {
+            QuantHardness::Off => ActivationForwardMode::Passthrough,
+            QuantHardness::Soft | QuantHardness::Hard => ActivationForwardMode::Train,
+        };
+
+        Self {
+            expert_qat,
+            activation,
         }
     }
 
@@ -334,6 +354,16 @@ impl ExpertBlockQat {
         self.experts[0].d_model()
     }
 
+    /// Applies phase hardness to every QAT leaf owned by the expert block.
+    pub fn set_hardness(&mut self, expert_qat: QuantHardness, activation_qat: QuantHardness) {
+        for expert in &mut self.experts {
+            expert.set_hardness(expert_qat, activation_qat);
+        }
+        if let Some(shared_dense) = &mut self.shared_dense {
+            shared_dense.set_hardness(activation_qat);
+        }
+    }
+
     /// Returns `residual + selected_expert_delta + alpha * shared_dense_delta`.
     ///
     /// Router weighting is outside this scalar block; this API receives the
@@ -557,6 +587,12 @@ impl ExpertQat {
         2
     }
 
+    pub fn set_hardness(&mut self, expert_qat: QuantHardness, activation_qat: QuantHardness) {
+        self.up_projection.set_hardness(expert_qat);
+        self.activation.set_hardness(activation_qat);
+        self.down_projection.set_hardness(expert_qat);
+    }
+
     pub fn validate_config(&self, config: ExpertMlpConfig) -> Result<(), ExpertBlockQatError> {
         if config.variant() != ExpertMlpVariant::TwoMatrix {
             return Err(ExpertBlockQatError::UnsupportedExpertMlpVariant {
@@ -706,6 +742,10 @@ impl SharedDenseBranch {
     ) -> Result<(), ExpertBlockQatError> {
         validate_shared_config_dimension("d_model", config.d_model(), self.d_model())?;
         validate_shared_config_dimension("d_ff_shared", config.d_ff_shared(), self.d_ff_shared())
+    }
+
+    pub fn set_hardness(&mut self, activation_qat: QuantHardness) {
+        self.activation.set_hardness(activation_qat);
     }
 
     fn forward(

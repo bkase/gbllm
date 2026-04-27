@@ -11,6 +11,8 @@ use gbf_artifact::norm_plan::{
     TileRmsThenAffineClipPlan as ArtifactTileRmsThenAffineClipPlan,
 };
 
+use super::{DEFAULT_SOFT_BLEND, QatHardnessControl, QuantHardness};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineParams {
     scale: f32,
@@ -232,11 +234,15 @@ impl NormExportData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormApproxQat {
     plan: NormApproxPlan,
+    hardness: QuantHardness,
 }
 
 impl NormApproxQat {
     pub fn new(plan: NormApproxPlan) -> Self {
-        Self { plan }
+        Self {
+            plan,
+            hardness: QuantHardness::Hard,
+        }
     }
 
     pub fn plan(&self) -> NormApproxPlan {
@@ -247,14 +253,27 @@ impl NormApproxQat {
         validate_input(input)?;
 
         match self.plan {
-            NormApproxPlan::AffineClipLut { affine, clip, lut } => Ok(input
-                .iter()
-                .copied()
-                .map(|value| apply_affine_clip_lut(value, affine, clip, lut))
-                .collect()),
-            NormApproxPlan::TileRmsThenAffineClip { tile, affine, clip } => {
-                tile_rms_then_affine_clip(input, tile, affine, clip)
+            NormApproxPlan::AffineClipLut { affine, clip, lut } => {
+                let forward = match self.hardness {
+                    QuantHardness::Off => exact_affine_clip_lut,
+                    QuantHardness::Soft => soft_affine_clip_lut,
+                    QuantHardness::Hard => apply_affine_clip_lut,
+                };
+                Ok(input
+                    .iter()
+                    .copied()
+                    .map(|value| forward(value, affine, clip, lut))
+                    .collect())
             }
+            NormApproxPlan::TileRmsThenAffineClip { tile, affine, clip } => match self.hardness {
+                QuantHardness::Off => full_rms_then_affine_clip(input, affine, clip),
+                QuantHardness::Soft => {
+                    let exact = full_rms_then_affine_clip(input, affine, clip)?;
+                    let hard = tile_rms_then_affine_clip(input, tile, affine, clip)?;
+                    Ok(blend_vectors(&exact, &hard, DEFAULT_SOFT_BLEND))
+                }
+                QuantHardness::Hard => tile_rms_then_affine_clip(input, tile, affine, clip),
+            },
         }
     }
 
@@ -282,6 +301,16 @@ impl NormApproxQat {
         };
 
         NormExportData { params }
+    }
+}
+
+impl QatHardnessControl for NormApproxQat {
+    fn hardness(&self) -> QuantHardness {
+        self.hardness
+    }
+
+    fn set_hardness(&mut self, hardness: QuantHardness) {
+        self.hardness = hardness;
     }
 }
 
@@ -362,6 +391,10 @@ fn apply_affine_clip(value: f32, affine: AffineParams, clip: NormClip) -> f32 {
     clip.apply(affine.apply(value))
 }
 
+fn exact_affine_clip_lut(value: f32, affine: AffineParams, clip: NormClip, _lut: LutSpec) -> f32 {
+    apply_affine_clip(value, affine, clip)
+}
+
 fn affine_clip_lut_values(affine: AffineParams, clip: NormClip, lut: LutSpec) -> Vec<f32> {
     (0..lut.entries())
         .map(|index| apply_affine_clip(lut.sample(index), affine, clip))
@@ -371,6 +404,11 @@ fn affine_clip_lut_values(affine: AffineParams, clip: NormClip, lut: LutSpec) ->
 fn apply_affine_clip_lut(value: f32, affine: AffineParams, clip: NormClip, lut: LutSpec) -> f32 {
     let values = affine_clip_lut_values(affine, clip, lut);
     values[lut.nearest_index(value)]
+}
+
+fn soft_affine_clip_lut(value: f32, affine: AffineParams, clip: NormClip, lut: LutSpec) -> f32 {
+    apply_affine_clip(value, affine, clip) * DEFAULT_SOFT_BLEND
+        + apply_affine_clip_lut(value, affine, clip, lut) * (1.0 - DEFAULT_SOFT_BLEND)
 }
 
 fn artifact_affine(affine: AffineParams) -> ArtifactNormAffineParams {
@@ -427,6 +465,34 @@ fn tile_rms_then_affine_clip(
                 .map(move |value| apply_affine_clip(value / rms, affine, clip))
         })
         .collect())
+}
+
+fn full_rms_then_affine_clip(
+    input: &[f32],
+    affine: AffineParams,
+    clip: NormClip,
+) -> Result<Vec<f32>, NormApproxError> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mean_square = input.iter().map(|value| value * value).sum::<f32>() / input.len() as f32;
+    let rms = mean_square.sqrt().max(f32::MIN_POSITIVE);
+
+    Ok(input
+        .iter()
+        .copied()
+        .map(|value| apply_affine_clip(value / rms, affine, clip))
+        .collect())
+}
+
+fn blend_vectors(exact: &[f32], hard: &[f32], exact_weight: f32) -> Vec<f32> {
+    exact
+        .iter()
+        .copied()
+        .zip(hard.iter().copied())
+        .map(|(exact, hard)| exact * exact_weight + hard * (1.0 - exact_weight))
+        .collect()
 }
 
 #[cfg(test)]

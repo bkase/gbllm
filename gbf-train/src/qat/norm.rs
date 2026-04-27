@@ -4,8 +4,8 @@ use std::error::Error;
 use std::fmt;
 
 use gbf_model::qat::{
-    AffineParams, LutSpec, NormApproxError, NormApproxPlan, NormApproxQat, NormClip,
-    NormExportData, TileRmsSpec,
+    AffineParams, DEFAULT_SOFT_BLEND, LutSpec, NormApproxError, NormApproxPlan, NormApproxQat,
+    NormClip, NormExportData, QatHardnessControl, QuantHardness, TileRmsSpec,
 };
 
 use crate::adapter::burn::{
@@ -25,6 +25,8 @@ pub enum NormApproxBurnPlan {
 pub struct NormApproxBurnQat<B: BurnBackend> {
     #[module(skip)]
     plan: NormApproxBurnPlan,
+    #[module(skip)]
+    hardness: QuantHardness,
     affine_scale: BurnParam<BurnFloatTensor<B, 1>>,
     affine_bias: BurnParam<BurnFloatTensor<B, 1>>,
     clip_center: BurnParam<BurnFloatTensor<B, 1>>,
@@ -42,6 +44,7 @@ impl<B: BurnBackend> NormApproxBurnQat<B> {
 
         Ok(Self {
             plan,
+            hardness: core.hardness(),
             affine_scale: BurnParam::from_tensor(scalar_tensor(affine.scale(), device)?),
             affine_bias: BurnParam::from_tensor(scalar_tensor(affine.bias(), device)?),
             clip_center: BurnParam::from_tensor(scalar_tensor(clip_center, device)?),
@@ -91,10 +94,20 @@ impl<B: BurnBackend> NormApproxBurnQat<B> {
         input: BurnFloatTensor<B, D>,
     ) -> Result<BurnFloatTensor<B, D>, NormApproxBurnQatError> {
         match self.plan {
-            NormApproxBurnPlan::AffineClipLut { lut } => Ok(self.affine_clip_lut(input, lut)),
-            NormApproxBurnPlan::TileRmsThenAffineClip { tile } => {
-                Ok(self.affine_clip(tile_rms(input, tile)?))
-            }
+            NormApproxBurnPlan::AffineClipLut { lut } => Ok(match self.hardness {
+                QuantHardness::Off => self.affine_clip(input),
+                QuantHardness::Soft => self.soft_affine_clip_lut(input, lut),
+                QuantHardness::Hard => self.affine_clip_lut(input, lut),
+            }),
+            NormApproxBurnPlan::TileRmsThenAffineClip { tile } => match self.hardness {
+                QuantHardness::Off => Ok(self.affine_clip(full_rms(input)?)),
+                QuantHardness::Soft => {
+                    let exact = self.affine_clip(full_rms(input.clone())?);
+                    let hard = self.affine_clip(tile_rms(input, tile)?);
+                    Ok(exact * DEFAULT_SOFT_BLEND + hard * (1.0 - DEFAULT_SOFT_BLEND))
+                }
+                QuantHardness::Hard => Ok(self.affine_clip(tile_rms(input, tile)?)),
+            },
         }
     }
 
@@ -131,6 +144,17 @@ impl<B: BurnBackend> NormApproxBurnQat<B> {
         let hard = self.hard_affine_clip_lut(input, lut);
 
         ste_replace_forward(surrogate, hard)
+    }
+
+    fn soft_affine_clip_lut<const D: usize>(
+        &self,
+        input: BurnFloatTensor<B, D>,
+        lut: LutSpec,
+    ) -> BurnFloatTensor<B, D> {
+        let exact = self.affine_clip(input.clone());
+        let hard = self.hard_affine_clip_lut(input, lut);
+
+        exact * DEFAULT_SOFT_BLEND + hard * (1.0 - DEFAULT_SOFT_BLEND)
     }
 
     fn hard_affine_clip_lut<const D: usize>(
@@ -197,6 +221,16 @@ impl<B: BurnBackend> NormApproxBurnQat<B> {
             scalar_from_tensor("clip_hi", self.clip_hi().detach())?,
         )
         .map_err(NormApproxBurnQatError::Model)
+    }
+}
+
+impl<B: BurnBackend> QatHardnessControl for NormApproxBurnQat<B> {
+    fn hardness(&self) -> QuantHardness {
+        self.hardness
+    }
+
+    fn set_hardness(&mut self, hardness: QuantHardness) {
+        self.hardness = hardness;
     }
 }
 
@@ -309,6 +343,29 @@ fn tile_rms<B: BurnBackend, const D: usize>(
     Ok((tiled / rms).reshape(original_shape))
 }
 
+fn full_rms<B: BurnBackend, const D: usize>(
+    input: BurnFloatTensor<B, D>,
+) -> Result<BurnFloatTensor<B, D>, NormApproxBurnQatError> {
+    let shape = float_tensor_shape(&input);
+    let len = checked_element_count(&shape)?;
+    let last_dim = shape
+        .last()
+        .copied()
+        .ok_or(NormApproxBurnQatError::RankZeroTileInput)?;
+
+    if len == 0 {
+        return Ok(input);
+    }
+
+    let original_shape = input.shape();
+    let rows = len / last_dim;
+    let tiled: BurnFloatTensor<B, 2> = input.reshape([rows, last_dim]);
+    let mean_square = (tiled.clone() * tiled.clone()).mean_dim(1);
+    let rms = mean_square.sqrt().clamp_min(f32::MIN_POSITIVE);
+
+    Ok((tiled / rms.repeat_dim(1, last_dim)).reshape(original_shape))
+}
+
 fn checked_element_count<const D: usize>(
     shape: &[usize; D],
 ) -> Result<usize, NormApproxBurnQatError> {
@@ -349,6 +406,60 @@ mod tests {
             float_tensor_into_vec(output).unwrap(),
             core.forward(&input).unwrap()
         );
+    }
+
+    #[test]
+    fn burn_norm_hardness_controls_affine_lut_forward() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let input = vec![0.25];
+        let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [1], &device).unwrap();
+
+        for hardness in [QuantHardness::Off, QuantHardness::Soft, QuantHardness::Hard] {
+            let mut core = NormApproxQat::new(NormApproxPlan::AffineClipLut {
+                affine: AffineParams::new(2.0, 0.0).unwrap(),
+                clip: NormClip::new(-1.0, 1.0).unwrap(),
+                lut: LutSpec::new(-1.0, 1.0, 3).unwrap(),
+            });
+            core.set_hardness(hardness);
+            let layer = NormApproxBurnQat::<B>::from_core(core.clone(), &device).unwrap();
+
+            let output = layer.forward(tensor.clone()).unwrap();
+
+            assert_close(
+                &float_tensor_into_vec(output).unwrap(),
+                &core.forward(&input).unwrap(),
+                1.0e-6,
+            );
+        }
+    }
+
+    #[test]
+    fn burn_norm_hardness_controls_tile_rms_forward() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let input = vec![3.0, 4.0];
+        let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [2], &device).unwrap();
+
+        for hardness in [QuantHardness::Off, QuantHardness::Soft, QuantHardness::Hard] {
+            let mut core = NormApproxQat::new(NormApproxPlan::TileRmsThenAffineClip {
+                tile: TileRmsSpec::new(1, 1.0).unwrap(),
+                affine: AffineParams::new(1.0, 0.0).unwrap(),
+                clip: NormClip::new(-2.0, 2.0).unwrap(),
+            });
+            core.set_hardness(hardness);
+            let layer = NormApproxBurnQat::<B>::from_core(core.clone(), &device).unwrap();
+
+            let output = layer.forward(tensor.clone()).unwrap();
+
+            assert_close(
+                &float_tensor_into_vec(output).unwrap(),
+                &core.forward(&input).unwrap(),
+                1.0e-6,
+            );
+        }
     }
 
     #[test]
@@ -555,6 +666,7 @@ mod tests {
             plan: NormApproxBurnPlan::AffineClipLut {
                 lut: LutSpec::new(-1.0, 1.0, 3).unwrap(),
             },
+            hardness: QuantHardness::Hard,
             affine_scale: BurnParam::from_tensor(scalar_tensor(1.0, &device).unwrap()),
             affine_bias: BurnParam::from_tensor(scalar_tensor(0.0, &device).unwrap()),
             clip_center: BurnParam::from_tensor(scalar_tensor(0.0, &device).unwrap()),

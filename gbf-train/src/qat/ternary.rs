@@ -5,13 +5,13 @@ use std::fmt;
 
 use gbf_artifact::weight_plan::TernaryWeightPlan;
 use gbf_model::qat::{
-    MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError,
-    TernaryThreshold,
+    DEFAULT_SOFT_TERNARY_TEMPERATURE, MatrixShape, Q8_8Scale, QatHardnessControl, QuantHardness,
+    TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError, TernaryThreshold,
 };
 
 use crate::adapter::burn::{
     BurnAdapterError, BurnBackend, BurnDevice, BurnFloatTensor, BurnModule, BurnParam, burn_linear,
-    float_tensor_from_vec, float_tensor_into_vec, float_tensor_shape, ste_clamp,
+    burn_sigmoid, float_tensor_from_vec, float_tensor_into_vec, float_tensor_shape, ste_clamp,
     ste_replace_forward, ste_round,
 };
 
@@ -108,13 +108,27 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
         }
         validate_finite_input(&input)?;
 
+        if self.core.hardness() == QuantHardness::Off {
+            return Ok(burn_linear(
+                input,
+                self.full_precision_weights().transpose(),
+                self.bias(),
+            ));
+        }
+
         let weights = self.full_precision_weights();
         let thresholds =
             threshold_tensor(&self.core, fake_quant_q8_8_nonnegative(self.thresholds()));
-        let hard_symbols = hard_ternary_symbols(weights.clone(), thresholds.clone());
-        let weight_sign = weights.clone().sign().detach();
-        let surrogate_symbols = weights.clone() - thresholds * weight_sign;
-        let symbols = ste_replace_forward(surrogate_symbols, hard_symbols);
+        let symbols = match self.core.hardness() {
+            QuantHardness::Off => unreachable!("off hardness returns before quantized path"),
+            QuantHardness::Soft => soft_ternary_symbols(weights, thresholds),
+            QuantHardness::Hard => {
+                let hard_symbols = hard_ternary_symbols(weights.clone(), thresholds.clone());
+                let weight_sign = weights.clone().sign().detach();
+                let surrogate_symbols = weights - thresholds * weight_sign;
+                ste_replace_forward(surrogate_symbols, hard_symbols)
+            }
+        };
         let scales = fake_quant_q8_8_scales(self.scale_factors())
             .reshape([shape.output_rows(), 1])
             .repeat_dim(1, shape.input_cols());
@@ -159,7 +173,21 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
             .transpose()?;
 
         TernaryLinearQat::new(self.shape(), weights, bias, thresholds, scales)
+            .map(|mut core| {
+                core.set_hardness(self.hardness());
+                core
+            })
             .map_err(TernaryLinearBurnQatError::Model)
+    }
+}
+
+impl<B: BurnBackend> QatHardnessControl for TernaryLinearBurnQat<B> {
+    fn hardness(&self) -> QuantHardness {
+        self.core.hardness()
+    }
+
+    fn set_hardness(&mut self, hardness: QuantHardness) {
+        self.core.set_hardness(hardness);
     }
 }
 
@@ -239,6 +267,17 @@ fn hard_ternary_symbols<B: BurnBackend>(
         .zeros_like()
         .mask_fill(positive, 1.0f32)
         .mask_fill(negative, -1.0f32)
+}
+
+fn soft_ternary_symbols<B: BurnBackend>(
+    weights: BurnFloatTensor<B, 2>,
+    thresholds: BurnFloatTensor<B, 2>,
+) -> BurnFloatTensor<B, 2> {
+    let positive =
+        burn_sigmoid((weights.clone() - thresholds.clone()) * DEFAULT_SOFT_TERNARY_TEMPERATURE);
+    let negative = burn_sigmoid((-weights - thresholds) * DEFAULT_SOFT_TERNARY_TEMPERATURE);
+
+    positive - negative
 }
 
 fn fake_quant_q8_8_scales<B: BurnBackend>(scales: BurnFloatTensor<B, 1>) -> BurnFloatTensor<B, 1> {
@@ -410,6 +449,74 @@ mod tests {
     }
 
     #[test]
+    fn burn_ternary_hardness_controls_off_soft_and_hard_forward() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let input = vec![1.0, 2.0];
+        let tensor = float_tensor_from_vec::<B, 1>(input.clone(), [2], &device).unwrap();
+
+        for hardness in [QuantHardness::Off, QuantHardness::Soft, QuantHardness::Hard] {
+            let mut core = TernaryLinearQat::new(
+                MatrixShape::new(2, 2).unwrap(),
+                vec![
+                    0.6, 0.0, //
+                    0.0, -0.4,
+                ],
+                None,
+                vec![TernaryThreshold::new(0.5).unwrap(); 2],
+                vec![Q8_8Scale::from_f32(1.0).unwrap(); 2],
+            )
+            .unwrap();
+            core.set_hardness(hardness);
+            let layer = TernaryLinearBurnQat::<B>::from_core(core.clone(), &device).unwrap();
+
+            let output = layer.fake_quant_forward(tensor.clone()).unwrap();
+
+            assert_close(
+                &float_tensor_into_vec(output).unwrap(),
+                &core.inference_forward(&input).unwrap(),
+                1.0e-6,
+            );
+        }
+    }
+
+    #[test]
+    fn burn_ternary_hardness_can_change_after_adapter_construction() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let mut core = TernaryLinearQat::new(
+            MatrixShape::new(1, 1).unwrap(),
+            vec![0.6],
+            None,
+            vec![TernaryThreshold::new(0.5).unwrap()],
+            vec![Q8_8Scale::from_f32(1.0).unwrap()],
+        )
+        .unwrap();
+        let mut layer = TernaryLinearBurnQat::<B>::from_core(core.clone(), &device).unwrap();
+        let tensor = float_tensor_from_vec::<B, 1>(vec![1.0], [1], &device).unwrap();
+
+        let hard = layer.fake_quant_forward(tensor.clone()).unwrap();
+        layer.set_hardness(QuantHardness::Off);
+        core.set_hardness(QuantHardness::Off);
+        let expected_off = core.inference_forward(&[1.0]).unwrap();
+        let off = layer.fake_quant_forward(tensor.clone()).unwrap();
+        layer.set_hardness(QuantHardness::Soft);
+        core.set_hardness(QuantHardness::Soft);
+        let expected_soft = core.inference_forward(&[1.0]).unwrap();
+        let soft = layer.fake_quant_forward(tensor.clone()).unwrap();
+
+        assert_close(&float_tensor_into_vec(hard).unwrap(), &[1.0], f32::EPSILON);
+        assert_close(&float_tensor_into_vec(off).unwrap(), &expected_off, 1.0e-6);
+        assert_close(
+            &float_tensor_into_vec(soft).unwrap(),
+            &expected_soft,
+            1.0e-6,
+        );
+    }
+
+    #[test]
     fn burn_ternary_export_matches_core_projection_for_edge_cases() {
         type B = BurnNdArrayBackend;
 
@@ -489,5 +596,15 @@ mod tests {
                 TernaryLinearQatError::NonFiniteInput { index: 1 }
             ))
         ));
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "{actual} != {expected} within {tolerance}"
+            );
+        }
     }
 }

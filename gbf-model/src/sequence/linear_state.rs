@@ -5,7 +5,8 @@ use std::fmt;
 
 use crate::qat::{
     ActFakeQuant, ActFakeQuantError, ActivationForwardMode, MatrixShape, NormApproxError,
-    NormApproxPlan, NormApproxQat, TernaryLinearQat, TernaryLinearQatError,
+    NormApproxPlan, NormApproxQat, QatHardnessControl, QuantHardness, TernaryLinearQat,
+    TernaryLinearQatError,
 };
 use crate::sequence::{
     SequenceActivation, SequenceActivationError, SequenceBlock, SequenceExportFacts,
@@ -161,6 +162,19 @@ impl LinearStateBlock {
 
     pub fn spec(&self) -> SequenceSemanticsSpec {
         self.config.spec()
+    }
+
+    pub fn set_hardness(
+        &mut self,
+        expert_qat: QuantHardness,
+        activation_qat: QuantHardness,
+        norm_qat: QuantHardness,
+    ) {
+        self.input_norm.set_hardness(norm_qat);
+        self.input_activation.set_hardness(activation_qat);
+        self.input_to_state.set_hardness(expert_qat);
+        self.state_to_output.set_hardness(expert_qat);
+        self.output_activation.set_hardness(activation_qat);
     }
 
     pub fn forward_with_options(
