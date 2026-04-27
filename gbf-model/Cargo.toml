@@ -11,3 +11,6 @@ gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

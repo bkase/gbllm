@@ -11,14 +11,18 @@ Use this for `gbf-model` topology/config beads and scalar model-semantics beads 
 
 - State in closure whether the bead owns only shape/topology or executable forward behavior.
 - Do not derive `Deserialize` for constructor-validated model config types unless deserialization goes through the same validation boundary.
+- If the bead explicitly names TOML/serde config, either implement a validated parse path with a parse test or create/name the owner bead before closing.
 - Prefer enum-backed topology choices over bool flags when invalid combinations must be unrepresentable.
+- Public strategy/selection enums with payloads should use private-field payload structs or an equivalent constructor-only boundary; do not expose unchecked public fields for invalid ranges, empty lists, or zero strides.
 - Test both dense and routed paths directly when a topology switch supports both.
+- For block/depth selection config, test every advertised selector variant plus zero-depth, out-of-range, duplicate/empty, and default-on-small-depth behavior.
 
 ## Scalar Semantics Beads
 
 - For scalar `gbf-model` semantics that do not own Burn, export, artifact, or budget paths, name those unsupported boundaries in closure and do not claim them complete.
 - When claiming parameter sharing or parameter-count reduction, add an owned-layer alias/count test.
 - If export, artifact, or budget sharing is not implemented, name the follow-up owner before closing.
+- If a config only represents a shared prototype, do not claim runtime/common-bank/export aliasing unless a bank/owner/count test proves it.
 - Keep enum or named constructors as the primary API for mode choices; bools should be derived queries or edge-adapter inputs.
 
 ## Closure Evidence

@@ -2,6 +2,9 @@
 
 use std::error::Error;
 use std::fmt;
+use std::num::NonZeroUsize;
+
+use serde::{Deserialize, Deserializer};
 
 use crate::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
 
@@ -41,6 +44,58 @@ impl ModelTopologyConfig {
         Ok(Self { blocks })
     }
 
+    pub fn from_moe_block_selection(
+        total_blocks: usize,
+        block_selection: &MoeBlockSelection,
+        shared_sequence_block: SharedSequenceConfig,
+        dense_ffn: Option<DenseFfnConfig>,
+        moe_ffn: MoeFfnConfig,
+    ) -> Result<Self, ModelConfigError> {
+        validate_nonzero("total_blocks", total_blocks)?;
+        validate_same_d_model(
+            "moe_ffn",
+            shared_sequence_block.d_model(),
+            moe_ffn.d_model(),
+        )?;
+
+        let selected_blocks = block_selection.selected_blocks(total_blocks)?;
+        let needs_dense_ffn = selected_blocks.len() < total_blocks;
+        let dense_ffn = if needs_dense_ffn {
+            let dense_ffn = dense_ffn.ok_or(ModelConfigError::MissingDenseFfnForNonMoeBlocks)?;
+            validate_same_d_model(
+                "dense_ffn",
+                shared_sequence_block.d_model(),
+                dense_ffn.d_model(),
+            )?;
+            if dense_ffn.d_ff() != moe_ffn.d_ff() {
+                return Err(ModelConfigError::FfnHiddenDimMismatch {
+                    dense_d_ff: dense_ffn.d_ff(),
+                    moe_d_ff: moe_ffn.d_ff(),
+                });
+            }
+            Some(dense_ffn)
+        } else {
+            dense_ffn
+        };
+
+        let mut blocks = Vec::with_capacity(total_blocks);
+        for block_index in 0..total_blocks {
+            let block = if selected_blocks.contains(&block_index) {
+                MoeBlockConfig::moe_ffn(shared_sequence_block.clone(), moe_ffn.clone())?
+            } else {
+                MoeBlockConfig::dense_ffn(
+                    shared_sequence_block.clone(),
+                    dense_ffn
+                        .clone()
+                        .expect("dense FFN was validated for non-MoE blocks"),
+                )?
+            };
+            blocks.push(block);
+        }
+
+        Self::new(blocks)
+    }
+
     pub fn blocks(&self) -> &[MoeBlockConfig] {
         &self.blocks
     }
@@ -56,6 +111,186 @@ impl ModelTopologyConfig {
     pub fn sequence_export_facts(&self) -> SequenceExportFacts {
         SequenceExportFacts::for_spec(self.sequence_semantics())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoeBlockSelection {
+    AllBlocks,
+    Alternating(MoeAlternatingBlockSelection),
+    Middle(MoeMiddleBlockSelection),
+    Explicit(MoeExplicitBlockSelection),
+}
+
+impl MoeBlockSelection {
+    pub fn all_blocks() -> Self {
+        Self::AllBlocks
+    }
+
+    pub fn alternating(start: usize, stride: usize) -> Result<Self, ModelConfigError> {
+        Ok(Self::Alternating(MoeAlternatingBlockSelection::new(
+            start, stride,
+        )?))
+    }
+
+    pub fn middle(first_moe: usize, last_moe: usize) -> Result<Self, ModelConfigError> {
+        Ok(Self::Middle(MoeMiddleBlockSelection::new(
+            first_moe, last_moe,
+        )?))
+    }
+
+    pub fn explicit(block_indices: Vec<usize>) -> Result<Self, ModelConfigError> {
+        Ok(Self::Explicit(MoeExplicitBlockSelection::new(
+            block_indices,
+        )?))
+    }
+
+    pub fn contains(
+        &self,
+        block_idx: usize,
+        total_blocks: usize,
+    ) -> Result<bool, ModelConfigError> {
+        Ok(self.selected_blocks(total_blocks)?.contains(&block_idx))
+    }
+
+    pub fn selected_blocks(&self, total_blocks: usize) -> Result<Vec<usize>, ModelConfigError> {
+        validate_nonzero("total_blocks", total_blocks)?;
+
+        let block_indices = match self {
+            Self::AllBlocks => (0..total_blocks).collect(),
+            Self::Alternating(selection) => {
+                let mut block_indices = Vec::new();
+                let mut block_idx = selection.start();
+                while block_idx < total_blocks {
+                    block_indices.push(block_idx);
+                    let Some(next_block_idx) = block_idx.checked_add(selection.stride().get())
+                    else {
+                        break;
+                    };
+                    block_idx = next_block_idx;
+                }
+                block_indices
+            }
+            Self::Middle(selection) => {
+                validate_block_index(selection.last_moe(), total_blocks)?;
+                (selection.first_moe()..=selection.last_moe()).collect()
+            }
+            Self::Explicit(selection) => {
+                for block_idx in selection.block_indices() {
+                    validate_block_index(*block_idx, total_blocks)?;
+                }
+                selection.block_indices().to_vec()
+            }
+        };
+
+        if block_indices.is_empty() {
+            return Err(ModelConfigError::EmptyBlockSelection);
+        }
+
+        Ok(block_indices)
+    }
+}
+
+impl<'de> Deserialize<'de> for MoeBlockSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = MoeBlockSelectionToml::deserialize(deserializer)?;
+        match raw {
+            MoeBlockSelectionToml::AllBlocks => Ok(Self::all_blocks()),
+            MoeBlockSelectionToml::Alternating { start, stride } => {
+                Self::alternating(start, stride).map_err(serde::de::Error::custom)
+            }
+            MoeBlockSelectionToml::Middle {
+                first_moe,
+                last_moe,
+            } => Self::middle(first_moe, last_moe).map_err(serde::de::Error::custom),
+            MoeBlockSelectionToml::Explicit { block_indices } => {
+                Self::explicit(block_indices).map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
+impl Default for MoeBlockSelection {
+    fn default() -> Self {
+        Self::alternating(2, 2).expect("default MoE block selection has nonzero stride")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoeAlternatingBlockSelection {
+    start: usize,
+    stride: NonZeroUsize,
+}
+
+impl MoeAlternatingBlockSelection {
+    pub fn new(start: usize, stride: usize) -> Result<Self, ModelConfigError> {
+        let stride = NonZeroUsize::new(stride).ok_or(ModelConfigError::ZeroBlockSelectionStride)?;
+        Ok(Self { start, stride })
+    }
+
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    pub fn stride(&self) -> NonZeroUsize {
+        self.stride
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoeMiddleBlockSelection {
+    first_moe: usize,
+    last_moe: usize,
+}
+
+impl MoeMiddleBlockSelection {
+    pub fn new(first_moe: usize, last_moe: usize) -> Result<Self, ModelConfigError> {
+        if first_moe > last_moe {
+            return Err(ModelConfigError::InvalidBlockSelectionRange {
+                first_moe,
+                last_moe,
+            });
+        }
+        Ok(Self {
+            first_moe,
+            last_moe,
+        })
+    }
+
+    pub fn first_moe(&self) -> usize {
+        self.first_moe
+    }
+
+    pub fn last_moe(&self) -> usize {
+        self.last_moe
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoeExplicitBlockSelection {
+    block_indices: Vec<usize>,
+}
+
+impl MoeExplicitBlockSelection {
+    pub fn new(block_indices: Vec<usize>) -> Result<Self, ModelConfigError> {
+        validate_explicit_block_selection(&block_indices)?;
+        Ok(Self { block_indices })
+    }
+
+    pub fn block_indices(&self) -> &[usize] {
+        &self.block_indices
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum MoeBlockSelectionToml {
+    AllBlocks,
+    Alternating { start: usize, stride: usize },
+    Middle { first_moe: usize, last_moe: usize },
+    Explicit { block_indices: Vec<usize> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +528,11 @@ pub enum ModelConfigError {
         expected: usize,
         actual: usize,
     },
+    FfnHiddenDimMismatch {
+        dense_d_ff: usize,
+        moe_d_ff: usize,
+    },
+    MissingDenseFfnForNonMoeBlocks,
     BlockModelDimMismatch {
         block_index: usize,
         expected: usize,
@@ -302,6 +542,19 @@ pub enum ModelConfigError {
         block_index: usize,
         expected: SequenceSemanticsSpec,
         actual: SequenceSemanticsSpec,
+    },
+    EmptyBlockSelection,
+    ZeroBlockSelectionStride,
+    InvalidBlockSelectionRange {
+        first_moe: usize,
+        last_moe: usize,
+    },
+    BlockSelectionIndexOutOfRange {
+        index: usize,
+        total_blocks: usize,
+    },
+    DuplicateBlockSelectionIndex {
+        index: usize,
     },
 }
 
@@ -323,6 +576,16 @@ impl fmt::Display for ModelConfigError {
                 f,
                 "{path} d_model mismatch: expected shared sequence d_model {expected}, got {actual}"
             ),
+            Self::FfnHiddenDimMismatch {
+                dense_d_ff,
+                moe_d_ff,
+            } => write!(
+                f,
+                "dense and MoE FFN hidden dimensions must match: dense d_ff {dense_d_ff}, MoE d_ff {moe_d_ff}"
+            ),
+            Self::MissingDenseFfnForNonMoeBlocks => f.write_str(
+                "dense FFN config is required when block selection leaves non-MoE blocks",
+            ),
             Self::BlockModelDimMismatch {
                 block_index,
                 expected,
@@ -339,6 +602,29 @@ impl fmt::Display for ModelConfigError {
                 f,
                 "block {block_index} sequence semantics mismatch: expected {expected:?}, got {actual:?}"
             ),
+            Self::EmptyBlockSelection => {
+                f.write_str("MoE block selection must select at least one block")
+            }
+            Self::ZeroBlockSelectionStride => {
+                f.write_str("MoE block selection stride must be nonzero")
+            }
+            Self::InvalidBlockSelectionRange {
+                first_moe,
+                last_moe,
+            } => write!(
+                f,
+                "invalid MoE block selection range: first_moe {first_moe} is after last_moe {last_moe}"
+            ),
+            Self::BlockSelectionIndexOutOfRange {
+                index,
+                total_blocks,
+            } => write!(
+                f,
+                "MoE block selection index {index} is out of range for {total_blocks} blocks"
+            ),
+            Self::DuplicateBlockSelectionIndex { index } => {
+                write!(f, "MoE block selection repeats block index {index}")
+            }
         }
     }
 }
@@ -387,4 +673,321 @@ fn validate_same_d_model(
         });
     }
     Ok(())
+}
+
+fn validate_block_index(index: usize, total_blocks: usize) -> Result<(), ModelConfigError> {
+    if index >= total_blocks {
+        return Err(ModelConfigError::BlockSelectionIndexOutOfRange {
+            index,
+            total_blocks,
+        });
+    }
+    Ok(())
+}
+
+fn validate_explicit_block_selection(block_indices: &[usize]) -> Result<(), ModelConfigError> {
+    if block_indices.is_empty() {
+        return Err(ModelConfigError::EmptyBlockSelection);
+    }
+
+    let mut sorted_indices = block_indices.to_vec();
+    sorted_indices.sort_unstable();
+    for duplicate_pair in sorted_indices.windows(2) {
+        if duplicate_pair[0] == duplicate_pair[1] {
+            return Err(ModelConfigError::DuplicateBlockSelectionIndex {
+                index: duplicate_pair[0],
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod moe {
+    use super::*;
+
+    #[test]
+    fn default_alternating_selection_starts_at_two_and_strides_by_two() {
+        let selection = MoeBlockSelection::default();
+
+        assert_eq!(selection.selected_blocks(12).unwrap(), vec![2, 4, 6, 8, 10]);
+        assert!(selection.contains(4, 12).unwrap());
+        assert!(!selection.contains(3, 12).unwrap());
+    }
+
+    #[test]
+    fn all_blocks_selection_includes_every_block() {
+        let selection = MoeBlockSelection::all_blocks();
+
+        assert_eq!(selection.selected_blocks(4).unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn middle_selection_includes_closed_range() {
+        let selection = MoeBlockSelection::middle(3, 8).unwrap();
+
+        assert_eq!(
+            selection.selected_blocks(12).unwrap(),
+            vec![3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn explicit_selection_preserves_requested_indices() {
+        let selection = MoeBlockSelection::explicit(vec![5, 1, 9]).unwrap();
+
+        assert_eq!(selection.selected_blocks(12).unwrap(), vec![5, 1, 9]);
+    }
+
+    #[test]
+    fn selection_rejects_empty_and_invalid_indices() {
+        assert_eq!(
+            MoeBlockSelection::explicit(vec![]),
+            Err(ModelConfigError::EmptyBlockSelection)
+        );
+        assert_eq!(
+            MoeBlockSelection::alternating(2, 0),
+            Err(ModelConfigError::ZeroBlockSelectionStride)
+        );
+        assert_eq!(
+            MoeBlockSelection::middle(8, 3),
+            Err(ModelConfigError::InvalidBlockSelectionRange {
+                first_moe: 8,
+                last_moe: 3,
+            })
+        );
+        assert_eq!(
+            MoeBlockSelection::explicit(vec![1, 1]),
+            Err(ModelConfigError::DuplicateBlockSelectionIndex { index: 1 })
+        );
+        assert_eq!(
+            MoeBlockSelection::alternating(12, 2)
+                .unwrap()
+                .selected_blocks(12),
+            Err(ModelConfigError::EmptyBlockSelection)
+        );
+        assert_eq!(
+            MoeBlockSelection::explicit(vec![0, 12])
+                .unwrap()
+                .selected_blocks(12),
+            Err(ModelConfigError::BlockSelectionIndexOutOfRange {
+                index: 12,
+                total_blocks: 12,
+            })
+        );
+        assert_eq!(
+            MoeBlockSelection::all_blocks().contains(0, 0),
+            Err(ModelConfigError::EmptyDimension {
+                field: "total_blocks"
+            })
+        );
+    }
+
+    #[test]
+    fn topology_from_selection_assigns_moe_and_dense_ffn_paths() {
+        let topology = ModelTopologyConfig::from_moe_block_selection(
+            6,
+            &MoeBlockSelection::explicit(vec![1, 4]).unwrap(),
+            shared_sequence(),
+            Some(dense_ffn(16)),
+            moe_ffn(16),
+        )
+        .unwrap();
+
+        let has_moe_ffn = topology
+            .blocks()
+            .iter()
+            .map(MoeBlockConfig::has_moe_ffn)
+            .collect::<Vec<_>>();
+
+        assert_eq!(has_moe_ffn, vec![false, true, false, false, true, false]);
+        assert!(
+            topology
+                .blocks()
+                .iter()
+                .all(|block| block.ffn_path().d_ff() == 16)
+        );
+    }
+
+    #[test]
+    fn topology_from_selection_supports_default_middle_and_all_block_masks() {
+        assert_eq!(
+            topology_moe_mask(6, &MoeBlockSelection::default()).unwrap(),
+            vec![false, false, true, false, true, false]
+        );
+        assert_eq!(
+            topology_moe_mask(6, &MoeBlockSelection::middle(2, 4).unwrap()).unwrap(),
+            vec![false, false, true, true, true, false]
+        );
+
+        let topology = ModelTopologyConfig::from_moe_block_selection(
+            4,
+            &MoeBlockSelection::all_blocks(),
+            shared_sequence(),
+            None,
+            moe_ffn(16),
+        )
+        .unwrap();
+        assert!(topology.blocks().iter().all(MoeBlockConfig::has_moe_ffn));
+    }
+
+    #[test]
+    fn topology_from_selection_requires_same_dense_and_moe_ffn_width() {
+        let err = ModelTopologyConfig::from_moe_block_selection(
+            4,
+            &MoeBlockSelection::explicit(vec![1]).unwrap(),
+            shared_sequence(),
+            Some(dense_ffn(12)),
+            moe_ffn(16),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            ModelConfigError::FfnHiddenDimMismatch {
+                dense_d_ff: 12,
+                moe_d_ff: 16,
+            }
+        );
+    }
+
+    #[test]
+    fn topology_from_selection_rejects_missing_dense_and_invalid_depth_bounds() {
+        let err = ModelTopologyConfig::from_moe_block_selection(
+            4,
+            &MoeBlockSelection::explicit(vec![1]).unwrap(),
+            shared_sequence(),
+            None,
+            moe_ffn(16),
+        )
+        .unwrap_err();
+        assert_eq!(err, ModelConfigError::MissingDenseFfnForNonMoeBlocks);
+
+        let err = ModelTopologyConfig::from_moe_block_selection(
+            0,
+            &MoeBlockSelection::all_blocks(),
+            shared_sequence(),
+            None,
+            moe_ffn(16),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ModelConfigError::EmptyDimension {
+                field: "total_blocks"
+            }
+        );
+
+        let err = ModelTopologyConfig::from_moe_block_selection(
+            6,
+            &MoeBlockSelection::middle(3, 8).unwrap(),
+            shared_sequence(),
+            Some(dense_ffn(16)),
+            moe_ffn(16),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ModelConfigError::BlockSelectionIndexOutOfRange {
+                index: 8,
+                total_blocks: 6,
+            }
+        );
+
+        let err = ModelTopologyConfig::from_moe_block_selection(
+            6,
+            &MoeBlockSelection::explicit(vec![0, 6]).unwrap(),
+            shared_sequence(),
+            Some(dense_ffn(16)),
+            moe_ffn(16),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ModelConfigError::BlockSelectionIndexOutOfRange {
+                index: 6,
+                total_blocks: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn block_selection_parses_from_model_moe_toml() {
+        #[derive(Debug, serde::Deserialize)]
+        struct ModelToml {
+            model: ModelSection,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        struct ModelSection {
+            moe: MoeSection,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        struct MoeSection {
+            block_selection: MoeBlockSelection,
+        }
+
+        let config: ModelToml = toml::from_str(
+            r#"
+            [model.moe]
+            block_selection = { type = "alternating", start = 2, stride = 2 }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config
+                .model
+                .moe
+                .block_selection
+                .selected_blocks(12)
+                .unwrap(),
+            vec![2, 4, 6, 8, 10]
+        );
+
+        let invalid = toml::from_str::<ModelToml>(
+            r#"
+            [model.moe]
+            block_selection = { type = "explicit", block_indices = [] }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            invalid
+                .to_string()
+                .contains("MoE block selection must select at least one block")
+        );
+    }
+
+    fn topology_moe_mask(
+        total_blocks: usize,
+        selection: &MoeBlockSelection,
+    ) -> Result<Vec<bool>, ModelConfigError> {
+        let topology = ModelTopologyConfig::from_moe_block_selection(
+            total_blocks,
+            selection,
+            shared_sequence(),
+            Some(dense_ffn(16)),
+            moe_ffn(16),
+        )?;
+        Ok(topology
+            .blocks()
+            .iter()
+            .map(MoeBlockConfig::has_moe_ffn)
+            .collect())
+    }
+
+    fn shared_sequence() -> SharedSequenceConfig {
+        SharedSequenceConfig::linear_state(8, 4).unwrap()
+    }
+
+    fn dense_ffn(d_ff: usize) -> DenseFfnConfig {
+        DenseFfnConfig::new(8, d_ff).unwrap()
+    }
+
+    fn moe_ffn(d_ff: usize) -> MoeFfnConfig {
+        MoeFfnConfig::new(8, d_ff, 2).unwrap()
+    }
 }
