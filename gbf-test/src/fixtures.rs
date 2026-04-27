@@ -517,7 +517,7 @@ fn tiny_expert_block(config: &TinyModelConfig) -> ExpertBlockQat {
     ExpertBlockQat::new(experts, None).unwrap()
 }
 
-fn tiny_expert(config: &TinyModelConfig, expert_index: usize) -> ExpertQat {
+pub fn tiny_expert(config: &TinyModelConfig, expert_index: usize) -> ExpertQat {
     let up = tiny_ternary_linear(
         config.d_ff(),
         config.d_model(),

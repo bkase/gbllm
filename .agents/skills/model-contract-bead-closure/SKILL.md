@@ -29,3 +29,6 @@ Use this for `gbf-model` topology/config beads and scalar model-semantics beads 
 
 - Closure claims must be guarded by behavior tests, not only constructor smoke tests.
 - If a bead exposes public config accepted today but executable behavior is deferred, reject that config at the executable boundary or name the owner bead in the closure.
+- If a model/test bead claims gradient flow or parameter sharing under Burn, prove it through a real Burn adapter path and `.backward()`/`.grad()` assertions. Manual gradient arithmetic is only an oracle after an executable gradient has been observed.
+- For F10 model coverage beads, reuse the project tiny fixtures for concrete model/expert construction. Build custom topologies only where the selector matrix itself is the behavior under test.
+- Treat structured config diagnostics and tracing logs as different surfaces. If the implementation owner returns a structured warning event, assert that event contract and state that logger adoption is not owned by the model test bead.
