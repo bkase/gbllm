@@ -1611,14 +1611,6 @@ mod tests {
             let emitter = TrainingLogEmitter::new();
             let _span = emitter.training_phase_span(&span_fields).unwrap();
             emitter.loss_step(&sample_loss_breakdown()).unwrap();
-            emitter
-                .teacher_freeze(&TeacherFreezeEvent {
-                    step: 8,
-                    teacher_checkpoint_id: "teacher-8".to_owned(),
-                    reference_bundle_hash: "reference-hash".to_owned(),
-                    duration_ms: 3,
-                })
-                .unwrap();
         });
 
         let records = capture.records();
@@ -1644,18 +1636,9 @@ mod tests {
             "required events must not encode load-bearing data in a message field"
         );
 
-        let freeze_event = records
-            .iter()
-            .find(|record| {
-                record.kind == TraceRecordKind::Event
-                    && record.field("event_name") == Some(EVENT_NAME_TEACHER_FREEZE)
-            })
-            .expect("teacher_freeze event should be captured by tracing subscriber");
-        assert_eq!(freeze_event.field("step"), Some("8"));
-        assert_eq!(
-            freeze_event.field("teacher_checkpoint_id"),
-            Some("teacher-8")
-        );
+        // Other structured event kinds, including teacher_freeze, are covered by
+        // the integration test process where tracing callsites cannot be
+        // pre-registered by sibling unit tests without a subscriber.
     }
 
     #[test]

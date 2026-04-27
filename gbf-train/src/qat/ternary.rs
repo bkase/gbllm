@@ -255,10 +255,16 @@ fn fake_quant_q8_8_nonnegative<B: BurnBackend>(
 
 #[cfg(test)]
 mod tests {
-    use gbf_model::qat::{MatrixShape, TernaryThreshold, TernaryValue};
+    use gbf_artifact::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
+    use gbf_model::qat::{
+        ExportVisitor, MatrixShape, QatModuleRef, TernaryThreshold, TernaryValue,
+    };
 
     use super::*;
-    use crate::adapter::burn::{BurnNdArrayAutodiffBackend, BurnNdArrayBackend};
+    use crate::adapter::burn::{
+        BurnGradientsParams, BurnNdArrayAutodiffBackend, BurnNdArrayBackend, BurnOptimizer,
+        adam_config,
+    };
 
     #[test]
     fn burn_ternary_forward_export_and_gradients_share_owned_tensors() {
@@ -310,6 +316,64 @@ mod tests {
             ]
         );
         assert_eq!(export.projected_weights(), vec![-0.25, 0.0, 0.25]);
+    }
+
+    #[test]
+    fn burn_ternary_one_step_train_export_round_trip_survives_burn_api() {
+        type B = BurnNdArrayAutodiffBackend;
+
+        let device = BurnDevice::<B>::default();
+        let core = TernaryLinearQat::new(
+            MatrixShape::new(1, 3).unwrap(),
+            vec![-0.2, 0.1, 0.2],
+            None,
+            vec![TernaryThreshold::new(0.5).unwrap()],
+            vec![Q8_8Scale::from_f32(0.25).unwrap()],
+        )
+        .unwrap();
+        let layer = TernaryLinearBurnQat::<B>::from_core(core, &device).unwrap();
+        let initial_weights =
+            float_tensor_into_vec(layer.full_precision_weights().detach()).unwrap();
+
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0, 1.0, 1.0], [3], &device).unwrap();
+        let target = float_tensor_from_vec::<B, 1>(vec![1.0], [1], &device).unwrap();
+        let error = layer.fake_quant_forward(input).unwrap() - target;
+        let loss = (error.clone() * error).sum();
+        let gradients = loss.backward();
+        let gradients = BurnGradientsParams::from_grads(gradients, &layer);
+
+        let mut optimizer = adam_config().init::<B, TernaryLinearBurnQat<B>>();
+        let trained = optimizer.step(1.0, layer, gradients);
+        let trained_weights =
+            float_tensor_into_vec(trained.full_precision_weights().detach()).unwrap();
+        assert_ne!(
+            trained_weights, initial_weights,
+            "one optimizer step should update the Burn-owned training tensors"
+        );
+        assert!(trained_weights.iter().all(|value| value.is_finite()));
+
+        let burn_export = trained.export_canonical().unwrap();
+        let trained_core = trained.to_core_from_trained_state().unwrap();
+        assert_eq!(
+            burn_export.projected_weights(),
+            trained_core.export_canonical().projected_weights()
+        );
+
+        let mut visitor = ExportVisitor::new(SequenceExportFacts::for_spec(
+            SequenceSemanticsSpec::bounded_kv(16, 8).unwrap(),
+        ));
+        visitor
+            .visit_module("projection", QatModuleRef::TernaryLinear(&trained_core))
+            .unwrap();
+        let artifact = visitor.finish().unwrap();
+        let encoded = serde_json::to_vec(&artifact).unwrap();
+        let decoded: gbf_model::qat::ExportedQatArtifact =
+            serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded, artifact);
+        assert_eq!(decoded.artifact_core_hash(), artifact.artifact_core_hash());
+        assert_eq!(decoded.core.tensors().len(), 2);
+        assert_eq!(decoded.visited_modules.len(), 1);
     }
 
     #[test]

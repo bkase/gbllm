@@ -14,7 +14,10 @@ pub use burn::module::{
     Param as BurnParam,
 };
 pub use burn::nn;
-pub use burn::optim::{AdamConfig as BurnAdamConfig, AdamWConfig as BurnAdamWConfig};
+pub use burn::optim::{
+    AdamConfig as BurnAdamConfig, AdamWConfig as BurnAdamWConfig,
+    GradientsParams as BurnGradientsParams, Optimizer as BurnOptimizer,
+};
 pub use burn::record::{
     DefaultFileRecorder as BurnDefaultFileRecorder, FileRecorder as BurnFileRecorder,
     FullPrecisionSettings as BurnFullPrecisionSettings, RecorderError as BurnRecorderError,
