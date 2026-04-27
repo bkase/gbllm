@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 
 use serde::{Deserialize, Deserializer};
 
+use crate::qat::SharedDenseBranchConfig;
 use crate::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
 
 const BOUNDED_KV_SLOT_BYTES: u16 = 4;
@@ -485,17 +486,43 @@ pub struct MoeFfnConfig {
     d_model: usize,
     d_ff: usize,
     n_experts: usize,
+    shared_dense_branch: Option<SharedDenseBranchConfig>,
 }
 
 impl MoeFfnConfig {
     pub fn new(d_model: usize, d_ff: usize, n_experts: usize) -> Result<Self, ModelConfigError> {
+        Self::with_shared_dense_branch(d_model, d_ff, n_experts, None)
+    }
+
+    pub fn with_shared_dense_branch(
+        d_model: usize,
+        d_ff: usize,
+        n_experts: usize,
+        shared_dense_branch: Option<SharedDenseBranchConfig>,
+    ) -> Result<Self, ModelConfigError> {
         validate_nonzero("d_model", d_model)?;
         validate_nonzero("d_ff", d_ff)?;
         validate_nonzero("n_experts", n_experts)?;
+        if let Some(shared_dense_branch) = shared_dense_branch {
+            if shared_dense_branch.d_model() != d_model {
+                return Err(ModelConfigError::SharedDenseBranchModelDimMismatch {
+                    expected: d_model,
+                    actual: shared_dense_branch.d_model(),
+                });
+            }
+            if shared_dense_branch.d_ff_shared() >= d_ff {
+                return Err(ModelConfigError::SharedDenseBranchNotSmallerThanExpert {
+                    d_ff_shared: shared_dense_branch.d_ff_shared(),
+                    d_ff,
+                });
+            }
+        }
+
         Ok(Self {
             d_model,
             d_ff,
             n_experts,
+            shared_dense_branch,
         })
     }
 
@@ -509,6 +536,10 @@ impl MoeFfnConfig {
 
     pub fn n_experts(&self) -> usize {
         self.n_experts
+    }
+
+    pub fn shared_dense_branch(&self) -> Option<SharedDenseBranchConfig> {
+        self.shared_dense_branch
     }
 }
 
@@ -533,6 +564,14 @@ pub enum ModelConfigError {
         moe_d_ff: usize,
     },
     MissingDenseFfnForNonMoeBlocks,
+    SharedDenseBranchModelDimMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    SharedDenseBranchNotSmallerThanExpert {
+        d_ff_shared: usize,
+        d_ff: usize,
+    },
     BlockModelDimMismatch {
         block_index: usize,
         expected: usize,
@@ -585,6 +624,14 @@ impl fmt::Display for ModelConfigError {
             ),
             Self::MissingDenseFfnForNonMoeBlocks => f.write_str(
                 "dense FFN config is required when block selection leaves non-MoE blocks",
+            ),
+            Self::SharedDenseBranchModelDimMismatch { expected, actual } => write!(
+                f,
+                "shared dense branch d_model mismatch: expected {expected}, got {actual}"
+            ),
+            Self::SharedDenseBranchNotSmallerThanExpert { d_ff_shared, d_ff } => write!(
+                f,
+                "shared dense branch d_ff_shared {d_ff_shared} must be smaller than expert d_ff {d_ff}"
             ),
             Self::BlockModelDimMismatch {
                 block_index,
@@ -830,6 +877,45 @@ mod moe {
         )
         .unwrap();
         assert!(topology.blocks().iter().all(MoeBlockConfig::has_moe_ffn));
+    }
+
+    #[test]
+    fn moe_ffn_shared_dense_branch_is_config_gated_and_absent_by_default() {
+        let default = MoeFfnConfig::new(8, 16, 2).unwrap();
+        assert_eq!(default.shared_dense_branch(), None);
+
+        let shared_dense = SharedDenseBranchConfig::new(8, 4).unwrap();
+        let configured =
+            MoeFfnConfig::with_shared_dense_branch(8, 16, 2, Some(shared_dense)).unwrap();
+        assert_eq!(configured.shared_dense_branch(), Some(shared_dense));
+    }
+
+    #[test]
+    fn moe_ffn_shared_dense_branch_rejects_wrong_shape_and_non_small_width() {
+        assert_eq!(
+            MoeFfnConfig::with_shared_dense_branch(
+                8,
+                16,
+                2,
+                Some(SharedDenseBranchConfig::new(7, 4).unwrap())
+            ),
+            Err(ModelConfigError::SharedDenseBranchModelDimMismatch {
+                expected: 8,
+                actual: 7,
+            })
+        );
+        assert_eq!(
+            MoeFfnConfig::with_shared_dense_branch(
+                8,
+                16,
+                2,
+                Some(SharedDenseBranchConfig::new(8, 16).unwrap())
+            ),
+            Err(ModelConfigError::SharedDenseBranchNotSmallerThanExpert {
+                d_ff_shared: 16,
+                d_ff: 16,
+            })
+        );
     }
 
     #[test]

@@ -282,6 +282,17 @@ pub struct ExpertBlockQat {
 }
 
 impl ExpertBlockQat {
+    pub fn without_shared_dense(experts: Vec<ExpertQat>) -> Result<Self, ExpertBlockQatError> {
+        Self::new(experts, None)
+    }
+
+    pub fn with_shared_dense(
+        experts: Vec<ExpertQat>,
+        shared_dense: SharedDenseBranch,
+    ) -> Result<Self, ExpertBlockQatError> {
+        Self::new(experts, Some(shared_dense))
+    }
+
     pub fn new(
         experts: Vec<ExpertQat>,
         shared_dense: Option<SharedDenseBranch>,
@@ -323,6 +334,10 @@ impl ExpertBlockQat {
         self.experts[0].d_model()
     }
 
+    /// Returns `residual + selected_expert_delta + alpha * shared_dense_delta`.
+    ///
+    /// Router weighting is outside this scalar block; this API receives the
+    /// already-selected expert id.
     pub fn forward(
         &self,
         input: &[f32],
@@ -589,6 +604,22 @@ pub struct SharedDenseBranch {
 }
 
 impl SharedDenseBranch {
+    pub fn for_config(
+        config: SharedDenseBranchConfig,
+        up_projection: DenseBranchProjection,
+        activation: ActFakeQuant,
+        down_projection: DenseBranchProjection,
+    ) -> Result<Self, ExpertBlockQatError> {
+        let branch = Self::new(
+            up_projection,
+            activation,
+            down_projection,
+            config.initial_alpha(),
+        )?;
+        branch.validate_config(config)?;
+        Ok(branch)
+    }
+
     pub fn new(
         up_projection: DenseBranchProjection,
         activation: ActFakeQuant,
@@ -628,6 +659,14 @@ impl SharedDenseBranch {
         self.alpha
     }
 
+    pub fn d_model(&self) -> usize {
+        self.up_projection.shape().input_cols()
+    }
+
+    pub fn d_ff_shared(&self) -> usize {
+        self.up_projection.shape().output_rows()
+    }
+
     pub fn up_shape(&self) -> MatrixShape {
         self.up_projection.shape()
     }
@@ -659,6 +698,14 @@ impl SharedDenseBranch {
         Ok(())
     }
 
+    pub fn validate_config(
+        &self,
+        config: SharedDenseBranchConfig,
+    ) -> Result<(), ExpertBlockQatError> {
+        validate_shared_config_dimension("d_model", config.d_model(), self.d_model())?;
+        validate_shared_config_dimension("d_ff_shared", config.d_ff_shared(), self.d_ff_shared())
+    }
+
     fn forward(
         &self,
         input: &[f32],
@@ -681,6 +728,40 @@ impl SharedDenseBranch {
         )?;
 
         Ok(output.into_iter().map(|value| value * self.alpha).collect())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedDenseBranchConfig {
+    d_model: usize,
+    d_ff_shared: usize,
+}
+
+impl SharedDenseBranchConfig {
+    pub const INITIAL_ALPHA: f32 = 0.0;
+
+    pub fn new(d_model: usize, d_ff_shared: usize) -> Result<Self, ExpertBlockQatError> {
+        validate_nonzero_dimension("d_model", d_model)?;
+        validate_nonzero_dimension("d_ff_shared", d_ff_shared)?;
+        validate_budget_dimension("d_model", d_model)?;
+        validate_budget_dimension("d_ff_shared", d_ff_shared)?;
+
+        Ok(Self {
+            d_model,
+            d_ff_shared,
+        })
+    }
+
+    pub fn d_model(self) -> usize {
+        self.d_model
+    }
+
+    pub fn d_ff_shared(self) -> usize {
+        self.d_ff_shared
+    }
+
+    pub fn initial_alpha(self) -> f32 {
+        Self::INITIAL_ALPHA
     }
 }
 
@@ -752,6 +833,11 @@ pub enum ExpertBlockQatError {
         output_dim: usize,
     },
     SharedModelDimMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    SharedConfigDimMismatch {
+        field: &'static str,
         expected: usize,
         actual: usize,
     },
@@ -864,6 +950,14 @@ impl fmt::Display for ExpertBlockQatError {
             Self::SharedModelDimMismatch { expected, actual } => write!(
                 f,
                 "shared dense d_model mismatch: expected {expected}, got {actual}"
+            ),
+            Self::SharedConfigDimMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "shared dense config {field} mismatch: expected {expected}, got {actual}"
             ),
             Self::EmptyExpertDimension { field } => write!(f, "{field} must be nonzero"),
             Self::ExpertParameterCountOverflow {
@@ -1087,6 +1181,22 @@ fn validate_config_dimension(
     Ok(())
 }
 
+fn validate_shared_config_dimension(
+    field: &'static str,
+    expected: usize,
+    actual: usize,
+) -> Result<(), ExpertBlockQatError> {
+    if expected != actual {
+        return Err(ExpertBlockQatError::SharedConfigDimMismatch {
+            field,
+            expected,
+            actual,
+        });
+    }
+
+    Ok(())
+}
+
 fn matrix_count_for_variant(variant: ExpertMlpVariant) -> usize {
     match variant {
         ExpertMlpVariant::TwoMatrix => 2,
@@ -1288,9 +1398,72 @@ mod tests {
     }
 
     #[test]
+    fn qat_expert_shared_dense_branch_is_absent_by_default_constructor() {
+        let block = ExpertBlockQat::without_shared_dense(vec![fixture_expert()]).unwrap();
+
+        assert!(block.shared_dense().is_none());
+    }
+
+    #[test]
+    fn qat_expert_shared_dense_config_defaults_to_zero_alpha() {
+        let config = SharedDenseBranchConfig::new(2, 1).unwrap();
+
+        assert_eq!(config.d_model(), 2);
+        assert_eq!(config.d_ff_shared(), 1);
+        assert_eq!(config.initial_alpha(), 0.0);
+        assert_eq!(SharedDenseBranchConfig::INITIAL_ALPHA, 0.0);
+        assert_eq!(
+            SharedDenseBranchConfig::new(0, 1),
+            Err(ExpertBlockQatError::EmptyExpertDimension { field: "d_model" })
+        );
+        assert_eq!(
+            SharedDenseBranchConfig::new(2, 0),
+            Err(ExpertBlockQatError::EmptyExpertDimension {
+                field: "d_ff_shared"
+            })
+        );
+        assert_eq!(
+            SharedDenseBranchConfig::new(2, u32::MAX as usize + 1),
+            Err(ExpertBlockQatError::ExpertDimensionExceedsBudgetFormula {
+                field: "d_ff_shared",
+                value: u32::MAX as usize + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn qat_expert_shared_dense_branch_builds_from_config() {
+        let config = SharedDenseBranchConfig::new(2, 1).unwrap();
+        let branch = SharedDenseBranch::for_config(
+            config,
+            DenseBranchProjection::new(MatrixShape::new(1, 2).unwrap(), vec![1.0, 1.0], None)
+                .unwrap(),
+            activation(),
+            DenseBranchProjection::new(MatrixShape::new(2, 1).unwrap(), vec![1.0, 2.0], None)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(branch.d_model(), 2);
+        assert_eq!(branch.d_ff_shared(), 1);
+        assert_eq!(branch.alpha(), 0.0);
+        assert_eq!(branch.validate_config(config), Ok(()));
+
+        let mismatched_config = SharedDenseBranchConfig::new(2, 2).unwrap();
+        assert_eq!(
+            branch.validate_config(mismatched_config),
+            Err(ExpertBlockQatError::SharedConfigDimMismatch {
+                field: "d_ff_shared",
+                expected: 2,
+                actual: 1,
+            })
+        );
+    }
+
+    #[test]
     fn qat_expert_optional_shared_dense_branch_is_explicit_and_alpha_gated() {
         let shared = fixture_shared_dense(0.5);
-        let block = ExpertBlockQat::new(vec![fixture_expert()], Some(shared)).unwrap();
+        let block = ExpertBlockQat::with_shared_dense(vec![fixture_expert()], shared).unwrap();
         let input = vec![1.0, 2.0];
 
         let output = block.forward(&input, 0).unwrap();

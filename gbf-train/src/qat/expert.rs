@@ -671,6 +671,60 @@ mod tests {
     }
 
     #[test]
+    fn burn_expert_zero_alpha_shared_branch_keeps_expert_output_and_trains_alpha() {
+        type B = BurnNdArrayAutodiffBackend;
+
+        let device = BurnDevice::<B>::default();
+        let core = fixture_block(0.0);
+        let expert_only = ExpertBlockQat::new(vec![fixture_expert()], None).unwrap();
+        let layer = ExpertBlockBurnQat::<B>::from_core(core, &device).unwrap();
+        let input_values = vec![0.25, 0.5];
+        let input = float_tensor_from_vec::<B, 1>(input_values.clone(), [2], &device)
+            .unwrap()
+            .require_grad();
+
+        let output = layer
+            .forward(input, 0, ExpertForwardOptions::hard_quantized_train())
+            .unwrap();
+        assert_eq!(
+            float_tensor_into_vec(output.clone()).unwrap(),
+            expert_only.forward(&input_values, 0).unwrap()
+        );
+
+        let gradients = output.sum().backward();
+        let expert = &layer.experts()[0];
+        let shared = layer.shared_dense().expect("fixture has a shared branch");
+
+        assert!(
+            float_tensor_into_vec(
+                expert
+                    .up_projection()
+                    .full_precision_weights()
+                    .grad(&gradients)
+                    .unwrap()
+            )
+            .unwrap()
+            .iter()
+            .any(|value| value.abs() > 0.0)
+        );
+        assert!(
+            float_tensor_into_vec(
+                expert
+                    .down_projection()
+                    .full_precision_weights()
+                    .grad(&gradients)
+                    .unwrap()
+            )
+            .unwrap()
+            .iter()
+            .any(|value| value.abs() > 0.0)
+        );
+        assert!(
+            float_tensor_into_vec(shared.alpha().grad(&gradients).unwrap()).unwrap()[0].abs() > 0.0
+        );
+    }
+
+    #[test]
     fn burn_expert_export_handoff_uses_burn_owned_tensors() {
         type B = BurnNdArrayBackend;
 

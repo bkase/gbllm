@@ -18,7 +18,7 @@ pub use expert::{
     ClippedActivation, ClippedActivationKind, DenseBranchProjection, ExpertBatchOutput,
     ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertMlpConfig,
     ExpertMlpConfigEvent, ExpertMlpConfigEventCode, ExpertMlpConfigEventLevel, ExpertMlpVariant,
-    ExpertQat, ExpertQatForwardMode, SharedDenseBranch,
+    ExpertQat, ExpertQatForwardMode, SharedDenseBranch, SharedDenseBranchConfig,
 };
 pub use export::{
     ExportVisitor, ExportVisitorError, ExportedQatArtifact, QatModuleRef, VisitedModule,

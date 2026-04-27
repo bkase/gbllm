@@ -5,8 +5,8 @@
 //! import surface without duplicating that implementation.
 
 pub use crate::qat::{
-    ClippedActivation, ClippedActivationKind, ExpertBatchOutput, ExpertBlockQat,
-    ExpertBlockQatError, ExpertForwardOptions, ExpertMlpConfig, ExpertMlpConfigEvent,
-    ExpertMlpConfigEventCode, ExpertMlpConfigEventLevel, ExpertMlpVariant, ExpertQat,
-    ExpertQatForwardMode,
+    ClippedActivation, ClippedActivationKind, DenseBranchProjection, ExpertBatchOutput,
+    ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertMlpConfig,
+    ExpertMlpConfigEvent, ExpertMlpConfigEventCode, ExpertMlpConfigEventLevel, ExpertMlpVariant,
+    ExpertQat, ExpertQatForwardMode, SharedDenseBranch, SharedDenseBranchConfig,
 };

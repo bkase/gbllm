@@ -141,6 +141,7 @@ pub struct MoeFfnStage {
     pub d_model: usize,
     pub d_ff: usize,
     pub n_experts: usize,
+    pub shared_dense: Option<SharedDenseBranchStage>,
 }
 
 impl MoeFfnStage {
@@ -149,6 +150,24 @@ impl MoeFfnStage {
             d_model: config.d_model(),
             d_ff: config.d_ff(),
             n_experts: config.n_experts(),
+            shared_dense: config
+                .shared_dense_branch()
+                .map(SharedDenseBranchStage::from_config),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedDenseBranchStage {
+    pub d_model: usize,
+    pub d_ff_shared: usize,
+}
+
+impl SharedDenseBranchStage {
+    fn from_config(config: crate::qat::SharedDenseBranchConfig) -> Self {
+        Self {
+            d_model: config.d_model(),
+            d_ff_shared: config.d_ff_shared(),
         }
     }
 }
@@ -187,6 +206,7 @@ mod tests {
                     d_model: 8,
                     d_ff: 16,
                     n_experts: 2,
+                    shared_dense: None,
                 }),
             ]
         );
@@ -224,6 +244,25 @@ mod tests {
         assert_eq!(block.sequence_state_update_count(), 1);
         assert_eq!(block.router_invocations_per_token(), 0);
         assert!(!block.config().has_moe_ffn());
+    }
+
+    #[test]
+    fn block_topology_reports_shared_dense_branch_when_configured() {
+        let block = ModelBlockTopology::new(shared_dense_moe_block());
+
+        assert!(matches!(
+            block.plan().ffn_path(),
+            FfnExecutionPath::Moe {
+                ffn: MoeFfnStage {
+                    shared_dense: Some(SharedDenseBranchStage {
+                        d_model: 8,
+                        d_ff_shared: 4,
+                    }),
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -343,6 +382,20 @@ mod tests {
         MoeBlockConfig::moe_ffn(
             SharedSequenceConfig::linear_state(8, 4).unwrap(),
             MoeFfnConfig::new(8, 16, 2).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn shared_dense_moe_block() -> MoeBlockConfig {
+        MoeBlockConfig::moe_ffn(
+            SharedSequenceConfig::linear_state(8, 4).unwrap(),
+            MoeFfnConfig::with_shared_dense_branch(
+                8,
+                16,
+                2,
+                Some(crate::qat::SharedDenseBranchConfig::new(8, 4).unwrap()),
+            )
+            .unwrap(),
         )
         .unwrap()
     }
