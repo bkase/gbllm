@@ -820,7 +820,7 @@ mod tests {
                     0.0, 1.0, //
                     0.25, 0.25,
                 ],
-                Some(vec![0.0, 0.0, 0.0]),
+                None,
             ),
             activation(),
             ternary_linear(
@@ -830,7 +830,7 @@ mod tests {
                     1.0, 0.0, 0.0, //
                     0.0, -1.0, 0.0,
                 ],
-                Some(vec![0.0, 0.0]),
+                None,
             ),
         )
         .unwrap()
@@ -846,7 +846,7 @@ mod tests {
                     0.0, 1.0, //
                     0.25, 0.25,
                 ],
-                Some(vec![0.0, 0.0, 0.0]),
+                None,
             ),
             ClippedActivation::gelu_clip(),
             activation(),
@@ -857,7 +857,7 @@ mod tests {
                     1.0, 0.0, 0.0, //
                     0.0, -1.0, 0.0,
                 ],
-                Some(vec![0.0, 0.0]),
+                None,
             ),
         )
         .unwrap()
@@ -873,7 +873,7 @@ mod tests {
                     0.0, 1.0, //
                     0.25, 0.25,
                 ],
-                Some(vec![0.0, 0.0, 0.0]),
+                None,
             ),
             eval_passthrough_activation(),
             ternary_linear(
@@ -883,7 +883,7 @@ mod tests {
                     1.0, 0.0, 0.0, //
                     0.0, -1.0, 0.0,
                 ],
-                Some(vec![0.0, 0.0]),
+                None,
             ),
         )
         .unwrap()

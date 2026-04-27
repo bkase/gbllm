@@ -878,9 +878,9 @@ mod tests {
 
         assert_eq!(
             export.artifact_core_hash().to_string(),
-            "c1e77d89a82a888a53cfe9a8871fa1148dd4080228c486ea82ad3c16a6ce75f5"
+            "c523e698a2dbe9db334d41a72b2c0f0621edc3992d5db0d61276e614226399f0"
         );
-        assert_eq!(export.core.tensors().len(), 17);
+        assert_eq!(export.core.tensors().len(), 16);
         assert_eq!(export.facts.activation_ranges.len(), 2);
         assert_eq!(export.facts.sequence.spec(), fixture_sequence());
         assert_eq!(export.core.quant().weight_quant().len(), 8);
@@ -1468,7 +1468,7 @@ mod tests {
                     1.0, 0.0, //
                     0.0, -1.0,
                 ],
-                Some(vec![0.0, 0.0]),
+                None,
             ),
         )
         .unwrap()
@@ -1494,7 +1494,7 @@ mod tests {
                     1.0, 0.0, //
                     0.0, -1.0,
                 ],
-                Some(vec![0.0, 0.0]),
+                None,
             ),
         )
         .unwrap()

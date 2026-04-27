@@ -507,6 +507,8 @@ impl ExpertQat {
                 output_dim: down_shape.output_rows(),
             });
         }
+        validate_expert_projection_bias("up_projection", &up_projection)?;
+        validate_expert_projection_bias("down_projection", &down_projection)?;
 
         Ok(Self {
             up_projection,
@@ -824,6 +826,9 @@ pub enum ExpertBlockQatError {
         input_dim: usize,
         output_dim: usize,
     },
+    ExpertBiasUnsupported {
+        projection: &'static str,
+    },
     SharedHiddenDimMismatch {
         up_output_rows: usize,
         down_input_cols: usize,
@@ -932,6 +937,10 @@ impl fmt::Display for ExpertBlockQatError {
             } => write!(
                 f,
                 "expert residual dimension mismatch: input {input_dim}, output {output_dim}"
+            ),
+            Self::ExpertBiasUnsupported { projection } => write!(
+                f,
+                "expert {projection} must be biasless; expert byte budgets account only for two ternary weight/scale projections"
             ),
             Self::SharedHiddenDimMismatch {
                 up_output_rows,
@@ -1059,6 +1068,17 @@ fn full_precision_linear(layer: &TernaryLinearQat, input: &[f32]) -> Vec<f32> {
             weighted_sum + layer.bias().map_or(0.0, |bias| bias[row_index])
         })
         .collect()
+}
+
+fn validate_expert_projection_bias(
+    projection: &'static str,
+    layer: &TernaryLinearQat,
+) -> Result<(), ExpertBlockQatError> {
+    if layer.bias().is_some() {
+        return Err(ExpertBlockQatError::ExpertBiasUnsupported { projection });
+    }
+
+    Ok(())
 }
 
 fn dense_linear(
@@ -1547,6 +1567,27 @@ mod tests {
                 actual: 1
             })
         );
+
+        assert_eq!(
+            ExpertQat::new(
+                ternary_linear(2, 2, vec![1.0, 0.0, 0.0, 1.0], Some(vec![0.0, 0.0])),
+                activation(),
+                ternary_linear(2, 2, vec![1.0, 0.0, 0.0, 1.0], None),
+            ),
+            Err(ExpertBlockQatError::ExpertBiasUnsupported {
+                projection: "up_projection",
+            })
+        );
+        assert_eq!(
+            ExpertQat::new(
+                ternary_linear(2, 2, vec![1.0, 0.0, 0.0, 1.0], None),
+                activation(),
+                ternary_linear(2, 2, vec![1.0, 0.0, 0.0, 1.0], Some(vec![0.0, 0.0])),
+            ),
+            Err(ExpertBlockQatError::ExpertBiasUnsupported {
+                projection: "down_projection",
+            })
+        );
     }
 
     fn fixture_expert() -> ExpertQat {
@@ -1559,7 +1600,7 @@ mod tests {
                     0.0, 1.0, //
                     0.25, 0.25,
                 ],
-                Some(vec![0.0, 0.0, 0.0]),
+                None,
             ),
             activation(),
             ternary_linear(
@@ -1569,7 +1610,7 @@ mod tests {
                     1.0, 0.0, 0.0, //
                     0.0, -1.0, 0.0,
                 ],
-                Some(vec![0.0, 0.0]),
+                None,
             ),
         )
         .unwrap()
@@ -1585,7 +1626,7 @@ mod tests {
                     0.0, 1.0, //
                     0.25, 0.25,
                 ],
-                Some(vec![0.0, 0.0, 0.0]),
+                None,
             ),
             ClippedActivation::gelu_clip(),
             activation(),
@@ -1596,7 +1637,7 @@ mod tests {
                     1.0, 0.0, 0.0, //
                     0.0, -1.0, 0.0,
                 ],
-                Some(vec![0.0, 0.0]),
+                None,
             ),
         )
         .unwrap()
