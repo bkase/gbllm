@@ -251,6 +251,14 @@ pub fn make_tiny_artifact() -> ArtifactCore {
 
 pub fn make_tiny_exported_artifact() -> ExportedQatArtifact {
     let model = make_tiny_model();
+    export_tiny_model_with_router_and_expert_block(&model, model.router(), model.expert_block())
+}
+
+pub fn export_tiny_model_with_router_and_expert_block(
+    model: &TinyModel,
+    router: &Top1RouterQat,
+    expert_block: &ExpertBlockQat,
+) -> ExportedQatArtifact {
     let config = model.config();
     let embedding = model.embedding();
     let mut visitor = ExportVisitor::new(config.topology().sequence_export_facts());
@@ -281,11 +289,9 @@ pub fn make_tiny_exported_artifact() -> ExportedQatArtifact {
     visitor
         .visit_dense_projection("block.0.dense_ffn.down", dense_ffn.down_projection())
         .unwrap();
+    visitor.visit_router("block.1.router", router).unwrap();
     visitor
-        .visit_router("block.1.router", model.router())
-        .unwrap();
-    visitor
-        .visit_expert_block("block.1.expert_block", model.expert_block())
+        .visit_expert_block("block.1.expert_block", expert_block)
         .unwrap();
 
     visitor.finish().unwrap()
