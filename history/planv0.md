@@ -449,6 +449,25 @@ pub struct InteractionBundle {
     pub transcript: TranscriptSpec,
     pub default_session: Option<SessionProfile>,
 }
+### Locked-in v1 charset (Tier 2 — "Accelerando voice")
+
+The first deployed `LexicalSpec` is fixed at the values below. This is part of `ArtifactCore`'s identity hash, so the values are not to be churned without a new artifact lineage.
+
+- **Charset (76 printable + `\n` = 77 + 2 control = 79 tokens; round to 80 with `<unk>` fallback)**:
+    - `A`–`Z` (26), `a`–`z` (26), `0`–`9` (10) — case-preserving
+    - punctuation: ` ` (space) `.` `,` `!` `?` `-` `'` `:` `;` `(` `)` `"` `/` (13)
+    - newline `\n` (1)
+    - control tokens: `<bos>`, `<eos>`, `<unk>` (assigned at IDs 80, 81, 82; never appear as printable bytes)
+- **Normalization** (deterministic, hashed into `LexicalSpec`):
+    1. NFC unicode normalize, then strip combining accents (`café` → `cafe`).
+    2. Preserve case as-is. Mixed case is load-bearing for proper-noun signal.
+    3. Smart quotes `“ ” ‘ ’` → `"` `'`; em-dash `—` → `--` (rendered back to em-dash by `TranscriptSpec` on output); ellipsis `…` → `...`.
+    4. Tab → single space; collapse runs of internal spaces; preserve `\n` exactly.
+    5. Drop training examples with > 2% unmappable characters; otherwise replace unmappable codepoints with `<unk>`.
+- **Tied embeddings apply** (`vocab ≤ 256`); see `gbf-model::embeddings::BYTE_LEVEL_TIED_VOCAB_LIMIT`.
+- **Keyboard layout** (`InteractionBundle::KeyboardLayoutSpec`, *not* part of identity hash) — three-page on-screen grid: lowercase / uppercase / symbols-and-digits, with `B` button as one-shot shift on the lowercase page. Iterable without artifact reissue.
+- **Genre intent**: dense Stross / *Accelerando*-style prose. Caps-only and script-style dialogue conventions are explicitly rejected as off-genre.
+
 
 pub struct TranscriptSpec {
     pub render_policy: RenderPolicy,

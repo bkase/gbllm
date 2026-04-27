@@ -1,1 +1,5 @@
 /target/
+
+# Local-only corpus data (license-restricted source text; reproducible from
+# scripts/split_accelerando.py + the original RTF on disk).
+/corpus/
