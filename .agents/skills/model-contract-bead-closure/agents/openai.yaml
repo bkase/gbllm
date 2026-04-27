@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Contract Beads"
+  short_description: "Model topology and scalar contract gates"
+  default_prompt: "Use $model-contract-bead-closure to review a gbf-model topology or scalar semantics bead."

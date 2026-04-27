@@ -59,6 +59,11 @@ There is no escape hatch. If tests fail, fix them.
 ### Project Skills
 
 - For QAT bead implementation, review, or closure, use `.agents/skills/qat-bead-closure/SKILL.md` before closing. Closure comments must include the QAT checklist, a claim-to-gate matrix, and the no future variant acceptance rule.
+- For ASM/ISA beads, also use `.agents/skills/asm-bead-closure/SKILL.md`.
+- For model topology or scalar model-contract beads, also use `.agents/skills/model-contract-bead-closure/SKILL.md`.
+- For sequence-state beads, also use `.agents/skills/sequence-state-bead-closure/SKILL.md`.
+- For tiny fixture beads, also use `.agents/skills/fixture-bead-closure/SKILL.md`.
+- For structured logging beads, also use `.agents/skills/logging-bead-closure/SKILL.md`.
 
 ### QAT Test Beads
 

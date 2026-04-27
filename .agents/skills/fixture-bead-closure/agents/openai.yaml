@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fixture Bead Closure"
+  short_description: "Tiny fixture and artifact helper gates"
+  default_prompt: "Use $fixture-bead-closure to implement or close a tiny fixture bead."

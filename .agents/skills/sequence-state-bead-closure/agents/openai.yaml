@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sequence-State Beads"
+  short_description: "Sequence-state closure and test guardrails"
+  default_prompt: "Use $sequence-state-bead-closure to implement or close a sequence-state bead."

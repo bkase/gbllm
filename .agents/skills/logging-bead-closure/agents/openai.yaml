@@ -1,0 +1,4 @@
+interface:
+  display_name: "Logging Bead Closure"
+  short_description: "Structured logging bead guardrails"
+  default_prompt: "Use $logging-bead-closure to implement or close a structured logging bead."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ASM Bead Closure"
+  short_description: "Guardrails for gbf-asm bead work"
+  default_prompt: "Use $asm-bead-closure to implement or close a gbf-asm bead."
