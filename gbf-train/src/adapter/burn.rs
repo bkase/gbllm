@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use burn::module::{
-    AutodiffModule as BurnAutodiffModule, Module as BurnModule, Param as BurnParam,
+    AutodiffModule as BurnAutodiffModule, Module as BurnModule, ModuleMapper as BurnModuleMapper,
+    Param as BurnParam,
 };
 pub use burn::nn;
 pub use burn::optim::{AdamConfig as BurnAdamConfig, AdamWConfig as BurnAdamWConfig};
@@ -21,6 +22,10 @@ pub use burn::record::{
 pub use burn::tensor::{
     Bool as BurnBool, Float as BurnFloat, Int as BurnInt, Shape as BurnShape, Tensor as BurnTensor,
     TensorData as BurnTensorData,
+    activation::{
+        gelu_approximate as burn_gelu_approximate, relu as burn_relu, silu as burn_silu,
+        softmax as burn_softmax,
+    },
     backend::{
         AutodiffBackend as BurnAutodiffBackend, Backend as BurnBackend,
         ExecutionError as BurnExecutionError,

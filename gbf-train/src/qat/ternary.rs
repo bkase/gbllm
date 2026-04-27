@@ -6,6 +6,7 @@ use std::fmt;
 use gbf_artifact::weight_plan::TernaryWeightPlan;
 use gbf_model::qat::{
     MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError,
+    TernaryThreshold,
 };
 
 use crate::adapter::burn::{
@@ -105,6 +106,7 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
                 shape: input_shape.to_vec(),
             });
         }
+        validate_finite_input(&input)?;
 
         let weights = self.full_precision_weights();
         let thresholds =
@@ -136,6 +138,27 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
 
         self.core
             .export_canonical_from_trained_state(&weights, &thresholds, &scales, bias.as_deref())
+            .map_err(TernaryLinearBurnQatError::Model)
+    }
+
+    pub fn to_core_from_trained_state(
+        &self,
+    ) -> Result<TernaryLinearQat, TernaryLinearBurnQatError> {
+        let weights = float_tensor_into_vec(self.full_precision_weights().detach())?;
+        let thresholds = float_tensor_into_vec(self.thresholds().detach())?
+            .into_iter()
+            .map(TernaryThreshold::from_f32_clamped_q8_8)
+            .collect::<Result<Vec<_>, _>>()?;
+        let scales = float_tensor_into_vec(self.scale_factors().detach())?
+            .into_iter()
+            .map(Q8_8Scale::from_f32_clamped)
+            .collect::<Result<Vec<_>, _>>()?;
+        let bias = self
+            .bias()
+            .map(|bias| float_tensor_into_vec(bias.detach()))
+            .transpose()?;
+
+        TernaryLinearQat::new(self.shape(), weights, bias, thresholds, scales)
             .map_err(TernaryLinearBurnQatError::Model)
     }
 }
@@ -192,6 +215,17 @@ fn threshold_tensor<B: BurnBackend>(
     thresholds
         .reshape([shape.output_rows(), 1])
         .repeat_dim(1, shape.input_cols())
+}
+
+fn validate_finite_input<B: BurnBackend, const D: usize>(
+    input: &BurnFloatTensor<B, D>,
+) -> Result<(), TernaryLinearBurnQatError> {
+    let values = float_tensor_into_vec(input.clone().detach())?;
+    if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+        return Err(TernaryLinearQatError::NonFiniteInput { index }.into());
+    }
+
+    Ok(())
 }
 
 fn hard_ternary_symbols<B: BurnBackend>(
@@ -382,6 +416,14 @@ mod tests {
                 shape,
             })
             if shape == vec![2]
+        ));
+
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0, f32::NAN, 2.0], [3], &device).unwrap();
+        assert!(matches!(
+            layer.fake_quant_forward(input),
+            Err(TernaryLinearBurnQatError::Model(
+                TernaryLinearQatError::NonFiniteInput { index: 1 }
+            ))
         ));
     }
 }

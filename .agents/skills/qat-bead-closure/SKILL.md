@@ -18,6 +18,21 @@ Every QAT bead closure comment must answer these explicitly:
 
 If the artifact contract is not implemented yet, do not claim artifact agreement. State the narrower pre-export contract and create or follow the bead that owns the artifact contract.
 
+## Harness-Compatible Closure Skeleton
+
+Use these exact fragments in QAT close reasons or closure comments; `scripts/qat_harness_checks.py` scans bead metadata case-sensitively:
+
+- `QAT Closure Checklist`
+- `Artifact contract`
+- `differentiable Burn path`
+- `Tests proving it`
+- `Support Matrix`
+- `Claim-To-Gate`
+- `| Closure claim | Guarding test or command | Feature gate | Notes or deviation |`
+- `No-future`
+
+Before rerunning the harness after a corrective close, search the bead's existing close reason and comments for stale support-matrix rows. The harness scans comments as well as the current close reason, so an old closure packet can keep failing even after the bead is reclosed with corrected ownership.
+
 ## QAT Test Beads
 
 - Before creating a moved-acceptance owner, search existing open beads and enrich the existing owner when one already names the behavior. Router/expert Burn adapter work is owned by `bd-1ptv` unless that bead is explicitly superseded.
