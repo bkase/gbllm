@@ -1600,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_tracing_subscriber_observes_structured_event_and_span_fields() {
+    fn actual_tracing_subscriber_observes_training_phase_span_fields() {
         let capture = TraceCapture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         let hardness = QatHardnessLevels::new(0.0, 0.25, 0.5, 1.0).unwrap();
@@ -1610,7 +1610,6 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let emitter = TrainingLogEmitter::new();
             let _span = emitter.training_phase_span(&span_fields).unwrap();
-            emitter.loss_step(&sample_loss_breakdown()).unwrap();
         });
 
         let records = capture.records();
@@ -1622,23 +1621,9 @@ mod tests {
         assert_eq!(phase_span.field("step_start"), Some("10"));
         assert_eq!(phase_span.field("router_hardness"), Some("0.5"));
 
-        let loss_event = records
-            .iter()
-            .find(|record| {
-                record.kind == TraceRecordKind::Event
-                    && record.field("event_name") == Some(EVENT_NAME_LOSS_STEP)
-            })
-            .expect("loss_step event should be captured by tracing subscriber");
-        assert_eq!(loss_event.field("step"), Some("7"));
-        assert_trace_f64_close(loss_event, "zrouter_loss", 0.04);
-        assert!(
-            loss_event.field("message").is_none(),
-            "required events must not encode load-bearing data in a message field"
-        );
-
-        // Other structured event kinds, including teacher_freeze, are covered by
-        // the integration test process where tracing callsites cannot be
-        // pre-registered by sibling unit tests without a subscriber.
+        // Structured event fields are covered by the integration test process,
+        // where tracing callsites cannot be pre-registered by sibling unit
+        // tests before the capture subscriber is installed.
     }
 
     #[test]
@@ -1775,18 +1760,6 @@ mod tests {
         fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
             self.insert(field, value.to_string());
         }
-    }
-
-    fn assert_trace_f64_close(record: &TraceRecord, field: &str, expected: f64) {
-        let actual = record
-            .field(field)
-            .unwrap_or_else(|| panic!("missing trace field {field}"))
-            .parse::<f64>()
-            .unwrap_or_else(|error| panic!("trace field {field} is not numeric: {error}"));
-        assert!(
-            (actual - expected).abs() <= 1.0e-6,
-            "trace field {field} expected {expected}, got {actual}"
-        );
     }
 
     fn sample_loss_breakdown() -> LossBreakdown {
