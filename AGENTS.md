@@ -114,4 +114,11 @@ git push                # Push to remote
 - Public artifact JSON shape tests should pin downstream field names with explicit `serde_json::json!` assertions, not only serde round-trips.
 - Expert-scoped export facts must state whether `ExpertId` is global or layer-local. If the model uses layer-local expert indexes, include `LayerId` or an artifact path in the fact.
 
+### Oracle And Conformance Beads
+
+- When a real oracle is unavailable and a fixture-local fallback evaluator is allowed, name it as a fallback in tests and closure, and record the real oracle owner bead.
+- Artifact evaluators must resolve deployable full-precision weights through `QuantSpec::weight_quant`, not by assuming tensor-id naming conventions.
+- Quantization-gap metrics over token logits must aggregate per token/vocab row; do not softmax a whole prompt's concatenated logits as one distribution.
+- In-memory metric JSON shape tests do not prove `conformance.json` emission. Name the report/conformance owner bead when report plumbing is not implemented.
+
 <!-- end-br-agent-instructions -->
