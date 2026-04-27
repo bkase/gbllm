@@ -18,9 +18,12 @@ use tracing_subscriber::EnvFilter;
 pub const EVENT_NAME_SCALAR_METRIC: &str = "scalar_metric";
 pub const EVENT_NAME_LOSS_STEP: &str = "loss_step";
 pub const EVENT_NAME_PHASE_TRANSITION: &str = "phase_transition";
+pub const EVENT_NAME_TEACHER_FREEZE: &str = "teacher_freeze";
 pub const EVENT_NAME_EXPORT_COMPLETE: &str = "export_complete";
 pub const EVENT_NAME_PREFLIGHT: &str = "preflight";
 pub const EVENT_NAME_SHADOW_COMPILE: &str = "shadow_compile";
+pub const DEFAULT_LOGGING_OVERHEAD_LIMIT: f64 = 0.01;
+pub const PREFLIGHT_CHECK_EXPERT_SLOT_BUDGET: &str = "expert_slot_budget";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -404,6 +407,14 @@ pub struct PhaseTransitionEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TeacherFreezeEvent {
+    pub step: u64,
+    pub teacher_checkpoint_id: String,
+    pub reference_bundle_hash: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExportEvent {
     pub step: u64,
     pub artifact_core_hash: String,
@@ -439,6 +450,118 @@ pub struct PreflightEvent {
     pub detail: String,
     pub numeric_value: f32,
     pub threshold: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpertSlotPreflightEvent {
+    detail: String,
+    status: PreflightStatus,
+    budget_computed: bool,
+    expert_bytes: u64,
+    expert_slot_usable_bytes: u64,
+    slack_bytes: u64,
+    over_by_bytes: u64,
+}
+
+impl ExpertSlotPreflightEvent {
+    pub fn fits(
+        detail: impl Into<String>,
+        expert_bytes: u64,
+        expert_slot_usable_bytes: u64,
+        slack_bytes: u64,
+    ) -> Result<Self, LoggingEventError> {
+        Self::new(
+            detail,
+            PreflightStatus::Pass,
+            true,
+            expert_bytes,
+            expert_slot_usable_bytes,
+            slack_bytes,
+            0,
+        )
+    }
+
+    pub fn exceeds(
+        detail: impl Into<String>,
+        expert_bytes: u64,
+        expert_slot_usable_bytes: u64,
+        over_by_bytes: u64,
+    ) -> Result<Self, LoggingEventError> {
+        Self::new(
+            detail,
+            PreflightStatus::Fail,
+            true,
+            expert_bytes,
+            expert_slot_usable_bytes,
+            0,
+            over_by_bytes,
+        )
+    }
+
+    pub fn invalid(
+        detail: impl Into<String>,
+        expert_slot_usable_bytes: u64,
+    ) -> Result<Self, LoggingEventError> {
+        Self::new(
+            detail,
+            PreflightStatus::Fail,
+            false,
+            0,
+            expert_slot_usable_bytes,
+            0,
+            0,
+        )
+    }
+
+    fn new(
+        detail: impl Into<String>,
+        status: PreflightStatus,
+        budget_computed: bool,
+        expert_bytes: u64,
+        expert_slot_usable_bytes: u64,
+        slack_bytes: u64,
+        over_by_bytes: u64,
+    ) -> Result<Self, LoggingEventError> {
+        let detail = detail.into();
+        validate_nonempty("detail", &detail)?;
+        Ok(Self {
+            detail,
+            status,
+            budget_computed,
+            expert_bytes,
+            expert_slot_usable_bytes,
+            slack_bytes,
+            over_by_bytes,
+        })
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    pub const fn status(&self) -> PreflightStatus {
+        self.status
+    }
+
+    pub const fn budget_computed(&self) -> bool {
+        self.budget_computed
+    }
+
+    pub const fn expert_bytes(&self) -> u64 {
+        self.expert_bytes
+    }
+
+    pub const fn expert_slot_usable_bytes(&self) -> u64 {
+        self.expert_slot_usable_bytes
+    }
+
+    pub const fn slack_bytes(&self) -> u64 {
+        self.slack_bytes
+    }
+
+    pub const fn over_by_bytes(&self) -> u64 {
+        self.over_by_bytes
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -632,6 +755,38 @@ impl TrainingLogEmitter {
         Ok(())
     }
 
+    pub fn teacher_freeze(&self, fields: &TeacherFreezeEvent) -> Result<(), LoggingEventError> {
+        validate_nonempty("teacher_checkpoint_id", &fields.teacher_checkpoint_id)?;
+        validate_nonempty("reference_bundle_hash", &fields.reference_bundle_hash)?;
+
+        tracing::info!(
+            event_name = EVENT_NAME_TEACHER_FREEZE,
+            step = fields.step,
+            teacher_checkpoint_id = %fields.teacher_checkpoint_id,
+            reference_bundle_hash = %fields.reference_bundle_hash,
+            duration_ms = fields.duration_ms,
+        );
+
+        self.record_test_event(TestEvent::new(
+            TestEventKind::TeacherFreeze,
+            LogLevel::Info,
+            fields_map([
+                ("step", TestFieldValue::U64(fields.step)),
+                (
+                    "teacher_checkpoint_id",
+                    TestFieldValue::String(fields.teacher_checkpoint_id.clone()),
+                ),
+                (
+                    "reference_bundle_hash",
+                    TestFieldValue::String(fields.reference_bundle_hash.clone()),
+                ),
+                ("duration_ms", TestFieldValue::U64(fields.duration_ms)),
+            ]),
+        ));
+
+        Ok(())
+    }
+
     pub fn export_complete(&self, fields: &ExportEvent) -> Result<(), LoggingEventError> {
         validate_nonempty("artifact_core_hash", &fields.artifact_core_hash)?;
         validate_nonempty(
@@ -716,6 +871,54 @@ impl TrainingLogEmitter {
                 ("detail", TestFieldValue::String(fields.detail.clone())),
                 ("numeric_value", TestFieldValue::F32(fields.numeric_value)),
                 ("threshold", TestFieldValue::F32(fields.threshold)),
+            ]),
+        ));
+
+        Ok(())
+    }
+
+    pub fn expert_slot_preflight(
+        &self,
+        fields: &ExpertSlotPreflightEvent,
+    ) -> Result<(), LoggingEventError> {
+        validate_nonempty("detail", fields.detail())?;
+
+        tracing::info!(
+            event_name = EVENT_NAME_PREFLIGHT,
+            check_name = PREFLIGHT_CHECK_EXPERT_SLOT_BUDGET,
+            status = fields.status().as_str(),
+            detail = %fields.detail(),
+            budget_computed = fields.budget_computed(),
+            expert_bytes = fields.expert_bytes(),
+            expert_slot_usable_bytes = fields.expert_slot_usable_bytes(),
+            slack_bytes = fields.slack_bytes(),
+            over_by_bytes = fields.over_by_bytes(),
+        );
+
+        self.record_test_event(TestEvent::new(
+            TestEventKind::Preflight,
+            LogLevel::Info,
+            fields_map([
+                (
+                    "check_name",
+                    TestFieldValue::String(PREFLIGHT_CHECK_EXPERT_SLOT_BUDGET.to_owned()),
+                ),
+                (
+                    "status",
+                    TestFieldValue::String(fields.status().as_str().to_owned()),
+                ),
+                ("detail", TestFieldValue::String(fields.detail().to_owned())),
+                (
+                    "budget_computed",
+                    TestFieldValue::Bool(fields.budget_computed()),
+                ),
+                ("expert_bytes", TestFieldValue::U64(fields.expert_bytes())),
+                (
+                    "expert_slot_usable_bytes",
+                    TestFieldValue::U64(fields.expert_slot_usable_bytes()),
+                ),
+                ("slack_bytes", TestFieldValue::U64(fields.slack_bytes())),
+                ("over_by_bytes", TestFieldValue::U64(fields.over_by_bytes())),
             ]),
         ));
 
@@ -816,6 +1019,7 @@ pub enum TestEventKind {
     TrainingPhaseSpan,
     LossStep,
     PhaseTransition,
+    TeacherFreeze,
     ExportComplete,
     Preflight,
     ShadowCompile,
@@ -899,6 +1103,183 @@ impl fmt::Display for LoggingEventError {
 }
 
 impl Error for LoggingEventError {}
+
+/// Explicit timing input for the logging overhead gate.
+///
+/// This type deliberately does not measure anything by itself. Callers must
+/// feed it values from a real baseline-vs-instrumented workload before making
+/// an overhead claim.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoggingOverheadMeasurement {
+    baseline_step_ns: u64,
+    instrumented_step_ns: u64,
+}
+
+impl LoggingOverheadMeasurement {
+    pub fn new(
+        baseline_step_ns: u64,
+        instrumented_step_ns: u64,
+    ) -> Result<Self, LoggingOverheadGateError> {
+        if baseline_step_ns == 0 {
+            return Err(LoggingOverheadGateError::ZeroBaseline);
+        }
+
+        Ok(Self {
+            baseline_step_ns,
+            instrumented_step_ns,
+        })
+    }
+
+    pub fn baseline_step_ns(self) -> u64 {
+        self.baseline_step_ns
+    }
+
+    pub fn instrumented_step_ns(self) -> u64 {
+        self.instrumented_step_ns
+    }
+
+    pub fn overhead_fraction(self) -> f64 {
+        if self.instrumented_step_ns <= self.baseline_step_ns {
+            return 0.0;
+        }
+
+        (self.instrumented_step_ns - self.baseline_step_ns) as f64 / self.baseline_step_ns as f64
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoggingOverheadStatus {
+    Pass,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoggingOverheadReport {
+    measurement: LoggingOverheadMeasurement,
+    overhead_fraction: f64,
+    max_overhead_fraction: f64,
+    status: LoggingOverheadStatus,
+}
+
+impl LoggingOverheadReport {
+    pub fn measurement(self) -> LoggingOverheadMeasurement {
+        self.measurement
+    }
+
+    pub fn overhead_fraction(self) -> f64 {
+        self.overhead_fraction
+    }
+
+    pub fn max_overhead_fraction(self) -> f64 {
+        self.max_overhead_fraction
+    }
+
+    pub fn status(self) -> LoggingOverheadStatus {
+        self.status
+    }
+
+    pub fn passes(self) -> bool {
+        self.status == LoggingOverheadStatus::Pass
+    }
+}
+
+/// Compares measured logging overhead against a configured limit.
+///
+/// Unit tests cover the arithmetic contract; benchmark ownership belongs to
+/// the workload that produces `LoggingOverheadMeasurement`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoggingOverheadGate {
+    max_overhead_fraction: f64,
+}
+
+impl LoggingOverheadGate {
+    pub fn new(max_overhead_fraction: f64) -> Result<Self, LoggingOverheadGateError> {
+        if !max_overhead_fraction.is_finite() || max_overhead_fraction < 0.0 {
+            return Err(LoggingOverheadGateError::InvalidMaxOverheadFraction {
+                value: max_overhead_fraction,
+            });
+        }
+
+        Ok(Self {
+            max_overhead_fraction,
+        })
+    }
+
+    pub fn constitution_one_percent() -> Self {
+        Self::new(DEFAULT_LOGGING_OVERHEAD_LIMIT)
+            .expect("default logging overhead limit is finite and non-negative")
+    }
+
+    pub fn max_overhead_fraction(self) -> f64 {
+        self.max_overhead_fraction
+    }
+
+    pub fn evaluate(self, measurement: LoggingOverheadMeasurement) -> LoggingOverheadReport {
+        let overhead_fraction = measurement.overhead_fraction();
+        let status = if overhead_fraction <= self.max_overhead_fraction {
+            LoggingOverheadStatus::Pass
+        } else {
+            LoggingOverheadStatus::Fail
+        };
+
+        LoggingOverheadReport {
+            measurement,
+            overhead_fraction,
+            max_overhead_fraction: self.max_overhead_fraction,
+            status,
+        }
+    }
+
+    pub fn require_pass(
+        self,
+        measurement: LoggingOverheadMeasurement,
+    ) -> Result<LoggingOverheadReport, LoggingOverheadGateError> {
+        let report = self.evaluate(measurement);
+        if report.passes() {
+            return Ok(report);
+        }
+
+        Err(LoggingOverheadGateError::Exceeded {
+            measured_fraction: report.overhead_fraction(),
+            max_fraction: report.max_overhead_fraction(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LoggingOverheadGateError {
+    ZeroBaseline,
+    InvalidMaxOverheadFraction {
+        value: f64,
+    },
+    Exceeded {
+        measured_fraction: f64,
+        max_fraction: f64,
+    },
+}
+
+impl fmt::Display for LoggingOverheadGateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroBaseline => {
+                f.write_str("logging overhead measurement baseline must be nonzero")
+            }
+            Self::InvalidMaxOverheadFraction { value } => write!(
+                f,
+                "logging overhead gate limit must be finite and non-negative, got {value}"
+            ),
+            Self::Exceeded {
+                measured_fraction,
+                max_fraction,
+            } => write!(
+                f,
+                "logging overhead {measured_fraction:.6} exceeds limit {max_fraction:.6}"
+            ),
+        }
+    }
+}
+
+impl Error for LoggingOverheadGateError {}
 
 fn fields_map<const N: usize>(
     entries: [(&'static str, TestFieldValue); N],
@@ -1120,10 +1501,18 @@ mod tests {
     }
 
     #[test]
-    fn export_preflight_and_shadow_compile_events_cover_required_fields() {
+    fn teacher_freeze_export_preflight_and_shadow_compile_events_cover_required_fields() {
         let collector = TestEventCollector::new();
         let emitter = TrainingLogEmitter::with_test_collector(collector.clone());
 
+        emitter
+            .teacher_freeze(&TeacherFreezeEvent {
+                step: 11,
+                teacher_checkpoint_id: "teacher-11".to_owned(),
+                reference_bundle_hash: "frozen-reference-hash".to_owned(),
+                duration_ms: 5,
+            })
+            .unwrap();
         emitter
             .export_complete(&ExportEvent {
                 step: 12,
@@ -1157,21 +1546,56 @@ mod tests {
             .unwrap();
 
         let events = collector.events();
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].kind(), TestEventKind::ExportComplete);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].kind(), TestEventKind::TeacherFreeze);
         assert_eq!(
-            events[0].field("artifact_core_hash"),
+            events[0].field("teacher_checkpoint_id"),
+            Some(&TestFieldValue::String("teacher-11".to_owned()))
+        );
+        assert_eq!(events[1].kind(), TestEventKind::ExportComplete);
+        assert_eq!(
+            events[1].field("artifact_core_hash"),
             Some(&TestFieldValue::String("0123456789abcdef".to_owned()))
         );
-        assert_eq!(events[1].kind(), TestEventKind::Preflight);
+        assert_eq!(events[2].kind(), TestEventKind::Preflight);
         assert_eq!(
-            events[1].field("status"),
+            events[2].field("status"),
             Some(&TestFieldValue::String("warn".to_owned()))
         );
-        assert_eq!(events[2].kind(), TestEventKind::ShadowCompile);
+        assert_eq!(events[3].kind(), TestEventKind::ShadowCompile);
         assert_eq!(
-            events[2].field("frontier_size"),
+            events[3].field("frontier_size"),
             Some(&TestFieldValue::U64(3))
+        );
+    }
+
+    #[test]
+    fn logging_overhead_gate_requires_measurement_and_enforces_one_percent_limit() {
+        assert_eq!(
+            LoggingOverheadMeasurement::new(0, 1).unwrap_err(),
+            LoggingOverheadGateError::ZeroBaseline
+        );
+        assert!(matches!(
+            LoggingOverheadGate::new(f64::NAN).unwrap_err(),
+            LoggingOverheadGateError::InvalidMaxOverheadFraction { .. }
+        ));
+
+        let gate = LoggingOverheadGate::constitution_one_percent();
+        let passing = gate
+            .require_pass(LoggingOverheadMeasurement::new(10_000, 10_050).unwrap())
+            .unwrap();
+        assert_eq!(passing.status(), LoggingOverheadStatus::Pass);
+        assert_eq!(passing.overhead_fraction(), 0.005);
+
+        let failing = gate
+            .require_pass(LoggingOverheadMeasurement::new(10_000, 10_200).unwrap())
+            .unwrap_err();
+        assert_eq!(
+            failing,
+            LoggingOverheadGateError::Exceeded {
+                measured_fraction: 0.02,
+                max_fraction: DEFAULT_LOGGING_OVERHEAD_LIMIT,
+            }
         );
     }
 
@@ -1187,6 +1611,14 @@ mod tests {
             let emitter = TrainingLogEmitter::new();
             let _span = emitter.training_phase_span(&span_fields).unwrap();
             emitter.loss_step(&sample_loss_breakdown()).unwrap();
+            emitter
+                .teacher_freeze(&TeacherFreezeEvent {
+                    step: 8,
+                    teacher_checkpoint_id: "teacher-8".to_owned(),
+                    reference_bundle_hash: "reference-hash".to_owned(),
+                    duration_ms: 3,
+                })
+                .unwrap();
         });
 
         let records = capture.records();
@@ -1211,6 +1643,19 @@ mod tests {
             loss_event.field("message").is_none(),
             "required events must not encode load-bearing data in a message field"
         );
+
+        let freeze_event = records
+            .iter()
+            .find(|record| {
+                record.kind == TraceRecordKind::Event
+                    && record.field("event_name") == Some(EVENT_NAME_TEACHER_FREEZE)
+            })
+            .expect("teacher_freeze event should be captured by tracing subscriber");
+        assert_eq!(freeze_event.field("step"), Some("8"));
+        assert_eq!(
+            freeze_event.field("teacher_checkpoint_id"),
+            Some("teacher-8")
+        );
     }
 
     #[test]
@@ -1221,6 +1666,7 @@ mod tests {
             EVENT_NAME_SCALAR_METRIC,
             EVENT_NAME_LOSS_STEP,
             EVENT_NAME_PHASE_TRANSITION,
+            EVENT_NAME_TEACHER_FREEZE,
             EVENT_NAME_EXPORT_COMPLETE,
             EVENT_NAME_PREFLIGHT,
             EVENT_NAME_SHADOW_COMPILE,
