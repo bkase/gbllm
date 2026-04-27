@@ -89,10 +89,14 @@ git push                # Push to remote
 
 - Separate raw diagnostic loss from weighted total-loss contribution. Log raw per-term losses; apply configured loss weights in the composition owner.
 - Define logits reduction explicitly: name the class/vocab axis, then state whether remaining batch/token dimensions are summed or averaged.
+- For activation/range losses, name the batch and per-sample activation axes. Use a checked value object when a flat slice would hide sample width or boundary semantics.
+- Tests for scalar hyperparameters such as safe bounds, temperatures, and loss weights must include a non-default/non-1.0 value.
 - For router z-loss, name the zero point/baseline (uncentered versus centered) and distinguish training `lambda_zrouter` losses from QAT/router aux-loss proxies.
 - For router load-balance losses, name hard top-1 assignments as stop-gradient dispatch provenance; gradient claims must identify whether the proof reaches routing probabilities, router logits, or full router parameters.
 - Burn loss helpers must validate computed tensor losses, including weighted outputs, for finite values before returning.
+- Burn loss helpers should not host-copy entire differentiable tensors for routine validation; validate scalar config/shape before tensor math and validate the computed loss after tensor math unless host inspection is required by the contract.
 - If a loss claim depends on Burn autodiff, closure must cite a feature-enabled gate such as `cargo test -p gbf-train --features burn-adapter -- <loss_test>`.
+- When a filtered test target is introduced by the patch, report the number of tests run and avoid claiming red-before-green unless you actually ran the pre-patch check.
 - Do not claim phase-boundary adoption or training-loop logging from a standalone loss helper. Name the integration bead that owns the real caller.
 
 <!-- end-br-agent-instructions -->
