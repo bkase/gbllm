@@ -373,10 +373,24 @@ fn validate_ternary_entry(
     entry: &TernaryQuantEntry,
     tensors: &BTreeMap<CanonicalTensorId, &CanonicalTensor>,
 ) -> Result<(), ArtifactCoreError> {
+    if entry.plan.encoding != WeightEncoding::Ternary2 {
+        return Err(ArtifactCoreError::InvalidQuantPlan {
+            path: entry.projection.clone(),
+            reason: "only Ternary2 ternary weight tensors are supported today",
+        });
+    }
+
     if entry.plan.scale_format != ScaleFormat::Q8_8 {
         return Err(ArtifactCoreError::InvalidQuantPlan {
             path: entry.projection.clone(),
             reason: "only Q8_8 ternary scale tensors are supported today",
+        });
+    }
+
+    if matches!(entry.plan.threshold, ThresholdPlan::LearnedPerGroup(_)) {
+        return Err(ArtifactCoreError::InvalidQuantPlan {
+            path: entry.projection.clone(),
+            reason: "learned per-group ternary threshold state is not exported today",
         });
     }
 
@@ -1044,6 +1058,50 @@ mod tests {
             ArtifactCoreError::InvalidQuantPlan {
                 path: ArtifactPath::new("projection").unwrap(),
                 reason: "only Q8_8 ternary scale tensors are supported today"
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_core_rejects_declared_non_ternary2_weight_encodings_until_tensor_encoding_exists() {
+        for encoding in [
+            WeightEncoding::SparseTernaryBitplanes,
+            WeightEncoding::Binary1,
+        ] {
+            let weight = ternary_tensor("projection.weight", &[2, 2], vec![1, 0, -1, 1]);
+            let scale = q8_8_tensor("projection.scale", &[2], vec![256, 256]);
+            let mut quant = fixture_ternary_quant();
+            quant.ternary_weight_plans[0].plan.encoding = encoding;
+            quant.weight_quant[0].ternary_plan = Some(quant.ternary_weight_plans[0].plan);
+
+            let err =
+                ArtifactCore::new(vec![weight, scale], quant, fixture_sequence()).unwrap_err();
+
+            assert_eq!(
+                err,
+                ArtifactCoreError::InvalidQuantPlan {
+                    path: ArtifactPath::new("projection").unwrap(),
+                    reason: "only Ternary2 ternary weight tensors are supported today"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_core_rejects_learned_per_group_thresholds_until_state_is_exported() {
+        let weight = ternary_tensor("projection.weight", &[2, 2], vec![1, 0, -1, 1]);
+        let scale = q8_8_tensor("projection.scale", &[2], vec![256, 256]);
+        let mut quant = fixture_ternary_quant();
+        quant.ternary_weight_plans[0].plan.threshold = ThresholdPlan::learned_per_group(2).unwrap();
+        quant.weight_quant[0].ternary_plan = Some(quant.ternary_weight_plans[0].plan);
+
+        let err = ArtifactCore::new(vec![weight, scale], quant, fixture_sequence()).unwrap_err();
+
+        assert_eq!(
+            err,
+            ArtifactCoreError::InvalidQuantPlan {
+                path: ArtifactPath::new("projection").unwrap(),
+                reason: "learned per-group ternary threshold state is not exported today"
             }
         );
     }
