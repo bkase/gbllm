@@ -13,6 +13,10 @@ use gbf_train::logging::{
     ShadowCompileEvent, TeacherFreezeEvent, TrainingLogEmitter,
 };
 use gbf_train::preflight::ExpertBudgetPreflightReport;
+use gbf_train::teacher::{
+    DenseTeacherModel, TeacherFreezeMetadata, TeacherStorageFingerprint, TeacherWeightFingerprint,
+    freeze_teacher_with_logging,
+};
 use tracing_subscriber::prelude::*;
 
 #[test]
@@ -37,7 +41,9 @@ fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
             .teacher_freeze(&TeacherFreezeEvent {
                 step: 10,
                 teacher_checkpoint_id: "teacher-10".to_owned(),
-                reference_bundle_hash: "reference-bundle-hash".to_owned(),
+                source_weight_fingerprint: "010203".to_owned(),
+                frozen_weight_fingerprint: "010203".to_owned(),
+                weights_match: true,
                 duration_ms: 7,
             })
             .unwrap();
@@ -166,9 +172,16 @@ fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
     assert_event_field(
         &records,
         EVENT_NAME_TEACHER_FREEZE,
-        "reference_bundle_hash",
-        "reference-bundle-hash",
+        "source_weight_fingerprint",
+        "010203",
     );
+    assert_event_field(
+        &records,
+        EVENT_NAME_TEACHER_FREEZE,
+        "frozen_weight_fingerprint",
+        "010203",
+    );
+    assert_event_field(&records, EVENT_NAME_TEACHER_FREEZE, "weights_match", "true");
     assert_event_field(&records, EVENT_NAME_TEACHER_FREEZE, "duration_ms", "7");
     assert_event_field(&records, EVENT_NAME_EXPORT_COMPLETE, "step", "30");
     assert_event_field(
@@ -224,6 +237,45 @@ fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
     ] {
         assert_no_message_field(&records, event_name);
     }
+}
+
+#[test]
+fn teacher_freeze_producer_is_captured_by_tracing_subscriber() {
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let emitter = TrainingLogEmitter::new();
+        let model = LoggingTeacherModel {
+            weights: vec![1.0, 2.0],
+            requires_grad: true,
+        };
+        let metadata = TeacherFreezeMetadata::new(10, "teacher-10").unwrap();
+
+        freeze_teacher_with_logging(&model, metadata, &emitter).unwrap();
+    });
+
+    let records = capture.records();
+    assert_event_field(&records, EVENT_NAME_TEACHER_FREEZE, "step", "10");
+    assert_event_field(
+        &records,
+        EVENT_NAME_TEACHER_FREEZE,
+        "teacher_checkpoint_id",
+        "teacher-10",
+    );
+    assert_event_field(
+        &records,
+        EVENT_NAME_TEACHER_FREEZE,
+        "source_weight_fingerprint",
+        "0000803f00000040",
+    );
+    assert_event_field(
+        &records,
+        EVENT_NAME_TEACHER_FREEZE,
+        "frozen_weight_fingerprint",
+        "0000803f00000040",
+    );
+    assert_event_field(&records, EVENT_NAME_TEACHER_FREEZE, "weights_match", "true");
 }
 
 #[test]
@@ -340,6 +392,49 @@ fn sample_loss_breakdown() -> LossBreakdown {
         shape_loss: 0.01,
         overflow_loss: 0.02,
         total_loss: 1.33,
+    }
+}
+
+#[derive(Clone)]
+struct LoggingTeacherModel {
+    weights: Vec<f32>,
+    requires_grad: bool,
+}
+
+impl DenseTeacherModel for LoggingTeacherModel {
+    type Input = Vec<f32>;
+    type Output = f32;
+    type ForwardError = std::convert::Infallible;
+
+    fn detach_for_teacher(&mut self) {
+        self.requires_grad = false;
+    }
+
+    fn forward_no_grad(&self, input: Self::Input) -> Result<Self::Output, Self::ForwardError> {
+        Ok(self
+            .weights
+            .iter()
+            .zip(input.iter())
+            .map(|(weight, input)| weight * input)
+            .sum())
+    }
+
+    fn teacher_weight_fingerprint(&self) -> TeacherWeightFingerprint {
+        TeacherWeightFingerprint::new(
+            self.weights
+                .iter()
+                .flat_map(|weight| weight.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
+        TeacherStorageFingerprint::new((self.weights.as_ptr() as usize).to_le_bytes()).unwrap()
+    }
+
+    fn teacher_requires_grad(&self) -> bool {
+        self.requires_grad
     }
 }
 

@@ -418,7 +418,9 @@ pub struct PhaseTransitionEvent {
 pub struct TeacherFreezeEvent {
     pub step: u64,
     pub teacher_checkpoint_id: String,
-    pub reference_bundle_hash: String,
+    pub source_weight_fingerprint: String,
+    pub frozen_weight_fingerprint: String,
+    pub weights_match: bool,
     pub duration_ms: u64,
 }
 
@@ -777,13 +779,22 @@ impl TrainingLogEmitter {
 
     pub fn teacher_freeze(&self, fields: &TeacherFreezeEvent) -> Result<(), LoggingEventError> {
         validate_nonempty("teacher_checkpoint_id", &fields.teacher_checkpoint_id)?;
-        validate_nonempty("reference_bundle_hash", &fields.reference_bundle_hash)?;
+        validate_nonempty(
+            "source_weight_fingerprint",
+            &fields.source_weight_fingerprint,
+        )?;
+        validate_nonempty(
+            "frozen_weight_fingerprint",
+            &fields.frozen_weight_fingerprint,
+        )?;
 
         tracing::info!(
             event_name = EVENT_NAME_TEACHER_FREEZE,
             step = fields.step,
             teacher_checkpoint_id = %fields.teacher_checkpoint_id,
-            reference_bundle_hash = %fields.reference_bundle_hash,
+            source_weight_fingerprint = %fields.source_weight_fingerprint,
+            frozen_weight_fingerprint = %fields.frozen_weight_fingerprint,
+            weights_match = fields.weights_match,
             duration_ms = fields.duration_ms,
         );
 
@@ -797,9 +808,14 @@ impl TrainingLogEmitter {
                     TestFieldValue::String(fields.teacher_checkpoint_id.clone()),
                 ),
                 (
-                    "reference_bundle_hash",
-                    TestFieldValue::String(fields.reference_bundle_hash.clone()),
+                    "source_weight_fingerprint",
+                    TestFieldValue::String(fields.source_weight_fingerprint.clone()),
                 ),
+                (
+                    "frozen_weight_fingerprint",
+                    TestFieldValue::String(fields.frozen_weight_fingerprint.clone()),
+                ),
+                ("weights_match", TestFieldValue::Bool(fields.weights_match)),
                 ("duration_ms", TestFieldValue::U64(fields.duration_ms)),
             ]),
         ));
@@ -1537,7 +1553,9 @@ mod tests {
             .teacher_freeze(&TeacherFreezeEvent {
                 step: 11,
                 teacher_checkpoint_id: "teacher-11".to_owned(),
-                reference_bundle_hash: "frozen-reference-hash".to_owned(),
+                source_weight_fingerprint: "010203".to_owned(),
+                frozen_weight_fingerprint: "010203".to_owned(),
+                weights_match: true,
                 duration_ms: 5,
             })
             .unwrap();
@@ -1579,6 +1597,10 @@ mod tests {
         assert_eq!(
             events[0].field("teacher_checkpoint_id"),
             Some(&TestFieldValue::String("teacher-11".to_owned()))
+        );
+        assert_eq!(
+            events[0].field("weights_match"),
+            Some(&TestFieldValue::Bool(true))
         );
         assert_eq!(events[1].kind(), TestEventKind::ExportComplete);
         assert_eq!(

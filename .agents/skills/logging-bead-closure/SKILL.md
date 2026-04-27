@@ -12,6 +12,7 @@ Use this for structured logging schema/helper work and adoption by training, dat
 - Closure must distinguish a logging schema/helper contract from adoption by real producers.
 - If producer adoption is incomplete, create or cite a named follow-up bead before closing.
 - Do not claim observability performance targets, such as logging overhead percentage, unless a benchmark or explicit gate measures them.
+- Producer events must not require downstream artifact identifiers before those artifacts exist. Log local verification evidence in the producer event and move durable artifact hashes to the export/artifact owner bead.
 
 ## Event Shape Rules
 

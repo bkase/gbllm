@@ -10,3 +10,4 @@ pub mod preflight;
 pub mod qat;
 pub mod scheduler;
 pub mod shadow;
+pub mod teacher;
