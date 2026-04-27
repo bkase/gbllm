@@ -85,4 +85,11 @@ git push                # Push to remote
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
 
+### Training Loss Beads
+
+- Separate raw diagnostic loss from weighted total-loss contribution. Log raw per-term losses; apply configured loss weights in the composition owner.
+- Define logits reduction explicitly: name the class/vocab axis, then state whether remaining batch/token dimensions are summed or averaged.
+- If a loss claim depends on Burn autodiff, closure must cite a feature-enabled gate such as `cargo test -p gbf-train --features burn-adapter -- <loss_test>`.
+- Do not claim phase-boundary adoption or training-loop logging from a standalone loss helper. Name the integration bead that owns the real caller.
+
 <!-- end-br-agent-instructions -->

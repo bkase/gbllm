@@ -26,8 +26,8 @@ pub use burn::tensor::{
     Bool as BurnBool, Float as BurnFloat, Int as BurnInt, Shape as BurnShape, Tensor as BurnTensor,
     TensorData as BurnTensorData,
     activation::{
-        gelu_approximate as burn_gelu_approximate, relu as burn_relu, sigmoid as burn_sigmoid,
-        silu as burn_silu, softmax as burn_softmax,
+        gelu_approximate as burn_gelu_approximate, log_softmax as burn_log_softmax,
+        relu as burn_relu, sigmoid as burn_sigmoid, silu as burn_silu, softmax as burn_softmax,
     },
     backend::{
         AutodiffBackend as BurnAutodiffBackend, Backend as BurnBackend,

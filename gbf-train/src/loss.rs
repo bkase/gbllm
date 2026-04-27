@@ -1,1 +1,3 @@
-//! Module stub.
+//! Training loss contracts.
+
+pub mod distillation;
