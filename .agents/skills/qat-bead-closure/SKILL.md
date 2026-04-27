@@ -43,6 +43,10 @@ Before rerunning the harness after a corrective close, search the bead's existin
 - Do not call a pre-export `export_canonical` reconstruction an artifact round trip. Artifact round trips require `ArtifactCore` or serialized artifact bytes and a dedicated gate.
 - For F4 phase/config beads, state whether the type is a canonical five-phase schedule or a generic timeline. Canonical schedules must reject wrong phase count, non-zero start, noncanonical order, gaps, overlaps, zero-length ranges, and step overflow with focused tests.
 - For phase hardness/mode beads, prove live phase transitions on already-constructed model or Burn adapter state. Construction-time initialization tests are not enough for a claim that a scheduler can change modes at phase boundaries.
+- For F4 scheduler beads, if claiming scheduler-level `QuantHardness::Soft` progress or annealing ownership, prove that a new same-phase step applies a control plan to the model/training boundary. A pure `step -> progress` query or transition-only test is not enough.
+- For F4 scheduler transition logs, cover every phase-control field carried by `TrainPhaseSpec` (`expert_qat`, `activation_qat`, `norm_qat`, and `router_mode`) or explicitly move the omitted field to a named owner.
+- If the crate has no production training-loop entrypoint yet, close only the scheduler/control boundary and cite the bead that owns future loop adoption. Do not claim producer adoption from an exported helper plus a test double.
+- Transition checkpoint status should be produced from a planned transition boundary, not passed as a caller-guessed boolean before the scheduler determines whether a transition occurred.
 
 ## Claim Discipline
 

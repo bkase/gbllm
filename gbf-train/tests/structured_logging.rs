@@ -28,8 +28,8 @@ fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
                 from_phase: "router_warmup".to_owned(),
                 to_phase: "expert_ternary_qat".to_owned(),
                 step: 20,
-                before_hardness: QatHardnessLevels::new(0.0, 0.0, 0.4, 0.0).unwrap(),
-                after_hardness: QatHardnessLevels::new(1.0, 0.5, 0.8, 1.0).unwrap(),
+                before_hardness: QatHardnessLevels::new(0.0, 0.0, 0.2, 0.4, 0.0).unwrap(),
+                after_hardness: QatHardnessLevels::new(1.0, 0.5, 0.6, 0.8, 1.0).unwrap(),
                 checkpoint_saved: true,
             })
             .unwrap();
@@ -105,6 +105,12 @@ fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
     assert_event_f64_close(
         &records,
         EVENT_NAME_PHASE_TRANSITION,
+        "before_norm_hardness",
+        0.2,
+    );
+    assert_event_f64_close(
+        &records,
+        EVENT_NAME_PHASE_TRANSITION,
         "before_router_hardness",
         0.4,
     );
@@ -125,6 +131,12 @@ fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
         EVENT_NAME_PHASE_TRANSITION,
         "after_activation_hardness",
         0.5,
+    );
+    assert_event_f64_close(
+        &records,
+        EVENT_NAME_PHASE_TRANSITION,
+        "after_norm_hardness",
+        0.6,
     );
     assert_event_f64_close(
         &records,

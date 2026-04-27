@@ -8,4 +8,5 @@ pub mod loss;
 pub mod phase;
 pub mod preflight;
 pub mod qat;
+pub mod scheduler;
 pub mod shadow;

@@ -303,6 +303,7 @@ impl Error for LoggingInitError {
 pub struct QatHardnessLevels {
     ternary: f32,
     activation: f32,
+    norm: f32,
     router: f32,
     expert: f32,
 }
@@ -311,17 +312,20 @@ impl QatHardnessLevels {
     pub fn new(
         ternary: f32,
         activation: f32,
+        norm: f32,
         router: f32,
         expert: f32,
     ) -> Result<Self, LoggingEventError> {
         validate_hardness("ternary_hardness", ternary)?;
         validate_hardness("activation_hardness", activation)?;
+        validate_hardness("norm_hardness", norm)?;
         validate_hardness("router_hardness", router)?;
         validate_hardness("expert_hardness", expert)?;
 
         Ok(Self {
             ternary,
             activation,
+            norm,
             router,
             expert,
         })
@@ -333,6 +337,10 @@ impl QatHardnessLevels {
 
     pub fn activation(self) -> f32 {
         self.activation
+    }
+
+    pub fn norm(self) -> f32 {
+        self.norm
     }
 
     pub fn router(self) -> f32 {
@@ -603,6 +611,7 @@ impl TrainingLogEmitter {
             learning_rate = fields.learning_rate,
             ternary_hardness = fields.hardness.ternary(),
             activation_hardness = fields.hardness.activation(),
+            norm_hardness = fields.hardness.norm(),
             router_hardness = fields.hardness.router(),
             expert_hardness = fields.hardness.expert(),
         );
@@ -626,6 +635,7 @@ impl TrainingLogEmitter {
                     "activation_hardness",
                     TestFieldValue::F32(fields.hardness.activation()),
                 ),
+                ("norm_hardness", TestFieldValue::F32(fields.hardness.norm())),
                 (
                     "router_hardness",
                     TestFieldValue::F32(fields.hardness.router()),
@@ -694,10 +704,12 @@ impl TrainingLogEmitter {
             step = fields.step,
             before_ternary_hardness = fields.before_hardness.ternary(),
             before_activation_hardness = fields.before_hardness.activation(),
+            before_norm_hardness = fields.before_hardness.norm(),
             before_router_hardness = fields.before_hardness.router(),
             before_expert_hardness = fields.before_hardness.expert(),
             after_ternary_hardness = fields.after_hardness.ternary(),
             after_activation_hardness = fields.after_hardness.activation(),
+            after_norm_hardness = fields.after_hardness.norm(),
             after_router_hardness = fields.after_hardness.router(),
             after_expert_hardness = fields.after_hardness.expert(),
             checkpoint_saved = fields.checkpoint_saved,
@@ -722,6 +734,10 @@ impl TrainingLogEmitter {
                     TestFieldValue::F32(fields.before_hardness.activation()),
                 ),
                 (
+                    "before_norm_hardness",
+                    TestFieldValue::F32(fields.before_hardness.norm()),
+                ),
+                (
                     "before_router_hardness",
                     TestFieldValue::F32(fields.before_hardness.router()),
                 ),
@@ -736,6 +752,10 @@ impl TrainingLogEmitter {
                 (
                     "after_activation_hardness",
                     TestFieldValue::F32(fields.after_hardness.activation()),
+                ),
+                (
+                    "after_norm_hardness",
+                    TestFieldValue::F32(fields.after_hardness.norm()),
                 ),
                 (
                     "after_router_hardness",
@@ -1413,7 +1433,7 @@ mod tests {
     fn test_collector_captures_training_phase_span_fields() {
         let collector = TestEventCollector::new();
         let emitter = TrainingLogEmitter::with_test_collector(collector.clone());
-        let hardness = QatHardnessLevels::new(0.0, 0.25, 0.5, 1.0).unwrap();
+        let hardness = QatHardnessLevels::new(0.0, 0.25, 0.4, 0.5, 1.0).unwrap();
         let span_fields =
             TrainingPhaseSpanFields::new("qat_warmup", 10, 20, 0.001, hardness).unwrap();
 
@@ -1429,6 +1449,10 @@ mod tests {
         assert_eq!(
             events[0].field("router_hardness"),
             Some(&TestFieldValue::F32(0.5))
+        );
+        assert_eq!(
+            events[0].field("norm_hardness"),
+            Some(&TestFieldValue::F32(0.4))
         );
     }
 
@@ -1482,8 +1506,8 @@ mod tests {
                 from_phase: "soft".to_owned(),
                 to_phase: "hard".to_owned(),
                 step: 99,
-                before_hardness: QatHardnessLevels::new(0.2, 0.3, 0.4, 0.5).unwrap(),
-                after_hardness: QatHardnessLevels::new(1.0, 1.0, 0.8, 0.8).unwrap(),
+                before_hardness: QatHardnessLevels::new(0.2, 0.3, 0.35, 0.4, 0.5).unwrap(),
+                after_hardness: QatHardnessLevels::new(1.0, 1.0, 0.9, 0.8, 0.8).unwrap(),
                 checkpoint_saved: true,
             })
             .unwrap();
@@ -1493,6 +1517,10 @@ mod tests {
         assert_eq!(
             events[0].field("after_ternary_hardness"),
             Some(&TestFieldValue::F32(1.0))
+        );
+        assert_eq!(
+            events[0].field("after_norm_hardness"),
+            Some(&TestFieldValue::F32(0.9))
         );
         assert_eq!(
             events[0].field("checkpoint_saved"),
@@ -1603,7 +1631,7 @@ mod tests {
     fn actual_tracing_subscriber_observes_training_phase_span_fields() {
         let capture = TraceCapture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
-        let hardness = QatHardnessLevels::new(0.0, 0.25, 0.5, 1.0).unwrap();
+        let hardness = QatHardnessLevels::new(0.0, 0.25, 0.4, 0.5, 1.0).unwrap();
         let span_fields =
             TrainingPhaseSpanFields::new("qat_warmup", 10, 20, 0.001, hardness).unwrap();
 
