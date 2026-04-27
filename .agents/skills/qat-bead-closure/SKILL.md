@@ -39,6 +39,7 @@ Before rerunning the harness after a corrective close, search the bead's existin
 - Keep scalar module tests, Burn adapter gradient tests, artifact byte agreement, and phase-hardness scheduling as separate claims.
 - If a QAT test bead only proves scalar or pre-export behavior, move artifact agreement to `bd-g90`/`bd-12c`/`bd-22o`, router/expert Burn gradients to `bd-1ptv`, and Off/Soft/Hard annealing semantics to `bd-2uw`.
 - Test oracles should be independent of the production helper under review. Prefer literal expected values or separately computed reference formulas over calling the same projection/export helper the test is meant to verify.
+- For independent reference packer/oracle beads, keep projection, quantization, and byte packing as separate claims unless the public plan carries the concrete values needed for all three. Byte packing should consume canonical artifact payloads; mark production-vs-reference byte agreement as moved until a production materializer emits comparable bytes.
 - Do not call a pre-export `export_canonical` reconstruction an artifact round trip. Artifact round trips require `ArtifactCore` or serialized artifact bytes and a dedicated gate.
 - For F4 phase/config beads, state whether the type is a canonical five-phase schedule or a generic timeline. Canonical schedules must reject wrong phase count, non-zero start, noncanonical order, gaps, overlaps, zero-length ranges, and step overflow with focused tests.
 

@@ -7,8 +7,24 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WeightEncoding {
+    /// Dense ternary values packed row-major at four values per byte.
+    ///
+    /// The first matrix element occupies the least-significant two bits of the
+    /// first byte, then the next element advances by two bits. Codes are
+    /// `00 = 0`, `01 = +1`, `10 = -1`, and `11` is reserved. Padding trits at
+    /// the end of the last byte must be encoded as `00`.
     Ternary2,
+    /// Dense ternary values represented as two row-major bitplanes.
+    ///
+    /// The first bitplane is the non-zero mask and the second bitplane is the
+    /// negative sign mask. Bits are least-significant-bit first within each
+    /// byte. A sign bit without the corresponding non-zero bit is invalid, and
+    /// padding bits in both planes must be zero.
     SparseTernaryBitplanes,
+    /// One-bit signed weights packed row-major, least-significant-bit first.
+    ///
+    /// `1` represents `+1`, `0` represents `-1`, and zero-valued ternary
+    /// weights are not representable. Padding bits must be zero.
     Binary1,
 }
 
