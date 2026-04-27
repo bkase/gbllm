@@ -110,6 +110,7 @@ git push                # Push to remote
 - Export fact schema beads must separate schema support from producer collection, compiler consumption, and dashboard/report adoption. Name the owner bead for any moved producer or consumer path.
 - Rate or probability newtypes must reject impossible ratios before quantization and must use overflow-safe arithmetic for conversion helpers.
 - Distribution-like vectors must validate aggregate invariants in constructors and deserialization, not just per-entry scalar bounds.
+- Unordered artifact hint pairs must canonicalize their stored representation in constructors and deserialization before deriving equality or hashing.
 - Public artifact JSON shape tests should pin downstream field names with explicit `serde_json::json!` assertions, not only serde round-trips.
 - Expert-scoped export facts must state whether `ExpertId` is global or layer-local. If the model uses layer-local expert indexes, include `LayerId` or an artifact path in the fact.
 
