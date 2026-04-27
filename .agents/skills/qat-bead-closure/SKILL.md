@@ -47,7 +47,9 @@ Before rerunning the harness after a corrective close, search the bead's existin
 
 - Do not claim exact compiler/runtime lowering agreement unless the closure cites a compiler, oracle, or codegen gate that exercises that lowering. If the lowering gate does not exist yet, mark the claim as `moved` and name the owning bead, typically `bd-g90` for ExportVisitor materialization or `bd-12c` for ArtifactOracle agreement.
 - Do not call inline floats, structs, or `Vec<f32>` "first-class tensors". First-class tensor claims require `CanonicalTensor` handles or an explicit moved-acceptance owner such as `bd-g90`/`bd-209`.
+- Distinguish artifact metadata/facts from canonical tensors. Activation ranges, range digests, and scalar export records are not tensors unless the artifact carries them as `CanonicalTensor`; sequence-state semantics belong to F12 unless the current bead explicitly owns them.
 - If a bead's literal acceptance wants a gradient proof in `gbf-model`, satisfy it through `gbf-train --features burn-adapter` only when the closure states the architectural move, references the Burn-adapter boundary, and names the exact Burn test.
+- Scope Burn/scalar parity claims to what the Burn tests actually prove. If scalar code rejects non-finite inputs or computed state but the Burn adapter does not guard that path, either add focused Burn rejection tests or say the Burn path is supported for finite inputs and finite adapter state.
 - A deployable approximation's training forward must match the exported behavior for every supported path, or the support matrix must mark the mismatch as moved/rejected and name the owning bead.
 - If QAT forward semantics add or change a nonlinearity, activation clip, phase behavior, or other non-weight operation, encode it in export/artifact identity or reject that path with a focused test. Do not let scalar forward behavior and exported artifact semantics diverge silently.
 - Keep one authoritative range owner for activation/nonlinearity behavior. If a pre-quant nonlinearity and fake-quant step both use a range, validate or derive one from the other and document which one exports.
@@ -71,6 +73,7 @@ Before rerunning the harness after a corrective close, search the bead's existin
 ## Support Matrix
 
 Every QAT bead closure must include a path support matrix. Use `supported`, `rejected`, `moved`, or `not applicable`; do not leave a path implicit.
+Keep these status cells exact. Put qualifiers such as "finite-input", "config-only", or "metadata-only" in the behavior name or guard text, not by inventing new status values.
 
 ```markdown
 | Public behavior or variant | Scalar/model core | Burn training path | Export/artifact path | Guard |
@@ -97,7 +100,14 @@ Acceptable gates include focused tests for development and the final all-feature
 ```bash
 cargo test -p gbf-model -- <module_or_test_name>
 cargo test -p gbf-train --features burn-adapter -- <module_or_test_name>
+cargo clippy -p gbf-train --features burn-adapter -- -D warnings
 cargo test --workspace --all-features
+```
+
+For Burn version pinning or adapter-containment claims, cite the project pin check directly:
+
+```bash
+./scripts/check_burn_pin.sh
 ```
 
 If no exact gate exists, add one before closing the bead or leave the bead open.
