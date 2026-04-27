@@ -95,6 +95,9 @@ git push                # Push to remote
 - For router load-balance losses, name hard top-1 assignments as stop-gradient dispatch provenance; gradient claims must identify whether the proof reaches routing probabilities, router logits, or full router parameters.
 - Burn loss helpers must validate computed tensor losses, including weighted outputs, for finite values before returning.
 - Burn loss helpers should not host-copy entire differentiable tensors for routine validation; validate scalar config/shape before tensor math and validate the computed loss after tensor math unless host inspection is required by the contract.
+- For capped tensor losses, do not express `min`/`max` by subtracting large nearly equal tensors. Use scalar `clamp` or tensor mask selection and add a large finite scalar/Burn parity regression.
+- For ternary zero/sparsity losses, matrix thresholds mirror the QAT ternary model contract: one global threshold or one threshold per output row. Do not expose per-weight thresholds unless a model/artifact bead defines that public behavior.
+- Keep raw weighted-loss helpers honest: they must validate finite/non-negative raw diagnostics even when the configured weight is zero. If a helper intentionally skips raw computation for a disabled config term, name it as a contribution/composer helper rather than a raw weighted-loss helper.
 - If a loss claim depends on Burn autodiff, closure must cite a feature-enabled gate such as `cargo test -p gbf-train --features burn-adapter -- <loss_test>`.
 - When a filtered test target is introduced by the patch, report the number of tests run and avoid claiming red-before-green unless you actually ran the pre-patch check.
 - Do not claim phase-boundary adoption or training-loop logging from a standalone loss helper. Name the integration bead that owns the real caller.
