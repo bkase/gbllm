@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterShape {
     d_model: usize,
@@ -74,7 +76,8 @@ pub fn default_router_rank(n_experts: usize) -> usize {
     (n_experts / 4).clamp(1, 8)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouterTrainMode {
     /// Produce a soft expert distribution for router-side training losses.
     SoftTop1,

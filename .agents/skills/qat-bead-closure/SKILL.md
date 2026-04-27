@@ -25,6 +25,7 @@ If the artifact contract is not implemented yet, do not claim artifact agreement
 - If a QAT test bead only proves scalar or pre-export behavior, move artifact agreement to `bd-g90`/`bd-12c`/`bd-22o`, router/expert Burn gradients to `bd-1ptv`, and Off/Soft/Hard annealing semantics to `bd-2uw`.
 - Test oracles should be independent of the production helper under review. Prefer literal expected values or separately computed reference formulas over calling the same projection/export helper the test is meant to verify.
 - Do not call a pre-export `export_canonical` reconstruction an artifact round trip. Artifact round trips require `ArtifactCore` or serialized artifact bytes and a dedicated gate.
+- For F4 phase/config beads, state whether the type is a canonical five-phase schedule or a generic timeline. Canonical schedules must reject wrong phase count, non-zero start, noncanonical order, gaps, overlaps, zero-length ranges, and step overflow with focused tests.
 
 ## Claim Discipline
 
@@ -45,6 +46,7 @@ If the artifact contract is not implemented yet, do not claim artifact agreement
 - If a QAT forward mutates sequence, temporal, EMA, or cache state, add tests proving failure does not advance state and that the stored state has the documented semantics. For routers, keep soft routing probabilities separate from hard dispatch weights.
 - Thread phase/activation/hardness options through every branch, including optional shared branches. Add a test that exercises the optional branch, not only the default path.
 - If a bead mentions F4 phased hardness, either implement the exact `Off`/`Soft`/`Hard` contract or explicitly move it to the phase-hardness owner bead. Local two-state shortcuts must be documented as local execution modes, not as F4 completion.
+- If a training config names executable model modes, reuse the model-owned enum where possible. If a separate config enum is necessary, add explicit conversion tests so the two vocabularies cannot drift silently.
 - Document deterministic router conventions that affect artifacts or training traces, including top-1 tie break and default-rank clamping for tiny expert sets.
 - Budget and preflight beads must distinguish provisional estimates from artifact/compiler-backed exact costs. Name estimated metadata as estimated, state the exact owner when final packing is elsewhere, and add tests for both the formula and the fit/reject boundary.
 - Preflight budget APIs must reject invalid model dimensions instead of reporting zero-sized experts or routers as fitting. Keep raw arithmetic helpers separate from validated preflight/report entry points.
@@ -112,6 +114,8 @@ If an acceptance criterion is intentionally moved, renamed, or satisfied in a di
 
 Use explicit bead ids in moved-acceptance text. The acceptance-owner harness checks that referenced bead ids exist and that the owning bead mentions the named concept.
 
+If a moved-acceptance sentence contains backticked API names or enum variants, verify the target bead text contains those exact names before closing. Enrich the target bead first when the ownership is correct but not machine-checkable.
+
 ## Bead Comment Workflow
 
 For non-trivial closure comments or corrective review notes, write the markdown to a temporary file and use:
@@ -133,3 +137,5 @@ cargo test -p gbf-test --test architecture
 ```
 
 The harness checks enforce QAT closure shape, moved-acceptance ownership, and absence of test-only backend seams in QAT modules.
+
+After closing any QAT bead with a substantial closure reason or moved-acceptance comments, run `python3 scripts/qat_harness_checks.py` again. The close reason itself becomes bead metadata and can introduce new harness failures.
