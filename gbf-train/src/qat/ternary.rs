@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use gbf_artifact::weight_plan::TernaryWeightPlan;
+use gbf_artifact::weight_plan::{TernaryWeightPlan, ThresholdPlan};
 use gbf_model::qat::{
     DEFAULT_SOFT_TERNARY_TEMPERATURE, MatrixShape, Q8_8Scale, QatHardnessControl, QuantHardness,
     TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError, TernaryThreshold,
@@ -23,6 +23,8 @@ pub struct TernaryLinearBurnQat<B: BurnBackend> {
     bias: Option<BurnParam<BurnFloatTensor<B, 1>>>,
     #[module(skip)]
     core: TernaryLinearQat,
+    #[module(skip)]
+    threshold_schedule_progress: ThresholdScheduleProgress,
 }
 
 impl<B: BurnBackend> TernaryLinearBurnQat<B> {
@@ -63,6 +65,7 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
             scale_factors: BurnParam::from_tensor(scale_factors),
             bias: bias.map(BurnParam::from_tensor),
             core,
+            threshold_schedule_progress: ThresholdScheduleProgress::complete(),
         })
     }
 
@@ -80,6 +83,15 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
 
     pub fn thresholds(&self) -> BurnFloatTensor<B, 1> {
         self.thresholds.val()
+    }
+
+    #[must_use]
+    pub const fn threshold_schedule_progress(&self) -> ThresholdScheduleProgress {
+        self.threshold_schedule_progress
+    }
+
+    pub fn set_threshold_schedule_progress(&mut self, progress: ThresholdScheduleProgress) {
+        self.threshold_schedule_progress = progress;
     }
 
     pub fn scale_factors(&self) -> BurnFloatTensor<B, 1> {
@@ -118,7 +130,7 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
 
         let weights = self.full_precision_weights();
         let thresholds =
-            threshold_tensor(&self.core, fake_quant_q8_8_nonnegative(self.thresholds()));
+            self.effective_threshold_tensor(fake_quant_q8_8_nonnegative(self.thresholds()))?;
         let symbols = match self.core.hardness() {
             QuantHardness::Off => unreachable!("off hardness returns before quantized path"),
             QuantHardness::Soft => soft_ternary_symbols(weights, thresholds),
@@ -181,6 +193,27 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
     }
 }
 
+impl<B: BurnBackend> TernaryLinearBurnQat<B> {
+    fn effective_threshold_tensor(
+        &self,
+        thresholds: BurnFloatTensor<B, 1>,
+    ) -> Result<BurnFloatTensor<B, 2>, TernaryLinearBurnQatError> {
+        Ok(match self.plan().threshold {
+            ThresholdPlan::FixedQ8_8 => threshold_tensor(self.shape(), thresholds),
+            ThresholdPlan::AnnealedGlobalThenPerOutputRow => annealed_threshold_tensor(
+                self.shape(),
+                thresholds,
+                self.threshold_schedule_progress,
+            ),
+            ThresholdPlan::LearnedPerGroup(_) => {
+                return Err(TernaryLinearBurnQatError::UnsupportedThresholdSchedule {
+                    plan: self.plan(),
+                });
+            }
+        })
+    }
+}
+
 impl<B: BurnBackend> QatHardnessControl for TernaryLinearBurnQat<B> {
     fn hardness(&self) -> QuantHardness {
         self.core.hardness()
@@ -195,6 +228,10 @@ impl<B: BurnBackend> QatHardnessControl for TernaryLinearBurnQat<B> {
 pub enum TernaryLinearBurnQatError {
     Adapter(BurnAdapterError),
     Model(TernaryLinearQatError),
+    InvalidThresholdScheduleProgress(f32),
+    UnsupportedThresholdSchedule {
+        plan: TernaryWeightPlan,
+    },
     InputLastDimMismatch {
         expected: usize,
         actual: usize,
@@ -207,6 +244,13 @@ impl fmt::Display for TernaryLinearBurnQatError {
         match self {
             Self::Adapter(error) => write!(f, "{error}"),
             Self::Model(error) => write!(f, "{error}"),
+            Self::InvalidThresholdScheduleProgress(value) => write!(
+                f,
+                "threshold schedule progress must be finite and in [0, 1], got {value}"
+            ),
+            Self::UnsupportedThresholdSchedule { plan } => {
+                write!(f, "unsupported Burn threshold schedule for plan {plan:?}")
+            }
             Self::InputLastDimMismatch {
                 expected,
                 actual,
@@ -236,13 +280,65 @@ impl From<TernaryLinearQatError> for TernaryLinearBurnQatError {
 }
 
 fn threshold_tensor<B: BurnBackend>(
-    core: &TernaryLinearQat,
+    shape: MatrixShape,
     thresholds: BurnFloatTensor<B, 1>,
 ) -> BurnFloatTensor<B, 2> {
-    let shape = core.shape();
     thresholds
         .reshape([shape.output_rows(), 1])
         .repeat_dim(1, shape.input_cols())
+}
+
+fn annealed_threshold_tensor<B: BurnBackend>(
+    shape: MatrixShape,
+    thresholds: BurnFloatTensor<B, 1>,
+    progress: ThresholdScheduleProgress,
+) -> BurnFloatTensor<B, 2> {
+    let per_row = threshold_tensor(shape, thresholds.clone());
+    let global = thresholds
+        .mean()
+        .reshape([1, 1])
+        .repeat_dim(0, shape.output_rows())
+        .repeat_dim(1, shape.input_cols());
+
+    global * (1.0 - progress.value()) + per_row * progress.value()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThresholdScheduleProgress {
+    value: f32,
+}
+
+impl ThresholdScheduleProgress {
+    pub fn new(value: f32) -> Result<Self, TernaryLinearBurnQatError> {
+        let progress = Self { value };
+        progress.validate()?;
+        Ok(progress)
+    }
+
+    #[must_use]
+    pub const fn start() -> Self {
+        Self { value: 0.0 }
+    }
+
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self { value: 1.0 }
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f32 {
+        self.value
+    }
+
+    fn validate(self) -> Result<(), TernaryLinearBurnQatError> {
+        if self.value.is_finite() && self.value >= 0.0 && self.value <= 1.0 {
+            Ok(())
+        } else {
+            Err(TernaryLinearBurnQatError::InvalidThresholdScheduleProgress(
+                self.value,
+            ))
+        }
+    }
 }
 
 fn validate_finite_input<B: BurnBackend, const D: usize>(
@@ -295,6 +391,7 @@ fn fake_quant_q8_8_nonnegative<B: BurnBackend>(
 #[cfg(test)]
 mod tests {
     use gbf_artifact::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
+    use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, ThresholdPlan, WeightEncoding};
     use gbf_model::qat::{
         ExportVisitor, MatrixShape, QatModuleRef, TernaryThreshold, TernaryValue,
     };
@@ -517,6 +614,79 @@ mod tests {
     }
 
     #[test]
+    fn burn_ternary_annealed_threshold_progress_blends_global_to_per_row_thresholds() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let mut layer =
+            TernaryLinearBurnQat::<B>::from_core(annealed_threshold_core(), &device).unwrap();
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0], [1], &device).unwrap();
+
+        layer.set_threshold_schedule_progress(ThresholdScheduleProgress::start());
+        assert_eq!(
+            layer.threshold_schedule_progress(),
+            ThresholdScheduleProgress::start()
+        );
+        let global = layer.fake_quant_forward(input.clone()).unwrap();
+
+        layer.set_threshold_schedule_progress(ThresholdScheduleProgress::new(0.5).unwrap());
+        let middle = layer.fake_quant_forward(input.clone()).unwrap();
+
+        layer.set_threshold_schedule_progress(ThresholdScheduleProgress::complete());
+        let per_row = layer.fake_quant_forward(input).unwrap();
+
+        assert_eq!(float_tensor_into_vec(global).unwrap(), vec![0.0, 1.0]);
+        assert_eq!(float_tensor_into_vec(middle).unwrap(), vec![0.0, 0.0]);
+        assert_eq!(float_tensor_into_vec(per_row).unwrap(), vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn burn_ternary_annealed_threshold_progress_keeps_threshold_gradients() {
+        type B = BurnNdArrayAutodiffBackend;
+
+        let device = BurnDevice::<B>::default();
+        let mut layer =
+            TernaryLinearBurnQat::<B>::from_core(annealed_threshold_core(), &device).unwrap();
+        layer.set_threshold_schedule_progress(ThresholdScheduleProgress::start());
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0], [1], &device).unwrap();
+
+        let output = layer.fake_quant_forward(input).unwrap();
+        let gradients = output.sum().backward();
+        let threshold_grad = layer
+            .thresholds()
+            .grad(&gradients)
+            .expect("annealed global threshold schedule must keep threshold gradients");
+
+        assert_eq!(
+            float_tensor_into_vec(threshold_grad).unwrap(),
+            vec![-1.0, -1.0]
+        );
+    }
+
+    #[test]
+    fn burn_ternary_threshold_schedule_progress_validates_range() {
+        assert_eq!(ThresholdScheduleProgress::new(0.25).unwrap().value(), 0.25);
+        assert!(matches!(
+            ThresholdScheduleProgress::new(-0.01),
+            Err(TernaryLinearBurnQatError::InvalidThresholdScheduleProgress(
+                value
+            )) if value == -0.01
+        ));
+        assert!(matches!(
+            ThresholdScheduleProgress::new(f32::NAN),
+            Err(TernaryLinearBurnQatError::InvalidThresholdScheduleProgress(
+                value
+            )) if value.is_nan()
+        ));
+        assert!(matches!(
+            ThresholdScheduleProgress::new(1.01),
+            Err(TernaryLinearBurnQatError::InvalidThresholdScheduleProgress(
+                value
+            )) if value == 1.01
+        ));
+    }
+
+    #[test]
     fn burn_ternary_export_matches_core_projection_for_edge_cases() {
         type B = BurnNdArrayBackend;
 
@@ -606,5 +776,28 @@ mod tests {
                 "{actual} != {expected} within {tolerance}"
             );
         }
+    }
+
+    fn annealed_threshold_core() -> TernaryLinearQat {
+        TernaryLinearQat::new_with_plan(
+            TernaryWeightPlan::new(
+                WeightEncoding::Ternary2,
+                ScaleGranularity::PerOutputRow,
+                ScaleFormat::Q8_8,
+                ThresholdPlan::AnnealedGlobalThenPerOutputRow,
+            ),
+            MatrixShape::new(2, 1).unwrap(),
+            vec![0.4, 0.75],
+            None,
+            vec![
+                TernaryThreshold::new(0.25).unwrap(),
+                TernaryThreshold::new(1.0).unwrap(),
+            ],
+            vec![
+                Q8_8Scale::from_f32(1.0).unwrap(),
+                Q8_8Scale::from_f32(1.0).unwrap(),
+            ],
+        )
+        .unwrap()
     }
 }

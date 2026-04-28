@@ -20,4 +20,4 @@ pub use norm::{NormApproxBurnPlan, NormApproxBurnQat, NormApproxBurnQatError};
 #[cfg(feature = "burn-adapter")]
 pub use router::{RouterBurnAuxLosses, RouterBurnForwardOutput, Top1RouterBurnQat};
 #[cfg(feature = "burn-adapter")]
-pub use ternary::{TernaryLinearBurnQat, TernaryLinearBurnQatError};
+pub use ternary::{TernaryLinearBurnQat, TernaryLinearBurnQatError, ThresholdScheduleProgress};

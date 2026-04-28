@@ -283,6 +283,15 @@ impl PhaseControls {
     pub const fn soft_progress(self) -> f32 {
         self.soft_progress
     }
+
+    #[must_use]
+    pub const fn threshold_schedule_progress(self) -> f32 {
+        match self.phase().kind() {
+            TrainPhaseKind::DenseTeacherWarmup | TrainPhaseKind::RouterWarmup => 0.0,
+            TrainPhaseKind::ExpertTernaryQat => self.soft_progress,
+            TrainPhaseKind::FullNumericQat | TrainPhaseKind::HardenAndSelect => 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -489,6 +498,34 @@ mod tests {
 
         let end = scheduler.phase_position(29).unwrap();
         assert_eq!(end.progress_fraction(), 1.0);
+    }
+
+    #[test]
+    fn scheduler_threshold_schedule_progress_stays_complete_after_expert_qat() {
+        let scheduler = scheduler();
+
+        let before = PhaseControls::from_position(scheduler.phase_position(10).unwrap());
+        assert_eq!(before.phase().kind(), TrainPhaseKind::RouterWarmup);
+        assert_eq!(before.threshold_schedule_progress(), 0.0);
+
+        let start = PhaseControls::from_position(scheduler.phase_position(20).unwrap());
+        assert_eq!(start.phase().kind(), TrainPhaseKind::ExpertTernaryQat);
+        assert_eq!(start.threshold_schedule_progress(), 0.0);
+
+        let middle = PhaseControls::from_position(scheduler.phase_position(24).unwrap());
+        assert!(middle.threshold_schedule_progress() > 0.44);
+        assert!(middle.threshold_schedule_progress() < 0.45);
+
+        let end = PhaseControls::from_position(scheduler.phase_position(29).unwrap());
+        assert_eq!(end.threshold_schedule_progress(), 1.0);
+
+        let full_numeric = PhaseControls::from_position(scheduler.phase_position(30).unwrap());
+        assert_eq!(full_numeric.phase().kind(), TrainPhaseKind::FullNumericQat);
+        assert_eq!(full_numeric.threshold_schedule_progress(), 1.0);
+
+        let harden = PhaseControls::from_position(scheduler.phase_position(40).unwrap());
+        assert_eq!(harden.phase().kind(), TrainPhaseKind::HardenAndSelect);
+        assert_eq!(harden.threshold_schedule_progress(), 1.0);
     }
 
     #[test]

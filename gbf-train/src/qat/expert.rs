@@ -16,7 +16,9 @@ use crate::adapter::burn::{
 };
 use crate::qat::{
     ActFakeQuantBurnQat, ActFakeQuantBurnQatError, TernaryLinearBurnQat, TernaryLinearBurnQatError,
+    ThresholdScheduleProgress,
 };
+use crate::scheduler::{PhaseControlledModel, PhaseControls};
 
 #[derive(BurnModule, Debug)]
 pub struct ExpertBlockBurnQat<B: BurnBackend> {
@@ -68,6 +70,12 @@ impl<B: BurnBackend> ExpertBlockBurnQat<B> {
         }
         if let Some(shared_dense) = &mut self.shared_dense {
             shared_dense.set_hardness(activation_qat);
+        }
+    }
+
+    pub fn set_threshold_schedule_progress(&mut self, progress: ThresholdScheduleProgress) {
+        for expert in &mut self.experts {
+            expert.set_threshold_schedule_progress(progress);
         }
     }
 
@@ -154,6 +162,16 @@ impl<B: BurnBackend> ExpertBlockBurnQat<B> {
     }
 }
 
+impl<B: BurnBackend> PhaseControlledModel for ExpertBlockBurnQat<B> {
+    fn apply_phase_controls(&mut self, controls: PhaseControls) {
+        self.set_hardness(controls.expert_qat(), controls.activation_qat());
+        self.set_threshold_schedule_progress(
+            ThresholdScheduleProgress::new(controls.threshold_schedule_progress())
+                .expect("phase progress is finite and within [0, 1]"),
+        );
+    }
+}
+
 #[derive(BurnModule, Debug)]
 pub struct ExpertBurnQat<B: BurnBackend> {
     up_projection: TernaryLinearBurnQat<B>,
@@ -199,6 +217,12 @@ impl<B: BurnBackend> ExpertBurnQat<B> {
         self.up_projection.set_hardness(expert_qat);
         self.activation.set_hardness(activation_qat);
         self.down_projection.set_hardness(expert_qat);
+    }
+
+    pub fn set_threshold_schedule_progress(&mut self, progress: ThresholdScheduleProgress) {
+        self.up_projection.set_threshold_schedule_progress(progress);
+        self.down_projection
+            .set_threshold_schedule_progress(progress);
     }
 
     fn forward_delta(
@@ -539,6 +563,9 @@ mod tests {
         BurnModuleMapper, BurnNdArrayAutodiffBackend, BurnNdArrayBackend, BurnParam,
         float_tensor_from_vec, float_tensor_into_vec, float_tensor_shape,
     };
+    use crate::logging::{TestEventCollector, TrainingLogEmitter};
+    use crate::phase::TrainingPhaseSchedule;
+    use crate::scheduler::TrainingPhaseScheduler;
 
     #[test]
     fn burn_expert_forward_matches_scalar_expert_block() {
@@ -646,6 +673,55 @@ mod tests {
         );
         assert_ne!(hard_values, soft_values);
         assert_ne!(soft_values, off_values);
+    }
+
+    #[test]
+    fn burn_expert_phase_controls_apply_threshold_schedule_progress() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let mut scheduler =
+            TrainingPhaseScheduler::new(TrainingPhaseSchedule::default_five_phase(10).unwrap());
+        let collector = TestEventCollector::new();
+        let emitter = TrainingLogEmitter::with_test_collector(collector);
+        let mut layer = ExpertBlockBurnQat::<B>::from_core(fixture_block(0.0), &device).unwrap();
+
+        scheduler.apply_step(20, &mut layer, &emitter).unwrap();
+        let expert = &layer.experts()[0];
+        assert_eq!(
+            expert.up_projection().threshold_schedule_progress(),
+            ThresholdScheduleProgress::start()
+        );
+        assert_eq!(
+            expert.down_projection().threshold_schedule_progress(),
+            ThresholdScheduleProgress::start()
+        );
+
+        scheduler.apply_step(24, &mut layer, &emitter).unwrap();
+        let expert = &layer.experts()[0];
+        let up_progress = expert.up_projection().threshold_schedule_progress().value();
+        let down_progress = expert
+            .down_projection()
+            .threshold_schedule_progress()
+            .value();
+
+        assert!(up_progress > 0.44, "{up_progress}");
+        assert!(up_progress < 0.45, "{up_progress}");
+        assert_eq!(up_progress, down_progress);
+
+        scheduler.apply_step(29, &mut layer, &emitter).unwrap();
+        let expert = &layer.experts()[0];
+        assert_eq!(
+            expert.up_projection().threshold_schedule_progress(),
+            ThresholdScheduleProgress::complete()
+        );
+
+        scheduler.apply_step(30, &mut layer, &emitter).unwrap();
+        let expert = &layer.experts()[0];
+        assert_eq!(
+            expert.up_projection().threshold_schedule_progress(),
+            ThresholdScheduleProgress::complete()
+        );
     }
 
     #[test]
