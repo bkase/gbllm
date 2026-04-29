@@ -6,9 +6,11 @@
 //!
 //! Output is symbolic pre-layout section IR. This layer records label markers,
 //! alignment directives, and structured op intent. It performs local section
-//! privilege/effect validation for typed instructions, structured ops, and opaque
-//! raw bytes; it does not perform relocation, branch relaxation, far-call thunk
-//! insertion, dynamic-address reachability proofs, or final byte lowering.
+//! privilege/effect validation for typed instructions and structured ops; it does
+//! not perform relocation, branch relaxation, far-call thunk insertion,
+//! dynamic-address reachability proofs, or final byte lowering. There is no
+//! opaque-byte escape hatch — every emitted byte goes through `Instr`, `db`, or
+//! `dw`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -23,7 +25,7 @@ use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
     BankLeaseSpec, LeaseId, LegalizationOp, MbcBankClass, PreLayoutOp, PrivilegeViolation,
     ProbeLevel, Section, SectionId, SectionItem, SectionPrivilege, SectionPrivilegeError,
-    SectionRole, SymbolId, TraceProbeId, YieldKind,
+    SectionRole, SymbolId, SymbolicBranch, TraceProbeId, YieldKind,
 };
 use crate::symbols::SymbolName;
 
@@ -203,23 +205,6 @@ impl Builder {
         Ok(())
     }
 
-    /// Audited raw byte escape hatch.
-    ///
-    /// Prefer typed `Instr`, `db`, `dw`, and structured op methods. `raw` exists for
-    /// boot headers, CPU quirks, and temporary bring-up gaps that have explicit
-    /// review coverage.
-    pub fn raw(&mut self, bytes: Vec<u8>) {
-        self.try_raw(bytes)
-            .expect("section privilege rejected opaque raw bytes");
-    }
-
-    pub fn try_raw(&mut self, bytes: Vec<u8>) -> Result<(), BuilderError> {
-        self.validate_effect(MachineEffect::OpaqueBytes)?;
-        self.section
-            .push(SectionItem::raw(bytes, self.cur_provenance.clone()));
-        Ok(())
-    }
-
     pub fn with_provenance<R>(
         &mut self,
         provenance: InstrProvenance,
@@ -265,6 +250,22 @@ impl Builder {
         }
 
         self.pre_layout_op_unchecked(op);
+        Ok(())
+    }
+
+    /// Emits a symbolic branch that keeps `target` unresolved until relaxation.
+    ///
+    /// Branch relaxation chooses the concrete encoding (`JR`/`JP`/in-bank
+    /// `CALL`/far-call thunk) once layout assigns addresses and banks.
+    pub fn branch(&mut self, branch: SymbolicBranch) {
+        self.try_branch(branch)
+            .expect("section privilege rejected symbolic branch");
+    }
+
+    pub fn try_branch(&mut self, branch: SymbolicBranch) -> Result<(), BuilderError> {
+        self.validate_effect(branch.machine_effect())?;
+        self.section
+            .push(SectionItem::branch(branch, self.cur_provenance.clone()));
         Ok(())
     }
 
@@ -444,7 +445,7 @@ fn provenance_recorded() {
     builder.emit(Instr::Nop);
     builder.with_provenance(storage_provenance.clone(), |builder| {
         builder.db(0xAA);
-        builder.raw(vec![0xBB, 0xCC]);
+        builder.db_bytes([0xBB, 0xCC]);
     });
     builder.dw(0x1234);
 
@@ -630,31 +631,6 @@ fn builder_rejects_privileged_effects_in_normal_sections() {
 
 #[cfg(test)]
 #[test]
-fn builder_rejects_raw_bytes_in_normal_sections() {
-    use crate::effect::PrivilegeClass;
-
-    let mut builder = Builder::new(
-        SectionRole::CommonBank,
-        SymbolName::kernel("raw_privilege", 0).expect("section name"),
-    );
-    assert_eq!(
-        builder.try_raw(vec![0xF3]),
-        Err(BuilderError::PrivilegeViolation {
-            effect: MachineEffect::OpaqueBytes,
-            violation: PrivilegeViolation::RequiredPrivilege {
-                required: PrivilegeClass::Privileged,
-                section: PrivilegeClass::Normal,
-            },
-        })
-    );
-
-    builder.set_section_privilege(SectionPrivilege::privileged());
-    builder.try_raw(vec![0xF3]).expect("privileged raw");
-    assert_eq!(builder.finish().items().len(), 1);
-}
-
-#[cfg(test)]
-#[test]
 fn builder_revalidates_existing_items_when_privilege_changes() {
     use crate::effect::{MbcRegisterClass, PrivilegeClass};
     use crate::isa::DirectAddr;
@@ -683,6 +659,115 @@ fn builder_revalidates_existing_items_when_privilege_changes() {
                 },
             }
         ))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn structured_ops_run_in_normal_sections() {
+    // Resolved F-A1 decision: BankLease/BankRelease/AssertBank are Normal.
+    // The privileged work happens inside the runtime helper; the call site
+    // does not need a Privileged section.
+    use crate::section::{BranchKind, SymbolicBranch};
+
+    let mut builder = Builder::new(
+        SectionRole::CommonBank,
+        SymbolName::runtime("banking", "normal").expect("section name"),
+    );
+    let lease = LeaseId::new(11);
+    let target = SymbolName::runtime("expert", "enter").expect("target");
+
+    builder
+        .try_bank_lease(BankLeaseSpec::new(lease, MbcBankClass::Rom, 7).expect("lease"))
+        .expect("bank lease in Normal section");
+    builder
+        .try_assert_bank(MbcBankClass::Rom, 7)
+        .expect("assert bank in Normal section");
+    builder
+        .try_far_call(target.clone(), &[lease])
+        .expect("far call in Normal section");
+    builder
+        .try_branch(SymbolicBranch::new(BranchKind::Jump, None, target.clone()))
+        .expect("symbolic branch in Normal section");
+    builder
+        .try_bank_release(lease)
+        .expect("bank release in Normal section");
+
+    assert_eq!(builder.finish().items().len(), 5);
+}
+
+#[cfg(test)]
+#[test]
+fn builder_emits_symbolic_branches() {
+    use crate::isa::Cond;
+    use crate::section::{BranchKind, SymbolicBranch};
+
+    let mut builder = Builder::new(
+        SectionRole::CommonBank,
+        SymbolName::runtime("loop", "section").expect("section name"),
+    );
+    let head = SymbolName::runtime("loop", "head").expect("head label");
+    let target = SymbolName::runtime("expert", "enter").expect("call target");
+
+    builder.label(head.clone());
+    builder.branch(SymbolicBranch::new(BranchKind::Jump, None, head.clone()));
+    builder.branch(SymbolicBranch::new(
+        BranchKind::Jump,
+        Some(Cond::NZ),
+        head.clone(),
+    ));
+    builder.branch(SymbolicBranch::new(BranchKind::Call, None, target.clone()));
+
+    let section = builder.finish();
+    assert_eq!(section.items().len(), 4);
+    assert_eq!(
+        section.items()[1].machine_effect(),
+        Some(MachineEffect::UnconditionalBranch)
+    );
+    assert_eq!(
+        section.items()[2].machine_effect(),
+        Some(MachineEffect::ConditionalBranch)
+    );
+    assert_eq!(
+        section.items()[3].machine_effect(),
+        Some(MachineEffect::Call)
+    );
+    assert_eq!(section.fixed_item_bytes(), None);
+}
+
+#[cfg(test)]
+#[test]
+fn builder_forbids_reserved_mbc_writes_in_every_section() {
+    use crate::isa::DirectAddr;
+
+    let addr = DirectAddr::new(0x6000).expect("reserved mbc address");
+    let reserved_effect = MachineEffect::StoreToMbcRegister {
+        reg: crate::effect::MbcRegisterClass::Reserved,
+    };
+
+    let mut normal = Builder::new(
+        SectionRole::CommonBank,
+        SymbolName::kernel("reserved_normal", 0).expect("section name"),
+    );
+    assert_eq!(
+        normal.try_emit(Instr::LdDirectFromA { addr }),
+        Err(BuilderError::PrivilegeViolation {
+            effect: reserved_effect,
+            violation: PrivilegeViolation::ForbiddenMbcReserved,
+        })
+    );
+
+    let mut privileged = Builder::new(
+        SectionRole::CommonBank,
+        SymbolName::kernel("reserved_privileged", 0).expect("section name"),
+    )
+    .with_section_privilege(SectionPrivilege::privileged());
+    assert_eq!(
+        privileged.try_emit(Instr::LdDirectFromA { addr }),
+        Err(BuilderError::PrivilegeViolation {
+            effect: reserved_effect,
+            violation: PrivilegeViolation::ForbiddenMbcReserved,
+        })
     );
 }
 

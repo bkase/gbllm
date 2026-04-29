@@ -55,13 +55,18 @@ pub enum IoRegister {
 }
 
 /// MBC register class selected by a store into the cartridge register window.
+///
+/// `Reserved` covers the MBC5 `$6000..=$7FFF` slot, which has no hardware
+/// effect on MBC5 (unlike MBC1's mode-select register). Writes classified as
+/// `Reserved` are forbidden at section-emission time even from `Privileged`
+/// sections; see `SectionPrivilege::check_effect`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum MbcRegisterClass {
     RamEnable,
     RomBankLow,
     RomBankHigh,
     SramBank,
-    ModeSelect,
+    Reserved,
 }
 
 impl MbcRegisterClass {
@@ -72,7 +77,7 @@ impl MbcRegisterClass {
             0x2000..=0x2FFF => Some(Self::RomBankLow),
             0x3000..=0x3FFF => Some(Self::RomBankHigh),
             0x4000..=0x5FFF => Some(Self::SramBank),
-            0x6000..=0x7FFF => Some(Self::ModeSelect),
+            0x6000..=0x7FFF => Some(Self::Reserved),
             _ => None,
         }
     }
@@ -148,7 +153,6 @@ pub enum MachineEffect {
     StoreToMbcRegister {
         reg: MbcRegisterClass,
     },
-    OpaqueBytes,
     InterruptControl(InterruptControlOp),
     UnconditionalBranch,
     ConditionalBranch,
@@ -189,7 +193,6 @@ impl MachineEffect {
             Self::StoreToMixedStatic { .. } => MachineEffectKind::StoreToMixedStatic,
             Self::ReadModifyWriteDynamic { .. } => MachineEffectKind::ReadModifyWriteDynamic,
             Self::StoreToMbcRegister { .. } => MachineEffectKind::StoreToMbcRegister,
-            Self::OpaqueBytes => MachineEffectKind::OpaqueBytes,
             Self::InterruptControl(_) => MachineEffectKind::InterruptControl,
             Self::UnconditionalBranch => MachineEffectKind::UnconditionalBranch,
             Self::ConditionalBranch => MachineEffectKind::ConditionalBranch,
@@ -249,7 +252,6 @@ pub enum MachineEffectKind {
     StoreToMixedStatic,
     ReadModifyWriteDynamic,
     StoreToMbcRegister,
-    OpaqueBytes,
     InterruptControl,
     UnconditionalBranch,
     ConditionalBranch,
@@ -375,11 +377,7 @@ pub const fn privilege_of(effect: &MachineEffect) -> PrivilegeClass {
                 PrivilegeClass::Normal
             }
         }
-        MachineEffect::OpaqueBytes
-        | MachineEffect::InterruptControl(_)
-        | MachineEffect::SystemCall(SystemCallKind::BankLease)
-        | MachineEffect::SystemCall(SystemCallKind::BankRelease)
-        | MachineEffect::SystemCall(SystemCallKind::AssertBank) => PrivilegeClass::Privileged,
+        MachineEffect::InterruptControl(_) => PrivilegeClass::Privileged,
         MachineEffect::Reti => PrivilegeClass::InterruptHandler,
         MachineEffect::PureCompute
         | MachineEffect::LoadFromBank0
@@ -408,9 +406,7 @@ pub const fn privilege_of(effect: &MachineEffect) -> PrivilegeClass {
         | MachineEffect::Call
         | MachineEffect::Return
         | MachineEffect::Rst { .. }
-        | MachineEffect::SystemCall(SystemCallKind::FarCall)
-        | MachineEffect::SystemCall(SystemCallKind::Yield)
-        | MachineEffect::SystemCall(SystemCallKind::TraceProbe) => PrivilegeClass::Normal,
+        | MachineEffect::SystemCall(_) => PrivilegeClass::Normal,
     }
 }
 
@@ -485,7 +481,7 @@ const fn store_to_addr(addr: u16) -> MachineEffect {
             MachineEffect::StoreToMbcRegister {
                 reg: match MbcRegisterClass::for_addr(addr) {
                     Some(reg) => reg,
-                    None => MbcRegisterClass::ModeSelect,
+                    None => MbcRegisterClass::Reserved,
                 },
             }
         }
@@ -938,8 +934,8 @@ fn mbc_writes_are_privileged() {
         (0x3FFF, MbcRegisterClass::RomBankHigh),
         (0x4000, MbcRegisterClass::SramBank),
         (0x5FFF, MbcRegisterClass::SramBank),
-        (0x6000, MbcRegisterClass::ModeSelect),
-        (0x7FFF, MbcRegisterClass::ModeSelect),
+        (0x6000, MbcRegisterClass::Reserved),
+        (0x7FFF, MbcRegisterClass::Reserved),
     ];
 
     for (addr, reg) in cases {
@@ -948,15 +944,25 @@ fn mbc_writes_are_privileged() {
         assert_eq!(effect, MachineEffect::StoreToMbcRegister { reg });
         assert_eq!(privilege_of(&effect), PrivilegeClass::Privileged);
     }
+}
 
+#[cfg(test)]
+#[test]
+fn structured_ops_are_normal_privilege() {
+    // Resolved F-A1 decision: structured ops are calls into the runtime ABI;
+    // the privilege gate lives inside the runtime helper, not at the call site.
     for kind in [
         SystemCallKind::BankLease,
         SystemCallKind::BankRelease,
+        SystemCallKind::FarCall,
+        SystemCallKind::Yield,
+        SystemCallKind::TraceProbe,
         SystemCallKind::AssertBank,
     ] {
         assert_eq!(
             privilege_of(&MachineEffect::SystemCall(kind)),
-            PrivilegeClass::Privileged
+            PrivilegeClass::Normal,
+            "structured op {kind:?} must be Normal"
         );
     }
 }

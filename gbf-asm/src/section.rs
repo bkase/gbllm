@@ -7,10 +7,10 @@ use std::num::NonZeroU16;
 use serde::{Deserialize, Serialize};
 
 use crate::effect::{
-    MachineEffect, MachineEffectKind, PrivilegeClass, classify_effect, classify_legalization_op,
-    classify_pre_layout_op, privilege_of,
+    MachineEffect, MachineEffectKind, MbcRegisterClass, PrivilegeClass, classify_effect,
+    classify_legalization_op, classify_pre_layout_op, privilege_of,
 };
-use crate::isa::Instr;
+use crate::isa::{Cond, Instr};
 use crate::provenance::InstrProvenance;
 use crate::symbols::SymbolName;
 
@@ -76,6 +76,11 @@ pub enum PrivilegeViolation {
     EffectKindNotAllowed {
         kind: MachineEffectKind,
     },
+    /// Writes to the MBC5 `$6000..=$7FFF` reserved window are forbidden in
+    /// every section, including `Privileged`. The range is a hardware no-op on
+    /// MBC5 and emitting a write there indicates either a bug or a leftover
+    /// MBC1 assumption.
+    ForbiddenMbcReserved,
 }
 
 /// Existing section item rejected by a replacement privilege policy.
@@ -144,6 +149,15 @@ impl SectionPrivilege {
     }
 
     pub fn check_effect(&self, effect: MachineEffect) -> Result<(), PrivilegeViolation> {
+        if matches!(
+            effect,
+            MachineEffect::StoreToMbcRegister {
+                reg: MbcRegisterClass::Reserved
+            }
+        ) {
+            return Err(PrivilegeViolation::ForbiddenMbcReserved);
+        }
+
         let kind = effect.kind();
         if let Some(allowed_effects) = &self.allowed_effects
             && !allowed_effects.contains(&kind)
@@ -400,6 +414,48 @@ pub enum LegalizationOp {
     },
 }
 
+/// Authoring intent for a symbolic branch's emitted shape.
+///
+/// `Jump` items relax to `JR` when the resolved target is in range and to `JP`
+/// otherwise. `Call` items relax to in-bank `CALL` when caller and callee land
+/// in the same visible bank, and to a Bank0 far-call thunk otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchKind {
+    Jump,
+    Call,
+}
+
+/// Symbolic branch that keeps a target `SymbolName` until layout and relaxation
+/// can pick the legal concrete encoding.
+///
+/// `Instr::JrRel`, `Instr::JpAbs`, and `Instr::Call` are concrete and require
+/// resolved offsets/addresses, so they are not the right place to carry an
+/// unresolved symbol. Branch relaxation consumes `SymbolicBranch` and emits
+/// concrete `Instr`s (or a `LegalizationOp::FarCall` for cross-bank calls).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SymbolicBranch {
+    pub kind: BranchKind,
+    pub cond: Option<Cond>,
+    pub target: SymbolName,
+}
+
+impl SymbolicBranch {
+    #[must_use]
+    pub const fn new(kind: BranchKind, cond: Option<Cond>, target: SymbolName) -> Self {
+        Self { kind, cond, target }
+    }
+
+    #[must_use]
+    pub const fn machine_effect(&self) -> MachineEffect {
+        match (self.kind, self.cond) {
+            (BranchKind::Jump, None) => MachineEffect::UnconditionalBranch,
+            (BranchKind::Jump, Some(_)) => MachineEffect::ConditionalBranch,
+            (BranchKind::Call, _) => MachineEffect::Call,
+        }
+    }
+}
+
 /// Assembly section item. Every item carries provenance.
 ///
 /// `SectionItem` is symbolic pre-layout IR. `Instr` items are concrete
@@ -437,8 +493,8 @@ pub enum SectionItem {
         op: LegalizationOp,
         provenance: InstrProvenance,
     },
-    Raw {
-        bytes: Vec<u8>,
+    Branch {
+        branch: SymbolicBranch,
         provenance: InstrProvenance,
     },
 }
@@ -490,8 +546,8 @@ impl SectionItem {
     }
 
     #[must_use]
-    pub(crate) fn raw(bytes: Vec<u8>, provenance: InstrProvenance) -> Self {
-        Self::Raw { bytes, provenance }
+    pub const fn branch(branch: SymbolicBranch, provenance: InstrProvenance) -> Self {
+        Self::Branch { branch, provenance }
     }
 
     #[must_use]
@@ -504,7 +560,7 @@ impl SectionItem {
             | Self::Align { provenance, .. }
             | Self::PreLayoutOp { provenance, .. }
             | Self::LegalizationOp { provenance, .. }
-            | Self::Raw { provenance, .. } => provenance,
+            | Self::Branch { provenance, .. } => provenance,
         }
     }
 
@@ -514,7 +570,7 @@ impl SectionItem {
             Self::Instr { instr, .. } => Some(classify_effect(instr)),
             Self::PreLayoutOp { op, .. } => Some(classify_pre_layout_op(op)),
             Self::LegalizationOp { op, .. } => Some(classify_legalization_op(op)),
-            Self::Raw { .. } => Some(MachineEffect::OpaqueBytes),
+            Self::Branch { branch, .. } => Some(branch.machine_effect()),
             Self::Label { .. } | Self::Db { .. } | Self::Dw { .. } | Self::Align { .. } => None,
         }
     }
@@ -523,11 +579,13 @@ impl SectionItem {
     pub fn fixed_byte_len(&self) -> Option<u32> {
         match self {
             Self::Label { .. } => Some(0),
-            Self::Align { .. } | Self::PreLayoutOp { .. } | Self::LegalizationOp { .. } => None,
+            Self::Align { .. }
+            | Self::PreLayoutOp { .. }
+            | Self::LegalizationOp { .. }
+            | Self::Branch { .. } => None,
             Self::Instr { instr, .. } => Some(u32::from(instr.byte_len())),
             Self::Db { bytes, .. } => Some(bytes.len() as u32),
             Self::Dw { words, .. } => Some((words.len() as u32) * 2),
-            Self::Raw { bytes, .. } => Some(bytes.len() as u32),
         }
     }
 }
@@ -784,6 +842,66 @@ fn privilege_inheritance() {
 
 #[cfg(test)]
 #[test]
+fn reserved_mbc_writes_are_forbidden_even_in_privileged_sections() {
+    let reserved_write = MachineEffect::StoreToMbcRegister {
+        reg: MbcRegisterClass::Reserved,
+    };
+
+    for privilege in [
+        SectionPrivilege::normal(),
+        SectionPrivilege::privileged(),
+        SectionPrivilege::interrupt_handler(),
+    ] {
+        assert_eq!(
+            privilege.check_effect(reserved_write),
+            Err(PrivilegeViolation::ForbiddenMbcReserved),
+            "{privilege:?} must reject reserved MBC writes",
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn symbolic_branch_section_item_round_trips_and_classifies() {
+    use crate::provenance::{InstrProvenance, PlanningStage};
+
+    let provenance = InstrProvenance::new(PlanningStage::Backend).with_source_op("emit_branch");
+    let target = SymbolName::runtime("loop", "head").expect("target name");
+
+    let cases = [
+        (
+            SymbolicBranch::new(BranchKind::Jump, None, target.clone()),
+            MachineEffect::UnconditionalBranch,
+        ),
+        (
+            SymbolicBranch::new(BranchKind::Jump, Some(Cond::NZ), target.clone()),
+            MachineEffect::ConditionalBranch,
+        ),
+        (
+            SymbolicBranch::new(BranchKind::Call, None, target.clone()),
+            MachineEffect::Call,
+        ),
+        (
+            SymbolicBranch::new(BranchKind::Call, Some(Cond::C), target.clone()),
+            MachineEffect::Call,
+        ),
+    ];
+
+    for (branch, expected_effect) in cases {
+        let item = SectionItem::branch(branch.clone(), provenance.clone());
+        assert_eq!(item.machine_effect(), Some(expected_effect));
+        assert_eq!(item.fixed_byte_len(), None);
+        assert_eq!(item.provenance(), &provenance);
+
+        let encoded = serde_json::to_string(&item).expect("branch item serializes");
+        let decoded: SectionItem =
+            serde_json::from_str(&encoded).expect("branch item deserializes");
+        assert_eq!(decoded, item);
+    }
+}
+
+#[cfg(test)]
+#[test]
 fn section_items_carry_provenance_and_size() {
     use crate::effect::{MachineEffect, SystemCallKind};
     use crate::isa::Instr;
@@ -815,8 +933,6 @@ fn section_items_carry_provenance_and_size() {
         section.items()[3].machine_effect(),
         Some(MachineEffect::SystemCall(SystemCallKind::Yield))
     );
-    let raw = SectionItem::raw(vec![0xF3], provenance);
-    assert_eq!(raw.machine_effect(), Some(MachineEffect::OpaqueBytes));
 
     let encoded = serde_json::to_string(&section).expect("section serializes");
     let decoded: Section = serde_json::from_str(&encoded).expect("section deserializes");
