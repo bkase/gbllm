@@ -15,15 +15,14 @@
 
 `gbf-asm` is the only legal authoring layer for executable Game Boy code in the entire system. T-A1.1 through T-A1.4 are already in tree: typed `Instr`, `SectionRole`, `MachineEffect`, `PrivilegeClass`, `Builder`, `SymbolName`, `InstrProvenance`. What is missing is everything from a populated `Section` to a `.gb` file that boots in SameBoy.
 
-Shared terminology for this RFC lives in `history/glossary.md`. Terms marked
-"Decision needed" there should be resolved before implementation. The
-`LoweredSection` / `LegalizedSection` distinction is now resolved: a
-`LoweredSection` is post-`PreLayoutOp` lowering but not necessarily byte-ready;
-a `LegalizedSection` is encoder-ready. The structured-op split now has phase-named
-terms: `PreLayoutOp` lowers before layout, while `LegalizationOp` lowers during
-legalization after placement is known. Remaining decisions include BankLease
-request privilege, MBC5 `$6000..=$7FFF` naming, and symbolic branch
-representation.
+Shared terminology for this RFC lives in `history/glossary.md`. The F-A1
+terminology decisions are resolved there: `LoweredSection` is post-`PreLayoutOp`
+lowering but not necessarily byte-ready; `LegalizedSection` is encoder-ready;
+the structured-op split uses phase-named `PreLayoutOp` and `LegalizationOp`;
+banking requests use a narrow `BankLeaseRequest` privilege; MBC5
+`$6000..=$7FFF` is a reserved register window rather than `ModeSelect`; and
+symbolic branches are durable section items, not symbolic operands inside
+`Instr`.
 
 This RFC proposes a five-piece pipeline that fills the remaining stubs (`cycle_model.rs`, `layout.rs`, `relax.rs`, `encoder.rs`, `listing.rs`) plus a new `rom.rs`. The pipeline runs in a strictly ordered, deterministic sequence:
 
@@ -1129,7 +1128,7 @@ These are the questions I would surface in PR review or to the oracle if needed.
 
 2. **How tight is the `MAX_RELAX_ITERS` bound?** I claimed monotone convergence in 2–3 iterations for typical programs. Adversarial inputs (every JR exactly at the boundary) could push this. **Proposal**: default 8, log a warning at >4, return `RelaxError::NoFixedPoint` past 8. The 8 is large enough for any realistic program and small enough to fail fast on a bug.
 
-3. **Are the current `PreLayoutOp` / `LegalizationOp` placements correct for production F-A4 lowering?** Current proposal: `Yield`, `TraceProbe`, and placement-independent `BankLease` / `BankRelease` calls are `PreLayoutOp`s. `FarCall` is a `LegalizationOp` because it needs final caller/callee bank placement. `AssertBank` currently lives with `PreLayoutOp`; if F-A4/F-A5 later needs address-specific assertion bodies, move only that variant to `LegalizationOp`. **Decision still to confirm with F-A4**: verify whether production BankLease/BankRelease lowering ever needs final placement context.
+3. **Are the current `PreLayoutOp` / `LegalizationOp` placements correct for production F-A4 lowering?** **Decision**: yes for F-A1. `Yield`, placement-independent `TraceProbe`, `BankLease`, `BankRelease`, and the current `AssertBank` are `PreLayoutOp`s; `FarCall` is a `LegalizationOp` because it needs final caller/callee bank placement. If F-A4/F-A5 later introduces a banking or assertion body whose emitted shape depends on caller bank, callee bank, final address, or thunk placement, that distinct variant belongs in `LegalizationOp`.
 
 4. **Does `BankIndex` belong in `gbf-asm` or `gbf-foundation`?** Both `layout` and the eventual `gbf-codegen::PlacedRom` will use it. **Proposal**: define in `gbf-asm/src/section.rs` for now; promote to `gbf-foundation` if Epic B wants it. Purely a refactor, no behavior change.
 

@@ -362,10 +362,23 @@ It may not claim final byte offsets or final branch distances.
 
 ### Symbolic Branch
 
-Status: RFC term, not current code.
+Status: RFC term, F-A1 decision; not current code.
 
-A proposed section item that keeps a target `SymbolName` until layout and
-relaxation can decide whether to emit `JR`, `JP`, `CALL`, or a far-call thunk.
+A section item that keeps a target `SymbolName` until layout and relaxation can
+decide whether to emit `JR`, `JP`, `CALL`, or a far-call thunk.
+
+F-A1 decision: add `SectionItem::Branch { branch: SymbolicBranch, provenance }`
+with a payload that names the branch kind, optional `Cond`, and target
+`SymbolName`. `Instr` remains concrete machine IR and must not grow symbolic
+operands.
+
+Initial F-A1 policy:
+
+- symbolic jumps prefer `JR` and widen monotonically to `JP` when required;
+- symbolic calls become in-bank `CALL`s when legal, or calls to Bank0 far-call
+  thunks when the callee is not visible from the caller's bank;
+- callers that require one exact CPU encoding use concrete `Instr` only after
+  they already know the concrete offset or address.
 
 Important current-code fact: `Instr::JrRel` and `Instr::Call` are concrete and
 already require offsets/addresses. Any RFC language saying "Builder emits
@@ -427,15 +440,21 @@ A structured assembly op whose emitted form does not depend on final section
 address, final bank placement, final branch width, or thunk placement. It lowers
 before layout, producing ordinary section items inside a `LoweredSection`.
 
-Examples, subject to F-A4 confirmation:
+F-A1 classification decision:
 
 - `Yield`;
 - `TraceProbe` when trace policy only decides emit-versus-strip;
 - `BankLease` / `BankRelease` calls whose runtime ABI symbol is known without
-  final placement.
+  final placement;
+- the current `AssertBank` form, because it checks a requested bank value rather
+  than choosing code from final address or bank placement.
 
 A `PreLayoutOp` may still emit a symbolic call target. It just cannot need final
 placement to choose its emitted shape.
+
+If F-A4 or F-A5 later introduces a banking/assertion op whose emitted shape
+depends on caller bank, callee bank, final address, or thunk placement, that
+distinct op belongs in `LegalizationOp`.
 
 ### `LegalizationOp`
 
@@ -446,7 +465,7 @@ the result of layout/relaxation. It is carried through layout as an explicitly
 sized obligation and lowers during legalization, producing encoder-ready items
 inside a `LegalizedSection`.
 
-Expected examples:
+F-A1 classification decision:
 
 - `FarCall`, because it needs to know caller/callee bank placement;
 - any debug/assertion op whose emitted sequence depends on final bank, address,
@@ -599,6 +618,19 @@ The cartridge memory bank controller target. Relevant facts:
 `gbf-asm` may need minimal MBC5-aware types for layout and effects, but
 hardware constants and register semantics belong in `gbf-hw`.
 
+### MBC5 Reserved Register Window
+
+Status: Resolved F-A1 policy term; implementation pending.
+
+For the MBC5 target, `$6000..=$7FFF` is not a mode-select register in the F-A1
+contract. Direct writes to that range should remain classified as cartridge
+control-window writes and require `Privileged`, but the public effect name
+should be `MbcRegisterClass::Reserved`, not `ModeSelect`.
+
+This keeps the classifier conservative without claiming a non-existent MBC5 mode
+register. F-A2's `TargetProfile` / hardware contract may later decide whether a
+profile rejects, ignores, or further specializes this reserved range.
+
 ### `FarCall`
 
 Status: Current `LegalizationOp` variant. Production details future-owned by F-A4/F-A5.
@@ -677,15 +709,38 @@ differs.
 
 ### `PrivilegeClass`
 
-Status: Current code, with one F-A1 policy question.
+Status: Current code, with resolved F-A1 policy change to implement.
 
-The privilege required by a machine effect. Current values are `Normal`,
+The privilege required by a machine effect. Current code values are `Normal`,
 `Privileged`, and `InterruptHandler`.
 
-Open F-A1 precision issue: a `BankLease` request should probably not grant the
-same privilege as direct MBC register writes. We should either map bank-lease
-structured op requests to `Normal` plus later reachability checks, or add a narrow
-class such as `BankLeaseRequest`.
+F-A1 decision: add a narrow `BankLeaseRequest` privilege class for structured
+banking requests such as `BankLease`, `BankRelease`, and `AssertBank`. This
+class is stronger than `Normal` but weaker than `Privileged`.
+
+Intended lattice:
+
+- `Normal` sections allow `Normal` effects only.
+- `BankLeaseRequest` sections allow `Normal` and `BankLeaseRequest` effects.
+- `Privileged` sections allow `Normal`, `BankLeaseRequest`, and `Privileged`
+  effects.
+- `InterruptHandler` remains separate and does not automatically allow
+  `BankLeaseRequest` or `Privileged` effects.
+
+Direct MBC register writes, raw opaque bytes, and interrupt-control operations
+remain `Privileged`.
+
+### `BankLeaseRequest`
+
+Status: Resolved F-A1 policy term; implementation pending.
+
+A narrow privilege for asking the runtime BankLease / BankGuard ABI to manage
+bank state. It permits authored requests to the runtime banking contract without
+also permitting direct MBC register writes.
+
+`BankLeaseRequest` is still a proof obligation for later reachability and lease
+validation. It means "this section may request runtime-managed bank access," not
+"this section may write cartridge control registers itself."
 
 ### Privileged
 
@@ -994,77 +1049,82 @@ Reason: layout, relaxation, final alignment, and thunk insertion are distinct
 from `PreLayoutOp` lowering. Overloading `LoweredSection` makes it too easy to
 feed unknown-width or unresolved symbolic items to the encoder.
 
-## Terms That Need F-A1 Decision
-
 ### PreLayoutOp Versus LegalizationOp Classification
 
-Decision needed.
+Decision: keep the phase-named split.
 
-The lowering order is named by the term:
+Precision:
 
-- `PreLayoutOp`: lowers before layout.
-- `LegalizationOp`: lowers during legalization after placement is known.
+- `PreLayoutOp` means "emitted shape is independent of final placement."
+- `LegalizationOp` means "emitted shape needs final placement or relaxation
+  facts."
+- A `PreLayoutOp` may emit symbolic branches or calls; unresolved target
+  addresses do not by themselves make it a `LegalizationOp`.
 
-Current RFC direction: keep each structured op in the phase-named enum matching
-whether its emitted form depends on final placement.
+Current F-A1 classification:
 
-- Placement-independent variants become `PreLayoutOp`s and lower into
-  `LoweredSection`.
-- Placement-dependent variants become `LegalizationOp`s and lower into
-  `LegalizedSection`.
+- `Yield`, placement-independent `TraceProbe`, `BankLease`, `BankRelease`, and
+  the current `AssertBank` are `PreLayoutOp`s.
+- `FarCall` is a `LegalizationOp`.
 
-Why that is attractive:
-
-- common op intents can be simplified before layout;
-- structured op generation is kept out of the encoder;
-- F-A1 can test the seam before F-A4 production lowering exists;
-- `FarCall` does not have to guess the callee bank before placement.
-
-Why it might be wrong:
-
-- layout now needs an explicit representation and size estimate for each
-  `LegalizationOp`;
-- split rules can be harder to explain than one lowering phase;
-- if many current structured op variants become `LegalizationOp`s, the split buys
-  little.
-
-Decision criterion: if F-A4 confirms an op's emitted sequence does not depend
-on final address or bank assignment, classify it as a `PreLayoutOp`. If it needs
-final placement context, classify it as a `LegalizationOp`. `FarCall` is the
-expected `LegalizationOp` case.
+Reason: this keeps structured op generation out of the encoder while preserving
+the exact placement fact needed for far calls. Future F-A4/F-A5 variants whose
+body depends on caller bank, callee bank, address, or thunk placement should be
+introduced as `LegalizationOp`s.
 
 ### BankLease Privilege
 
-Decision needed.
+Decision: add a narrow `BankLeaseRequest` privilege class.
 
-Current code treats selected BankLease structured ops as privileged. That may force
-normal generated sections to become privileged just to request legal bank
-access. Better options:
+Precision:
 
-- classify BankLease requests as `Normal` and rely on later reachability/lease
-  validation; or
-- add a narrow `BankLeaseRequest` privilege class that does not permit raw MBC
-  writes.
+- `BankLease`, `BankRelease`, and `AssertBank` require `BankLeaseRequest`.
+- Direct MBC register writes remain `Privileged`.
+- Raw opaque bytes remain `Privileged`.
+- `InterruptHandler` does not automatically allow `BankLeaseRequest`.
 
-Direct MBC writes must remain privileged either way.
+Reason: generated code must be able to ask the runtime banking ABI for legal
+bank access without gaining permission to write cartridge control registers.
+Classifying the request as plain `Normal` would erase a useful local signal;
+classifying it as `Privileged` would overstate the permission.
 
 ### MBC5 `$6000..=$7FFF` Naming
 
-Decision needed.
+Decision: rename the effect class to `MbcRegisterClass::Reserved`.
 
-Current effect code has an `MbcRegisterClass::ModeSelect` catch-all for
-`$6000..=$7FFF`. F-A2.3's bead names only RAMG, BANK1, BANK2, and RAMB for
-MBC5. We need to reconcile whether this range is forbidden, unused/reserved, or
-kept as a compatibility catch-all. The public name should not imply a real MBC5
-mode register if that is not the intended hardware contract.
+Precision:
+
+- F-A1 should not expose `ModeSelect` for the MBC5 target.
+- Direct writes to `$6000..=$7FFF` are still cartridge control-window writes and
+  remain `Privileged`.
+- F-A2 may later decide whether a target profile rejects, ignores, or further
+  specializes the reserved range.
+
+Reason: `ModeSelect` is misleading MBC1 vocabulary. `Reserved` keeps the effect
+classifier conservative without claiming that MBC5 has a mode-select register.
 
 ### Symbolic Branch Representation
 
-Decision needed.
+Decision: add a durable symbolic branch section item.
 
-Current code has labels and concrete branch instructions, but not a durable
-symbolic branch item. Branch relaxation needs target symbols. We should add a
-`SectionItem::Branch` or equivalent rather than smuggling symbols into `Instr`.
+Precision:
+
+- Add `SectionItem::Branch { branch: SymbolicBranch, provenance }`.
+- `SymbolicBranch` carries branch kind, optional `Cond`, and target
+  `SymbolName`.
+- `Instr` stays concrete and never carries unresolved symbols.
+- Branch items are symbolic pre-layout IR with unknown or bounded width, not
+  fixed-size instructions.
+- Relaxation/legalization converts symbolic branches into concrete `Instr`
+  values or far-call thunk calls before encoding.
+
+Reason: labels plus concrete `Instr::JrRel` / `Instr::Call` cannot preserve the
+target symbol required by branch relaxation. Putting symbols inside `Instr`
+would blur concrete machine IR with symbolic pre-layout IR.
+
+## Terms That Still Need F-A1 Decision
+
+None as of 2026-04-29.
 
 ## References
 
