@@ -1,7 +1,7 @@
 //! Typed canonical LR35902 instruction shapes.
 //!
 //! This module models the concrete, post-symbol-resolution instruction families
-//! that the encoder will turn into bytes. Pseudo-ops, symbolic labels,
+//! that the encoder will turn into bytes. Structured ops, symbolic labels,
 //! relocations, and branch relaxation are owned by later `gbf-asm` layers.
 //!
 //! Some values are intentionally canonical rather than a byte-for-byte mirror of

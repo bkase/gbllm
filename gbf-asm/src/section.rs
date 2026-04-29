@@ -7,8 +7,8 @@ use std::num::NonZeroU16;
 use serde::{Deserialize, Serialize};
 
 use crate::effect::{
-    MachineEffect, MachineEffectKind, PrivilegeClass, classify_effect, classify_pseudo_op,
-    privilege_of,
+    MachineEffect, MachineEffectKind, PrivilegeClass, classify_effect, classify_legalization_op,
+    classify_pre_layout_op, privilege_of,
 };
 use crate::isa::Instr;
 use crate::provenance::InstrProvenance;
@@ -235,7 +235,7 @@ impl From<SymbolId> for u32 {
     }
 }
 
-/// Bank class asserted or leased through runtime banking pseudo-ops.
+/// Bank class asserted or leased through runtime banking structured ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MbcBankClass {
@@ -243,7 +243,7 @@ pub enum MbcBankClass {
     Sram,
 }
 
-/// Builder-local bank lease id used to thread pseudo-op ordering.
+/// Builder-local bank lease id used to thread structured op ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LeaseId(u32);
 
@@ -343,7 +343,7 @@ pub enum YieldKind {
     Cooperative,
 }
 
-/// Trace probe identifier emitted by instrumentation pseudo-ops.
+/// Trace probe identifier emitted by instrumentation structured ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TraceProbeId(u32);
 
@@ -368,19 +368,15 @@ pub enum ProbeLevel {
     Info,
 }
 
-/// Pseudo-op markers consumed by the encoder/runtime lowering layer.
+/// Structured op markers lowered before layout.
 ///
 /// These markers do not write MBC registers directly. They preserve authoring
 /// intent until the BankLease ABI lowering owns concrete instruction emission.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum PseudoOp {
+pub enum PreLayoutOp {
     BankLease(BankLeaseSpec),
     BankRelease {
         lease_id: LeaseId,
-    },
-    FarCall {
-        target: SymbolName,
-        lease_chain: Vec<LeaseId>,
     },
     Yield {
         kind: YieldKind,
@@ -395,11 +391,20 @@ pub enum PseudoOp {
     },
 }
 
+/// Structured op markers lowered during legalization, after placement is known.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LegalizationOp {
+    FarCall {
+        target: SymbolName,
+        lease_chain: Vec<LeaseId>,
+    },
+}
+
 /// Assembly section item. Every item carries provenance.
 ///
 /// `SectionItem` is symbolic pre-layout IR. `Instr` items are concrete
-/// instruction shapes, but labels, alignment directives, pseudo-ops, and raw
-/// escape hatches still require later layout/relocation/encoding work.
+/// instruction shapes, but labels, alignment directives, structured ops, and
+/// raw escape hatches still require later layout/relocation/encoding work.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum SectionItem {
@@ -424,8 +429,12 @@ pub enum SectionItem {
         align: NonZeroU16,
         provenance: InstrProvenance,
     },
-    Pseudo {
-        op: PseudoOp,
+    PreLayoutOp {
+        op: PreLayoutOp,
+        provenance: InstrProvenance,
+    },
+    LegalizationOp {
+        op: LegalizationOp,
         provenance: InstrProvenance,
     },
     Raw {
@@ -471,8 +480,13 @@ impl SectionItem {
     }
 
     #[must_use]
-    pub fn pseudo(op: PseudoOp, provenance: InstrProvenance) -> Self {
-        Self::Pseudo { op, provenance }
+    pub const fn pre_layout_op(op: PreLayoutOp, provenance: InstrProvenance) -> Self {
+        Self::PreLayoutOp { op, provenance }
+    }
+
+    #[must_use]
+    pub const fn legalization_op(op: LegalizationOp, provenance: InstrProvenance) -> Self {
+        Self::LegalizationOp { op, provenance }
     }
 
     #[must_use]
@@ -488,7 +502,8 @@ impl SectionItem {
             | Self::Db { provenance, .. }
             | Self::Dw { provenance, .. }
             | Self::Align { provenance, .. }
-            | Self::Pseudo { provenance, .. }
+            | Self::PreLayoutOp { provenance, .. }
+            | Self::LegalizationOp { provenance, .. }
             | Self::Raw { provenance, .. } => provenance,
         }
     }
@@ -497,7 +512,8 @@ impl SectionItem {
     pub fn machine_effect(&self) -> Option<MachineEffect> {
         match self {
             Self::Instr { instr, .. } => Some(classify_effect(instr)),
-            Self::Pseudo { op, .. } => Some(classify_pseudo_op(op)),
+            Self::PreLayoutOp { op, .. } => Some(classify_pre_layout_op(op)),
+            Self::LegalizationOp { op, .. } => Some(classify_legalization_op(op)),
             Self::Raw { .. } => Some(MachineEffect::OpaqueBytes),
             Self::Label { .. } | Self::Db { .. } | Self::Dw { .. } | Self::Align { .. } => None,
         }
@@ -507,7 +523,7 @@ impl SectionItem {
     pub fn fixed_byte_len(&self) -> Option<u32> {
         match self {
             Self::Label { .. } => Some(0),
-            Self::Align { .. } | Self::Pseudo { .. } => None,
+            Self::Align { .. } | Self::PreLayoutOp { .. } | Self::LegalizationOp { .. } => None,
             Self::Instr { instr, .. } => Some(u32::from(instr.byte_len())),
             Self::Db { bytes, .. } => Some(bytes.len() as u32),
             Self::Dw { words, .. } => Some((words.len() as u32) * 2),
@@ -788,8 +804,8 @@ fn section_items_carry_provenance_and_size() {
 
     assert_eq!(section.fixed_item_bytes(), Some(7));
     assert_eq!(section.items()[0].provenance(), &provenance);
-    section.push(SectionItem::pseudo(
-        PseudoOp::Yield {
+    section.push(SectionItem::pre_layout_op(
+        PreLayoutOp::Yield {
             kind: YieldKind::Cooperative,
         },
         provenance.clone(),

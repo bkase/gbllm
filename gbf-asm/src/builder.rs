@@ -1,12 +1,12 @@
 //! Ergonomic typed builder for assembly sections.
 //!
 //! The builder is the authoring surface for runtime authors and compiler
-//! lowering code. It preserves typed `Instr`/pseudo-op values and attaches
+//! lowering code. It preserves typed `Instr`/structured op values and attaches
 //! provenance to every emitted item.
 //!
 //! Output is symbolic pre-layout section IR. This layer records label markers,
-//! alignment directives, and pseudo-op intent. It performs local section
-//! privilege/effect validation for typed instructions, pseudo-ops, and opaque
+//! alignment directives, and structured op intent. It performs local section
+//! privilege/effect validation for typed instructions, structured ops, and opaque
 //! raw bytes; it does not perform relocation, branch relaxation, far-call thunk
 //! insertion, dynamic-address reachability proofs, or final byte lowering.
 
@@ -15,13 +15,15 @@ use std::fmt;
 use std::num::NonZeroU16;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
-use crate::effect::{MachineEffect, classify_effect, classify_pseudo_op};
+use crate::effect::{
+    MachineEffect, classify_effect, classify_legalization_op, classify_pre_layout_op,
+};
 use crate::isa::Instr;
 use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
-    BankLeaseSpec, LeaseId, MbcBankClass, PrivilegeViolation, ProbeLevel, PseudoOp, Section,
-    SectionId, SectionItem, SectionPrivilege, SectionPrivilegeError, SectionRole, SymbolId,
-    TraceProbeId, YieldKind,
+    BankLeaseSpec, LeaseId, LegalizationOp, MbcBankClass, PreLayoutOp, PrivilegeViolation,
+    ProbeLevel, Section, SectionId, SectionItem, SectionPrivilege, SectionPrivilegeError,
+    SectionRole, SymbolId, TraceProbeId, YieldKind,
 };
 use crate::symbols::SymbolName;
 
@@ -203,7 +205,7 @@ impl Builder {
 
     /// Audited raw byte escape hatch.
     ///
-    /// Prefer typed `Instr`, `db`, `dw`, and pseudo-op methods. `raw` exists for
+    /// Prefer typed `Instr`, `db`, `dw`, and structured op methods. `raw` exists for
     /// boot headers, CPU quirks, and temporary bring-up gaps that have explicit
     /// review coverage.
     pub fn raw(&mut self, bytes: Vec<u8>) {
@@ -239,14 +241,14 @@ impl Builder {
     }
 
     pub fn try_bank_lease(&mut self, lease: BankLeaseSpec) -> Result<(), BuilderError> {
-        let op = PseudoOp::BankLease(lease.clone());
-        self.validate_effect(classify_pseudo_op(&op))?;
+        let op = PreLayoutOp::BankLease(lease.clone());
+        self.validate_effect(classify_pre_layout_op(&op))?;
         let lease_id = lease.lease_id();
         if !self.active_leases.insert(lease_id) {
             return Err(BuilderError::DuplicateLease { lease_id });
         }
 
-        self.pseudo_unchecked(op);
+        self.pre_layout_op_unchecked(op);
         Ok(())
     }
 
@@ -256,13 +258,13 @@ impl Builder {
     }
 
     pub fn try_bank_release(&mut self, lease_id: LeaseId) -> Result<(), BuilderError> {
-        let op = PseudoOp::BankRelease { lease_id };
-        self.validate_effect(classify_pseudo_op(&op))?;
+        let op = PreLayoutOp::BankRelease { lease_id };
+        self.validate_effect(classify_pre_layout_op(&op))?;
         if !self.active_leases.remove(&lease_id) {
             return Err(BuilderError::UnknownLease { lease_id });
         }
 
-        self.pseudo_unchecked(op);
+        self.pre_layout_op_unchecked(op);
         Ok(())
     }
 
@@ -276,11 +278,11 @@ impl Builder {
         target: SymbolName,
         lease_chain: &[LeaseId],
     ) -> Result<(), BuilderError> {
-        let op = PseudoOp::FarCall {
+        let op = LegalizationOp::FarCall {
             target,
             lease_chain: lease_chain.to_vec(),
         };
-        self.validate_effect(classify_pseudo_op(&op))?;
+        self.validate_effect(classify_legalization_op(&op))?;
         for lease_id in lease_chain {
             if !self.active_leases.contains(lease_id) {
                 return Err(BuilderError::UnknownLease {
@@ -289,22 +291,22 @@ impl Builder {
             }
         }
 
-        self.pseudo_unchecked(op);
+        self.legalization_op_unchecked(op);
         Ok(())
     }
 
     pub fn yield_op(&mut self, kind: YieldKind) {
         self.try_yield_op(kind)
-            .expect("section privilege rejected yield pseudo-op");
+            .expect("section privilege rejected yield structured op");
     }
 
     pub fn try_yield_op(&mut self, kind: YieldKind) -> Result<(), BuilderError> {
-        self.pseudo(PseudoOp::Yield { kind })
+        self.pre_layout_op(PreLayoutOp::Yield { kind })
     }
 
     pub fn trace_probe(&mut self, id: TraceProbeId, level: ProbeLevel) {
         self.try_trace_probe(id, level)
-            .expect("section privilege rejected trace-probe pseudo-op");
+            .expect("section privilege rejected trace-probe structured op");
     }
 
     pub fn try_trace_probe(
@@ -312,7 +314,7 @@ impl Builder {
         id: TraceProbeId,
         level: ProbeLevel,
     ) -> Result<(), BuilderError> {
-        self.pseudo(PseudoOp::TraceProbe { id, level })
+        self.pre_layout_op(PreLayoutOp::TraceProbe { id, level })
     }
 
     pub fn assert_bank(&mut self, expected: MbcBankClass, expected_n: u8) {
@@ -325,16 +327,16 @@ impl Builder {
         expected: MbcBankClass,
         expected_n: u8,
     ) -> Result<(), BuilderError> {
-        let op = PseudoOp::AssertBank {
+        let op = PreLayoutOp::AssertBank {
             expected,
             expected_n,
         };
-        self.validate_effect(classify_pseudo_op(&op))?;
+        self.validate_effect(classify_pre_layout_op(&op))?;
         if expected == MbcBankClass::Sram && u16::from(expected_n) > BankLeaseSpec::MAX_SRAM_BANK {
             return Err(BuilderError::SramBankOutOfRange { bank: expected_n });
         }
 
-        self.pseudo_unchecked(op);
+        self.pre_layout_op_unchecked(op);
         Ok(())
     }
 
@@ -349,15 +351,22 @@ impl Builder {
             .map_err(|violation| BuilderError::PrivilegeViolation { effect, violation })
     }
 
-    fn pseudo(&mut self, op: PseudoOp) -> Result<(), BuilderError> {
-        self.validate_effect(classify_pseudo_op(&op))?;
-        self.pseudo_unchecked(op);
+    fn pre_layout_op(&mut self, op: PreLayoutOp) -> Result<(), BuilderError> {
+        self.validate_effect(classify_pre_layout_op(&op))?;
+        self.pre_layout_op_unchecked(op);
         Ok(())
     }
 
-    fn pseudo_unchecked(&mut self, op: PseudoOp) {
+    fn pre_layout_op_unchecked(&mut self, op: PreLayoutOp) {
         self.section
-            .push(SectionItem::pseudo(op, self.cur_provenance.clone()));
+            .push(SectionItem::pre_layout_op(op, self.cur_provenance.clone()));
+    }
+
+    fn legalization_op_unchecked(&mut self, op: LegalizationOp) {
+        self.section.push(SectionItem::legalization_op(
+            op,
+            self.cur_provenance.clone(),
+        ));
     }
 }
 
@@ -455,7 +464,7 @@ fn provenance_recorded() {
 
 #[cfg(test)]
 #[test]
-fn pseudo_ops_dont_panic() {
+fn structured_ops_record_exact_payloads() {
     let mut builder = Builder::new(
         SectionRole::CommonBank,
         SymbolName::runtime("banking", "ops").expect("section name"),
@@ -476,41 +485,41 @@ fn pseudo_ops_dont_panic() {
     assert_eq!(
         section.items(),
         [
-            SectionItem::pseudo(
-                PseudoOp::BankLease(
+            SectionItem::pre_layout_op(
+                PreLayoutOp::BankLease(
                     BankLeaseSpec::new(lease, MbcBankClass::Rom, 12).expect("lease")
                 ),
                 InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
             ),
-            SectionItem::pseudo(
-                PseudoOp::AssertBank {
+            SectionItem::pre_layout_op(
+                PreLayoutOp::AssertBank {
                     expected: MbcBankClass::Rom,
                     expected_n: 12,
                 },
                 InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
             ),
-            SectionItem::pseudo(
-                PseudoOp::TraceProbe {
+            SectionItem::pre_layout_op(
+                PreLayoutOp::TraceProbe {
                     id: TraceProbeId::new(3),
                     level: ProbeLevel::Debug,
                 },
                 InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
             ),
-            SectionItem::pseudo(
-                PseudoOp::Yield {
+            SectionItem::pre_layout_op(
+                PreLayoutOp::Yield {
                     kind: YieldKind::PollInterrupts,
                 },
                 InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
             ),
-            SectionItem::pseudo(
-                PseudoOp::FarCall {
+            SectionItem::legalization_op(
+                LegalizationOp::FarCall {
                     target,
                     lease_chain: vec![lease],
                 },
                 InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
             ),
-            SectionItem::pseudo(
-                PseudoOp::BankRelease { lease_id: lease },
+            SectionItem::pre_layout_op(
+                PreLayoutOp::BankRelease { lease_id: lease },
                 InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
             ),
         ]

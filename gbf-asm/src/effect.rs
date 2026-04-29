@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::isa::{
     AluSrc8, CbTarget, DirectAddr, HighDirectOffset, IncDec8Target, Instr, Reg16Addr, RstVector,
 };
-use crate::section::PseudoOp;
+use crate::section::{LegalizationOp, PreLayoutOp};
 
 /// Memory region reached through a concrete immediate address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -87,7 +87,7 @@ pub enum InterruptControlOp {
     EnableInterrupts,
 }
 
-/// Runtime pseudo-op classes surfaced to reachability validation.
+/// Runtime structured op classes surfaced to reachability validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SystemCallKind {
     BankLease,
@@ -98,7 +98,7 @@ pub enum SystemCallKind {
     AssertBank,
 }
 
-/// Closed privilege lattice for instruction and pseudo-op effects.
+/// Closed privilege lattice for instruction and structured op effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PrivilegeClass {
     Normal,
@@ -106,7 +106,7 @@ pub enum PrivilegeClass {
     InterruptHandler,
 }
 
-/// Machine-visible effect of an instruction or pseudo-op.
+/// Machine-visible effect of an instruction or structured op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MachineEffect {
     PureCompute,
@@ -343,16 +343,23 @@ pub const fn classify_effect(instr: &Instr) -> MachineEffect {
     }
 }
 
-/// Classifies a builder pseudo-op for section-level validation.
+/// Classifies a pre-layout op for section-level validation.
 #[must_use]
-pub fn classify_pseudo_op(op: &PseudoOp) -> MachineEffect {
+pub fn classify_pre_layout_op(op: &PreLayoutOp) -> MachineEffect {
     match op {
-        PseudoOp::BankLease(_) => MachineEffect::SystemCall(SystemCallKind::BankLease),
-        PseudoOp::BankRelease { .. } => MachineEffect::SystemCall(SystemCallKind::BankRelease),
-        PseudoOp::FarCall { .. } => MachineEffect::SystemCall(SystemCallKind::FarCall),
-        PseudoOp::Yield { .. } => MachineEffect::SystemCall(SystemCallKind::Yield),
-        PseudoOp::TraceProbe { .. } => MachineEffect::SystemCall(SystemCallKind::TraceProbe),
-        PseudoOp::AssertBank { .. } => MachineEffect::SystemCall(SystemCallKind::AssertBank),
+        PreLayoutOp::BankLease(_) => MachineEffect::SystemCall(SystemCallKind::BankLease),
+        PreLayoutOp::BankRelease { .. } => MachineEffect::SystemCall(SystemCallKind::BankRelease),
+        PreLayoutOp::Yield { .. } => MachineEffect::SystemCall(SystemCallKind::Yield),
+        PreLayoutOp::TraceProbe { .. } => MachineEffect::SystemCall(SystemCallKind::TraceProbe),
+        PreLayoutOp::AssertBank { .. } => MachineEffect::SystemCall(SystemCallKind::AssertBank),
+    }
+}
+
+/// Classifies a legalization op for section-level validation.
+#[must_use]
+pub fn classify_legalization_op(op: &LegalizationOp) -> MachineEffect {
+    match op {
+        LegalizationOp::FarCall { .. } => MachineEffect::SystemCall(SystemCallKind::FarCall),
     }
 }
 
