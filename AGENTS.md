@@ -30,6 +30,13 @@ br sync --flush-only  # Export DB to JSONL
 br sync --status      # Check sync status
 ```
 
+When a PR intentionally changes `.beads/issues.jsonl`, verify that only the
+owned issue records changed before commit:
+
+```bash
+python3 scripts/beads_pr_scope_check.py --base origin/main --head WORKTREE --allow <issue-id>[,<issue-id>...]
+```
+
 ### Workflow Pattern
 
 1. **Start**: Run `br ready` to find actionable work

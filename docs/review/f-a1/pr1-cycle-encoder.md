@@ -41,7 +41,6 @@ This is the complete changed-file set from the GitHub PR diff.
 
 | File | Reviewer handling |
 | --- | --- |
-| `.beads/issues.jsonl` | Skip line review; issue-tracker export only. Check only if you want bead closure provenance. |
 | `docs/review/f-a1/pr1-cycle-encoder.md` | Read first; this packet explains how to review the PR. |
 | `gbf-asm/src/builder.rs` | Review focused on builder APIs, SoA emission, privilege checks, and inline-data rejection. |
 | `gbf-asm/src/cycle_model.rs` | Deep review; this is one of PR1's primary implementation files. |
@@ -54,9 +53,15 @@ This is the complete changed-file set from the GitHub PR diff.
 | `gbf-asm/src/test_support.rs` | Review the gbdev opcode JSON parser and `Instr` fixture mapping used by encoder/cycle tests. |
 | `gbf-asm/tests/fixtures/gbdev-opcodes.json` | External oracle fixture copied from `https://gbdev.io/gb-opcodes/Opcodes.json`; inspect only for provenance or fixture refresh concerns. |
 | `history/glossary.md` | Skim for terminology alignment only. |
-| `history/planv0.md` | Skim for F-A1 scope alignment only; not executable code. |
-| `history/rfcs/F-A1-gbf-asm.md` | Review as the implementation contract for this stack, especially PR1-owned claims. |
-| `history/rfcs/F-A1-review-packet-requirements.md` | Skim as the packet contract; use it to judge whether the review packet is sufficient. |
+
+## Base Context
+
+These files are useful review context but are not part of the GitHub PR diff:
+
+- `history/rfcs/F-A1-gbf-asm.md` is the implementation contract for this
+  stack, especially PR1-owned claims.
+- `history/rfcs/F-A1-review-packet-requirements.md` is the packet contract.
+- `history/planv0.md` is background F-A1 scope context only.
 
 ## Main Claims
 

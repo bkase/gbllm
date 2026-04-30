@@ -459,6 +459,36 @@ Any code path that can emit bytes without Instr/DataBlock/Align
 
 `diff-map.md` should be a table mapping every changed file to its purpose, risk level, and relevant tests.
 
+The packet must also include a **Changed File Disposition** table for the
+exact PR diff. This table is different from architectural base context:
+
+```text
+## Changed File Disposition
+
+| File | Reviewer handling |
+| --- | --- |
+| `gbf-asm/src/layout.rs` | Deep review; primary PR implementation file. |
+| `docs/review/f-a1/pr2-layout-relax-lowering.md` | Read first; packet instructions. |
+| `.beads/issues.jsonl` | Skip line review; issue-tracker export only. |
+```
+
+Rules:
+
+* Every file in `gh pr diff --name-only <pr>` must appear exactly once in the
+  table.
+* Files that are useful base context but are not in the PR diff belong in a
+  separate "Base Context" or "Reviewer Order" section, not in Changed File
+  Disposition.
+* The table must tell the reviewer whether to read deeply, skim, or skip line
+  review, and why.
+* Before requesting review, run:
+
+```bash
+python3 scripts/review_packet_check.py \
+  --packet docs/review/f-a1/<packet>.md \
+  --pr <number>
+```
+
 Example:
 
 | File             |             Change |       Risk | Why reviewer should care                    | Main tests                                                                                        |
@@ -1740,6 +1770,7 @@ The review packet is complete only when:
 [ ] A fresh checkout can run verify-packet.sh successfully.
 [ ] The packet says exactly which files to read first.
 [ ] The packet says exactly which files/artifacts can be skimmed.
+[ ] The packet has a Changed File Disposition table that matches the PR diff.
 [ ] Every major RFC claim maps to at least one test, type invariant, or generated artifact.
 [ ] tiny_rom.gb, tiny_rom.lst, and tiny_rom.sym are reproducible and hashed.
 [ ] The packet contains rendered diagrams and source diagrams.
