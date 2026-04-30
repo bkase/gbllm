@@ -1,0 +1,12 @@
+flowchart TD
+  A["Vec<Section>"] --> B["lower_pre_layout_ops"]
+  B --> C["Vec<LoweredSection>"]
+  C --> D["layout_into_banks"]
+  D --> E["LayoutPlan"]
+  E --> F["relax_and_legalize"]
+  F --> G["LegalizedSection + SymbolTable"]
+  G --> H["encode_section"]
+  H --> I["EncodedSection"]
+  I --> J["assemble_rom"]
+  I --> K["emit_listing"]
+  G --> L["write_sym"]

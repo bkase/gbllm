@@ -1,0 +1,1 @@
+No F-A1 runtime benchmark is claimed; ROM/listing/sym generation is covered by verify-packet.sh.

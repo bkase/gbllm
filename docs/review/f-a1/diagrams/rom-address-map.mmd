@@ -1,0 +1,4 @@
+flowchart TD
+  A["CPU ROM0 $0000-$3FFF"] --> B["File $0000-$3FFF"]
+  C["CPU ROMX bank N $4000-$7FFF"] --> D["File N*$4000 + cpu-$4000"]
+  E["WRAM/HRAM/SRAM/VRAM/OAM"] --> F["No ROM file offset"]

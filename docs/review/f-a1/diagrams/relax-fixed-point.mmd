@@ -1,0 +1,9 @@
+flowchart TD
+  A["Optimistic JR/CALL decisions"] --> B["Resolve symbols"]
+  B --> C{"JR out of range?"}
+  C -->|"yes"| D["Widen JR -> JP"]
+  D --> B
+  C -->|"no"| E{"AutoFar cross-bank CALL?"}
+  E -->|"yes"| F["Allocate/reuse per-target thunk"]
+  F --> B
+  E -->|"no"| G["Fixed point"]

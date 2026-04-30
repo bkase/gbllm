@@ -1,0 +1,4 @@
+flowchart LR
+  Caller["CALL runtime.banking.thunk.target"] --> Thunk["Bank 0 thunk\ncallee bank + target addr"]
+  Thunk --> Helper["runtime.banking.far_call_entry\nF-A4 production ABI"]
+  Helper --> Callee["Target in ROMX bank N"]

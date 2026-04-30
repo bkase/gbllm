@@ -10,6 +10,7 @@ pub mod listing;
 pub mod lowering;
 pub mod provenance;
 pub mod relax;
+pub mod rom;
 pub mod section;
 pub mod symbols;
 

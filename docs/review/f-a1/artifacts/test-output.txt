@@ -1,0 +1,96 @@
+
+running 86 tests
+test builder::builder_forbids_reserved_mbc_writes_in_every_section ... ok
+test builder::builder_emits_symbolic_branches ... ok
+test builder::builder_rejects_privileged_effects_in_normal_sections ... ok
+test builder::builder_revalidates_existing_items_when_privilege_changes ... ok
+test builder::builder_rejects_invalid_alignment_and_duplicate_labels ... ok
+test builder::provenance_recorded ... ok
+test builder::builder_validates_lease_lifecycle_and_bank_ranges ... ok
+test builder::db_dw_rejected_in_executable_sections ... ok
+test builder::roundtrip ... ok
+test cycle_model::tests::conditional_branch_timings_by_family ... ok
+test builder::structured_ops_run_in_normal_sections ... ok
+test builder::structured_ops_record_exact_payloads ... ok
+test cycle_model::tests::halt_one_mcycle ... ok
+test builder::provenance_scope_restores_after_caught_panic ... ok
+test cycle_model::tests::known_instructions ... ok
+test cycle_model::tests::no_zero_cost ... ok
+test cycle_model::tests::t_states_lossless ... ok
+test effect::classify_exhaustive ... ok
+test effect::dynamic_memory_effects_name_reachability_obligation ... ok
+test effect::mbc_writes_are_privileged ... ok
+test effect::structured_ops_are_normal_privilege ... ok
+test encoder::tests::encode_instr_matches_byte_len ... ok
+test encoder::tests::encode_section_rejects_mismatched_or_invalid_placement ... ok
+test encoder::tests::encode_section_merges_legalized_arrays_in_order ... ok
+test encoder::tests::encode_section_rejects_missing_or_extra_alignment_plan ... ok
+test encoder::tests::known_opcodes ... ok
+test encoder::tests::cb_prefix_table_is_exhaustive ... ok
+test isa::instr_size_in_bytes ... ok
+test isa::operand_classification ... ok
+test layout::rom_file_offset_rejects_bank_boundary_overflow ... ok
+test layout::romx_file_offset_subtracts_4000 ... ok
+test isa::serde_rejects_invalid_validated_operands ... ok
+test layout::tests::bank0_auto_placement_skips_pinned_sections ... ok
+test layout::tests::budgeted_reserve_respected ... ok
+test layout::tests::pinned_placements_cannot_overlap ... ok
+test layout::tests::strict_expert_banks_skip_common_banks ... ok
+test layout::tests::no_section_crosses_bank ... ok
+test layout::tests::strict_one_expert_per_bank_semantics ... ok
+test layout::tests::user_header_section_rejected ... ok
+test layout::tests::layout_plan_json_round_trip_with_string_bank_keys ... ok
+test listing::tests::format_instr_canonical ... ok
+test listing::tests::cycle_cost_shown ... ok
+test lowering::tests::elided_stub_ops_emit_no_items ... ok
+test listing::tests::byte_stable ... ok
+test listing::tests::provenance_visible ... ok
+test listing::tests::large_alignment_padding_is_chunked_deterministically ... ok
+test listing::tests::large_data_block_is_chunked_deterministically ... ok
+test lowering::tests::lowered_fragments_are_revalidated_against_section_privilege ... ok
+test lowering::tests::lowered_fragments_preserve_sub_index_order ... ok
+test listing::tests::all_options_render ... ok
+test lowering::tests::pre_layout_ops_are_drained ... ok
+test provenance::stage_enum_stable ... ok
+test relax::tests::cross_bank_jr_is_rejected ... ok
+test relax::tests::auto_far_symbolic_call_becomes_per_target_thunk ... ok
+test relax::tests::explicit_far_call_becomes_per_target_thunk ... ok
+test relax::tests::plain_cross_bank_call_is_rejected ... ok
+test relax::tests::same_bank_jr_stays_short ... ok
+test relax::tests::short_jr_recomputes_alignment_padding ... ok
+test relax::tests::two_callsites_share_one_thunk ... ok
+test rom::tests::invalid_rom_size_for_layout ... ok
+test rom::tests::invalid_title_rejected ... ok
+test relax::tests::thunk_pool_overflow_is_reported ... ok
+test rom::tests::ram_size_header_bytes ... ok
+test rom::tests::user_header_range_rejected ... ok
+test rom::tests::public_enums_reject_unknown_serde_values ... ok
+test section::legalized_section_drops_unencoded_arrays_at_the_type_level ... ok
+test section::reserved_mbc_writes_are_forbidden_even_in_privileged_sections ... ok
+test section::privilege_inheritance ... ok
+test rom::tests::header_checksum_known_vector ... ok
+test symbols::sym_tests::rom_only_omits_bankless_symbols ... ok
+test symbols::sym_tests::write_sym_dot_safe_collision_detected ... ok
+test symbols::sym_tests::write_sym_dot_safe ... ok
+test section::role_exhaustive ... ok
+test rom::tests::nintendo_logo_present ... ok
+test symbols::sym_tests::write_sym_sorted ... ok
+test section::section_items_carry_provenance_and_size ... ok
+test symbols::canonical_naming ... ok
+test rom::tests::unused_regions_are_ff ... ok
+test symbols::sym_tests::write_sym_dot_safe_collision_table_driven ... ok
+test symbols::sym_tests::write_sym_dot_safe_escape_avoids_naive_collision ... ok
+test section::symbolic_branch_classifies_and_round_trips ... ok
+test rom::tests::bank_n_at_correct_offset ... ok
+test rom::tests::deterministic ... ok
+test rom::tests::global_checksum_round_trip ... ok
+test relax::tests::out_of_range_jr_becomes_jp ... ok
+test rom::tests::power_of_two_size ... ok
+
+test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
