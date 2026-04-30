@@ -430,7 +430,7 @@ pub enum PreLayoutOp {
     },
     AssertBank {
         expected: MbcBankClass,
-        expected_n: u8,
+        expected_n: u16,
     },
 }
 

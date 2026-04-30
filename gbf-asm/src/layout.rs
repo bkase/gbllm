@@ -69,6 +69,13 @@ impl PlacedSection {
                         cpu_start: self.cpu_start,
                     });
                 }
+                if self.cpu_end_exclusive() > ROM0_END_EXCLUSIVE as u32 {
+                    return Err(LayoutError::SectionTooBig {
+                        id: self.id,
+                        size: u32::from(self.final_size),
+                        bank_capacity: ROM0_END_EXCLUSIVE as u32,
+                    });
+                }
                 Ok(Some(usize::from(self.cpu_start)))
             }
             (AddressSpace::RomX, BankIndex::Rom(bank)) if bank >= 1 => {
@@ -77,6 +84,13 @@ impl PlacedSection {
                         section_id: self.id,
                         space: self.space,
                         cpu_start: self.cpu_start,
+                    });
+                }
+                if self.cpu_end_exclusive() > ROMX_END_EXCLUSIVE as u32 {
+                    return Err(LayoutError::SectionTooBig {
+                        id: self.id,
+                        size: u32::from(self.final_size),
+                        bank_capacity: ROM_BANK_SIZE,
                     });
                 }
                 Ok(Some(
@@ -110,6 +124,11 @@ pub struct LayoutPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutError {
+    SectionTooBig {
+        id: SectionId,
+        size: u32,
+        bank_capacity: u32,
+    },
     CpuAddressOutOfRange {
         section_id: SectionId,
         space: AddressSpace,
@@ -125,6 +144,15 @@ pub enum LayoutError {
 impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SectionTooBig {
+                id,
+                size,
+                bank_capacity,
+            } => write!(
+                f,
+                "section {} is {size} bytes and cannot fit in {bank_capacity} bytes",
+                id.get()
+            ),
             Self::CpuAddressOutOfRange {
                 section_id,
                 space,
@@ -166,4 +194,41 @@ fn romx_file_offset_subtracts_4000() {
         placed.rom_file_offset().expect("valid romx section"),
         Some(3 * 0x4000 + 0x0123)
     );
+}
+
+#[cfg(test)]
+#[test]
+fn rom_file_offset_rejects_bank_boundary_overflow() {
+    let mut placed = PlacedSection {
+        id: SectionId::new(1),
+        space: AddressSpace::Rom0,
+        bank: BankIndex::Rom(0),
+        cpu_start: 0x3FFE,
+        final_size: 2,
+        estimated_size: 2,
+        alignment_padding: BTreeMap::new(),
+    };
+    assert_eq!(
+        placed.rom_file_offset().expect("exact ROM0 end"),
+        Some(0x3FFE)
+    );
+    placed.final_size = 3;
+    assert!(matches!(
+        placed.rom_file_offset(),
+        Err(LayoutError::SectionTooBig { .. })
+    ));
+
+    placed.space = AddressSpace::RomX;
+    placed.bank = BankIndex::Rom(1);
+    placed.cpu_start = 0x7FFE;
+    placed.final_size = 2;
+    assert_eq!(
+        placed.rom_file_offset().expect("exact ROMX end"),
+        Some(0x4000 + 0x3FFE)
+    );
+    placed.final_size = 3;
+    assert!(matches!(
+        placed.rom_file_offset(),
+        Err(LayoutError::SectionTooBig { .. })
+    ));
 }

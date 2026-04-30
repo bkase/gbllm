@@ -8,7 +8,7 @@ use crate::isa::{
     AluSrc8, CbTarget, Cond, IncDec8Target, Instr, Reg8, Reg16Addr, Reg16Data, Reg16Stack,
     RstVector,
 };
-use crate::layout::{AddressSpace, PlacedSection};
+use crate::layout::{AddressSpace, LayoutError, PlacedSection};
 use crate::section::{DataBlock, LegalizedSection, SectionId};
 
 /// One section after byte lowering.
@@ -51,6 +51,14 @@ pub enum EncodeError {
         section_id: SectionId,
         space: AddressSpace,
     },
+    SectionPlacementMismatch {
+        section_id: SectionId,
+        placed_id: SectionId,
+    },
+    InvalidPlacement {
+        section_id: SectionId,
+        error: LayoutError,
+    },
     SectionSizeMismatch {
         section_id: SectionId,
         expected: u16,
@@ -82,6 +90,22 @@ impl fmt::Display for EncodeError {
                 "section {} has non-ROM address space {space:?} and cannot be encoded",
                 section_id.get()
             ),
+            Self::SectionPlacementMismatch {
+                section_id,
+                placed_id,
+            } => write!(
+                f,
+                "section {} was paired with placement for section {}",
+                section_id.get(),
+                placed_id.get()
+            ),
+            Self::InvalidPlacement { section_id, error } => {
+                write!(
+                    f,
+                    "section {} has invalid placement: {error}",
+                    section_id.get()
+                )
+            }
             Self::SectionSizeMismatch {
                 section_id,
                 expected,
@@ -102,11 +126,26 @@ pub fn encode_section(
     section: &LegalizedSection,
     placed: &PlacedSection,
 ) -> Result<EncodedSection, EncodeError> {
-    if !matches!(placed.space, AddressSpace::Rom0 | AddressSpace::RomX) {
-        return Err(EncodeError::NonRomSectionEncoded {
+    if section.id != placed.id {
+        return Err(EncodeError::SectionPlacementMismatch {
             section_id: section.id,
-            space: placed.space,
+            placed_id: placed.id,
         });
+    }
+    match placed.rom_file_offset() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err(EncodeError::NonRomSectionEncoded {
+                section_id: section.id,
+                space: placed.space,
+            });
+        }
+        Err(error) => {
+            return Err(EncodeError::InvalidPlacement {
+                section_id: section.id,
+                error,
+            });
+        }
     }
 
     let mut items = Vec::with_capacity(
@@ -810,6 +849,57 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn encode_section_rejects_mismatched_or_invalid_placement() {
+        let prov = InstrProvenance::new(PlanningStage::Backend);
+        let section = LegalizedSection {
+            id: SectionId::new(1),
+            role: SectionRole::Bank0Nucleus,
+            name: SymbolName::runtime("test", "section").expect("symbol"),
+            align: NonZeroU16::new(1).expect("nonzero"),
+            size_hint_bytes: None,
+            next_seq_index: 1,
+            labels: vec![],
+            instrs: vec![OrderedItem::new(Instr::Nop, 0, prov)],
+            data_blocks: vec![],
+            alignments: vec![],
+        };
+        let mut placed = PlacedSection {
+            id: SectionId::new(2),
+            space: AddressSpace::Rom0,
+            bank: BankIndex::Rom(0),
+            cpu_start: 0x0150,
+            final_size: 1,
+            estimated_size: 1,
+            alignment_padding: BTreeMap::new(),
+        };
+
+        assert!(matches!(
+            encode_section(&section, &placed),
+            Err(EncodeError::SectionPlacementMismatch {
+                section_id,
+                placed_id,
+            }) if section_id == SectionId::new(1) && placed_id == SectionId::new(2)
+        ));
+
+        placed.id = section.id;
+        placed.space = AddressSpace::Rom0;
+        placed.bank = BankIndex::Rom(1);
+        assert!(matches!(
+            encode_section(&section, &placed),
+            Err(EncodeError::InvalidPlacement { .. })
+        ));
+
+        placed.space = AddressSpace::Rom0;
+        placed.bank = BankIndex::Rom(0);
+        placed.cpu_start = 0x3FFF;
+        placed.final_size = 2;
+        assert!(matches!(
+            encode_section(&section, &placed),
+            Err(EncodeError::InvalidPlacement { .. })
+        ));
     }
 
     fn sample_instrs() -> Vec<Instr> {

@@ -44,7 +44,10 @@ pub enum BuilderError {
         lease_id: LeaseId,
     },
     SramBankOutOfRange {
-        bank: u8,
+        bank: u16,
+    },
+    RomBankOutOfRange {
+        bank: u16,
     },
     PrivilegeViolation {
         effect: MachineEffect,
@@ -75,6 +78,9 @@ impl fmt::Display for BuilderError {
             }
             Self::SramBankOutOfRange { bank } => {
                 write!(f, "SRAM bank {bank} is outside MBC5 range 0..=15")
+            }
+            Self::RomBankOutOfRange { bank } => {
+                write!(f, "ROM bank {bank} is outside MBC5 range 0..=511")
             }
             Self::PrivilegeViolation { effect, violation } => {
                 write!(
@@ -364,7 +370,7 @@ impl Builder {
         self.pre_layout_op(PreLayoutOp::TraceProbe { id, level })
     }
 
-    pub fn assert_bank(&mut self, expected: MbcBankClass, expected_n: u8) {
+    pub fn assert_bank(&mut self, expected: MbcBankClass, expected_n: u16) {
         self.try_assert_bank(expected, expected_n)
             .expect("invalid bank assertion in Builder::assert_bank");
     }
@@ -372,14 +378,17 @@ impl Builder {
     pub fn try_assert_bank(
         &mut self,
         expected: MbcBankClass,
-        expected_n: u8,
+        expected_n: u16,
     ) -> Result<(), BuilderError> {
         let op = PreLayoutOp::AssertBank {
             expected,
             expected_n,
         };
         self.validate_effect(classify_pre_layout_op(&op))?;
-        if expected == MbcBankClass::Sram && u16::from(expected_n) > BankLeaseSpec::MAX_SRAM_BANK {
+        if expected == MbcBankClass::Rom && expected_n > BankLeaseSpec::MAX_ROM_BANK {
+            return Err(BuilderError::RomBankOutOfRange { bank: expected_n });
+        }
+        if expected == MbcBankClass::Sram && expected_n > BankLeaseSpec::MAX_SRAM_BANK {
             return Err(BuilderError::SramBankOutOfRange { bank: expected_n });
         }
 
@@ -630,6 +639,13 @@ fn builder_validates_lease_lifecycle_and_bank_ranges() {
     assert_eq!(
         builder.try_assert_bank(MbcBankClass::Sram, 16),
         Err(BuilderError::SramBankOutOfRange { bank: 16 })
+    );
+    builder
+        .try_assert_bank(MbcBankClass::Rom, 511)
+        .expect("MBC5 ROM bank 511 is representable");
+    assert_eq!(
+        builder.try_assert_bank(MbcBankClass::Rom, 512),
+        Err(BuilderError::RomBankOutOfRange { bank: 512 })
     );
 
     let spec = BankLeaseSpec::new(lease, MbcBankClass::Sram, 15).expect("valid sram lease");
