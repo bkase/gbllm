@@ -23,8 +23,11 @@ use crate::symbols::SymbolName;
 #[serde(rename_all = "snake_case")]
 pub enum SectionRole {
     Bank0Nucleus,
+    Bank0Data,
     CommonBank,
+    CommonData,
     ExpertBank,
+    ExpertData,
     WramHotArena,
     WramOverlay,
     HramFastFlags,
@@ -35,10 +38,13 @@ pub enum SectionRole {
 }
 
 impl SectionRole {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Bank0Nucleus,
+        Self::Bank0Data,
         Self::CommonBank,
+        Self::CommonData,
         Self::ExpertBank,
+        Self::ExpertData,
         Self::WramHotArena,
         Self::WramOverlay,
         Self::HramFastFlags,
@@ -52,8 +58,11 @@ impl SectionRole {
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::Bank0Nucleus => "bank0_nucleus",
+            Self::Bank0Data => "bank0_data",
             Self::CommonBank => "common_bank",
+            Self::CommonData => "common_data",
             Self::ExpertBank => "expert_bank",
+            Self::ExpertData => "expert_data",
             Self::WramHotArena => "wram_hot_arena",
             Self::WramOverlay => "wram_overlay",
             Self::HramFastFlags => "hram_fast_flags",
@@ -80,6 +89,9 @@ impl SectionRole {
         match self {
             Self::Bank0Nucleus | Self::CommonBank | Self::ExpertBank => false,
             Self::HeaderCartridge
+            | Self::Bank0Data
+            | Self::CommonData
+            | Self::ExpertData
             | Self::WramHotArena
             | Self::WramOverlay
             | Self::HramFastFlags
@@ -473,6 +485,24 @@ impl SymbolicBranch {
     #[must_use]
     pub const fn new(kind: BranchKind, cond: Option<Cond>, target: SymbolName) -> Self {
         Self { kind, cond, target }
+    }
+
+    #[must_use]
+    pub const fn jump(target: SymbolName, cond: Option<Cond>) -> Self {
+        Self {
+            kind: BranchKind::Jump,
+            cond,
+            target,
+        }
+    }
+
+    #[must_use]
+    pub const fn call(target: SymbolName, cond: Option<Cond>) -> Self {
+        Self {
+            kind: BranchKind::Call,
+            cond,
+            target,
+        }
     }
 
     #[must_use]
@@ -969,8 +999,11 @@ fn role_exhaustive() {
         SectionRole::ALL,
         [
             SectionRole::Bank0Nucleus,
+            SectionRole::Bank0Data,
             SectionRole::CommonBank,
+            SectionRole::CommonData,
             SectionRole::ExpertBank,
+            SectionRole::ExpertData,
             SectionRole::WramHotArena,
             SectionRole::WramOverlay,
             SectionRole::HramFastFlags,
@@ -984,8 +1017,11 @@ fn role_exhaustive() {
         SectionRole::ALL.map(SectionRole::canonical_name),
         [
             "bank0_nucleus",
+            "bank0_data",
             "common_bank",
+            "common_data",
             "expert_bank",
+            "expert_data",
             "wram_hot_arena",
             "wram_overlay",
             "hram_fast_flags",

@@ -7,6 +7,7 @@ pub mod encoder;
 pub mod isa;
 pub mod layout;
 pub mod listing;
+pub mod lowering;
 pub mod provenance;
 pub mod relax;
 pub mod section;

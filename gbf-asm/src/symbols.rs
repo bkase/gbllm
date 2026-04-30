@@ -110,6 +110,10 @@ impl SymbolName {
         Self::new(format!("runtime.{module}.{symbol}"))
     }
 
+    pub fn runtime_thunk_for(target: &SymbolName) -> Result<Self, SymbolNameError> {
+        Self::new(format!("runtime.banking.thunk.{}", target.as_str()))
+    }
+
     pub fn section(role: SectionRole, id: SectionId) -> Result<Self, SymbolNameError> {
         Self::new(format!("section.{}.{}", role.canonical_name(), id.get()))
     }
@@ -269,6 +273,10 @@ impl SymbolTable {
             .collect()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&SymbolName, SymbolAddress)> {
+        self.by_name.iter().map(|(name, address)| (name, *address))
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_name.len()
@@ -305,6 +313,12 @@ fn canonical_naming() {
     assert!(SymbolName::runtime("banking.lease", "enter").is_err());
     assert!(SymbolName::runtime("banking", "lease.enter").is_err());
     assert!(serde_json::from_str::<SymbolName>(r#""runtime..panic""#).is_err());
+    assert_eq!(
+        SymbolName::runtime_thunk_for(&kernel)
+            .expect("thunk name")
+            .as_str(),
+        "runtime.banking.thunk.kernel.matvec.7"
+    );
 
     let mut table = SymbolTable::new();
     let kernel_addr = SymbolAddress::new(SectionId::new(1), 0x20);

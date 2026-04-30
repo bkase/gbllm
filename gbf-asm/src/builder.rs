@@ -898,6 +898,9 @@ fn db_dw_rejected_in_executable_sections() {
     // Data-only roles accept inline data unconditionally.
     for role in [
         SectionRole::HeaderCartridge,
+        SectionRole::Bank0Data,
+        SectionRole::CommonData,
+        SectionRole::ExpertData,
         SectionRole::WramHotArena,
         SectionRole::WramOverlay,
         SectionRole::HramFastFlags,
