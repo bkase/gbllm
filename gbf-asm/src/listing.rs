@@ -47,8 +47,40 @@ pub enum AddressRadix {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListingError {
-    MissingSection { section_id: SectionId },
-    MissingPlacement { section_id: SectionId },
+    MissingSection {
+        section_id: SectionId,
+    },
+    MissingPlacement {
+        section_id: SectionId,
+    },
+    SectionMismatch {
+        section_id: SectionId,
+        encoded_id: SectionId,
+        placed_id: SectionId,
+    },
+    MissingSpan {
+        section_id: SectionId,
+        order: ItemOrder,
+        kind: EncodedItemKind,
+    },
+    DuplicateSpan {
+        section_id: SectionId,
+        order: ItemOrder,
+        kind: EncodedItemKind,
+    },
+    ExtraSpan {
+        section_id: SectionId,
+        order: ItemOrder,
+        kind: EncodedItemKind,
+    },
+    SpanOutOfBounds {
+        section_id: SectionId,
+        order: ItemOrder,
+        kind: EncodedItemKind,
+        offset: u16,
+        len: u16,
+        encoded_len: usize,
+    },
 }
 
 impl fmt::Display for ListingError {
@@ -64,6 +96,66 @@ impl fmt::Display for ListingError {
             Self::MissingPlacement { section_id } => {
                 write!(f, "section {} has no placement", section_id.get())
             }
+            Self::SectionMismatch {
+                section_id,
+                encoded_id,
+                placed_id,
+            } => write!(
+                f,
+                "section {} was paired with encoded section {} and placement {}",
+                section_id.get(),
+                encoded_id.get(),
+                placed_id.get()
+            ),
+            Self::MissingSpan {
+                section_id,
+                order,
+                kind,
+            } => write!(
+                f,
+                "section {} listing is missing {kind:?} span at {}:{}",
+                section_id.get(),
+                order.seq_index,
+                order.sub_index
+            ),
+            Self::DuplicateSpan {
+                section_id,
+                order,
+                kind,
+            } => write!(
+                f,
+                "section {} listing has duplicate {kind:?} span at {}:{}",
+                section_id.get(),
+                order.seq_index,
+                order.sub_index
+            ),
+            Self::ExtraSpan {
+                section_id,
+                order,
+                kind,
+            } => write!(
+                f,
+                "section {} listing has extra {kind:?} span at {}:{}",
+                section_id.get(),
+                order.seq_index,
+                order.sub_index
+            ),
+            Self::SpanOutOfBounds {
+                section_id,
+                order,
+                kind,
+                offset,
+                len,
+                encoded_len,
+            } => write!(
+                f,
+                "section {} listing {kind:?} span at {}:{} covers {}..{} beyond encoded length {encoded_len}",
+                section_id.get(),
+                order.seq_index,
+                order.sub_index,
+                offset,
+                u32::from(*offset) + u32::from(*len)
+            ),
         }
     }
 }
@@ -71,14 +163,21 @@ impl fmt::Display for ListingError {
 impl std::error::Error for ListingError {}
 
 /// Emits a deterministic listing for one encoded section.
-#[must_use]
 pub fn emit_listing(
     section: &LegalizedSection,
     encoded: &EncodedSection,
     placed: &PlacedSection,
     symbols: &SymbolTable,
     opts: &ListingOptions,
-) -> String {
+) -> Result<String, ListingError> {
+    if section.id != encoded.id || section.id != placed.id {
+        return Err(ListingError::SectionMismatch {
+            section_id: section.id,
+            encoded_id: encoded.id,
+            placed_id: placed.id,
+        });
+    }
+
     let mut out = String::new();
     if opts.include_section_header {
         out.push_str(&format!(
@@ -91,7 +190,8 @@ pub fn emit_listing(
         ));
     }
 
-    let spans = span_map(&encoded.item_spans);
+    let spans = span_map(section.id, &encoded.item_spans)?;
+    let mut consumed_spans = BTreeSet::new();
     let mut emitted_symbol_offsets = BTreeSet::new();
     for item in ordered_items(section) {
         match item {
@@ -111,9 +211,9 @@ pub fn emit_listing(
                 }
             }
             ListingItem::Instr(instr) => {
-                let Some(span) = spans.get(&(instr.order(), EncodedItemKind::Instr)) else {
-                    continue;
-                };
+                let key = (instr.order(), EncodedItemKind::Instr);
+                let span = require_span(section.id, &spans, key)?;
+                consumed_spans.insert(key);
                 emit_symbol_lines(
                     &mut out,
                     section.id,
@@ -123,7 +223,7 @@ pub fn emit_listing(
                     opts.address_radix,
                     &mut emitted_symbol_offsets,
                 );
-                let bytes = span_bytes(encoded, *span);
+                let bytes = span_bytes(encoded, *span, key)?;
                 let addr = placed.cpu_start.wrapping_add(span.offset);
                 let mnemonic = format_instr(&instr.data, addr, symbols);
                 out.push_str(&format_record(
@@ -136,9 +236,9 @@ pub fn emit_listing(
                 ));
             }
             ListingItem::DataBlock(block) => {
-                let Some(span) = spans.get(&(block.order(), EncodedItemKind::DataBlock)) else {
-                    continue;
-                };
+                let key = (block.order(), EncodedItemKind::DataBlock);
+                let span = require_span(section.id, &spans, key)?;
+                consumed_spans.insert(key);
                 emit_symbol_lines(
                     &mut out,
                     section.id,
@@ -148,21 +248,21 @@ pub fn emit_listing(
                     opts.address_radix,
                     &mut emitted_symbol_offsets,
                 );
+                let bytes = span_bytes(encoded, *span, key)?;
                 emit_chunked_record(
                     &mut out,
                     placed.cpu_start,
                     span.offset,
-                    span_bytes(encoded, *span),
+                    bytes,
                     &format!("db {} bytes", span.len),
                     &block.provenance,
                     opts,
                 );
             }
             ListingItem::Align(align) => {
-                let Some(span) = spans.get(&(align.order(), EncodedItemKind::AlignmentPadding))
-                else {
-                    continue;
-                };
+                let key = (align.order(), EncodedItemKind::AlignmentPadding);
+                let span = require_span(section.id, &spans, key)?;
+                consumed_spans.insert(key);
                 emit_symbol_lines(
                     &mut out,
                     section.id,
@@ -172,11 +272,12 @@ pub fn emit_listing(
                     opts.address_radix,
                     &mut emitted_symbol_offsets,
                 );
+                let bytes = span_bytes(encoded, *span, key)?;
                 emit_chunked_record(
                     &mut out,
                     placed.cpu_start,
                     span.offset,
-                    span_bytes(encoded, *span),
+                    bytes,
                     &format!("align {} padding", align.data.0),
                     &align.provenance,
                     opts,
@@ -185,10 +286,20 @@ pub fn emit_listing(
         }
     }
 
+    for key in spans.keys() {
+        if !consumed_spans.contains(key) {
+            return Err(ListingError::ExtraSpan {
+                section_id: section.id,
+                order: key.0,
+                kind: key.1,
+            });
+        }
+    }
+
     if !out.ends_with('\n') {
         out.push('\n');
     }
-    out
+    Ok(out)
 }
 
 pub fn emit_program_listing(
@@ -198,7 +309,7 @@ pub fn emit_program_listing(
     symbols: &SymbolTable,
     opts: &ListingOptions,
 ) -> Result<String, ListingError> {
-    let mut out = String::new();
+    let mut entries = Vec::with_capacity(encoded_sections.len());
     for encoded in encoded_sections {
         let section = sections
             .iter()
@@ -213,7 +324,22 @@ pub fn emit_program_listing(
             .ok_or(ListingError::MissingPlacement {
                 section_id: encoded.id,
             })?;
-        out.push_str(&emit_listing(section, encoded, placed, symbols, opts));
+        entries.push((section, encoded, placed));
+    }
+    entries.sort_by_key(|(_, _, placed)| {
+        (
+            placed
+                .rom_file_offset()
+                .ok()
+                .flatten()
+                .unwrap_or(usize::MAX),
+            placed.id,
+        )
+    });
+
+    let mut out = String::new();
+    for (section, encoded, placed) in entries {
+        out.push_str(&emit_listing(section, encoded, placed, symbols, opts)?);
         if !out.ends_with("\n\n") {
             out.push('\n');
         }
@@ -255,23 +381,56 @@ fn ordered_items(section: &LegalizedSection) -> Vec<ListingItem<'_>> {
     items
 }
 
-fn span_map(spans: &[EncodedItemSpan]) -> BTreeMap<(ItemOrder, EncodedItemKind), EncodedItemSpan> {
-    spans
-        .iter()
-        .copied()
-        .map(|span| {
-            (
-                (ItemOrder::new(span.seq_index, span.sub_index), span.kind),
-                span,
-            )
-        })
-        .collect()
+type SpanKey = (ItemOrder, EncodedItemKind);
+
+fn span_map(
+    section_id: SectionId,
+    spans: &[EncodedItemSpan],
+) -> Result<BTreeMap<SpanKey, EncodedItemSpan>, ListingError> {
+    let mut out = BTreeMap::new();
+    for span in spans.iter().copied() {
+        let key = (ItemOrder::new(span.seq_index, span.sub_index), span.kind);
+        if out.insert(key, span).is_some() {
+            return Err(ListingError::DuplicateSpan {
+                section_id,
+                order: key.0,
+                kind: key.1,
+            });
+        }
+    }
+    Ok(out)
 }
 
-fn span_bytes(encoded: &EncodedSection, span: EncodedItemSpan) -> Vec<u8> {
+fn require_span(
+    section_id: SectionId,
+    spans: &BTreeMap<SpanKey, EncodedItemSpan>,
+    key: SpanKey,
+) -> Result<&EncodedItemSpan, ListingError> {
+    spans.get(&key).ok_or(ListingError::MissingSpan {
+        section_id,
+        order: key.0,
+        kind: key.1,
+    })
+}
+
+fn span_bytes(
+    encoded: &EncodedSection,
+    span: EncodedItemSpan,
+    key: SpanKey,
+) -> Result<Vec<u8>, ListingError> {
     let start = usize::from(span.offset);
     let end = start + usize::from(span.len);
-    encoded.bytes[start..end].to_vec()
+    if end > encoded.bytes.len() {
+        return Err(ListingError::SpanOutOfBounds {
+            section_id: encoded.id,
+            order: key.0,
+            kind: key.1,
+            offset: span.offset,
+            len: span.len,
+            encoded_len: encoded.bytes.len(),
+        });
+    }
+    Ok(encoded.bytes[start..end].to_vec())
 }
 
 fn emit_symbol_lines(
@@ -584,7 +743,7 @@ mod tests {
     use std::num::NonZeroU16;
 
     use super::*;
-    use crate::encoder::{EncodedItemKind, PAD_BYTE, encode_section};
+    use crate::encoder::{EncodedItemKind, EncodedItemSpan, PAD_BYTE, encode_section};
     use crate::isa::{BitIndex, Cond, HighDirectOffset, Reg8, Reg16Data};
     use crate::layout::{AddressSpace, BankIndex};
     use crate::provenance::{InstrProvenance, PlanningStage};
@@ -661,8 +820,8 @@ mod tests {
         let symbols = symbols_for(&section);
         let opts = ListingOptions::default();
         assert_eq!(
-            emit_listing(&section, &encoded, &placed, &symbols, &opts),
-            emit_listing(&section, &encoded, &placed, &symbols, &opts)
+            emit_listing(&section, &encoded, &placed, &symbols, &opts).expect("listing"),
+            emit_listing(&section, &encoded, &placed, &symbols, &opts).expect("listing")
         );
     }
 
@@ -677,7 +836,8 @@ mod tests {
             &placed,
             &symbols,
             &ListingOptions::default(),
-        );
+        )
+        .expect("listing");
         let no_prov = emit_listing(
             &section,
             &encoded,
@@ -687,7 +847,8 @@ mod tests {
                 show_provenance: false,
                 ..ListingOptions::default()
             },
-        );
+        )
+        .expect("listing");
         let cycles = emit_listing(
             &section,
             &encoded,
@@ -697,7 +858,8 @@ mod tests {
                 show_cycle_costs: true,
                 ..ListingOptions::default()
             },
-        );
+        )
+        .expect("listing");
         let no_bytes = emit_listing(
             &section,
             &encoded,
@@ -707,7 +869,8 @@ mod tests {
                 show_bytes: false,
                 ..ListingOptions::default()
             },
-        );
+        )
+        .expect("listing");
         let decimal = emit_listing(
             &section,
             &encoded,
@@ -717,7 +880,8 @@ mod tests {
                 address_radix: AddressRadix::Decimal,
                 ..ListingOptions::default()
             },
-        );
+        )
+        .expect("listing");
         assert_ne!(base, no_prov);
         assert_ne!(base, cycles);
         assert_ne!(base, no_bytes);
@@ -734,9 +898,145 @@ mod tests {
             &placed,
             &symbols_for(&section),
             &ListingOptions::default(),
-        );
+        )
+        .expect("listing");
         assert!(listing.contains("stage=backend"));
         assert!(listing.contains("op=load"));
+    }
+
+    #[test]
+    fn exact_golden_listing() {
+        let (section, placed) = fixture_section(vec![1], 0);
+        let encoded = encode_section(&section, &placed).expect("encode");
+        let listing = emit_listing(
+            &section,
+            &encoded,
+            &placed,
+            &symbols_for(&section),
+            &ListingOptions::default(),
+        )
+        .expect("listing");
+        let expected = format!(
+            concat!(
+                "; section: runtime.listing.section (Bank0Data)\n",
+                "; bank=rom0 origin=$0150 size=0x0003\n",
+                "$0150  <runtime.listing.entry>:\n",
+                "$0150  {:<47} ; {:<24}  ; stage=backend op=load\n",
+                "$0152  {:<47} ; {:<24}  ; stage=backend op=data\n",
+                "$0153  {:<47} ; {:<24}  ; stage=backend op=align\n",
+            ),
+            "3E 42", "ld   a, $42", "01", "db 1 bytes", "", "align 16 padding",
+        );
+        assert_eq!(listing, expected);
+    }
+
+    #[test]
+    fn missing_encoded_span_is_error() {
+        let (section, placed) = fixture_section(vec![1], 0);
+        let mut encoded = encode_section(&section, &placed).expect("encode");
+        encoded
+            .item_spans
+            .retain(|span| span.kind != EncodedItemKind::Instr);
+        let err = emit_listing(
+            &section,
+            &encoded,
+            &placed,
+            &symbols_for(&section),
+            &ListingOptions::default(),
+        )
+        .expect_err("missing span");
+        assert!(matches!(err, ListingError::MissingSpan { .. }));
+    }
+
+    #[test]
+    fn extra_encoded_span_is_error() {
+        let (section, placed) = fixture_section(vec![1], 0);
+        let mut encoded = encode_section(&section, &placed).expect("encode");
+        encoded.item_spans.push(EncodedItemSpan {
+            seq_index: 99,
+            sub_index: 0,
+            kind: EncodedItemKind::Instr,
+            offset: 0,
+            len: 1,
+        });
+        let err = emit_listing(
+            &section,
+            &encoded,
+            &placed,
+            &symbols_for(&section),
+            &ListingOptions::default(),
+        )
+        .expect_err("extra span");
+        assert!(matches!(err, ListingError::ExtraSpan { .. }));
+    }
+
+    #[test]
+    fn out_of_bounds_encoded_span_is_error() {
+        let (section, placed) = fixture_section(vec![1], 0);
+        let mut encoded = encode_section(&section, &placed).expect("encode");
+        encoded.item_spans[0].len = 100;
+        let err = emit_listing(
+            &section,
+            &encoded,
+            &placed,
+            &symbols_for(&section),
+            &ListingOptions::default(),
+        )
+        .expect_err("out of bounds span");
+        assert!(matches!(err, ListingError::SpanOutOfBounds { .. }));
+    }
+
+    #[test]
+    fn program_listing_orders_sections_by_placed_rom_offset() {
+        let (mut later, mut later_placed) = fixture_section(vec![1], 0);
+        later.id = SectionId::new(1);
+        later.name = SymbolName::runtime("listing", "later").expect("symbol");
+        later.labels[0].data.name = SymbolName::runtime("listing", "later_entry").expect("symbol");
+        later_placed.id = later.id;
+        later_placed.cpu_start = 0x0160;
+
+        let (mut earlier, mut earlier_placed) = fixture_section(vec![2], 0);
+        earlier.id = SectionId::new(2);
+        earlier.name = SymbolName::runtime("listing", "earlier").expect("symbol");
+        earlier.labels[0].data.name =
+            SymbolName::runtime("listing", "earlier_entry").expect("symbol");
+        earlier_placed.id = earlier.id;
+        earlier_placed.cpu_start = 0x0150;
+
+        let later_encoded = encode_section(&later, &later_placed).expect("encode");
+        let earlier_encoded = encode_section(&earlier, &earlier_placed).expect("encode");
+        let mut symbols = SymbolTable::new();
+        symbols
+            .insert(
+                later.labels[0].data.name.clone(),
+                SymbolAddress::new(later.id, 0),
+            )
+            .expect("insert later");
+        symbols
+            .insert(
+                earlier.labels[0].data.name.clone(),
+                SymbolAddress::new(earlier.id, 0),
+            )
+            .expect("insert earlier");
+        let layout = LayoutPlan {
+            sections: vec![later_placed, earlier_placed],
+            bank_count: 2,
+            free_bytes_per_bank: BTreeMap::new(),
+            reserved_ranges: Vec::new(),
+        };
+
+        let listing = emit_program_listing(
+            &[later, earlier],
+            &[later_encoded, earlier_encoded],
+            &layout,
+            &symbols,
+            &ListingOptions::default(),
+        )
+        .expect("listing");
+        assert!(
+            listing.find("runtime.listing.earlier").expect("earlier")
+                < listing.find("runtime.listing.later").expect("later")
+        );
     }
 
     #[test]
@@ -828,7 +1128,8 @@ mod tests {
             &placed,
             &symbols_for(&section),
             &ListingOptions::default(),
-        );
+        )
+        .expect("listing");
         assert_eq!(listing.matches("db 40 bytes").count(), 1);
         assert_eq!(listing.matches("continued").count(), 2);
     }
@@ -843,7 +1144,8 @@ mod tests {
             &placed,
             &symbols_for(&section),
             &ListingOptions::default(),
-        );
+        )
+        .expect("listing");
         assert_eq!(listing.matches("align 16 padding").count(), 1);
         assert_eq!(listing.matches("continued").count(), 2);
         assert!(encoded.bytes.ends_with(&[PAD_BYTE; 4]));
@@ -868,7 +1170,8 @@ mod tests {
                 show_cycle_costs: true,
                 ..ListingOptions::default()
             },
-        );
+        )
+        .expect("listing");
         assert!(listing.contains("cycles=2"));
     }
 }

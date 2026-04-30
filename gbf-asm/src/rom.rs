@@ -211,9 +211,20 @@ pub enum RomAssemblyError {
         start: usize,
         end_exclusive: usize,
     },
+    SectionCollision {
+        id: SectionId,
+        other_id: SectionId,
+        start: usize,
+        end_exclusive: usize,
+    },
     SectionPlacementMismatch {
         section_id: SectionId,
         placed_id: SectionId,
+    },
+    SectionSizeMismatch {
+        id: SectionId,
+        expected: u16,
+        actual: usize,
     },
     SectionExceedsBankBoundary {
         id: SectionId,
@@ -237,6 +248,9 @@ pub enum RomAssemblyError {
     InvalidRomSizeForLayout {
         requested_banks: u16,
         header_banks: u16,
+    },
+    MissingEntryPoint {
+        addr: u16,
     },
     NonRomSection {
         id: SectionId,
@@ -265,6 +279,17 @@ impl fmt::Display for RomAssemblyError {
                 "section {} overlaps cartridge header bytes ${start:04X}..${end_exclusive:04X}",
                 id.get()
             ),
+            Self::SectionCollision {
+                id,
+                other_id,
+                start,
+                end_exclusive,
+            } => write!(
+                f,
+                "section {} overlaps section {} at ROM bytes ${start:04X}..${end_exclusive:04X}",
+                id.get(),
+                other_id.get()
+            ),
             Self::SectionPlacementMismatch {
                 section_id,
                 placed_id,
@@ -273,6 +298,15 @@ impl fmt::Display for RomAssemblyError {
                 "encoded section {} was paired with placement for section {}",
                 section_id.get(),
                 placed_id.get()
+            ),
+            Self::SectionSizeMismatch {
+                id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "encoded section {} has {actual} bytes but placement declares {expected}",
+                id.get()
             ),
             Self::SectionExceedsBankBoundary {
                 id,
@@ -306,6 +340,12 @@ impl fmt::Display for RomAssemblyError {
                 f,
                 "layout needs {requested_banks} banks but header declares {header_banks}"
             ),
+            Self::MissingEntryPoint { addr } => {
+                write!(
+                    f,
+                    "ROM has no encoded section at cartridge entry point ${addr:04X}"
+                )
+            }
             Self::NonRomSection { id, space } => {
                 write!(f, "section {} is in {space:?}, not ROM", id.get())
             }
@@ -344,8 +384,12 @@ pub fn assemble_rom(
     }
 
     let mut rom = vec![0xFF; header.rom_size.bytes()];
+    let mut occupied = vec![None; rom.len()];
     for (section, placed) in encoded {
-        copy_section(&mut rom, section, placed, header_banks)?;
+        copy_section(&mut rom, &mut occupied, section, placed, header_banks)?;
+    }
+    if occupied[usize::from(ENTRY_POINT)].is_none() {
+        return Err(RomAssemblyError::MissingEntryPoint { addr: ENTRY_POINT });
     }
 
     let header_section = build_header_section(header)?;
@@ -365,14 +409,25 @@ pub fn assemble_rom(
 
 fn copy_section(
     rom: &mut [u8],
+    occupied: &mut [Option<SectionId>],
     encoded: &EncodedSection,
     placed: &PlacedSection,
     header_banks: u16,
 ) -> Result<(), RomAssemblyError> {
+    if encoded.id == HEADER_SECTION_ID {
+        return Err(RomAssemblyError::UserHeaderSectionRejected { id: encoded.id });
+    }
     if encoded.id != placed.id {
         return Err(RomAssemblyError::SectionPlacementMismatch {
             section_id: encoded.id,
             placed_id: placed.id,
+        });
+    }
+    if encoded.bytes.len() != usize::from(placed.final_size) {
+        return Err(RomAssemblyError::SectionSizeMismatch {
+            id: encoded.id,
+            expected: placed.final_size,
+            actual: encoded.bytes.len(),
         });
     }
     let bank = match placed.bank {
@@ -405,6 +460,14 @@ fn copy_section(
             end_exclusive: end,
         });
     }
+    if let Some(other_id) = occupied[offset..end].iter().find_map(|owner| *owner) {
+        return Err(RomAssemblyError::SectionCollision {
+            id: encoded.id,
+            other_id,
+            start: offset,
+            end_exclusive: end,
+        });
+    }
     let bank_end = (usize::from(bank) + 1) * ROM_BANK_SIZE;
     if end > bank_end {
         return Err(RomAssemblyError::SectionExceedsBankBoundary {
@@ -421,6 +484,7 @@ fn copy_section(
         });
     }
     rom[offset..end].copy_from_slice(&encoded.bytes);
+    occupied[offset..end].fill(Some(encoded.id));
     Ok(())
 }
 
@@ -579,8 +643,19 @@ mod tests {
         )
     }
 
+    fn entry_section() -> (EncodedSection, PlacedSection) {
+        encoded_section(1, 0, ENTRY_POINT, &[0x00])
+    }
+
+    fn with_entry(
+        sections: impl IntoIterator<Item = (EncodedSection, PlacedSection)>,
+    ) -> Vec<(EncodedSection, PlacedSection)> {
+        std::iter::once(entry_section()).chain(sections).collect()
+    }
+
     fn assemble(header: CartridgeHeader) -> Vec<u8> {
-        assemble_rom(&[], &layout(2), &header).expect("assemble rom")
+        let sections = [entry_section()];
+        assemble_rom(&sections, &layout(2), &header).expect("assemble rom")
     }
 
     #[test]
@@ -616,7 +691,8 @@ mod tests {
                 rom_size,
                 ..CartridgeHeader::default()
             };
-            let rom = assemble_rom(&[], &layout(2), &header).expect("assemble rom");
+            let sections = [entry_section()];
+            let rom = assemble_rom(&sections, &layout(2), &header).expect("assemble rom");
             assert!(rom.len().is_power_of_two());
             assert!(rom.len() >= 32 * 1024);
         }
@@ -641,7 +717,8 @@ mod tests {
             rom_size: RomSize::Kib64,
             ..CartridgeHeader::default()
         };
-        let rom = assemble_rom(&[section], &layout(4), &header).expect("assemble rom");
+        let sections = with_entry([section]);
+        let rom = assemble_rom(&sections, &layout(4), &header).expect("assemble rom");
         assert_eq!(
             &rom[3 * ROM_BANK_SIZE..3 * ROM_BANK_SIZE + 3],
             &[0xAA, 0xBB, 0xCC]
@@ -651,10 +728,11 @@ mod tests {
     #[test]
     fn unused_regions_are_ff() {
         let section = encoded_section(7, 1, 0x4000, &[0xAA]);
-        let rom = assemble_rom(&[section], &layout(2), &CartridgeHeader::default())
-            .expect("assemble rom");
+        let sections = with_entry([section]);
+        let rom =
+            assemble_rom(&sections, &layout(2), &CartridgeHeader::default()).expect("assemble rom");
         assert_eq!(rom[ROM_BANK_SIZE + 1], 0xFF);
-        assert_eq!(rom[0x0150], 0xFF);
+        assert_eq!(rom[0x0151], 0xFF);
     }
 
     #[test]
@@ -681,9 +759,47 @@ mod tests {
     #[test]
     fn user_header_range_rejected() {
         let section = encoded_section(1, 0, 0x0100, &[0x00]);
-        let err = assemble_rom(&[section], &layout(2), &CartridgeHeader::default())
+        let sections = with_entry([section]);
+        let err = assemble_rom(&sections, &layout(2), &CartridgeHeader::default())
             .expect_err("header collision");
         assert!(matches!(err, RomAssemblyError::HeaderRangeCollision { .. }));
+    }
+
+    #[test]
+    fn overlapping_sections_are_rejected() {
+        let first = encoded_section(2, 1, 0x4000, &[0xAA, 0xBB]);
+        let second = encoded_section(3, 1, 0x4001, &[0xCC]);
+        let sections = with_entry([first, second]);
+        let err = assemble_rom(&sections, &layout(2), &CartridgeHeader::default())
+            .expect_err("section collision");
+        assert!(matches!(err, RomAssemblyError::SectionCollision { .. }));
+    }
+
+    #[test]
+    fn section_size_mismatch_is_rejected() {
+        let (mut encoded, placed) = encoded_section(2, 1, 0x4000, &[0xAA, 0xBB]);
+        encoded.bytes.pop();
+        let sections = with_entry([(encoded, placed)]);
+        let err = assemble_rom(&sections, &layout(2), &CartridgeHeader::default())
+            .expect_err("section size mismatch");
+        assert!(matches!(err, RomAssemblyError::SectionSizeMismatch { .. }));
+
+        let (mut encoded, placed) = encoded_section(3, 1, 0x4004, &[0xCC]);
+        encoded.bytes.push(0xDD);
+        let sections = with_entry([(encoded, placed)]);
+        let err = assemble_rom(&sections, &layout(2), &CartridgeHeader::default())
+            .expect_err("section size mismatch");
+        assert!(matches!(err, RomAssemblyError::SectionSizeMismatch { .. }));
+    }
+
+    #[test]
+    fn entry_point_is_required() {
+        let err = assemble_rom(&[], &layout(2), &CartridgeHeader::default())
+            .expect_err("missing entry point");
+        assert_eq!(
+            err,
+            RomAssemblyError::MissingEntryPoint { addr: ENTRY_POINT }
+        );
     }
 
     #[test]

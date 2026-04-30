@@ -38,3 +38,5 @@ docs/review/f-a1/artifacts/tiny_rom.sym  deterministic RGBDS-compatible symbols
 ```
 
 See `generated-artifacts.md` and `artifacts/tiny_rom.sha256` for hashes.
+
+External review follow-up is summarized in `external-review-follow-up.md`.

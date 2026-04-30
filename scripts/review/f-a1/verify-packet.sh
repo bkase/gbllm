@@ -10,6 +10,7 @@ mkdir -p "$target_dir"
 
 cargo test -p gbf-asm --all-features
 cargo run -p gbf-asm --example tiny_rom --features stub-runtime -- "$target_dir"
+git diff --check
 
 cmp "$target_dir/tiny_rom.gb" "$artifact_dir/tiny_rom.gb"
 cmp "$target_dir/tiny_rom.lst" "$artifact_dir/tiny_rom.lst"
