@@ -11,6 +11,12 @@ use crate::isa::{
 use crate::layout::{AddressSpace, LayoutError, PlacedSection};
 use crate::section::{DataBlock, LegalizedSection, SectionId};
 
+/// Byte used for layout-selected alignment padding in ROM sections.
+///
+/// `0xFF` matches erased/fill ROM bytes and avoids silently creating executable
+/// `NOP` padding.
+pub const PAD_BYTE: u8 = 0xFF;
+
 /// One section after byte lowering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncodedSection {
@@ -47,6 +53,10 @@ pub enum EncodeError {
         section_id: SectionId,
         seq_index: u32,
     },
+    ExtraAlignmentPlan {
+        section_id: SectionId,
+        seq_index: u32,
+    },
     NonRomSectionEncoded {
         section_id: SectionId,
         space: AddressSpace,
@@ -63,6 +73,15 @@ pub enum EncodeError {
         section_id: SectionId,
         expected: u16,
         actual: usize,
+    },
+    SectionOffsetOverflow {
+        section_id: SectionId,
+        offset: usize,
+    },
+    ItemSpanOverflow {
+        section_id: SectionId,
+        seq_index: u32,
+        len: usize,
     },
 }
 
@@ -83,6 +102,14 @@ impl fmt::Display for EncodeError {
             } => write!(
                 f,
                 "section {} has Align item {seq_index} but no layout padding entry",
+                section_id.get()
+            ),
+            Self::ExtraAlignmentPlan {
+                section_id,
+                seq_index,
+            } => write!(
+                f,
+                "section {} layout padding references non-Align item {seq_index}",
                 section_id.get()
             ),
             Self::NonRomSectionEncoded { section_id, space } => write!(
@@ -113,6 +140,20 @@ impl fmt::Display for EncodeError {
             } => write!(
                 f,
                 "section {} encoded to {actual} bytes, layout expected {expected}",
+                section_id.get()
+            ),
+            Self::SectionOffsetOverflow { section_id, offset } => write!(
+                f,
+                "section {} item offset {offset} does not fit in u16",
+                section_id.get()
+            ),
+            Self::ItemSpanOverflow {
+                section_id,
+                seq_index,
+                len,
+            } => write!(
+                f,
+                "section {} item {seq_index} span length {len} does not fit in u16",
                 section_id.get()
             ),
         }
@@ -185,6 +226,7 @@ pub fn encode_section(
 
     let mut bytes = Vec::with_capacity(usize::from(placed.final_size));
     let mut item_spans = Vec::new();
+    let mut seen_alignments = std::collections::BTreeSet::new();
 
     for (seq_index, item) in items {
         match item {
@@ -198,7 +240,7 @@ pub fn encode_section(
                     seq_index,
                     kind: EncodedItemKind::Instr,
                     offset,
-                    len: encoded.len() as u16,
+                    len: checked_span_len(encoded.len(), section.id, seq_index)?,
                 });
             }
             SectionEncodeItem::DataBlock(idx) => {
@@ -209,11 +251,12 @@ pub fn encode_section(
                     seq_index,
                     kind: EncodedItemKind::DataBlock,
                     offset,
-                    len: (bytes.len() - before) as u16,
+                    len: checked_span_len(bytes.len() - before, section.id, seq_index)?,
                 });
             }
             SectionEncodeItem::Align(idx) => {
                 let align = &section.alignments[idx];
+                seen_alignments.insert(align.seq_index);
                 let padding = *placed.alignment_padding.get(&align.seq_index).ok_or(
                     EncodeError::MissingAlignmentPlan {
                         section_id: section.id,
@@ -221,7 +264,7 @@ pub fn encode_section(
                     },
                 )?;
                 let offset = checked_offset(bytes.len(), section.id)?;
-                bytes.resize(bytes.len() + usize::from(padding), 0xFF);
+                bytes.resize(bytes.len() + usize::from(padding), PAD_BYTE);
                 item_spans.push(EncodedItemSpan {
                     seq_index,
                     kind: EncodedItemKind::AlignmentPadding,
@@ -229,6 +272,15 @@ pub fn encode_section(
                     len: padding,
                 });
             }
+        }
+    }
+
+    for seq_index in placed.alignment_padding.keys() {
+        if !seen_alignments.contains(seq_index) {
+            return Err(EncodeError::ExtraAlignmentPlan {
+                section_id: section.id,
+                seq_index: *seq_index,
+            });
         }
     }
 
@@ -256,10 +308,14 @@ enum SectionEncodeItem {
 }
 
 fn checked_offset(offset: usize, section_id: SectionId) -> Result<u16, EncodeError> {
-    u16::try_from(offset).map_err(|_| EncodeError::SectionSizeMismatch {
+    u16::try_from(offset).map_err(|_| EncodeError::SectionOffsetOverflow { section_id, offset })
+}
+
+fn checked_span_len(len: usize, section_id: SectionId, seq_index: u32) -> Result<u16, EncodeError> {
+    u16::try_from(len).map_err(|_| EncodeError::ItemSpanOverflow {
         section_id,
-        expected: u16::MAX,
-        actual: offset,
+        seq_index,
+        len,
     })
 }
 
@@ -899,6 +955,47 @@ mod tests {
         assert!(matches!(
             encode_section(&section, &placed),
             Err(EncodeError::InvalidPlacement { .. })
+        ));
+    }
+
+    #[test]
+    fn encode_section_rejects_missing_or_extra_alignment_plan() {
+        let prov = InstrProvenance::new(PlanningStage::Backend);
+        let section = LegalizedSection {
+            id: SectionId::new(1),
+            role: SectionRole::Bank0Nucleus,
+            name: SymbolName::runtime("test", "alignment").expect("symbol"),
+            align: NonZeroU16::new(1).expect("nonzero"),
+            size_hint_bytes: None,
+            next_seq_index: 2,
+            labels: vec![],
+            instrs: vec![],
+            data_blocks: vec![],
+            alignments: vec![OrderedItem::new(
+                Align(NonZeroU16::new(4).expect("nonzero")),
+                0,
+                prov,
+            )],
+        };
+        let mut placed = PlacedSection {
+            id: section.id,
+            space: AddressSpace::Rom0,
+            bank: BankIndex::Rom(0),
+            cpu_start: 0x0150,
+            final_size: 0,
+            estimated_size: 0,
+            alignment_padding: BTreeMap::new(),
+        };
+        assert!(matches!(
+            encode_section(&section, &placed),
+            Err(EncodeError::MissingAlignmentPlan { seq_index: 0, .. })
+        ));
+
+        placed.alignment_padding.insert(0, 0);
+        placed.alignment_padding.insert(7, 0);
+        assert!(matches!(
+            encode_section(&section, &placed),
+            Err(EncodeError::ExtraAlignmentPlan { seq_index: 7, .. })
         ));
     }
 

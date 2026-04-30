@@ -45,8 +45,20 @@ Latest local result:
 
 ```text
 cargo test -p gbf-asm
-37 passed; 0 failed; 0 ignored
+40 passed; 0 failed; 0 ignored
 ```
+
+## External Review Follow-Up
+
+Codex, Gemini, and Claude review passes were requested for this PR. Accepted
+findings applied here:
+
+- `LDH A,(C)` / `LDH (C),A` cycle costs are 2 M-cycles.
+- ROM file offsets now reject sections that cross ROM0/ROMX bank boundaries.
+- `encode_section` rejects section/placement mismatches and invalid placement
+  tuples before emitting bytes.
+- Alignment plans now reject both missing and extra padding entries.
+- Span/offset conversions fail explicitly instead of truncating.
 
 ## Notes For Follow-Up PRs
 

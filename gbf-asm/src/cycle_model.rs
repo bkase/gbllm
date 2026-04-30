@@ -81,8 +81,6 @@ pub const fn cycle_cost(instr: &Instr) -> CycleCost {
         | Instr::Cpl
         | Instr::Daa
         | Instr::Ld8Reg { .. }
-        | Instr::LdAFromHighC
-        | Instr::LdHighCFromA
         | Instr::JpHl
         | Instr::Rlca
         | Instr::Rrca
@@ -91,6 +89,8 @@ pub const fn cycle_cost(instr: &Instr) -> CycleCost {
         Instr::Ld8RegFromImm { .. }
         | Instr::Ld8RegFromHl { .. }
         | Instr::Ld8HlFromReg { .. }
+        | Instr::LdAFromHighC
+        | Instr::LdHighCFromA
         | Instr::LdAFromReg16Addr { .. }
         | Instr::LdReg16AddrFromA { .. }
         | Instr::LdSpFromHl
@@ -268,7 +268,8 @@ mod tests {
                 },
                 3,
             ),
-            (Instr::LdAFromHighC, 1),
+            (Instr::LdAFromHighC, 2),
+            (Instr::LdHighCFromA, 2),
             (
                 Instr::Ld16Imm {
                     dst: Reg16Data::HL,
