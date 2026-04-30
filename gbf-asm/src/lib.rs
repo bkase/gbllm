@@ -11,3 +11,6 @@ pub mod provenance;
 pub mod relax;
 pub mod section;
 pub mod symbols;
+
+#[cfg(test)]
+mod test_support;

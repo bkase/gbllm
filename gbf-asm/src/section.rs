@@ -7,10 +7,10 @@ use std::num::NonZeroU16;
 use serde::{Deserialize, Serialize};
 
 use crate::effect::{
-    MachineEffect, MachineEffectKind, PrivilegeClass, classify_effect, classify_legalization_op,
-    classify_pre_layout_op, privilege_of,
+    MachineEffect, MachineEffectKind, MbcRegisterClass, PrivilegeClass, classify_effect,
+    classify_legalization_op, classify_pre_layout_op, privilege_of,
 };
-use crate::isa::Instr;
+use crate::isa::{Cond, Instr};
 use crate::provenance::InstrProvenance;
 use crate::symbols::SymbolName;
 
@@ -63,6 +63,31 @@ impl SectionRole {
             Self::HeaderCartridge => "header_cartridge",
         }
     }
+
+    /// Whether this role permits `db` / `dw` inline data directives.
+    ///
+    /// Executable ROM sections (`Bank0Nucleus`, `CommonBank`, `ExpertBank`)
+    /// reject inline data: an author could otherwise hand-encode a privileged
+    /// instruction (e.g. `LD ($2000), A` as `db [0xEA, 0x00, 0x20]`) and slip
+    /// it past the effect classifier — the same opaque-bytes escape hatch the
+    /// removed `SectionItem::Raw` was meant to close. Inline ROM data tables
+    /// (jump tables, fonts, lookup tables) live in their own non-executable
+    /// sections instead. Closure-skill rule: "Raw bytes are opaque privileged
+    /// effects unless a bead explicitly narrows the claim to data-only
+    /// sections." This narrows the claim by section role.
+    #[must_use]
+    pub const fn permits_inline_data(self) -> bool {
+        match self {
+            Self::Bank0Nucleus | Self::CommonBank | Self::ExpertBank => false,
+            Self::HeaderCartridge
+            | Self::WramHotArena
+            | Self::WramOverlay
+            | Self::HramFastFlags
+            | Self::SramPersistent
+            | Self::VramOwnedByUi
+            | Self::OamOwnedByUi => true,
+        }
+    }
 }
 
 /// Why a section privilege policy rejected an effect.
@@ -76,12 +101,21 @@ pub enum PrivilegeViolation {
     EffectKindNotAllowed {
         kind: MachineEffectKind,
     },
+    /// Writes to the MBC5 `$6000..=$7FFF` reserved window are forbidden in
+    /// every section, including `Privileged`. The range is a hardware no-op on
+    /// MBC5 and emitting a write there indicates either a bug or a leftover
+    /// MBC1 assumption.
+    ForbiddenMbcReserved,
 }
 
 /// Existing section item rejected by a replacement privilege policy.
+///
+/// `seq_index` is the global authoring sequence index of the offending item
+/// (see `OrderedItem::seq_index`); it is stable across the SoA layout. When
+/// multiple items violate the policy the earliest by `seq_index` is reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SectionPrivilegeError {
-    pub item_index: usize,
+    pub seq_index: u32,
     pub effect: MachineEffect,
     pub violation: PrivilegeViolation,
 }
@@ -144,6 +178,15 @@ impl SectionPrivilege {
     }
 
     pub fn check_effect(&self, effect: MachineEffect) -> Result<(), PrivilegeViolation> {
+        if matches!(
+            effect,
+            MachineEffect::StoreToMbcRegister {
+                reg: MbcRegisterClass::Reserved
+            }
+        ) {
+            return Err(PrivilegeViolation::ForbiddenMbcReserved);
+        }
+
         let kind = effect.kind();
         if let Some(allowed_effects) = &self.allowed_effects
             && !allowed_effects.contains(&kind)
@@ -387,7 +430,7 @@ pub enum PreLayoutOp {
     },
     AssertBank {
         expected: MbcBankClass,
-        expected_n: u8,
+        expected_n: u16,
     },
 }
 
@@ -400,139 +443,190 @@ pub enum LegalizationOp {
     },
 }
 
-/// Assembly section item. Every item carries provenance.
+/// Authoring intent for a symbolic branch's emitted shape.
 ///
-/// `SectionItem` is symbolic pre-layout IR. `Instr` items are concrete
-/// instruction shapes, but labels, alignment directives, structured ops, and
-/// raw escape hatches still require later layout/relocation/encoding work.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum SectionItem {
-    Label {
-        id: SymbolId,
-        name: SymbolName,
-        provenance: InstrProvenance,
-    },
-    Instr {
-        instr: Instr,
-        provenance: InstrProvenance,
-    },
-    Db {
-        bytes: Vec<u8>,
-        provenance: InstrProvenance,
-    },
-    Dw {
-        words: Vec<u16>,
-        provenance: InstrProvenance,
-    },
-    Align {
-        align: NonZeroU16,
-        provenance: InstrProvenance,
-    },
-    PreLayoutOp {
-        op: PreLayoutOp,
-        provenance: InstrProvenance,
-    },
-    LegalizationOp {
-        op: LegalizationOp,
-        provenance: InstrProvenance,
-    },
-    Raw {
-        bytes: Vec<u8>,
-        provenance: InstrProvenance,
-    },
+/// `Jump` items relax to `JR` when the resolved target is in range and to `JP`
+/// otherwise. `Call` items relax to in-bank `CALL` when caller and callee land
+/// in the same visible bank, and to a Bank0 far-call thunk otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchKind {
+    Jump,
+    Call,
 }
 
-impl SectionItem {
+/// Symbolic branch that keeps a target `SymbolName` until layout and relaxation
+/// can pick the legal concrete encoding.
+///
+/// `Instr::JrRel`, `Instr::JpAbs`, and `Instr::Call` are concrete and require
+/// resolved offsets/addresses, so they are not the right place to carry an
+/// unresolved symbol. Branch relaxation consumes `SymbolicBranch` and emits
+/// concrete `Instr`s (or a `LegalizationOp::FarCall` for cross-bank calls).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SymbolicBranch {
+    pub kind: BranchKind,
+    pub cond: Option<Cond>,
+    pub target: SymbolName,
+}
+
+impl SymbolicBranch {
     #[must_use]
-    pub fn label(id: SymbolId, name: SymbolName, provenance: InstrProvenance) -> Self {
-        Self::Label {
-            id,
-            name,
+    pub const fn new(kind: BranchKind, cond: Option<Cond>, target: SymbolName) -> Self {
+        Self { kind, cond, target }
+    }
+
+    #[must_use]
+    pub const fn machine_effect(&self) -> MachineEffect {
+        match (self.kind, self.cond) {
+            (BranchKind::Jump, None) => MachineEffect::UnconditionalBranch,
+            (BranchKind::Jump, Some(_)) => MachineEffect::ConditionalBranch,
+            (BranchKind::Call, _) => MachineEffect::Call,
+        }
+    }
+}
+
+/// Per-array item wrapper carrying a globally-monotone sequence index and
+/// provenance.
+///
+/// The `Section` IR is laid out as a Struct-of-Arrays (SoA): each kind of item
+/// (instructions, labels, data blocks, ...) lives in its own typed `Vec`. The
+/// `seq_index` is unique within the owning `Section` and increases with every
+/// emit, so callers can recover authoring order across the parallel arrays by
+/// merging on `seq_index`. The SoA layout exists so stage-transition types
+/// (`LoweredSection`, `LegalizedSection`) can *physically* drop arrays whose
+/// items have been lowered away — the encoder consumes a `LegalizedSection`
+/// that has no `pre_layout_ops` / `legalization_ops` / `branches` array at all,
+/// making "encountered an un-legalized op" a compile-time impossibility instead
+/// of a runtime error.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OrderedItem<T> {
+    pub data: T,
+    pub seq_index: u32,
+    pub provenance: InstrProvenance,
+}
+
+impl<T> OrderedItem<T> {
+    #[must_use]
+    pub const fn new(data: T, seq_index: u32, provenance: InstrProvenance) -> Self {
+        Self {
+            data,
+            seq_index,
             provenance,
         }
     }
+}
 
-    #[must_use]
-    pub const fn instr(instr: Instr, provenance: InstrProvenance) -> Self {
-        Self::Instr { instr, provenance }
-    }
+/// Label marker attached to the next emitted byte position.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Label {
+    pub id: SymbolId,
+    pub name: SymbolName,
+}
 
-    #[must_use]
-    pub fn db(bytes: impl Into<Vec<u8>>, provenance: InstrProvenance) -> Self {
-        Self::Db {
-            bytes: bytes.into(),
-            provenance,
-        }
-    }
+/// Inline data directive. `Bytes` is `db` (8-bit), `Words` is `dw` (16-bit
+/// little-endian on emit). Merged into one array so the layout/encoder can
+/// treat all data-only items uniformly without juggling two parallel arrays.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "data")]
+pub enum DataBlock {
+    Bytes(Vec<u8>),
+    Words(Vec<u16>),
+}
 
+impl DataBlock {
+    /// Number of ROM bytes this data block contributes pre-layout. Always known.
     #[must_use]
-    pub fn dw(words: impl Into<Vec<u16>>, provenance: InstrProvenance) -> Self {
-        Self::Dw {
-            words: words.into(),
-            provenance,
-        }
-    }
-
-    #[must_use]
-    pub const fn align(align: NonZeroU16, provenance: InstrProvenance) -> Self {
-        Self::Align { align, provenance }
-    }
-
-    #[must_use]
-    pub const fn pre_layout_op(op: PreLayoutOp, provenance: InstrProvenance) -> Self {
-        Self::PreLayoutOp { op, provenance }
-    }
-
-    #[must_use]
-    pub const fn legalization_op(op: LegalizationOp, provenance: InstrProvenance) -> Self {
-        Self::LegalizationOp { op, provenance }
-    }
-
-    #[must_use]
-    pub(crate) fn raw(bytes: Vec<u8>, provenance: InstrProvenance) -> Self {
-        Self::Raw { bytes, provenance }
-    }
-
-    #[must_use]
-    pub const fn provenance(&self) -> &InstrProvenance {
+    pub fn byte_len(&self) -> u32 {
         match self {
-            Self::Label { provenance, .. }
-            | Self::Instr { provenance, .. }
-            | Self::Db { provenance, .. }
-            | Self::Dw { provenance, .. }
-            | Self::Align { provenance, .. }
-            | Self::PreLayoutOp { provenance, .. }
-            | Self::LegalizationOp { provenance, .. }
-            | Self::Raw { provenance, .. } => provenance,
+            Self::Bytes(b) => b.len() as u32,
+            Self::Words(w) => (w.len() as u32) * 2,
+        }
+    }
+}
+
+/// Section-local alignment directive. The actual padding count is decided by
+/// layout once the cursor is known; this carries only the requested alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Align(pub NonZeroU16);
+
+/// Borrowed view of an item in `seq_index` order.
+///
+/// `Section::iter_items()` returns `SectionItemView`s by k-way-merging the
+/// parallel arrays on `seq_index`. The view exists for code that genuinely
+/// needs ordered traversal (listing, JSON-encoded debug dumps, the legacy test
+/// surface). Stage-transformations and the encoder iterate the typed arrays
+/// directly — they do not pay the merge cost.
+#[derive(Debug, Clone, Copy)]
+pub enum SectionItemView<'a> {
+    Label(&'a OrderedItem<Label>),
+    Instr(&'a OrderedItem<Instr>),
+    DataBlock(&'a OrderedItem<DataBlock>),
+    Align(&'a OrderedItem<Align>),
+    PreLayoutOp(&'a OrderedItem<PreLayoutOp>),
+    LegalizationOp(&'a OrderedItem<LegalizationOp>),
+    Branch(&'a OrderedItem<SymbolicBranch>),
+}
+
+impl<'a> SectionItemView<'a> {
+    #[must_use]
+    pub const fn seq_index(&self) -> u32 {
+        match self {
+            Self::Label(o) => o.seq_index,
+            Self::Instr(o) => o.seq_index,
+            Self::DataBlock(o) => o.seq_index,
+            Self::Align(o) => o.seq_index,
+            Self::PreLayoutOp(o) => o.seq_index,
+            Self::LegalizationOp(o) => o.seq_index,
+            Self::Branch(o) => o.seq_index,
+        }
+    }
+
+    #[must_use]
+    pub const fn provenance(&self) -> &'a InstrProvenance {
+        match self {
+            Self::Label(o) => &o.provenance,
+            Self::Instr(o) => &o.provenance,
+            Self::DataBlock(o) => &o.provenance,
+            Self::Align(o) => &o.provenance,
+            Self::PreLayoutOp(o) => &o.provenance,
+            Self::LegalizationOp(o) => &o.provenance,
+            Self::Branch(o) => &o.provenance,
         }
     }
 
     #[must_use]
     pub fn machine_effect(&self) -> Option<MachineEffect> {
         match self {
-            Self::Instr { instr, .. } => Some(classify_effect(instr)),
-            Self::PreLayoutOp { op, .. } => Some(classify_pre_layout_op(op)),
-            Self::LegalizationOp { op, .. } => Some(classify_legalization_op(op)),
-            Self::Raw { .. } => Some(MachineEffect::OpaqueBytes),
-            Self::Label { .. } | Self::Db { .. } | Self::Dw { .. } | Self::Align { .. } => None,
+            Self::Instr(o) => Some(classify_effect(&o.data)),
+            Self::PreLayoutOp(o) => Some(classify_pre_layout_op(&o.data)),
+            Self::LegalizationOp(o) => Some(classify_legalization_op(&o.data)),
+            Self::Branch(o) => Some(o.data.machine_effect()),
+            Self::Label(_) | Self::DataBlock(_) | Self::Align(_) => None,
         }
     }
 
     #[must_use]
     pub fn fixed_byte_len(&self) -> Option<u32> {
         match self {
-            Self::Label { .. } => Some(0),
-            Self::Align { .. } | Self::PreLayoutOp { .. } | Self::LegalizationOp { .. } => None,
-            Self::Instr { instr, .. } => Some(u32::from(instr.byte_len())),
-            Self::Db { bytes, .. } => Some(bytes.len() as u32),
-            Self::Dw { words, .. } => Some((words.len() as u32) * 2),
-            Self::Raw { bytes, .. } => Some(bytes.len() as u32),
+            Self::Label(_) => Some(0),
+            Self::Instr(o) => Some(u32::from(o.data.byte_len())),
+            Self::DataBlock(o) => Some(o.data.byte_len()),
+            Self::Align(_) | Self::PreLayoutOp(_) | Self::LegalizationOp(_) | Self::Branch(_) => {
+                None
+            }
         }
     }
 }
 
-/// Typed section with a validated alignment.
+/// Typed section with a validated alignment, laid out as a Struct of Arrays.
+///
+/// Items are partitioned by kind into parallel `Vec<OrderedItem<T>>` arrays.
+/// Authoring order is recoverable via each `OrderedItem`'s `seq_index`. The
+/// SoA layout exists so stage-transition types (`LoweredSection`,
+/// `LegalizedSection`) can drop entire arrays — for example,
+/// `LegalizedSection` *has no* `pre_layout_ops`, `legalization_ops`, or
+/// `branches` field, so the encoder cannot encounter an un-legalized op even
+/// if it tried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Section {
     id: SectionId,
@@ -540,9 +634,16 @@ pub struct Section {
     name: SymbolName,
     #[serde(default)]
     privilege: SectionPrivilege,
-    items: Vec<SectionItem>,
     align: NonZeroU16,
     size_hint_bytes: Option<u32>,
+    next_seq_index: u32,
+    labels: Vec<OrderedItem<Label>>,
+    instrs: Vec<OrderedItem<Instr>>,
+    data_blocks: Vec<OrderedItem<DataBlock>>,
+    alignments: Vec<OrderedItem<Align>>,
+    pre_layout_ops: Vec<OrderedItem<PreLayoutOp>>,
+    legalization_ops: Vec<OrderedItem<LegalizationOp>>,
+    branches: Vec<OrderedItem<SymbolicBranch>>,
 }
 
 impl Section {
@@ -552,9 +653,16 @@ impl Section {
             role,
             name,
             privilege: SectionPrivilege::default(),
-            items: Vec::new(),
             align,
             size_hint_bytes: None,
+            next_seq_index: 0,
+            labels: Vec::new(),
+            instrs: Vec::new(),
+            data_blocks: Vec::new(),
+            alignments: Vec::new(),
+            pre_layout_ops: Vec::new(),
+            legalization_ops: Vec::new(),
+            branches: Vec::new(),
         }
     }
 
@@ -589,13 +697,58 @@ impl Section {
         &mut self,
         privilege: SectionPrivilege,
     ) -> Result<(), SectionPrivilegeError> {
-        validate_items_for_privilege(&self.items, &privilege)?;
+        validate_section_for_privilege(self, &privilege)?;
         self.privilege = privilege;
         Ok(())
     }
 
-    pub(crate) fn push(&mut self, item: SectionItem) {
-        self.items.push(item);
+    fn next_seq(&mut self) -> u32 {
+        let idx = self.next_seq_index;
+        self.next_seq_index = self
+            .next_seq_index
+            .checked_add(1)
+            .expect("section seq_index overflowed u32");
+        idx
+    }
+
+    pub(crate) fn push_label(&mut self, label: Label, provenance: InstrProvenance) {
+        let seq = self.next_seq();
+        self.labels.push(OrderedItem::new(label, seq, provenance));
+    }
+
+    pub(crate) fn push_instr(&mut self, instr: Instr, provenance: InstrProvenance) {
+        let seq = self.next_seq();
+        self.instrs.push(OrderedItem::new(instr, seq, provenance));
+    }
+
+    pub(crate) fn push_data_block(&mut self, block: DataBlock, provenance: InstrProvenance) {
+        let seq = self.next_seq();
+        self.data_blocks
+            .push(OrderedItem::new(block, seq, provenance));
+    }
+
+    pub(crate) fn push_align(&mut self, align: Align, provenance: InstrProvenance) {
+        let seq = self.next_seq();
+        self.alignments
+            .push(OrderedItem::new(align, seq, provenance));
+    }
+
+    pub(crate) fn push_pre_layout_op(&mut self, op: PreLayoutOp, provenance: InstrProvenance) {
+        let seq = self.next_seq();
+        self.pre_layout_ops
+            .push(OrderedItem::new(op, seq, provenance));
+    }
+
+    pub(crate) fn push_legalization_op(&mut self, op: LegalizationOp, provenance: InstrProvenance) {
+        let seq = self.next_seq();
+        self.legalization_ops
+            .push(OrderedItem::new(op, seq, provenance));
+    }
+
+    pub(crate) fn push_branch(&mut self, branch: SymbolicBranch, provenance: InstrProvenance) {
+        let seq = self.next_seq();
+        self.branches
+            .push(OrderedItem::new(branch, seq, provenance));
     }
 
     #[must_use]
@@ -619,8 +772,38 @@ impl Section {
     }
 
     #[must_use]
-    pub fn items(&self) -> &[SectionItem] {
-        &self.items
+    pub fn labels(&self) -> &[OrderedItem<Label>] {
+        &self.labels
+    }
+
+    #[must_use]
+    pub fn instrs(&self) -> &[OrderedItem<Instr>] {
+        &self.instrs
+    }
+
+    #[must_use]
+    pub fn data_blocks(&self) -> &[OrderedItem<DataBlock>] {
+        &self.data_blocks
+    }
+
+    #[must_use]
+    pub fn alignments(&self) -> &[OrderedItem<Align>] {
+        &self.alignments
+    }
+
+    #[must_use]
+    pub fn pre_layout_ops(&self) -> &[OrderedItem<PreLayoutOp>] {
+        &self.pre_layout_ops
+    }
+
+    #[must_use]
+    pub fn legalization_ops(&self) -> &[OrderedItem<LegalizationOp>] {
+        &self.legalization_ops
+    }
+
+    #[must_use]
+    pub fn branches(&self) -> &[OrderedItem<SymbolicBranch>] {
+        &self.branches
     }
 
     #[must_use]
@@ -634,30 +817,149 @@ impl Section {
     }
 
     #[must_use]
+    pub fn total_items(&self) -> usize {
+        self.labels.len()
+            + self.instrs.len()
+            + self.data_blocks.len()
+            + self.alignments.len()
+            + self.pre_layout_ops.len()
+            + self.legalization_ops.len()
+            + self.branches.len()
+    }
+
+    /// Returns the per-array borrowed items merged in `seq_index` order.
+    ///
+    /// O(N log K) for N items across K arrays — used by listing and tests
+    /// that genuinely need authoring order. The encoder and stage
+    /// transformations operate on the typed arrays directly.
+    #[must_use]
+    pub fn iter_items(&self) -> Vec<SectionItemView<'_>> {
+        let mut views: Vec<SectionItemView<'_>> = Vec::with_capacity(self.total_items());
+        views.extend(self.labels.iter().map(SectionItemView::Label));
+        views.extend(self.instrs.iter().map(SectionItemView::Instr));
+        views.extend(self.data_blocks.iter().map(SectionItemView::DataBlock));
+        views.extend(self.alignments.iter().map(SectionItemView::Align));
+        views.extend(self.pre_layout_ops.iter().map(SectionItemView::PreLayoutOp));
+        views.extend(
+            self.legalization_ops
+                .iter()
+                .map(SectionItemView::LegalizationOp),
+        );
+        views.extend(self.branches.iter().map(SectionItemView::Branch));
+        views.sort_by_key(SectionItemView::seq_index);
+        views
+    }
+
+    /// Returns `Some(N)` only when every item has a known fixed pre-layout
+    /// width — i.e., the section contains no `Align`, `PreLayoutOp`,
+    /// `LegalizationOp`, or `Branch` items. Otherwise returns `None`.
+    #[must_use]
     pub fn fixed_item_bytes(&self) -> Option<u32> {
-        self.items
+        if !self.alignments.is_empty()
+            || !self.pre_layout_ops.is_empty()
+            || !self.legalization_ops.is_empty()
+            || !self.branches.is_empty()
+        {
+            return None;
+        }
+        let instr_bytes: u32 = self
+            .instrs
             .iter()
-            .try_fold(0u32, |acc, item| item.fixed_byte_len().map(|len| acc + len))
+            .map(|item| u32::from(item.data.byte_len()))
+            .sum();
+        let data_bytes: u32 = self
+            .data_blocks
+            .iter()
+            .map(|item| item.data.byte_len())
+            .sum();
+        Some(instr_bytes + data_bytes)
     }
 }
 
-fn validate_items_for_privilege(
-    items: &[SectionItem],
+/// Section after pre-layout lowering. The `pre_layout_ops` array is physically
+/// absent: every `PreLayoutOp` has been replaced with `Instr`s, `DataBlock`s,
+/// or `LegalizationOp`s. Layout and relax consume `LoweredSection`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoweredSection {
+    pub id: SectionId,
+    pub role: SectionRole,
+    pub name: SymbolName,
+    pub align: NonZeroU16,
+    pub size_hint_bytes: Option<u32>,
+    pub next_seq_index: u32,
+    pub labels: Vec<OrderedItem<Label>>,
+    pub instrs: Vec<OrderedItem<Instr>>,
+    pub data_blocks: Vec<OrderedItem<DataBlock>>,
+    pub alignments: Vec<OrderedItem<Align>>,
+    pub legalization_ops: Vec<OrderedItem<LegalizationOp>>,
+    pub branches: Vec<OrderedItem<SymbolicBranch>>,
+}
+
+/// Encoder-ready section. The `pre_layout_ops`, `legalization_ops`, and
+/// `branches` arrays are *physically absent* — the encoder pattern-matches
+/// only over `labels`, `instrs`, `data_blocks`, and `alignments`, and the
+/// match is exhaustive at compile time. There is no `EncodeError::OpNotLegalized`
+/// because the un-legalized variants do not appear in the type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegalizedSection {
+    pub id: SectionId,
+    pub role: SectionRole,
+    pub name: SymbolName,
+    pub align: NonZeroU16,
+    pub size_hint_bytes: Option<u32>,
+    pub next_seq_index: u32,
+    pub labels: Vec<OrderedItem<Label>>,
+    pub instrs: Vec<OrderedItem<Instr>>,
+    pub data_blocks: Vec<OrderedItem<DataBlock>>,
+    pub alignments: Vec<OrderedItem<Align>>,
+}
+
+fn validate_section_for_privilege(
+    section: &Section,
     privilege: &SectionPrivilege,
 ) -> Result<(), SectionPrivilegeError> {
-    for (item_index, item) in items.iter().enumerate() {
-        let Some(effect) = item.machine_effect() else {
-            continue;
-        };
+    let candidates = section
+        .instrs
+        .iter()
+        .map(|i| (i.seq_index, classify_effect(&i.data)))
+        .chain(
+            section
+                .pre_layout_ops
+                .iter()
+                .map(|i| (i.seq_index, classify_pre_layout_op(&i.data))),
+        )
+        .chain(
+            section
+                .legalization_ops
+                .iter()
+                .map(|i| (i.seq_index, classify_legalization_op(&i.data))),
+        )
+        .chain(
+            section
+                .branches
+                .iter()
+                .map(|i| (i.seq_index, i.data.machine_effect())),
+        );
+
+    let mut earliest: Option<(u32, MachineEffect, PrivilegeViolation)> = None;
+    for (seq_index, effect) in candidates {
         if let Err(violation) = privilege.check_effect(effect) {
-            return Err(SectionPrivilegeError {
-                item_index,
-                effect,
-                violation,
-            });
+            match earliest {
+                Some((existing_seq, _, _)) if existing_seq <= seq_index => {}
+                _ => earliest = Some((seq_index, effect, violation)),
+            }
         }
     }
-    Ok(())
+
+    if let Some((seq_index, effect, violation)) = earliest {
+        Err(SectionPrivilegeError {
+            seq_index,
+            effect,
+            violation,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -784,6 +1086,69 @@ fn privilege_inheritance() {
 
 #[cfg(test)]
 #[test]
+fn reserved_mbc_writes_are_forbidden_even_in_privileged_sections() {
+    let reserved_write = MachineEffect::StoreToMbcRegister {
+        reg: MbcRegisterClass::Reserved,
+    };
+
+    for privilege in [
+        SectionPrivilege::normal(),
+        SectionPrivilege::privileged(),
+        SectionPrivilege::interrupt_handler(),
+    ] {
+        assert_eq!(
+            privilege.check_effect(reserved_write),
+            Err(PrivilegeViolation::ForbiddenMbcReserved),
+            "{privilege:?} must reject reserved MBC writes",
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn symbolic_branch_classifies_and_round_trips() {
+    use crate::provenance::{InstrProvenance, PlanningStage};
+
+    let provenance = InstrProvenance::new(PlanningStage::Backend).with_source_op("emit_branch");
+    let target = SymbolName::runtime("loop", "head").expect("target name");
+
+    let cases = [
+        (
+            SymbolicBranch::new(BranchKind::Jump, None, target.clone()),
+            MachineEffect::UnconditionalBranch,
+        ),
+        (
+            SymbolicBranch::new(BranchKind::Jump, Some(Cond::NZ), target.clone()),
+            MachineEffect::ConditionalBranch,
+        ),
+        (
+            SymbolicBranch::new(BranchKind::Call, None, target.clone()),
+            MachineEffect::Call,
+        ),
+        (
+            SymbolicBranch::new(BranchKind::Call, Some(Cond::C), target.clone()),
+            MachineEffect::Call,
+        ),
+    ];
+
+    for (branch, expected_effect) in cases {
+        let item = OrderedItem::new(branch.clone(), 0, provenance.clone());
+        assert_eq!(item.data.machine_effect(), expected_effect);
+
+        let view = SectionItemView::Branch(&item);
+        assert_eq!(view.machine_effect(), Some(expected_effect));
+        assert_eq!(view.fixed_byte_len(), None);
+        assert_eq!(view.provenance(), &provenance);
+
+        let encoded = serde_json::to_string(&item).expect("branch ordered item serializes");
+        let decoded: OrderedItem<SymbolicBranch> =
+            serde_json::from_str(&encoded).expect("branch ordered item deserializes");
+        assert_eq!(decoded, item);
+    }
+}
+
+#[cfg(test)]
+#[test]
 fn section_items_carry_provenance_and_size() {
     use crate::effect::{MachineEffect, SystemCallKind};
     use crate::isa::Instr;
@@ -798,28 +1163,33 @@ fn section_items_carry_provenance_and_size() {
     )
     .with_size_hint_bytes(64);
 
-    section.push(SectionItem::instr(Instr::Nop, provenance.clone()));
-    section.push(SectionItem::db([0xCE, 0xED], provenance.clone()));
-    section.push(SectionItem::dw([0x1234, 0xCAFE], provenance.clone()));
+    section.push_instr(Instr::Nop, provenance.clone());
+    section.push_data_block(DataBlock::Bytes(vec![0xCE, 0xED]), provenance.clone());
+    section.push_data_block(DataBlock::Words(vec![0x1234, 0xCAFE]), provenance.clone());
 
     assert_eq!(section.fixed_item_bytes(), Some(7));
-    assert_eq!(section.items()[0].provenance(), &provenance);
-    section.push(SectionItem::pre_layout_op(
+
+    let ordered = section.iter_items();
+    assert_eq!(ordered.len(), 3);
+    assert_eq!(ordered[0].provenance(), &provenance);
+    assert_eq!(ordered[0].seq_index(), 0);
+    assert_eq!(ordered[2].seq_index(), 2);
+
+    section.push_pre_layout_op(
         PreLayoutOp::Yield {
             kind: YieldKind::Cooperative,
         },
         provenance.clone(),
-    ));
+    );
     assert_eq!(section.fixed_item_bytes(), None);
+    let ordered = section.iter_items();
+    assert_eq!(ordered.len(), 4);
     assert_eq!(
-        section.items()[3].machine_effect(),
+        ordered[3].machine_effect(),
         Some(MachineEffect::SystemCall(SystemCallKind::Yield))
     );
-    let raw = SectionItem::raw(vec![0xF3], provenance);
-    assert_eq!(raw.machine_effect(), Some(MachineEffect::OpaqueBytes));
 
     let encoded = serde_json::to_string(&section).expect("section serializes");
     let decoded: Section = serde_json::from_str(&encoded).expect("section deserializes");
-
     assert_eq!(decoded, section);
 }
