@@ -76,15 +76,23 @@ cargo test -p gbf-asm
 
 ## External Review Follow-Up
 
-Codex, Gemini, and Claude review passes were requested for this PR. Accepted
-findings applied here:
+Gemini and Claude both returned actionable PR1 findings. The table below is
+the disposition of those reviews; it is not another list of files to inspect.
 
-- `LDH A,(C)` / `LDH (C),A` cycle costs are 2 M-cycles.
-- ROM file offsets now reject sections that cross ROM0/ROMX bank boundaries.
-- `encode_section` rejects section/placement mismatches and invalid placement
-  tuples before emitting bytes.
-- Alignment plans now reject both missing and extra padding entries.
-- Span/offset conversions fail explicitly instead of truncating.
+| Review finding | Disposition |
+| --- | --- |
+| `LDH A,(C)` / `LDH (C),A` cycle costs were 1 M-cycle instead of 2 | Accepted; `cycle_model::known_instructions` pins both at 2 M-cycles. |
+| ROM file offsets did not reject sections crossing ROM0/ROMX bank boundaries | Accepted; `PlacedSection::rom_file_offset` validates full-section bank windows. |
+| `encode_section` used an overloaded size-mismatch error for large offsets | Accepted; offset overflow is a distinct `EncodeError::SectionOffsetOverflow`. |
+| `EncodedItemSpan::len` could truncate materialized byte lengths | Accepted; span lengths now use checked conversion through `checked_span_len`. |
+| Extra `alignment_padding` entries were ignored | Accepted; stale alignment plans now return `EncodeError::ExtraAlignmentPlan`. |
+| Padding byte `0xFF` was unnamed | Accepted; `encoder::PAD_BYTE` names the value and documents the rationale. |
+| Encoder error paths lacked coverage | Accepted for PR1-owned errors: missing/extra alignment, non-ROM placement, bad placement tuple, offset overflow, and size mismatch are covered. |
+| `HeaderCartridge` permits inline data | Deferred to the stack boundary: PR2 rejects user-authored header sections, and PR3 owns the internal ROM header overlay. |
+| `LegalizedSection` compile-fail proof was requested | Not added in PR1; the packet no longer claims a compile-fail doctest, only the implemented type shape and JSON-shape regression. |
+| Label items do not produce `EncodedItemSpan` entries | Intentional; labels are zero-byte symbolic positions, and PR3's symbol/listing path resolves addresses from the symbol table rather than item spans. |
+| `Pop` grouping in `cycle_model.rs` was stylistic | Left unchanged; the tested cost is correct. |
+| `encode_data_block` could return a length directly | Left unchanged; the caller validates the materialized span length and final section size after emission. |
 
 ## Notes For Follow-Up PRs
 
