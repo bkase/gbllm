@@ -620,16 +620,17 @@ hardware constants and register semantics belong in `gbf-hw`.
 
 ### MBC5 Reserved Register Window
 
-Status: Resolved F-A1 policy term; implementation pending.
+Status: Current code.
 
-For the MBC5 target, `$6000..=$7FFF` is not a mode-select register in the F-A1
-contract. Direct writes to that range should remain classified as cartridge
-control-window writes and require `Privileged`, but the public effect name
-should be `MbcRegisterClass::Reserved`, not `ModeSelect`.
+For the MBC5 target, `$6000..=$7FFF` is not a mode-select register. Writes are
+classified as `StoreToMbcRegister { reg: MbcRegisterClass::Reserved }` and
+forbidden by `SectionPrivilege::check_effect` in every section, including
+`Privileged`, surfacing as `PrivilegeViolation::ForbiddenMbcReserved`.
 
-This keeps the classifier conservative without claiming a non-existent MBC5 mode
-register. F-A2's `TargetProfile` / hardware contract may later decide whether a
-profile rejects, ignores, or further specializes this reserved range.
+The forbid is a hardware fact: on MBC5 the slot is a no-op, so any write there
+is either a bug or a leftover MBC1 assumption. F-A2's `TargetProfile` /
+hardware contract may later lift the forbid for non-MBC5 targets by adding its
+own class.
 
 ### `FarCall`
 
@@ -709,38 +710,26 @@ differs.
 
 ### `PrivilegeClass`
 
-Status: Current code, with resolved F-A1 policy change to implement.
+Status: Current code.
 
-The privilege required by a machine effect. Current code values are `Normal`,
-`Privileged`, and `InterruptHandler`.
+The privilege required by a machine effect. The lattice is closed at three
+classes: `Normal`, `Privileged`, and `InterruptHandler`. There is no
+`BankLeaseRequest` class — the resolved F-A1 decision was that structured
+ops are `Normal` and the privileged work happens inside the runtime helper.
 
-F-A1 decision: add a narrow `BankLeaseRequest` privilege class for structured
-banking requests such as `BankLease`, `BankRelease`, and `AssertBank`. This
-class is stronger than `Normal` but weaker than `Privileged`.
+The privilege lattice gates *direct hardware effects*:
 
-Intended lattice:
+- `Privileged` is required for direct MBC register writes, raw opaque bytes,
+  and interrupt-control operations.
+- `InterruptHandler` is required for `RETI`. It does not automatically permit
+  `Privileged` effects.
+- `Normal` covers everything else, including all `MachineEffect::SystemCall`
+  variants (BankLease, BankRelease, FarCall, Yield, TraceProbe, AssertBank).
 
-- `Normal` sections allow `Normal` effects only.
-- `BankLeaseRequest` sections allow `Normal` and `BankLeaseRequest` effects.
-- `Privileged` sections allow `Normal`, `BankLeaseRequest`, and `Privileged`
-  effects.
-- `InterruptHandler` remains separate and does not automatically allow
-  `BankLeaseRequest` or `Privileged` effects.
-
-Direct MBC register writes, raw opaque bytes, and interrupt-control operations
-remain `Privileged`.
-
-### `BankLeaseRequest`
-
-Status: Resolved F-A1 policy term; implementation pending.
-
-A narrow privilege for asking the runtime BankLease / BankGuard ABI to manage
-bank state. It permits authored requests to the runtime banking contract without
-also permitting direct MBC register writes.
-
-`BankLeaseRequest` is still a proof obligation for later reachability and lease
-validation. It means "this section may request runtime-managed bank access," not
-"this section may write cartridge control registers itself."
+Identification of *which* runtime contract a structured op invokes is carried
+by `SystemCallKind` inside `MachineEffect::SystemCall(_)`, not by the privilege
+lattice. Reachability/lease validation reads `SystemCallKind` to find lease
+requests; the privilege gate stays focused on direct hardware effects.
 
 ### Privileged
 
@@ -1074,34 +1063,49 @@ introduced as `LegalizationOp`s.
 
 ### BankLease Privilege
 
-Decision: add a narrow `BankLeaseRequest` privilege class.
+Decision: structured-op privilege class is `Normal`. No new privilege class.
 
 Precision:
 
-- `BankLease`, `BankRelease`, and `AssertBank` require `BankLeaseRequest`.
+- `BankLease`, `BankRelease`, `AssertBank`, `Yield`, `TraceProbe`, and
+  `FarCall` all require `Normal`.
 - Direct MBC register writes remain `Privileged`.
 - Raw opaque bytes remain `Privileged`.
-- `InterruptHandler` does not automatically allow `BankLeaseRequest`.
+- The privileged work happens inside the runtime ABI helper that the
+  structured op lowers to. The call site does not need a privileged section.
+- Lease lifecycle (acquire/release pairing, double-acquire, scope) is owned by
+  later reachability/lease validation, not by privilege class.
+- Each structured op stays distinguishable through its `SystemCallKind` inside
+  `MachineEffect::SystemCall(_)`, so reachability/lease analysis can locate
+  bank-lease requests without help from the privilege lattice.
 
-Reason: generated code must be able to ask the runtime banking ABI for legal
-bank access without gaining permission to write cartridge control registers.
-Classifying the request as plain `Normal` would erase a useful local signal;
-classifying it as `Privileged` would overstate the permission.
+Reason: the privilege lattice gates *direct hardware effects*. A structured
+op is a call into a privileged runtime helper, no different in privilege from
+any other call into runtime code. A narrow `BankLeaseRequest` class would mix
+identification (descriptive — "this section does X") with permission
+(prescriptive — "this section is allowed to do Y"); those concerns belong in
+`MachineEffectKind` / `SystemCallKind` and `PrivilegeClass` respectively.
 
 ### MBC5 `$6000..=$7FFF` Naming
 
-Decision: rename the effect class to `MbcRegisterClass::Reserved`.
+Decision: rename the effect class to `MbcRegisterClass::Reserved` and forbid
+writes to it in every section, including `Privileged`.
 
 Precision:
 
-- F-A1 should not expose `ModeSelect` for the MBC5 target.
-- Direct writes to `$6000..=$7FFF` are still cartridge control-window writes and
-  remain `Privileged`.
-- F-A2 may later decide whether a target profile rejects, ignores, or further
-  specializes the reserved range.
+- F-A1 does not expose `ModeSelect` for the MBC5 target.
+- Direct writes classified as `StoreToMbcRegister { reg: Reserved }` are
+  rejected by `SectionPrivilege::check_effect` in every section. The rejection
+  surfaces as `PrivilegeViolation::ForbiddenMbcReserved`.
+- For privilege-lattice purposes, `privilege_of` still rates these writes as
+  `Privileged`, but the forbidden gate runs first; no section can opt in.
+- F-A2 may later decide whether a different target profile (e.g. MBC1) lifts
+  the forbid in favor of a real semantic, by introducing its own class.
 
-Reason: `ModeSelect` is misleading MBC1 vocabulary. `Reserved` keeps the effect
-classifier conservative without claiming that MBC5 has a mode-select register.
+Reason: `ModeSelect` is misleading MBC1 vocabulary. On MBC5 the slot is a
+hardware no-op, so silently allowing privileged writes there would let a bug or
+a leftover MBC1 assumption ship as dead code. Forbidding the write surfaces the
+mistake at section-emission time.
 
 ### Symbolic Branch Representation
 

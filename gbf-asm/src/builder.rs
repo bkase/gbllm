@@ -23,8 +23,8 @@ use crate::effect::{
 use crate::isa::Instr;
 use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
-    BankLeaseSpec, LeaseId, LegalizationOp, MbcBankClass, PreLayoutOp, PrivilegeViolation,
-    ProbeLevel, Section, SectionId, SectionItem, SectionPrivilege, SectionPrivilegeError,
+    Align, BankLeaseSpec, DataBlock, Label, LeaseId, LegalizationOp, MbcBankClass, PreLayoutOp,
+    PrivilegeViolation, ProbeLevel, Section, SectionId, SectionPrivilege, SectionPrivilegeError,
     SectionRole, SymbolId, SymbolicBranch, TraceProbeId, YieldKind,
 };
 use crate::symbols::SymbolName;
@@ -51,6 +51,14 @@ pub enum BuilderError {
         violation: PrivilegeViolation,
     },
     SectionPrivilegeViolation(SectionPrivilegeError),
+    /// `db` / `dw` was called inside a section whose `SectionRole` is
+    /// executable (Bank0Nucleus, CommonBank, ExpertBank). Inline data in an
+    /// executable section is the opaque-bytes escape hatch we closed by
+    /// removing `SectionItem::Raw` — emit data tables in their own
+    /// non-executable sections instead.
+    InlineDataInExecutableSection {
+        role: SectionRole,
+    },
 }
 
 impl fmt::Display for BuilderError {
@@ -77,8 +85,15 @@ impl fmt::Display for BuilderError {
             Self::SectionPrivilegeViolation(error) => {
                 write!(
                     f,
-                    "section privilege rejected existing item {} with effect {:?}: {:?}",
-                    error.item_index, error.effect, error.violation
+                    "section privilege rejected existing item at seq {} with effect {:?}: {:?}",
+                    error.seq_index, error.effect, error.violation
+                )
+            }
+            Self::InlineDataInExecutableSection { role } => {
+                write!(
+                    f,
+                    "inline db/dw not allowed in executable section role {role:?}; \
+                     emit data into a non-executable section instead"
                 )
             }
         }
@@ -147,27 +162,58 @@ impl Builder {
 
     pub fn try_emit(&mut self, instr: Instr) -> Result<(), BuilderError> {
         self.validate_effect(classify_effect(&instr))?;
-        self.section
-            .push(SectionItem::instr(instr, self.cur_provenance.clone()));
+        self.section.push_instr(instr, self.cur_provenance.clone());
         Ok(())
     }
 
     pub fn db(&mut self, byte: u8) {
-        self.db_bytes([byte]);
+        self.try_db(byte)
+            .expect("db rejected by section role; use try_db");
+    }
+
+    pub fn try_db(&mut self, byte: u8) -> Result<(), BuilderError> {
+        self.try_db_bytes([byte])
     }
 
     pub fn db_bytes(&mut self, bytes: impl Into<Vec<u8>>) {
+        self.try_db_bytes(bytes)
+            .expect("db_bytes rejected by section role; use try_db_bytes");
+    }
+
+    pub fn try_db_bytes(&mut self, bytes: impl Into<Vec<u8>>) -> Result<(), BuilderError> {
+        self.guard_inline_data()?;
         self.section
-            .push(SectionItem::db(bytes, self.cur_provenance.clone()));
+            .push_data_block(DataBlock::Bytes(bytes.into()), self.cur_provenance.clone());
+        Ok(())
     }
 
     pub fn dw(&mut self, word: u16) {
-        self.dw_words([word]);
+        self.try_dw(word)
+            .expect("dw rejected by section role; use try_dw");
+    }
+
+    pub fn try_dw(&mut self, word: u16) -> Result<(), BuilderError> {
+        self.try_dw_words([word])
     }
 
     pub fn dw_words(&mut self, words: impl Into<Vec<u16>>) {
+        self.try_dw_words(words)
+            .expect("dw_words rejected by section role; use try_dw_words");
+    }
+
+    pub fn try_dw_words(&mut self, words: impl Into<Vec<u16>>) -> Result<(), BuilderError> {
+        self.guard_inline_data()?;
         self.section
-            .push(SectionItem::dw(words, self.cur_provenance.clone()));
+            .push_data_block(DataBlock::Words(words.into()), self.cur_provenance.clone());
+        Ok(())
+    }
+
+    fn guard_inline_data(&self) -> Result<(), BuilderError> {
+        let role = self.section.role();
+        if !role.permits_inline_data() {
+            return Err(BuilderError::InlineDataInExecutableSection { role });
+        }
+        Ok(())
     }
 
     /// Emits a label marker and returns its builder-local id.
@@ -190,13 +236,13 @@ impl Builder {
             .checked_add(1)
             .ok_or(BuilderError::TooManyLabels)?;
         self.section
-            .push(SectionItem::label(id, name, self.cur_provenance.clone()));
+            .push_label(Label { id, name }, self.cur_provenance.clone());
         Ok(id)
     }
 
     pub fn align(&mut self, align: NonZeroU16) {
         self.section
-            .push(SectionItem::align(align, self.cur_provenance.clone()));
+            .push_align(Align(align), self.cur_provenance.clone());
     }
 
     pub fn try_align(&mut self, align: u16) -> Result<(), BuilderError> {
@@ -265,7 +311,7 @@ impl Builder {
     pub fn try_branch(&mut self, branch: SymbolicBranch) -> Result<(), BuilderError> {
         self.validate_effect(branch.machine_effect())?;
         self.section
-            .push(SectionItem::branch(branch, self.cur_provenance.clone()));
+            .push_branch(branch, self.cur_provenance.clone());
         Ok(())
     }
 
@@ -360,14 +406,12 @@ impl Builder {
 
     fn pre_layout_op_unchecked(&mut self, op: PreLayoutOp) {
         self.section
-            .push(SectionItem::pre_layout_op(op, self.cur_provenance.clone()));
+            .push_pre_layout_op(op, self.cur_provenance.clone());
     }
 
     fn legalization_op_unchecked(&mut self, op: LegalizationOp) {
-        self.section.push(SectionItem::legalization_op(
-            op,
-            self.cur_provenance.clone(),
-        ));
+        self.section
+            .push_legalization_op(op, self.cur_provenance.clone());
     }
 }
 
@@ -375,9 +419,15 @@ impl Builder {
 #[test]
 fn roundtrip() {
     use crate::isa::Reg8;
+    use crate::section::DataBlock;
 
+    // HeaderCartridge is a data-only role that accepts both Instr (the
+    // entry-point thunk at $0100 is `nop; jp $0150`, which is legitimately
+    // expressed as Instrs) and inline `db`/`dw` for the cartridge header
+    // payload. Executable roles (Bank0Nucleus/CommonBank/ExpertBank) reject
+    // inline data — see `try_db_in_executable_section_is_rejected` below.
     let mut builder = Builder::new(
-        SectionRole::Bank0Nucleus,
+        SectionRole::HeaderCartridge,
         SymbolName::runtime("boot", "start").expect("section name"),
     );
     let entry = builder.label(SymbolName::runtime("boot", "entry").expect("label"));
@@ -390,43 +440,46 @@ fn roundtrip() {
     builder.try_align(4).expect("valid alignment");
 
     let section = builder.finish();
+    let default_provenance =
+        InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default");
 
-    assert_eq!(section.role(), SectionRole::Bank0Nucleus);
-    assert_eq!(section.items().len(), 5);
+    assert_eq!(section.role(), SectionRole::HeaderCartridge);
+    assert_eq!(section.total_items(), 5);
     assert_eq!(section.fixed_item_bytes(), None);
     assert_eq!(entry.get(), 0);
+
+    assert_eq!(section.labels().len(), 1);
+    let label = &section.labels()[0];
+    assert_eq!(label.seq_index, 0);
+    assert_eq!(label.data.id, entry);
     assert_eq!(
-        section.items()[0],
-        SectionItem::label(
-            entry,
-            SymbolName::runtime("boot", "entry").expect("label"),
-            InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-        )
+        label.data.name,
+        SymbolName::runtime("boot", "entry").expect("label")
     );
+    assert_eq!(label.provenance, default_provenance);
+
+    assert_eq!(section.instrs().len(), 1);
+    let instr = &section.instrs()[0];
+    assert_eq!(instr.seq_index, 1);
     assert_eq!(
-        section.items()[1],
-        SectionItem::instr(
-            Instr::Ld8RegFromImm {
-                dst: Reg8::A,
-                imm: 0x12,
-            },
-            InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-        )
+        instr.data,
+        Instr::Ld8RegFromImm {
+            dst: Reg8::A,
+            imm: 0x12
+        }
     );
+
+    assert_eq!(section.data_blocks().len(), 2);
+    assert_eq!(section.data_blocks()[0].seq_index, 2);
+    assert_eq!(section.data_blocks()[0].data, DataBlock::Bytes(vec![0x34]));
+    assert_eq!(section.data_blocks()[1].seq_index, 3);
     assert_eq!(
-        section.items()[2],
-        SectionItem::db(
-            [0x34],
-            InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-        )
+        section.data_blocks()[1].data,
+        DataBlock::Words(vec![0x5678])
     );
-    assert_eq!(
-        section.items()[3],
-        SectionItem::dw(
-            [0x5678],
-            InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-        )
-    );
+
+    assert_eq!(section.alignments().len(), 1);
+    assert_eq!(section.alignments()[0].seq_index, 4);
 }
 
 #[cfg(test)]
@@ -437,11 +490,13 @@ fn provenance_recorded() {
     let storage_provenance =
         InstrProvenance::new(PlanningStage::StoragePlan).with_source_op("arena_bind");
 
+    // The provenance-scope semantics are independent of role; pick a data-only
+    // role so `db`/`dw` are accepted (Option A: executable sections reject
+    // inline data — see SectionRole::permits_inline_data).
     let mut builder = Builder::new(
-        SectionRole::CommonBank,
-        SymbolName::kernel("copy", 1).expect("section name"),
-    )
-    .with_section_privilege(SectionPrivilege::privileged());
+        SectionRole::HeaderCartridge,
+        SymbolName::section(SectionRole::HeaderCartridge, SectionId::new(0)).expect("section name"),
+    );
     builder.emit(Instr::Nop);
     builder.with_provenance(storage_provenance.clone(), |builder| {
         builder.db(0xAA);
@@ -450,14 +505,15 @@ fn provenance_recorded() {
     builder.dw(0x1234);
 
     let section = builder.finish();
+    let ordered = section.iter_items();
 
-    assert_eq!(section.items()[0].provenance(), &default_provenance);
-    assert_eq!(section.items()[1].provenance(), &storage_provenance);
-    assert_eq!(section.items()[2].provenance(), &storage_provenance);
-    assert_eq!(section.items()[3].provenance(), &default_provenance);
+    assert_eq!(ordered.len(), 4);
+    assert_eq!(ordered[0].provenance(), &default_provenance);
+    assert_eq!(ordered[1].provenance(), &storage_provenance);
+    assert_eq!(ordered[2].provenance(), &storage_provenance);
+    assert_eq!(ordered[3].provenance(), &default_provenance);
     assert!(
-        section
-            .items()
+        ordered
             .iter()
             .all(|item| item.provenance().source_op.is_some())
     );
@@ -482,49 +538,49 @@ fn structured_ops_record_exact_payloads() {
 
     let section = builder.finish();
 
-    assert_eq!(section.items().len(), 6);
+    assert_eq!(section.total_items(), 6);
+    assert_eq!(section.pre_layout_ops().len(), 5);
+    assert_eq!(section.legalization_ops().len(), 1);
+
+    let pre_payloads: Vec<&PreLayoutOp> = section
+        .pre_layout_ops()
+        .iter()
+        .map(|item| &item.data)
+        .collect();
     assert_eq!(
-        section.items(),
-        [
-            SectionItem::pre_layout_op(
-                PreLayoutOp::BankLease(
-                    BankLeaseSpec::new(lease, MbcBankClass::Rom, 12).expect("lease")
-                ),
-                InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
+        pre_payloads,
+        vec![
+            &PreLayoutOp::BankLease(
+                BankLeaseSpec::new(lease, MbcBankClass::Rom, 12).expect("lease")
             ),
-            SectionItem::pre_layout_op(
-                PreLayoutOp::AssertBank {
-                    expected: MbcBankClass::Rom,
-                    expected_n: 12,
-                },
-                InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-            ),
-            SectionItem::pre_layout_op(
-                PreLayoutOp::TraceProbe {
-                    id: TraceProbeId::new(3),
-                    level: ProbeLevel::Debug,
-                },
-                InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-            ),
-            SectionItem::pre_layout_op(
-                PreLayoutOp::Yield {
-                    kind: YieldKind::PollInterrupts,
-                },
-                InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-            ),
-            SectionItem::legalization_op(
-                LegalizationOp::FarCall {
-                    target,
-                    lease_chain: vec![lease],
-                },
-                InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-            ),
-            SectionItem::pre_layout_op(
-                PreLayoutOp::BankRelease { lease_id: lease },
-                InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default")
-            ),
+            &PreLayoutOp::AssertBank {
+                expected: MbcBankClass::Rom,
+                expected_n: 12,
+            },
+            &PreLayoutOp::TraceProbe {
+                id: TraceProbeId::new(3),
+                level: ProbeLevel::Debug,
+            },
+            &PreLayoutOp::Yield {
+                kind: YieldKind::PollInterrupts,
+            },
+            &PreLayoutOp::BankRelease { lease_id: lease },
         ]
     );
+    assert_eq!(
+        &section.legalization_ops()[0].data,
+        &LegalizationOp::FarCall {
+            target,
+            lease_chain: vec![lease],
+        }
+    );
+    // Authoring order is preserved across the SoA via seq_index.
+    let seqs: Vec<u32> = section
+        .iter_items()
+        .iter()
+        .map(|item| item.seq_index())
+        .collect();
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(section.fixed_item_bytes(), None);
 }
 
@@ -626,7 +682,9 @@ fn builder_rejects_privileged_effects_in_normal_sections() {
     builder
         .try_emit(Instr::LdDirectFromA { addr })
         .expect("privileged section accepts mbc write");
-    assert_eq!(builder.finish().items().len(), 1);
+    let section = builder.finish();
+    assert_eq!(section.total_items(), 1);
+    assert_eq!(section.instrs().len(), 1);
 }
 
 #[cfg(test)]
@@ -649,7 +707,7 @@ fn builder_revalidates_existing_items_when_privilege_changes() {
         builder.try_set_section_privilege(SectionPrivilege::normal()),
         Err(BuilderError::SectionPrivilegeViolation(
             crate::section::SectionPrivilegeError {
-                item_index: 0,
+                seq_index: 0,
                 effect: MachineEffect::StoreToMbcRegister {
                     reg: MbcRegisterClass::RomBankLow,
                 },
@@ -693,7 +751,11 @@ fn structured_ops_run_in_normal_sections() {
         .try_bank_release(lease)
         .expect("bank release in Normal section");
 
-    assert_eq!(builder.finish().items().len(), 5);
+    let section = builder.finish();
+    assert_eq!(section.total_items(), 5);
+    assert_eq!(section.pre_layout_ops().len(), 3);
+    assert_eq!(section.legalization_ops().len(), 1);
+    assert_eq!(section.branches().len(), 1);
 }
 
 #[cfg(test)]
@@ -719,18 +781,22 @@ fn builder_emits_symbolic_branches() {
     builder.branch(SymbolicBranch::new(BranchKind::Call, None, target.clone()));
 
     let section = builder.finish();
-    assert_eq!(section.items().len(), 4);
+    assert_eq!(section.total_items(), 4);
+    assert_eq!(section.labels().len(), 1);
+    assert_eq!(section.branches().len(), 3);
+
+    let effects: Vec<MachineEffect> = section
+        .branches()
+        .iter()
+        .map(|item| item.data.machine_effect())
+        .collect();
     assert_eq!(
-        section.items()[1].machine_effect(),
-        Some(MachineEffect::UnconditionalBranch)
-    );
-    assert_eq!(
-        section.items()[2].machine_effect(),
-        Some(MachineEffect::ConditionalBranch)
-    );
-    assert_eq!(
-        section.items()[3].machine_effect(),
-        Some(MachineEffect::Call)
+        effects,
+        vec![
+            MachineEffect::UnconditionalBranch,
+            MachineEffect::ConditionalBranch,
+            MachineEffect::Call,
+        ]
     );
     assert_eq!(section.fixed_item_bytes(), None);
 }
@@ -773,6 +839,71 @@ fn builder_forbids_reserved_mbc_writes_in_every_section() {
 
 #[cfg(test)]
 #[test]
+fn db_dw_rejected_in_executable_sections() {
+    // Closes the raw-byte privilege loophole: an author cannot hand-encode
+    // privileged instruction bytes (e.g. `LD ($2000), A` as `db 0xEA, 0x00,
+    // 0x20`) in an executable section to slip past the effect classifier.
+    // SectionRole::permits_inline_data() is the gate.
+    for role in [
+        SectionRole::Bank0Nucleus,
+        SectionRole::CommonBank,
+        SectionRole::ExpertBank,
+    ] {
+        let mut builder = Builder::new(
+            role,
+            SymbolName::section(role, SectionId::new(0)).expect("section name"),
+        );
+        // Even a privileged section cannot relax this — privilege is for
+        // typed effects (Instr, structured ops); inline bytes have no typed
+        // effect to check, so the only safe gate is the role.
+        if matches!(role, SectionRole::CommonBank) {
+            builder.set_section_privilege(SectionPrivilege::privileged());
+        }
+
+        assert_eq!(
+            builder.try_db(0xEA),
+            Err(BuilderError::InlineDataInExecutableSection { role })
+        );
+        assert_eq!(
+            builder.try_db_bytes([0xEA, 0x00, 0x20]),
+            Err(BuilderError::InlineDataInExecutableSection { role })
+        );
+        assert_eq!(
+            builder.try_dw(0x20EA),
+            Err(BuilderError::InlineDataInExecutableSection { role })
+        );
+        assert_eq!(
+            builder.try_dw_words([0x20EA, 0x1234]),
+            Err(BuilderError::InlineDataInExecutableSection { role })
+        );
+        assert_eq!(builder.finish().total_items(), 0);
+    }
+
+    // Data-only roles accept inline data unconditionally.
+    for role in [
+        SectionRole::HeaderCartridge,
+        SectionRole::WramHotArena,
+        SectionRole::WramOverlay,
+        SectionRole::HramFastFlags,
+        SectionRole::SramPersistent,
+        SectionRole::VramOwnedByUi,
+        SectionRole::OamOwnedByUi,
+    ] {
+        let mut builder = Builder::new(
+            role,
+            SymbolName::section(role, SectionId::new(0)).expect("section name"),
+        );
+        builder.try_db(0x42).expect("data role accepts db");
+        builder
+            .try_dw_words([0x1234, 0x5678])
+            .expect("data role accepts dw_words");
+        let section = builder.finish();
+        assert_eq!(section.data_blocks().len(), 2);
+    }
+}
+
+#[cfg(test)]
+#[test]
 fn provenance_scope_restores_after_caught_panic() {
     let default_provenance =
         InstrProvenance::new(PlanningStage::Backend).with_source_op("builder.default");
@@ -790,5 +921,5 @@ fn provenance_scope_restores_after_caught_panic() {
     builder.emit(Instr::Nop);
     let section = builder.finish();
 
-    assert_eq!(section.items()[0].provenance(), &default_provenance);
+    assert_eq!(section.instrs()[0].provenance, default_provenance);
 }
