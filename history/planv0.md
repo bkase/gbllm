@@ -32,7 +32,7 @@ For M0-M2, these may remain modules rather than separate crates. The semantic bo
 The three semantic strata (orthogonal to the product decomposition; each stratum is a distinct notion of truth, not a distinct product):
 
 1. **Denotation** — the target-independent reference meaning and quality baseline of the **source reference model**, represented by a durable `ReferenceModelBundle`. This is where "did model quality regress?" lives.
-2. **Artifact semantics** — the exact canonical semantics of the frozen exported quantized model, *without* packing, tiling, bank, or schedule assumptions. This is where "did export/quantization introduce a regression?" lives.
+2. **Artifact semantics** — the exact canonical semantics of the frozen exported quantized model, _without_ packing, tiling, bank, or schedule assumptions. This is where "did export/quantization introduce a regression?" lives.
 3. **Operational schedule** — the resumable, bank-aware execution of those artifact semantics on the target. This is where "did the scheduler, lowering, or backend break the artifact semantics?" lives.
 
 The four object-level layers (every runtime entity in the system is unambiguously exactly one of these):
@@ -98,17 +98,17 @@ End-to-end Rust is therefore not just "same language everywhere". It specificall
 - the same canonical specs, ids, and blob schemas are shared end-to-end;
 - the same lowering/packer code deterministically materializes target-data lowerings from canonical tensors, whether invoked during export or during compile-time cache population;
 - the same production packer and LUT generator are reused where exact deployed bytes must agree;
-- verification-critical algorithms *also* have an **independent slow reference implementation** in tests and conformance tooling so a shared bug cannot become self-validating;
+- verification-critical algorithms _also_ have an **independent slow reference implementation** in tests and conformance tooling so a shared bug cannot become self-validating;
 - the same `LexicalSpec` drives dataset normalization and charset semantics; the `InteractionBundle` (in `ArtifactAux`) carries keyboard layout (through `KeyboardLayoutSpec`) and transcript rendering (through `TranscriptSpec`);
 - the same state-layout types are known to training, oracle stack, compiler, and runtime.
 
-For the training side, Burn remains the pragmatic front-end, but not the owner of deployed quantization semantics. Burn owns backend portability, autodiff, optimizers, checkpoints, and training metrics. `gbf-model` owns ternary projection, activation fake-quant, norm approximation, and export visitation. Burn-native PTQ remains in the workflow as a baseline and ablation path for shared modules (embedding/router/head), but ternary QAT remains custom. Pin an exact Burn version and hide backend/quantization API drift behind a thin internal adapter layer in `gbf-train`. ([Docs.rs][1])
+For the training side, Burn remains the pragmatic front-end, but not the owner of deployed quantization semantics. Burn owns backend portability, autodiff, optimizers, checkpoints, and training metrics. `gbf-model` owns ternary projection, activation fake-quant, norm approximation, and export visitation. **There is exactly one quantization path: `gbf-model::qat`.** PTQ-style training (no fake-quant during training, harden only at export) is expressed by running the same QAT modules with `QuantHardness::Off` for the relevant `TrainPhaseSpec` phases — same modules, same `ExportVisitor`, different schedule. There is no separate Burn-native quantization path; that would create two export boundaries and reintroduce the drift F1 was designed to prevent. Pin an exact Burn version and hide backend API drift behind a thin internal adapter layer in `gbf-train`. ([Docs.rs][1])
 
 Before the architecture itself, I would lock in three corrections now.
 
-* Ternary is not literally "1 bit" unless you are doing some secondary sparse encoding trick. If the deployed weights are truly `{-1, 0, +1}`, the physical planning number should be 2-bit packed ternary (`WeightEncoding::Ternary2`), or an equivalent two-bitplane representation. So your bank math should assume four weights per byte unless you later prove a better packing.
-* A single LUT cannot implement full LayerNorm by itself, because LayerNorm is not an elementwise transform. For this machine, replace full LayerNorm with an explicit `NormPlan` — RMSNorm, affine rescale + clamp, or another normalization variant that the compiler can lower cheaply.
-* A 16-bit accumulator is not automatically safe. The compiler needs explicit range analysis (a `RangePlan` pass), because `fan_in × max_abs_activation` can exceed signed 16-bit bounds surprisingly fast.
+- Ternary is not literally "1 bit" unless you are doing some secondary sparse encoding trick. If the deployed weights are truly `{-1, 0, +1}`, the physical planning number should be 2-bit packed ternary (`WeightEncoding::Ternary2`), or an equivalent two-bitplane representation. So your bank math should assume four weights per byte unless you later prove a better packing.
+- A single LUT cannot implement full LayerNorm by itself, because LayerNorm is not an elementwise transform. For this machine, replace full LayerNorm with an explicit `NormPlan` — RMSNorm, affine rescale + clamp, or another normalization variant that the compiler can lower cheaply.
+- A 16-bit accumulator is not automatically safe. The compiler needs explicit range analysis (a `RangePlan` pass), because `fan_in × max_abs_activation` can exceed signed 16-bit bounds surprisingly fast.
 
 ## The machine you are actually compiling for
 
@@ -154,7 +154,8 @@ gbforge/
     gbf-asm/         # typed LR35902 eDSL, pretty-printer, cycle model, layout support, encoder
     gbf-runtime/     # Bank0/common-bank runtime authored as Rust builders over AsmIR
     gbf-codegen/     # lowering, observe/range/storage/window/kernel/arena/schedule, reachability, backend, legalization, reports; uses gbf-store for stage cache
-    gbf-emu/         # emulator adapters, breakpoint orchestration, trace normalization, harness mode
+    gbf-emu/         # gameroy adapter, deterministic-execution policy, breakpoint/watchpoint primitives, trace normalization, harness mode
+    gbf-debug/       # agent-facing scripted debugger CLI: stateless session files, rquickjs scripting host, programmable machine-interface
     gbf-test/        # orchestration of integration, property, snapshot, differential, liveness, nightly perf tests
     gbf-bench/       # workload manifests, cycle calibration, calibration bundle production, constrained autotune, Pareto reports
     gbf-cli/         # thin top-level command surface; heavy subcommands feature-gated where practical
@@ -192,6 +193,7 @@ Key decouplings:
 - `gbf-hw` owns hardware constants, target profiles, and calibration schema so the compiler and runtime stop carrying magic numbers.
 - `gbf-test` exists as its own crate so the correctness loop is not scattered across unrelated packages.
 - `gbf-bench` exists as its own crate so workload manifests, cycle calibration, calibration-bundle production, and constrained autotuning are first-class instead of ad hoc scripts.
+- `gbf-emu` owns gameroy-backed primitives, deterministic execution policy, and breakpoint/watchpoint trapping; `gbf-debug` adds the agent-facing scripted CLI on top so `gbf-test` and `gbf-bench` consume the same primitives without depending on a JS runtime.
 
 Inside the important crates, I would make the module split more concrete:
 
@@ -202,6 +204,8 @@ Inside the important crates, I would make the module split more concrete:
 - `gbf-asm::{isa, builder, section, provenance, cycle_model, listing, layout, relax, encoder, symbols}`
 - `gbf-runtime::{boot, interrupts, scheduler, joypad, text, keyboard, video_commit, banking, panic, trace, harness, persistence}`
 - `gbf-codegen::{import, validate, lower_quant, lower_infer, observe, range, storage, window, kernel_select, arena, schedule, lower_asm, reachability, place, legalize, report, rom, stage_cache}`
+- `gbf-emu::{adapter, primitives, trap, trace_ring, harness, determinism}`
+- `gbf-debug::{session, script, cli}`
 
 That one set of boundaries will save you a lot of pain later.
 
@@ -306,7 +310,15 @@ Exact equality gates are legal only when the active `DeterminismClass` admits th
 
 `gbf-codegen` is the actual compiler. Among other things, it owns the always-on content-addressed `StageCache` keyed by semantic core hash + data-lowering hash + compile-request hash + calibration hash + pass version + feature flags; `--resume-from <stage>` is a user-facing control layered on top of that cache.
 
-`gbf-emu` owns emulator adapters, breakpoint orchestration, memory-trace normalization, and the harness-mode execution path that tests consume. It should preferably wrap an existing fast backend plus an existing accuracy/debugger backend rather than grow two emulator cores in-tree. SameBoy advertises very high accuracy with a powerful text debugger (conditional breakpoints, watchpoints, disassembly, backtracing); BGB advertises accurate hardware emulation, clock-exact LCD timing, and `.sym` support. That is the surface you want to stand on, not reimplement. ([GitHub][6])
+`gbf-emu` owns the **gameroy** adapter, deterministic-execution policy, breakpoint/watchpoint primitives, memory-trace normalization, and the harness-mode execution path that tests consume. Single Rust-only backend on purpose: gameroy is independently maintained, passes most of the mooneye-test-suite accuracy gates, and exposes a library API we can drive headlessly from `gbf-test`, `gbf-bench`, and the agent debugger. The crate exposes step / `run_until` / mem r-w / register access / snapshot–restore / framebuffer / joypad-injection plus a registry-driven trap dispatcher (PC traps, memory-access traps with read/write/rw kinds, optional persisted predicates) and a `DeterminismPolicy` (fixed RTC, RNG seeding, audio disabled by default) that all consumers share. It does not grow an in-tree emulator core, and it does not host a JS runtime — that lives one crate over. ([GitHub][6])
+
+`gbf-debug` is the **agent-facing scripted debugger CLI** layered on `gbf-emu`. Its design starts from two observations: agents are best at coding, and emulator state is cheap. So the right shape is a stateless CLI that round-trips through session files, plus a programmable scripting host that lets the agent express many debugger ops in one tool call. It owns:
+
+- the on-disk **session file** (`session.gbsess`, zstd-compressed JSON, schema-versioned with hard refusal on mismatch) carrying ROM identity by SHA-256, the embedded `SymbolTable` so rehydration never breaks on a moved `.sym`, the gameroy save state blob, persisted breakpoints/watchpoints with optional stringified-JS predicates, a size-capped trace ring, and a one-hop `parent_sha256` for lineage;
+- an **rquickjs**-based scripting host exposing a `gb` object — `regs`, `read`, `write`, `step`, `run_until`, `add_breakpoint`, `add_watchpoint`, `remove_breakpoint`, `remove_watchpoint`, `list_breakpoints`, `list_watchpoints`, `snapshot`/`restore` (in-script branching, distinct from the on-disk session), `symbol`/`symbol_at`, `framebuffer`, `input`, `trace_ring`/`clear_trace`, plus `log(msg, data)` and `result = ...` for structured CLI return — with a wall-clock timeout so runaway loops cannot hang the invocation;
+- a **stateless CLI**: `gbf-debug init --rom game.gb --sym game.sym --out session.gbsess` forges a fresh session at PC `$0100`; `gbf-debug exec --in <session> --script <file> --out <session>` runs a script and writes the post-execution session, emitting structured JSON on stdout; `gbf-debug inspect <session>` is a no-run state dump for forensics.
+
+Predicates that need to persist across invocations (e.g., conditional breakpoints carried in the session) are stringified JS source; closure-shaped predicates only live for the current execution. The agent issues one tool call per programmable batch, so conditional breakpoints collapse to "scripted loops with predicates" and counterfactual exploration is either a `gb.snapshot()` inside the script or a session-file copy outside it. ([GitHub][7])
 
 `gbf-test` is the dedicated home for the correctness loop: integration tests, property tests, snapshot/golden tests, differential tests, liveness stress tests, UI smoke tests, nightly perf/trust tests, and best-effort failure reduction / testcase minimization, all driven by versioned `WorkloadManifest`s where practical.
 
@@ -449,6 +461,7 @@ pub struct InteractionBundle {
     pub transcript: TranscriptSpec,
     pub default_session: Option<SessionProfile>,
 }
+
 ### Locked-in v1 charset (Tier 2 — "Accelerando voice")
 
 The first deployed `LexicalSpec` is fixed at the values below. This is part of `ArtifactCore`'s identity hash, so the values are not to be churned without a new artifact lineage.
@@ -467,7 +480,6 @@ The first deployed `LexicalSpec` is fixed at the values below. This is part of `
 - **Tied embeddings apply** (`vocab ≤ 256`); see `gbf-model::embeddings::BYTE_LEVEL_TIED_VOCAB_LIMIT`.
 - **Keyboard layout** (`InteractionBundle::KeyboardLayoutSpec`, *not* part of identity hash) — three-page on-screen grid: lowercase / uppercase / symbols-and-digits, with `B` button as one-shot shift on the lowercase page. Iterable without artifact reissue.
 - **Genre intent**: dense Stross / *Accelerando*-style prose. Caps-only and script-style dialogue conventions are explicitly rejected as off-genre.
-
 
 pub struct TranscriptSpec {
     pub render_policy: RenderPolicy,
@@ -638,6 +650,8 @@ pub struct ResolvedCompilePolicy {
     pub observability: ObservabilityMode,
     pub trace_budget: TraceBudget,
     pub requested_runtime_modes: BTreeSet<RuntimeMode>,
+    /// The only policy surface the feasibility refinement loop may mutate.
+    pub knobs: CompileKnobs,
     pub repair: RepairPolicy,
     pub provenance: PolicyProvenance,
 }
@@ -695,7 +709,7 @@ The compiler should consume a frozen artifact and a `CompileRequest`, not live t
 `DenotationalOracle` consumes a sibling `ReferenceModelBundle` plus (optionally) a `ReferenceObservationCache`.
 `ReferenceObservationCache` remains a cache of observations; it is never the source of denotational meaning.
 
-**`ArtifactCore` is target-independent.** It carries canonical logical quantized tensors (`CanonicalTensor`), logical LUT contents (`LogicalLutSpec`), and pure sequence **semantics** (`SequenceSemanticsSpec`) — *not* the concrete byte layout of sequence state. It contains nothing about packing, tiling, bank residency, schedule, target profile, compile profile, or calibration. `ArtifactCore` is content-addressed by the canonical serialization of an `ArtifactSemanticPayload`; the `ArtifactManifest` records that hash but is **not** self-hashed recursively. The same rule applies to lowering hashes.
+**`ArtifactCore` is target-independent.** It carries canonical logical quantized tensors (`CanonicalTensor`), logical LUT contents (`LogicalLutSpec`), and pure sequence **semantics** (`SequenceSemanticsSpec`) — _not_ the concrete byte layout of sequence state. It contains nothing about packing, tiling, bank residency, schedule, target profile, compile profile, or calibration. `ArtifactCore` is content-addressed by the canonical serialization of an `ArtifactSemanticPayload`; the `ArtifactManifest` records that hash but is **not** self-hashed recursively. The same rule applies to lowering hashes.
 
 **`ArtifactManifest` should include:**
 
@@ -717,7 +731,7 @@ The compiler should consume a frozen artifact and a `CompileRequest`, not live t
 **`TargetDataLoweringArtifact` is deterministic and derived.**
 Compilation resolves a `TargetProfileId` to a compatible `DataLoweringProfileId`; timing, calibration, and schedule policy remain target-specific, but packed-data identity does not. Any lowering sidecar is hashed separately (`lowering_hash`) and must round-trip back to the semantic core under the declared `packer_version`; `ArtifactValidation` enforces this round-trip. Only deterministic **data** lowerings round-trip this way. For large artifacts, round-trip validation should be defined both per lowering shard and for the assembled lowering manifest. Execution tiling, ROM/build planning, slice boundaries, and autotune winners do not belong here — they are compile products. The compiler can consume a pre-computed lowering when present or deterministically regenerate it when absent or stale, and may lazy-load large blobs through `BlobRef`s rather than eagerly materializing the whole artifact in memory. Packer drift becomes an early validation error instead of a mysterious runtime mismatch.
 
-**`ArtifactAux` is mutable and can be rewritten between builds without invalidating the core.** `ReferenceObservationCache` is optional; when present, `DenotationalOracle` uses it to amortize reference evaluation, but it is a cache, not a source of meaning. `ConformanceEnvelope` / `conformance.json` records quality/degradation relationships between denotation and artifact semantics. The approximation relation lives here, not inside any oracle. `ConformanceEnvelope` defines how much degradation from the reference is acceptable — so the frozen artifact is explicitly *not* the definition of success.
+**`ArtifactAux` is mutable and can be rewritten between builds without invalidating the core.** `ReferenceObservationCache` is optional; when present, `DenotationalOracle` uses it to amortize reference evaluation, but it is a cache, not a source of meaning. `ConformanceEnvelope` / `conformance.json` records quality/degradation relationships between denotation and artifact semantics. The approximation relation lives here, not inside any oracle. `ConformanceEnvelope` defines how much degradation from the reference is acceptable — so the frozen artifact is explicitly _not_ the definition of success.
 
 **`LexicalSpec` + `InteractionBundle` replace the old monolithic `InputSpec`.** `LexicalSpec` owns charset, normalization, and control tokens — the model-semantic subset that belongs in `ArtifactCore`. `InteractionBundle` owns keyboard layout, transcript rendering, and default session profile — interaction/policy concerns that live in `ArtifactAux`, not in immutable model identity. This means the same quantized model does not get a new semantic identity hash because you changed line wrapping, fallback glyph handling, or keyboard layout. `KeyboardLayoutSpec` governs on-device input; `TranscriptSpec` governs what actually renders (control-token visibility, fallback glyphs, wrap and newline policies). Otherwise harness output, persistence, and UI rendering will slowly drift. Likewise, active decode policy is explicit through `SessionProfile` / `DecodePolicy` — oracle, compiler, runtime, and harness all need the same decode and RNG semantics at session/run level, while `ArtifactCore` declares only a `DecodeCapabilitySet` of supported decode modes.
 
@@ -1056,7 +1070,7 @@ Headline pipeline:
 **Policy / feasibility envelope:**
 
 0. `ArtifactValidationAndUpgrade`
-0.5 `ResolvedCompilePolicy`
+   0.5 `ResolvedCompilePolicy`
 
 **Transformative stages (wrapped by a bounded `FeasibilityRefinementLoop`):**
 
@@ -1068,10 +1082,10 @@ Headline pipeline:
 6. `StoragePlan`
 7. `SramPagePlan`
 8. `RomWindowPlan`
-8.5 `OverlayPlan`
+   8.5 `OverlayPlan`
 9. `ArenaPlan`
 10. `GbSchedIR`
-10.5 `ResourceStateValidation`
+    10.5 `ResourceStateValidation`
 11. `ScheduleCostAnalysis`
 12. Backend (`AsmIR -> ReachabilityValidation -> PlacedRom -> EncodedRom`)
 
@@ -1084,10 +1098,38 @@ Headline pipeline:
 Passes do not call earlier passes recursively; instead they emit
 `RepairProposal`s against an explicit `CompileKnobs` surface. `ScheduleCostAnalysis` is the only producer of objective-facing cost envelopes used by the refinement loop, which keeps repair logic centralized and testable.
 
+The loop controller is the only component that applies `ConstraintDelta`s.
+Individual passes may propose repairs, but they may not mutate policy state
+directly. A proposed delta is admissible only when:
+
+- the target knob is not locked by `CompileKnobs::locks`,
+- the corresponding `RepairPolicy` toggle permits the mutation,
+- the new value is within `CompileKnobBounds`,
+- the mutation is monotone in the knob's declared order,
+- the mutation has provenance,
+- the mutation does not violate `ObservabilityMode`.
+
+For ordered enums, monotone means advancing to a later value only. For tile
+classes, monotone means removing candidates, never adding new candidates after
+the loop begins. For targeted override maps, monotone means inserting a new
+selector or moving an existing selector to a later value in its declared order.
+For optional probes, monotone means adding probes to
+`disabled_optional_probes`; semantic observations are never removed by trace
+repair.
+
+`RiskPolicy::fallback_profile` remains outside the bounded refinement loop:
+it is a whole-profile retry after the current resolved profile fails.
+`RepairPolicy::allow_placement_profile_fallback` controls only the internal
+`PlacementProfile` ladder.
+
 ```rust
 pub struct RepairPolicy {
     pub max_refinement_iters: u8,
-    pub allow_profile_fallback: bool,
+    /// PlacementProfile fallback only:
+    /// `StrictOnePerBank` -> `Budgeted` -> `PackedExperts`.
+    ///
+    /// Full `CompileProfile` fallback remains `RiskPolicy::fallback_profile`.
+    pub allow_placement_profile_fallback: bool,
     pub allow_trace_demotion: bool,
     pub allow_overlay_promotion: bool,
     pub allow_recompute_promotion: bool,
@@ -1098,6 +1140,311 @@ pub struct RepairProposal {
     pub reason: RepairReason,
     pub tighten: ConstraintDelta,
     pub estimated_cost: EstimatedCostDelta,
+}
+
+/// The only policy surface the bounded `FeasibilityRefinementLoop` may mutate.
+///
+/// `CompileKnobs` is intentionally finite, typed, profile-bounded, and
+/// auditable. It does not contain target constants, calibration measurements,
+/// objective weights, or pass-private heuristic numbers.
+pub struct CompileKnobs {
+    pub global: CompileKnobValues,
+    pub bounds: CompileKnobBounds,
+    pub overrides: CompileKnobOverrides,
+    pub locks: KnobLockSet,
+    pub provenance: BTreeMap<CompileKnobId, ConstraintProvenance>,
+}
+
+pub struct CompileKnobValues {
+    pub placement: PlacementKnobs,
+    pub observation: ObservationKnobs,
+    pub range: RangeKnobs,
+    pub storage: StorageKnobs,
+    pub sram: SramKnobs,
+    pub rom_window: RomWindowKnobs,
+    pub overlay: OverlayKnobs,
+    pub schedule: ScheduleKnobs,
+}
+
+pub struct PlacementKnobs {
+    pub profile: PlacementProfile,
+}
+
+pub struct ObservationKnobs {
+    pub trace_demotion: TraceDemotionLevel,
+    pub optional_probe_floor: ProbeBudgetClass,
+}
+
+pub enum TraceDemotionLevel {
+    None,
+    DropBestEffort,
+    DropDiagnosticAndBestEffort,
+    RequiredOnly,
+}
+
+pub enum ProbeBudgetClass {
+    Required,
+    Important,
+    Diagnostic,
+    BestEffort,
+}
+
+pub struct RangeKnobs {
+    pub reduction_ceiling: ReductionPlanCeiling,
+}
+
+pub enum ReductionPlanCeiling {
+    SingleI16Only,
+    AllowChunkedI16,
+    AllowRenormLoop,
+}
+
+pub struct StorageKnobs {
+    pub recompute_promotion: RecomputePromotionLevel,
+}
+
+pub enum RecomputePromotionLevel {
+    None,
+    PureSliceValues,
+    PureResumeWindowValues,
+    PureTokenValues,
+}
+
+pub struct SramKnobs {
+    pub page_aggression: SramPageAggression,
+    pub spill_policy: SpillPolicy,
+}
+
+pub enum SramPageAggression {
+    KeepHotInWram,
+    BatchSramAccesses,
+    AllowColdSpills,
+    FitFirstPagedSpills,
+}
+
+pub struct RomWindowKnobs {
+    pub kernel_residency_bias: KernelResidencyBias,
+    pub kernel_duplication_bias: KernelDuplicationBias,
+}
+
+pub enum KernelResidencyBias {
+    ProfileDefault,
+    PreferCoResident,
+    PreferBank0Streaming,
+    PreferWramOverlay,
+    FitFirst,
+}
+
+pub enum KernelDuplicationBias {
+    ShareKernels,
+    DuplicateEntryStubs,
+    DuplicateTinyKernels,
+    DuplicateToSatisfyWindow,
+}
+
+pub struct OverlayKnobs {
+    pub promotion: OverlayPromotionLevel,
+}
+
+pub enum OverlayPromotionLevel {
+    None,
+    KernelsOnly,
+    KernelsAndLutFragments,
+    AnyOverlayable,
+}
+
+pub struct ScheduleKnobs {
+    pub tile_search: TileSearchKnobs,
+    pub slice_coarsening: SliceCoarseningLevel,
+    pub pressure: ResourcePressureThresholds,
+    pub stage_iters: StageIterationCeilings,
+}
+
+pub struct TileSearchKnobs {
+    pub allowed_classes: BTreeSet<TileCandidateClass>,
+}
+
+pub enum TileCandidateClass {
+    SmallWorkingSet,
+    Balanced,
+    SwitchAmortized,
+}
+
+pub enum SliceCoarseningLevel {
+    Fine,
+    ProfileDefault,
+    CoarseWithinLatency,
+    EpochCoalesced,
+}
+
+pub struct ResourcePressureThresholds {
+    pub wram_hot: PressureLimit<ByteBudget>,
+    pub hram_hot: PressureLimit<ByteBudget>,
+    pub bank0_rom: PressureLimit<ByteBudget>,
+    pub switchable_rom_window: PressureLimit<ByteBudget>,
+    pub sram_window: PressureLimit<ByteBudget>,
+    pub slice_cycles: PressureLimit<CycleBudget>,
+    pub interrupt_latency: PressureLimit<CycleBudget>,
+    pub trace_bytes_per_frame: PressureLimit<u16>,
+    pub persist_bytes_per_frame: PressureLimit<u16>,
+    pub overlay_installs_per_frame: PressureLimit<u8>,
+    pub bank_switches_per_token: PressureLimit<u16>,
+    pub sram_page_switches_per_token: PressureLimit<u16>,
+}
+
+pub struct PressureLimit<T> {
+    pub soft: T,
+    pub hard: T,
+}
+
+pub struct StageIterationCeilings {
+    pub range: RefinementIterBudget,
+    pub storage: RefinementIterBudget,
+    pub sram_page: RefinementIterBudget,
+    pub rom_window: RefinementIterBudget,
+    pub overlay: RefinementIterBudget,
+    pub arena: RefinementIterBudget,
+    pub schedule: RefinementIterBudget,
+}
+
+#[repr(transparent)]
+pub struct RefinementIterBudget(pub u8);
+
+pub struct CompileKnobBounds {
+    pub max_placement_profile: PlacementProfile,
+    pub max_trace_demotion: TraceDemotionLevel,
+    pub max_reduction_ceiling: ReductionPlanCeiling,
+    pub max_recompute_promotion: RecomputePromotionLevel,
+    pub max_sram_page_aggression: SramPageAggression,
+    pub max_kernel_residency_bias: KernelResidencyBias,
+    pub max_kernel_duplication_bias: KernelDuplicationBias,
+    pub max_overlay_promotion: OverlayPromotionLevel,
+    pub allowed_tile_classes: BTreeSet<TileCandidateClass>,
+    pub max_slice_coarsening: SliceCoarseningLevel,
+    pub stage_iters: StageIterationCeilings,
+}
+
+pub struct CompileKnobOverrides {
+    /// Optional operational probes disabled by trace demotion.
+    /// Semantic observations are NEVER listed here.
+    pub disabled_optional_probes: BTreeSet<TraceProbeId>,
+    pub forced_kernel_residency: BTreeMap<KernelSelector, KernelResidency>,
+    pub forced_recompute: BTreeSet<ValueSelector>,
+    pub reduction_ceiling_overrides:
+        BTreeMap<ReductionSelector, ReductionPlanCeiling>,
+    pub tile_class_overrides:
+        BTreeMap<TileSelector, BTreeSet<TileCandidateClass>>,
+}
+
+pub enum KernelSelector {
+    KernelSpec(KernelSpecId),
+    LayerExpert { layer: LayerId, expert: ExpertId },
+    Section(SectionId),
+}
+
+pub enum ValueSelector {
+    Value(ValueId),
+    AliasClass(AliasClassId),
+}
+
+pub enum ReductionSelector {
+    Site(ReductionSiteId),
+    Layer(LayerId),
+}
+
+pub enum TileSelector {
+    Kernel(KernelSpecId),
+    Layer(LayerId),
+    SliceClass(SliceClass),
+}
+
+pub enum SliceClass {
+    Micro,
+    Frame,
+    TokenBoundary,
+    TraceHeavy,
+}
+
+pub struct KnobLockSet {
+    pub locked: BTreeSet<CompileKnobId>,
+}
+
+pub enum CompileKnobId {
+    PlacementProfile,
+    ObservationTraceDemotion,
+    ObservationProbeSelection,
+    RangeReductionCeiling,
+    StorageRecomputePromotion,
+    StorageMaterializationOverrides,
+    SramPageAggression,
+    SramSpillPolicy,
+    RomKernelResidencyBias,
+    RomKernelDuplicationBias,
+    RomKernelResidencyOverrides,
+    OverlayPromotion,
+    ScheduleTileSearch,
+    ScheduleSliceCoarsening,
+    ScheduleResourcePressure,
+    StageIterationCeilings,
+}
+
+pub struct ConstraintProvenance {
+    pub source: PolicySource,
+    pub evidence: Vec<EvidenceRef>,
+}
+
+pub enum PolicySource {
+    TargetDefault,
+    ProfileDefault,
+    CompileRequestOverride,
+    HintBundle,
+    Calibration,
+    RepairProposal(RepairProposalId),
+}
+
+pub struct ConstraintDelta {
+    pub changes: Vec<KnobDelta>,
+}
+
+pub enum KnobDelta {
+    AdvancePlacementProfile { to: PlacementProfile },
+    SetTraceDemotion { to: TraceDemotionLevel },
+    DisableOptionalProbes { probes: BTreeSet<TraceProbeId> },
+    RaiseReductionCeiling {
+        selector: Option<ReductionSelector>,
+        to: ReductionPlanCeiling,
+    },
+    PromoteRecomputeLevel { to: RecomputePromotionLevel },
+    ForceRecompute { values: BTreeSet<ValueSelector> },
+    AdvanceSramPageAggression { to: SramPageAggression },
+    AdvanceKernelResidencyBias { to: KernelResidencyBias },
+    AdvanceKernelDuplicationBias { to: KernelDuplicationBias },
+    ForceKernelResidency {
+        selector: KernelSelector,
+        to: KernelResidency,
+    },
+    PromoteOverlay { to: OverlayPromotionLevel },
+    NarrowTileClasses {
+        selector: TileSelector,
+        remaining: BTreeSet<TileCandidateClass>,
+    },
+    SetSliceCoarsening { to: SliceCoarseningLevel },
+    UpdatePressureThreshold { update: ResourcePressureUpdate },
+}
+
+pub enum ResourcePressureUpdate {
+    WramHot(PressureLimit<ByteBudget>),
+    HramHot(PressureLimit<ByteBudget>),
+    Bank0Rom(PressureLimit<ByteBudget>),
+    SwitchableRomWindow(PressureLimit<ByteBudget>),
+    SramWindow(PressureLimit<ByteBudget>),
+    SliceCycles(PressureLimit<CycleBudget>),
+    InterruptLatency(PressureLimit<CycleBudget>),
+    TraceBytesPerFrame(PressureLimit<u16>),
+    PersistBytesPerFrame(PressureLimit<u16>),
+    OverlayInstallsPerFrame(PressureLimit<u8>),
+    BankSwitchesPerToken(PressureLimit<u16>),
+    SramPageSwitchesPerToken(PressureLimit<u16>),
 }
 
 pub struct CostEstimate {
@@ -1134,7 +1481,15 @@ pub struct BuildShardManifest {
 ```
 
 Every build emits `policy_resolution.json`, recording the fully resolved
-compile policy and the provenance of every hard and soft constraint.
+compile policy, `CompileKnobs::{global,bounds,locks,overrides}`, and the
+provenance of every hard and soft constraint. The report must make it clear
+which values came from target defaults, profile defaults, compile-request
+overrides, hint bundles, calibration, and accepted repair proposals.
+
+Every build also emits `repair_report.json`, recording all proposed repairs,
+whether each proposal was accepted or rejected, the lock/bound/policy reason
+for every rejection, and the before/after `CompileKnobs` delta for every
+accepted proposal.
 
 The stage ordering is deliberate. `ObservationPlan` runs immediately after `GbInferIR` so semantic checkpoints and debug probes are derived from canonical model paths before any scheduling happens. `RangePlan` is purely logical and can run next because it does not depend on materialization or residency decisions. `StoragePlan` is the missing bridge from value/effect semantics to spatial scheduling — it decides materialization, persistence, and alias classes without yet assigning bytes. `RomWindowPlan` then uses storage decisions to resolve kernel residency under the single-switchable-window constraint. `ArenaPlan` only then allocates concrete byte ranges to the materialized values `StoragePlan` selected, never to pure expression nodes directly. The backend adds a new sub-pass, `ReachabilityValidation`, that computes (rather than trusts) whole-program reachability classes before final placement.
 
@@ -1493,6 +1848,7 @@ One `CompiledBuild` may contain a `SchedulePack` keyed by `RuntimeMode` rather t
 This is where the compiler decides that a long expert matvec becomes many smaller tiles and inserts safe yield points between them, and where each slice is proven to have a bounded worst-case interrupt latency. Slices also participate in the liveness contract — every slice is expected to make measurable progress at the `SemanticCheckpointId` level.
 
 `ResourceStateValidation` runs after `GbSchedIR` and proves:
+
 - all resource leases are balanced (every `AcquireLease` has a matching `ReleaseLease`),
 - no illegal yield crosses a non-resumable lease,
 - no ISR-visible path depends on leased switchable state,
@@ -1978,11 +2334,11 @@ The continuation record in WRAM is minimal: just enough for precise coroutine re
 
 Yield points are still inserted only at stable checkpoints:
 
-* current tile complete,
-* live registers spilled,
-* bank shadow updated,
-* temporary results committed,
-* continuation target written.
+- current tile complete,
+- live registers spilled,
+- bank shadow updated,
+- temporary results committed,
+- continuation target written.
 
 The scheduler in Bank0 then works like this:
 
@@ -2152,6 +2508,41 @@ Optional later-derived profiles, only when measurement justifies them:
 Each profile changes placement policy, observation/probe density, trace insertion, branch density tradeoffs, thunking strategy, whether certain kernels are cloned or shared, and which reports are mandatory.
 Each profile also declares whether observability must preserve the compiled behavior class or may freely perturb it.
 
+Each profile also resolves a `RepairPolicy` and a `CompileKnobs` lock-set.
+Defaults:
+
+| Profile                                     | `max_refinement_iters` | `allow_placement_profile_fallback` | `allow_trace_demotion` | `allow_overlay_promotion` | `allow_recompute_promotion` |
+| ------------------------------------------- | ---------------------: | ---------------------------------- | ---------------------- | ------------------------- | --------------------------- |
+| `Bringup`                                   |                      1 | false                              | false                  | false                     | false                       |
+| `Default`                                   |                      4 | true                               | true                   | true                      | true                        |
+| `Trace` with `ObservabilityMode::Invariant` |                      2 | false                              | false                  | false                     | false                       |
+| `Recovery`                                  |                      6 | true                               | true                   | true                      | true                        |
+
+`Bringup` defaults to one refinement iteration rather than zero. This permits
+deterministic local tile/slice repairs while still preventing profile fallback,
+trace demotion, overlay promotion, and recompute promotion. A stricter
+first-fit mode may set `max_refinement_iters = 0` explicitly.
+
+`Default` starts from `PlacementProfile::Budgeted` and may advance to
+`PackedExperts`. It may demote optional probes, promote pure values to
+recompute, and promote eligible kernels or tiny LUT fragments to WRAM overlay
+when cost and resource reports justify the trade.
+
+`Trace` defaults to `ObservabilityMode::Invariant`. In invariant mode, policy
+resolution must force `allow_trace_demotion = false` and freeze
+behavior-affecting knobs after the paired Default-compatible schedule has been
+resolved. If invariant tracing exceeds `TraceBudget`, the compiler fails
+instead of silently dropping probes. `ObservabilityMode::Flexible` may opt into
+Default-like repair behavior, but must emit `trace_loss_report.json` and
+`observability.cert.json`.
+
+`Recovery` is fit-first. It may advance to `PackedExperts`, demote optional
+tracing down to required operational probes, promote eligible kernels/LUT
+fragments to overlays, and promote pure materialized values to recompute. It
+does not bypass semantic observations, persistence correctness,
+`ResourceStateValidation`, `ReachabilityValidation`, interrupt-latency bounds,
+or liveness bounds.
+
 ```rust
 pub enum ObservabilityMode {
     Invariant,
@@ -2169,7 +2560,7 @@ pub struct TraceBudget {
 and the compiler must prove that claim with a paired-build comparison on a declared workload slice.
 `ObservabilityMode::Flexible` means richer instrumentation may change the build.
 
-```rust
+````rust
 pub struct PerturbationSummary {
     pub changed_slices: u16,
     pub changed_epochs: u16,
@@ -2312,19 +2703,32 @@ Per-layer buffer diffs, token-by-token output diffs, and trace-page diffs for de
 
 ### Nightly trust tests
 
-- stricter emulator backend,
+- extended emulator runs on the same gameroy backend (longer cycle ceilings, broader workload coverage),
 - longer prompt suite driven by versioned `WorkloadManifest`s,
 - performance regression gates against `CompileObjective` satisfaction,
 - **common-mode failure checks comparing production and independent reference implementations on randomized artifacts**,
 - liveness stress runs with watchdog assertions and no-progress fault injection,
 - optional real-hardware smoke run.
 
-The emulator strategy should be split in two on purpose:
+### Emulation and the agent debugger
 
-- **fast backend** for bulk CI,
-- **accurate reference backend wrapped from an external emulator/debugger** (SameBoy or BGB).
+The emulator strategy is single-backend on purpose:
 
-`gbf-emu` is an adapter layer around existing emulators, not a place to grow two emulator cores in-tree. ([GitHub][6])
+- **gameroy** as the sole Rust-native core, used by both bulk CI and nightly/trust runs ([GitHub][6]);
+- **`gbf-debug`** layered on top to give agents a programmable, stateless machine-interface debugger ([GitHub][7]).
+
+`gbf-emu` is the adapter layer around gameroy and the home of breakpoint/watchpoint/harness primitives. `gbf-debug` is the agent CLI plus rquickjs scripting host plus the on-disk session file format. The previously-sketched two-backend split (separate accuracy backend wrapping an external emulator/debugger) is dropped: gameroy already passes most mooneye-test-suite accuracy gates, and maintaining two adapters and two calibration bundles in a Rust-only project did not pay for itself. The differential ladder still has its bites — `ScheduleOracle` ↔ harness, `ArtifactOracle` ↔ `ScheduleOracle`, conformance vs `DenotationalOracle` — we just stopped pretending two emulator cores were the load-bearing safety net.
+
+The agent debugger is built around the observation that **agents are best at coding, and emulator state is cheap**, so the right shape is a stateless CLI round-tripping through session files plus a programmable scripting host:
+
+- **Session file** (`session.gbsess`, zstd-compressed JSON, schema-versioned with hard refusal on mismatch). Carries: ROM identity by SHA-256, embedded `SymbolTable` (so rehydration never breaks on a moved `.sym`), gameroy save state blob, persisted breakpoints and watchpoints with optional stringified-JS predicates, size-capped trace ring, and a one-hop `parent_sha256` for lineage. The script's return value and log buffer are stdout output, not session state.
+- **rquickjs scripting host**. The agent writes JS that calls a `gb` object: `regs`, `read`, `write`, `step`, `run_until`, `add_breakpoint`, `add_watchpoint`, `remove_breakpoint`, `remove_watchpoint`, `list_breakpoints`, `list_watchpoints`, `snapshot`/`restore` (in-script branching, transient), `symbol`/`symbol_at`, `framebuffer`, `input`, `trace_ring`/`clear_trace`, plus `log(msg, data)` and `result = ...` for structured CLI output. Predicates accept JS functions for in-script use; predicates that persist across invocations are stringified source. A wall-clock timeout prevents runaway loops.
+- **Stateless CLI**: `gbf-debug init --rom game.gb --sym game.sym --out session.gbsess` forges a fresh session at PC `$0100`; `gbf-debug exec --in <session> --script <file> --out <session>` runs a script and writes the post-execution session; `gbf-debug inspect <session>` is a no-run state dump.
+- **Agent workflow**: the agent issues one tool call per programmable batch — write a multi-step JS script, hand it to `gbf-debug exec`, get back structured JSON plus a new session file. Conditional breakpoints collapse to "scripted loops with predicates"; counterfactual exploration ("what if branch X had gone the other way") is a `gb.snapshot()` inside the script or a session-file copy outside it. The JS host gives the agent the ergonomic loop-and-branch surface it would otherwise have to round-trip across many tool calls.
+
+Determinism is a `gbf-emu` policy, not a per-consumer choice: fixed RTC, RNG seeding controlled, audio disabled by default. `gbf-test`, `gbf-bench`, and `gbf-debug` all consume the same deterministic execution path so an emulator-side bug cannot manifest only in one consumer and not the others. UI smoke tests opt out of RTC pinning explicitly via a `DeterminismPolicy` builder when they need real-time-like behavior.
+
+The `.sym` format produced by `gbf-asm::symbols` is the standard line-oriented Game Boy symbol format (`BB:AAAA name` per line); it is the format the embedded `SymbolTable` is hydrated from when forging a session, and it is what the agent's `gb.symbol(name)` and `gb.symbol_at(addr)` resolve against.
 
 ## Reports and artifacts
 
@@ -2401,6 +2805,12 @@ Every build should emit a complete debugging/report package:
 - expert hotness / placement notes,
 - reduction-plan decisions.
 
+`policy_resolution.json` should additionally include the resolved
+`CompileKnobs` values, bounds, lock-set, targeted overrides, and per-knob
+provenance. `repair_report.json` should additionally include rejected repair
+proposals, accepted `ConstraintDelta`s, per-stage iteration counts, and the
+reason the bounded loop terminated.
+
 Treat these as first-class regressions, not just debugging trivia.
 
 When a mismatch occurs, the failure triage order should be explicit and aligned with the semantic strata:
@@ -2462,9 +2872,9 @@ cargo run -p gbf-cli   -- oracle artifacts/builds/model.gbf --stratum denotation
 cargo run -p gbf-cli   -- oracle artifacts/builds/model.gbf --stratum artifact   --suite fixtures/prompts/standard.txt
 cargo run -p gbf-cli   -- compile artifacts/builds/model.gbf --request configs/compile/trace.toml
 cargo run -p gbf-cli   -- compile artifacts/builds/model.gbf --request configs/compile/default.toml --resume-from GbSchedIR
-cargo run -p gbf-bench -- autotune artifacts/builds/model.gbf --workload fixtures/workloads/daily.toml --calibration configs/calibration/sameboy.toml
+cargo run -p gbf-bench -- autotune artifacts/builds/model.gbf --workload fixtures/workloads/daily.toml --calibration configs/calibration/gameroy.toml
 cargo test -p gbf-test -- --nocapture
-```
+````
 
 The debugging flow should also become explicit and maps directly to the semantic strata:
 
@@ -2478,9 +2888,9 @@ The debugging flow should also become explicit and maps directly to the semantic
 
 The important social rule is that every architecture change answers three questions:
 
-* did denotational quality (not just artifact consistency) improve or hold?
-* did ROM/state budgets still fit?
-* did cycles/token, bank-switch count, worst-case interrupt latency, and liveness margin get better or worse?
+- did denotational quality (not just artifact consistency) improve or hold?
+- did ROM/state budgets still fit?
+- did cycles/token, bank-switch count, worst-case interrupt latency, and liveness margin get better or worse?
 
 If you cannot answer all three, the iteration is incomplete.
 
@@ -2488,7 +2898,7 @@ If you cannot answer all three, the iteration is incomplete.
 
 Not the whole transformer. I would build the stack in milestone form:
 
-- **M0**: `gbf-asm`, encoder, symbol map, ROM builder; `gbf-hw` target profiles + calibration schema; `gbf-abi` skeleton (including liveness fields); Bank0 UI/runtime skeleton with VBlank, keyboard, text output, video commit queue, cooperative scheduler, and `BankLease`/`BankGuard` ABI.
+- **M0**: `gbf-asm`, encoder, symbol map, ROM builder; `gbf-hw` target profiles + calibration schema; `gbf-abi` skeleton (including liveness fields); Bank0 UI/runtime skeleton with VBlank, keyboard, text output, video commit queue, cooperative scheduler, and `BankLease`/`BankGuard` ABI; `gbf-emu` gameroy adapter with deterministic execution policy and breakpoint/watchpoint primitives; `gbf-debug` session file format and rquickjs-scripted agent CLI so the runtime skeleton is agent-debuggable from the first ROM that boots.
 - **M1**: `DenotationalOracle` + `ArtifactOracle` plus a single quantized dense kernel; conformance checking between reference observations and the frozen artifact (first `conformance.json`); first `CompileRequest` wiring.
 - **M2**: one shared micro-kernel resolved by `RomWindowPlan`, plus one expert payload bank, with exact emulator diffing against `ScheduleOracle` and checkpoint alignment against `ArtifactOracle` at `SemanticCheckpointId` boundaries; first `ReachabilityValidation` pass integrated into the backend.
 - **M3**: top-1 router, expert dispatch table, value/effect `GbInferIR` + `ObservationPlan` + `RangePlan` + `StoragePlan` wired end-to-end for a routed FFN under the cooperative scheduler.
@@ -2517,7 +2927,7 @@ That order gives you a functioning compiler-runtime-verification loop before you
 7. The harness uses symbols and `SemanticCheckpointId`s derived from canonical model paths, not magic addresses or incidental pass-local numbering.
 8. The compiler owns yield insertion and coroutine legality.
 9. Shared model/compiler contracts live in `gbf-artifact`; shared live-execution contracts live in `gbf-abi`; training internals do not leak into codegen.
-10. `Raw(Vec<u8>)` remains an escape hatch, never the default path.
+10. No escape hatches like `Raw(Vec<u8>)` allowed to dirty our code.
 11. `gbf-hw`, `gbf-artifact`, `gbf-abi`, `gbf-ir`, and `gbf-asm` are `no_std + alloc` capable where practical.
 12. `unsafe` is forbidden by default and isolated to tiny audited islands when unavoidable.
 13. Harness, trace, and oracle contracts use stable `SemanticCheckpointId`s, not raw addresses.
@@ -2532,6 +2942,7 @@ That order gives you a functioning compiler-runtime-verification loop before you
 22. `HintBundle` splits cleanly into `ExportFacts` (measured evidence), `CompilePreferences` (cost-function nudges), and `BuildConstraints` (hard admissibility conditions); the compiler treats the three differently and reports consumption explicitly.
 23. Critical safety passes emit machine-checkable certificates consumed by `gbf-verify`; human-readable reports are not the only source of truth for pass validity.
 24. Deterministic builds require a pinned toolchain, lockfile, and host triple at minimum; every train/export/compile/bench run emits a minimal `ReproducibilityManifest`. Extra host-environment capture is opt-in diagnostic data until real nondeterminism justifies making it contractual.
+25. `CompileKnobs` is the only mutable repair surface for the bounded feasibility loop. Passes may emit `RepairProposal`s, but only the loop controller may apply `ConstraintDelta`s. Every repair mutation must be typed, monotone in a declared finite order, bounded by profile policy, rejected if locked, and recorded in `policy_resolution.json` / `repair_report.json` with provenance.
 
 ## Bottom line
 
@@ -2539,38 +2950,38 @@ The architecture I would actually ship is **five cooperating products plus three
 
 The five products:
 
-* Rust training and export, Burn-fronted as a training host (backend portability, autodiff, optimizers, checkpoints, metrics), with `gbf-model` owning deployable numeric semantics (ternary projection, activation fake-quant, norm approximation, export visitation) because built-in QAT is currently not supported; Burn-native PTQ serves as a baseline and ablation path; training proceeds in explicit `TrainPhaseSpec` phases (`DenseTeacherWarmup` → `RouterWarmup` → `ExpertTernaryQat` → `FullNumericQat` → `HardenAndSelect`), with a frozen dense teacher exported as `ReferenceModelBundle` and periodic shadow export/compile via `ShadowCompilePolicy` for Pareto frontier checkpoint selection; backend choice is an implementation detail behind the training/model boundary, pinned to an exact Burn version. ([Docs.rs][1])
-* A versioned shared artifact boundary with an immutable `ArtifactCore` (canonical semantic, target-independent, quantized; `LexicalSpec` for model semantics, `DecodeCapabilitySet` for supported decode modes), zero or more deterministic `TargetDataLoweringArtifact` sidecars (physical packing, packing layouts, packed LUT blobs, kernel compatibility metadata per `DataLoweringProfileId`, with `compatible_targets` for cache reuse), a mutable `ArtifactAux` (golden vectors via `SidecarRef`, `ReferenceObservationCache` via `SidecarRef`, hierarchical `ConformanceEnvelope` via `SidecarRef`, `HintBundle`, `InteractionBundle`, `CompilerFeedback`), and an optional sibling `ReferenceModelBundle` (with `ReferenceNumericProfile`) for denotational truth — plus a separate `CompileRequest` boundary (with `CalibrationSetRef` for layered calibration) and a `ResolvedCompilePolicy` that captures final objectives, constraints, repair policy, and provenance before the transform pipeline begins, backed by a content-addressed `blobs/sha256/` store for efficient deduplication and lazy loading.
-* **Three oracles**: a `DenotationalOracle` consuming the sibling `ReferenceModelBundle` to define target-independent reference meaning, an `ArtifactOracle` defining the exact canonical semantics of the deployed model, and a `ScheduleOracle` proving that the scheduled execution refines that artifact semantics. The approximation relation is between the first two, recorded in `ConformanceEnvelope` / `conformance.json`, not embodied in any single oracle.
-* A real staged compiler pipeline: `ArtifactValidationAndUpgrade -> ResolvedCompilePolicy -> QuantGraph -> StaticBudgetReport -> GbInferIR (value/effect IR) -> ObservationPlan -> RangePlan -> StoragePlan -> SramPagePlan -> RomWindowPlan -> ArenaPlan -> GbSchedIR -> ResourceStateValidation -> (AsmIR -> ReachabilityValidation -> PlacedRom -> EncodedRom) -> BuildReports`, with a bounded `FeasibilityRefinementLoop` wrapping `RangePlan` through `GbSchedIR`, bracketed as policy/feasibility/transform/reporting envelopes and sped up by `gbf-store`'s two-level always-on content-addressed `StageCache` (shard-local + global).
-* A Bank0 cooperative runtime with deadline-assisted yielding that owns UI, interrupts, scheduling, resumption, a `BankLease`/`BankGuard` ABI, a `video_commit` queue driving UI budget, a versioned SRAM persistence protocol with explicit `DurabilityClass`-stratified record kinds, page states, `PersistChecksum` options, semantic/resume/build identity separation, and atomic `CommitGroupId`-based commit (with HRAM caching but SRAM-authoritative recovery), `ResidencyEpoch`-aware schedule-pack-driven runtime-mode switching (including a `Safe` mode with explicit `SafeModeTrigger`s), multi-resource `FrameBudget`, a `RuntimeDriftMonitor` with `DriftTrigger`s for automatic adaptation, a `FaultPolicy` table with `FaultDomain`s and graded `RecoveryAction`s, and an explicit liveness contract.
+- Rust training and export, Burn-fronted as a training host (backend portability, autodiff, optimizers, checkpoints, metrics), with `gbf-model` owning deployable numeric semantics (ternary projection, activation fake-quant, norm approximation, export visitation) because built-in QAT is currently not supported; **`gbf-model::qat` is the single quantization path** — PTQ-style runs are expressed as `QuantHardness::Off` over the same modules, not a second pipeline; training proceeds in explicit `TrainPhaseSpec` phases (`DenseTeacherWarmup` → `RouterWarmup` → `ExpertTernaryQat` → `FullNumericQat` → `HardenAndSelect`), with a frozen dense teacher exported as `ReferenceModelBundle` and periodic shadow export/compile via `ShadowCompilePolicy` for Pareto frontier checkpoint selection; backend choice is an implementation detail behind the training/model boundary, pinned to an exact Burn version. ([Docs.rs][1])
+- A versioned shared artifact boundary with an immutable `ArtifactCore` (canonical semantic, target-independent, quantized; `LexicalSpec` for model semantics, `DecodeCapabilitySet` for supported decode modes), zero or more deterministic `TargetDataLoweringArtifact` sidecars (physical packing, packing layouts, packed LUT blobs, kernel compatibility metadata per `DataLoweringProfileId`, with `compatible_targets` for cache reuse), a mutable `ArtifactAux` (golden vectors via `SidecarRef`, `ReferenceObservationCache` via `SidecarRef`, hierarchical `ConformanceEnvelope` via `SidecarRef`, `HintBundle`, `InteractionBundle`, `CompilerFeedback`), and an optional sibling `ReferenceModelBundle` (with `ReferenceNumericProfile`) for denotational truth — plus a separate `CompileRequest` boundary (with `CalibrationSetRef` for layered calibration) and a `ResolvedCompilePolicy` that captures final objectives, constraints, repair policy, and provenance before the transform pipeline begins, backed by a content-addressed `blobs/sha256/` store for efficient deduplication and lazy loading.
+- **Three oracles**: a `DenotationalOracle` consuming the sibling `ReferenceModelBundle` to define target-independent reference meaning, an `ArtifactOracle` defining the exact canonical semantics of the deployed model, and a `ScheduleOracle` proving that the scheduled execution refines that artifact semantics. The approximation relation is between the first two, recorded in `ConformanceEnvelope` / `conformance.json`, not embodied in any single oracle.
+- A real staged compiler pipeline: `ArtifactValidationAndUpgrade -> ResolvedCompilePolicy -> QuantGraph -> StaticBudgetReport -> GbInferIR (value/effect IR) -> ObservationPlan -> RangePlan -> StoragePlan -> SramPagePlan -> RomWindowPlan -> ArenaPlan -> GbSchedIR -> ResourceStateValidation -> (AsmIR -> ReachabilityValidation -> PlacedRom -> EncodedRom) -> BuildReports`, with a bounded `FeasibilityRefinementLoop` wrapping `RangePlan` through `GbSchedIR`, bracketed as policy/feasibility/transform/reporting envelopes and sped up by `gbf-store`'s two-level always-on content-addressed `StageCache` (shard-local + global).
+- A Bank0 cooperative runtime with deadline-assisted yielding that owns UI, interrupts, scheduling, resumption, a `BankLease`/`BankGuard` ABI, a `video_commit` queue driving UI budget, a versioned SRAM persistence protocol with explicit `DurabilityClass`-stratified record kinds, page states, `PersistChecksum` options, semantic/resume/build identity separation, and atomic `CommitGroupId`-based commit (with HRAM caching but SRAM-authoritative recovery), `ResidencyEpoch`-aware schedule-pack-driven runtime-mode switching (including a `Safe` mode with explicit `SafeModeTrigger`s), multi-resource `FrameBudget`, a `RuntimeDriftMonitor` with `DriftTrigger`s for automatic adaptation, a `FaultPolicy` table with `FaultDomain`s and graded `RecoveryAction`s, and an explicit liveness contract.
 
 The three shared contracts:
 
-* `gbf-hw` owns the **target contract** — actual machine/cartridge profile, physical constraints, and calibration schema.
-* `gbf-artifact` owns the **durable model contract** only — deployed artifact lineage (with per-component lowering shards) plus an optional sibling `ReferenceModelBundle` (with frozen `ReferenceProgram` and exported `SemanticCheckpointSchema`) for denotational truth, with content-addressed hashing and blob-backed tensor storage. Faster-moving schemas live in adjacent `gbf-policy`, `gbf-workload`, and `gbf-report`.
-* `gbf-abi` owns the **live execution contract** — `InferenceState` (with liveness counters), harness blocks (with a real control-plane `HarnessOp` set), fault codes (including liveness and drift faults), `FaultSnapshot` (with `FaultDomain` and `RecoveryAction`), `FaultPolicy`, trace events, `InterruptPolicy`, `ResourceLease`, semantic checkpoint IDs, `CompatibilityEnvelope`, `BootValidationPlan`, and `BuildIdentityBlock`, with `#[repr(C)]` layouts and a pinned `AbiVersion`.
+- `gbf-hw` owns the **target contract** — actual machine/cartridge profile, physical constraints, and calibration schema.
+- `gbf-artifact` owns the **durable model contract** only — deployed artifact lineage (with per-component lowering shards) plus an optional sibling `ReferenceModelBundle` (with frozen `ReferenceProgram` and exported `SemanticCheckpointSchema`) for denotational truth, with content-addressed hashing and blob-backed tensor storage. Faster-moving schemas live in adjacent `gbf-policy`, `gbf-workload`, and `gbf-report`.
+- `gbf-abi` owns the **live execution contract** — `InferenceState` (with liveness counters), harness blocks (with a real control-plane `HarnessOp` set), fault codes (including liveness and drift faults), `FaultSnapshot` (with `FaultDomain` and `RecoveryAction`), `FaultPolicy`, trace events, `InterruptPolicy`, `ResourceLease`, semantic checkpoint IDs, `CompatibilityEnvelope`, `BootValidationPlan`, and `BuildIdentityBlock`, with `#[repr(C)]` layouts and a pinned `AbiVersion`.
 
 The three semantic strata (cross-cutting the products, each owning a distinct notion of truth):
 
-* **Denotation** — target-independent reference meaning and quality baseline of the source reference model (`ReferenceModelBundle`); `DenotationalOracle` owns it.
-* **Artifact semantics** — exact canonical semantics of the frozen deployed model; `ArtifactOracle` owns it.
-* **Operational schedule** — resumable bank-aware execution of artifact semantics on the target; `ScheduleOracle` and the runtime own it.
+- **Denotation** — target-independent reference meaning and quality baseline of the source reference model (`ReferenceModelBundle`); `DenotationalOracle` owns it.
+- **Artifact semantics** — exact canonical semantics of the frozen deployed model; `ArtifactOracle` owns it.
+- **Operational schedule** — resumable bank-aware execution of artifact semantics on the target; `ScheduleOracle` and the runtime own it.
 
 The four object-level layers (every runtime entity is unambiguously one of these):
 
-* `ArtifactCore` — immutable semantic identity.
-* `TargetDataLoweringArtifact` — deterministic derived data form.
-* `CompileRequest` — how to build it today (target/profile/objective/calibration/constraints).
-* `CompiledBuild` — a versioned `BuildManifest` plus schedule packs, reports, certificates, ROM, listings, maps, and stage-cache refs, with `StabilityTier` annotations.
+- `ArtifactCore` — immutable semantic identity.
+- `TargetDataLoweringArtifact` — deterministic derived data form.
+- `CompileRequest` — how to build it today (target/profile/objective/calibration/constraints).
+- `CompiledBuild` — a versioned `BuildManifest` plus schedule packs, reports, certificates, ROM, listings, maps, and stage-cache refs, with `StabilityTier` annotations.
 
 The closure:
 
-* a measured calibration loop via `gbf-bench`: versioned `WorkloadManifest`s typed by `WorkloadClass`, layered calibration bundle production, measured kernel profiles, cycle-model drift reporting, constrained autotune over a small explicit knob set, and explicit `CompileObjective`s so "faster" is a real optimization target instead of folklore.
+- a measured calibration loop via `gbf-bench`: versioned `WorkloadManifest`s typed by `WorkloadClass`, layered calibration bundle production, measured kernel profiles, cycle-model drift reporting, constrained autotune over a small explicit knob set, and explicit `CompileObjective`s so "faster" is a real optimization target instead of folklore.
 
-Plus the non-negotiable architectural invariants: placement profiles (`StrictOnePerBank` / `Budgeted` / `PackedExperts`) instead of a rigid "one expert equals one bank" law; value/effect `GbInferIR` with explicit effect edges and no buffer commitment; `ObservationPlan` as the stable observation contract with explicit `ObservabilityMode` (invariant vs flexible), `TraceBudget`, and `MetricProbe`s for always-on lightweight telemetry; `StoragePlan` as the bridge between value semantics and spatial scheduling, with `LifetimeClass` replacing the old `survives_yield` boolean; generated yielding as a compiler-visible coroutine ABI with deadline-assisted safe points (`YieldCheckClass`), bounded interrupt latency, and bounded liveness; `ResidencyEpoch` as the intermediate object between `RomWindowPlan` and the final slice schedule; ISR code/data Bank0-resident and bank-agnostic *proven* by `ReachabilityValidation`; the `BankLease`/`BankGuard` ABI as the only legal path to MBC writes; the `video_commit` queue driving UI budget; `gbf-foundation` as the tiny cross-cutting crate for ids, hashes, and semver wrappers; `gbf-kernel` as a dedicated shared crate for kernel families, calling conventions, and autotune dimensions; `gbf-verify` as the owner of independent slow reference implementations (not `gbf-test`); risk-aware `CompileObjective`s with quantile and confidence gates via `RiskPolicy`; `ResolvedCompilePolicy` as the single answer to "what policy governed this build"; `FeasibilityRefinementLoop` as a bounded monotone repair loop with explicit `RepairPolicy` and `RepairProposal`s; profile-guided co-design via load-bearing `HintBundle` (facts/preferences/constraints) and bidirectional `CompilerFeedback`; `CompatibilityEnvelope` and ROM-resident `BuildIdentityBlock` as the single identity handshake for every subsystem; emulator accuracy solved by adapters around SameBoy/BGB rather than re-implementation; a four-profile canonical build set (`Bringup`, `Default`, `Trace`, `Recovery`) with `Speed` and `Size` only once measurements justify them; `DeployabilityEnvelope` + `gbf-train preflight` as the shift-left research-loop filter; independent slow reference implementations for verification-critical algorithms owned by `gbf-verify` so a shared bug cannot become self-validating; `ReferenceNumericProfile` with explicit `DeterminismClass` and `ReductionOrderPolicy` for the denotational stratum so exact equality gates are legal only when the contract admits them; `DataLoweringProfile` decoupling packed-data identity from the full target profile for better cache reuse; `SramPagePlan` as the SRAM analogue of `RomWindowPlan`; `gbf-store` as the dedicated CAS/transport/stage-cache crate so `gbf-artifact` stays schema-only; `RunManifest` and `FailureCapsule` making operational evidence and minimized repros first-class; `ResourceVector` and `FrameBudget` replacing scalar slice budgeting with multi-resource pressure; `CorpusManifest` turning data lineage into a reproducibility peer of build lineage; machine-checkable certificates for critical safety passes consumed by `gbf-verify`; and an always-on content-addressed `StageCache` so layout/backend bugs become ordinary bisect/debug problems.
+Plus the non-negotiable architectural invariants: placement profiles (`StrictOnePerBank` / `Budgeted` / `PackedExperts`) instead of a rigid "one expert equals one bank" law; value/effect `GbInferIR` with explicit effect edges and no buffer commitment; `ObservationPlan` as the stable observation contract with explicit `ObservabilityMode` (invariant vs flexible), `TraceBudget`, and `MetricProbe`s for always-on lightweight telemetry; `StoragePlan` as the bridge between value semantics and spatial scheduling, with `LifetimeClass` replacing the old `survives_yield` boolean; generated yielding as a compiler-visible coroutine ABI with deadline-assisted safe points (`YieldCheckClass`), bounded interrupt latency, and bounded liveness; `ResidencyEpoch` as the intermediate object between `RomWindowPlan` and the final slice schedule; ISR code/data Bank0-resident and bank-agnostic _proven_ by `ReachabilityValidation`; the `BankLease`/`BankGuard` ABI as the only legal path to MBC writes; the `video_commit` queue driving UI budget; `gbf-foundation` as the tiny cross-cutting crate for ids, hashes, and semver wrappers; `gbf-kernel` as a dedicated shared crate for kernel families, calling conventions, and autotune dimensions; `gbf-verify` as the owner of independent slow reference implementations (not `gbf-test`); risk-aware `CompileObjective`s with quantile and confidence gates via `RiskPolicy`; `ResolvedCompilePolicy` as the single answer to "what policy governed this build"; `FeasibilityRefinementLoop` as a bounded monotone repair loop with explicit `RepairPolicy` and `RepairProposal`s; profile-guided co-design via load-bearing `HintBundle` (facts/preferences/constraints) and bidirectional `CompilerFeedback`; `CompatibilityEnvelope` and ROM-resident `BuildIdentityBlock` as the single identity handshake for every subsystem; emulator accuracy solved by a single Rust-native gameroy adapter rather than re-implementation, with `gbf-debug` providing a stateless, rquickjs-scripted agent debugger on top via session files; a four-profile canonical build set (`Bringup`, `Default`, `Trace`, `Recovery`) with `Speed` and `Size` only once measurements justify them; `DeployabilityEnvelope` + `gbf-train preflight` as the shift-left research-loop filter; independent slow reference implementations for verification-critical algorithms owned by `gbf-verify` so a shared bug cannot become self-validating; `ReferenceNumericProfile` with explicit `DeterminismClass` and `ReductionOrderPolicy` for the denotational stratum so exact equality gates are legal only when the contract admits them; `DataLoweringProfile` decoupling packed-data identity from the full target profile for better cache reuse; `SramPagePlan` as the SRAM analogue of `RomWindowPlan`; `gbf-store` as the dedicated CAS/transport/stage-cache crate so `gbf-artifact` stays schema-only; `RunManifest` and `FailureCapsule` making operational evidence and minimized repros first-class; `ResourceVector` and `FrameBudget` replacing scalar slice budgeting with multi-resource pressure; `CorpusManifest` turning data lineage into a reproducibility peer of build lineage; machine-checkable certificates for critical safety passes consumed by `gbf-verify`; and an always-on content-addressed `StageCache` so layout/backend bugs become ordinary bisect/debug problems.
 
-The single most important architectural correction was the addition of `RomWindowPlan`. The single most important *additional* correction was the three-stratum semantic framing (denotation / artifact semantics / operational schedule) overlaid on the five-product decomposition. The previous pass added three structural corrections: (a) separate **semantic identity** from **build identity** via `CompileRequest`; (b) split **deterministic data lowerings** from **execution/build planning**; and (c) add a formal **observation plan** and **whole-program reachability validation**. The next revision pass added ten more corrections making the architecture a more complete artifact system: (1) split denotational truth from deployed artifact truth via `ReferenceModelBundle`; (2) factor kernels into a dedicated `gbf-kernel` crate; (3) replace `survives_yield: bool` with `LifetimeClass` and add atomic `CommitGroupId`-based persistence; (4) let one `CompiledBuild` contain a `SchedulePack` of multiple runtime-mode variants; (5) make compile objectives quantile-aware and confidence-aware via `RiskPolicy`; (6) add `CompatibilityEnvelope` and ROM-resident `BuildIdentityBlock` as the single identity handshake; (7) make observability perturbation first-class via `ObservabilityMode`, `TraceBudget`, and `FaultSnapshot`; (8) turn harness mode into a real control plane with `StepSlice`, `RunUntilCheckpoint`, `DumpArena`, `InjectFault`, and `PowerCut` ops; (9) emit machine-checkable certificates for critical safety passes consumed by `gbf-verify`; (10) back artifact storage with a content-addressed `blobs/sha256/` store and lazy loading via `BlobRef`. The current revision pass adds eleven more corrections that sharpen boundaries and operational realism: (1) add a bounded `FeasibilityRefinementLoop` with `RepairPolicy`/`RepairProposal`; (2) split calibration into layered `PlatformCalibrationBundle`/`KernelCalibrationBundle`/`RuntimeCalibrationBundle` via `CalibrationSetRef`; (3) introduce `ResolvedCompilePolicy` with `PolicyProvenance`; (4) narrow `ArtifactCore` by moving interaction/decode policy out of immutable identity (`LexicalSpec` + `DecodeCapabilitySet` in core, `InteractionBundle` + `SessionProfile` in aux/session); (5) replace rigid slice budgeting with hybrid timer-assisted safe points (`YieldCheckClass`, `soft_deadline_margin`); (6) simplify persistence by `DurabilityClass` with `PersistChecksum` options and SRAM-authoritative recovery; (7) add first-class `ResidencyEpoch` between `RomWindowPlan` and the schedule; (8) refactor dependency surface with `gbf-foundation` and `gbf-ir-schema`; (9) make `CompiledBuild` concrete with `BuildManifest` and `StabilityTier`; (10) add low-overhead `MetricProbe`s alongside event traces; (11) make the reference side truly reference-grade with `ReferenceNumericProfile` and move slow reference implementations into `gbf-verify`. The latest revision pass adds nine more corrections that sharpen honesty and operational realism: (1) make determinism an explicit contract via `DeterminismClass` and `ReductionOrderPolicy` so exact equality gates are only legal when the contract admits them; (2) decouple data lowering from the full target profile via `DataLoweringProfile`/`DataLoweringProfileId` for better cache reuse and sharper identity boundaries; (3) separate semantic state compatibility from build identity in persistence (`semantic_state_hash`/`resume_abi_hash`/`build_identity_hash` per record kind, with `Continuation` as its own `PersistKind`); (4) add an explicit `SramPagePlan` stage so SRAM page working sets and page-switch behavior have the same first-class planning as ROM visibility; (5) introduce a dedicated `gbf-store` crate for CAS resolution, stage-cache implementation, archive/directory transport, and integrity verification so `gbf-artifact` stays schema-only and `gbf-codegen` does not grow its own blob store; (6) make operational evidence first-class with hierarchical `ConformanceEnvelope`, `RunManifest`, and `FailureCapsule` so runs and failures are queryable scientific records; (7) replace scalar slice budgeting with a multi-resource pressure model (`ResourceVector` per slice, `FrameBudget` for the scheduler); (8) strengthen `gbf-data` into a real corpus-governance layer with `CorpusManifest`, source provenance, dedup policy, and contamination checking; (9) add an explicit `Safe` runtime mode and `Recovery` build profile with `SafeModeTrigger`s and `fallback_runtime_mode` in `RiskPolicy`. The latest revision pass adds ten more corrections focused on long-term evolution, operational state, and user-visible guarantees: (1) make contract evolution a first-class subsystem via `gbf-migrate` with `CompatibilityEpochs`, `MigrationReport`, and host-side upgrade DAGs; (2) make the stage cache shard-aware via `ComponentDigestSet` and `BuildShardManifest` for localized invalidation without changing semantic identity; (3) make ROM/SRAM/overlay/interrupt state explicit in the schedule via `ResourceLease`, `ResourceLeaseKind`, and `ResourceStateValidation`; (4) propagate uncertainty and evidence through the cost model via `CostEstimate`, `EvidenceClass`, and `EstimatedCostDelta`; (5) add service-level objectives for interactive behavior via `ServiceLevelObjective` inside `CompileObjective`; (6) add a runtime drift monitor with automatic demotion via `RuntimeDriftMonitor`, `DriftTrigger`, and `DriftAction`; (7) add fault domains and graded recovery actions via `FaultDomain`, `FaultPolicy`, `RecoveryAction`, and `BootValidationPlan`; (8) turn invariant observability from a promise into a certificate via `ObservabilityCertificate` and `PerturbationSummary`; (9) add `Quality` and `Interactive` workload classes with `ExperienceGate` and lightweight `DecodeTransformSet`; (10) add minimal `ReproducibilityManifest` for scientific reproducibility. The latest revision pass adds eleven more corrections focused on contract narrowness, denotational honesty, and planning completeness: (1) narrow `gbf-artifact` to durable model lineage only, with `gbf-policy`/`gbf-workload`/`gbf-report` as adjacent operational schema families; (2) freeze denotational truth as a `ReferenceProgram` inside `ReferenceModelBundle`; (3) promote `SemanticCheckpointSchema` to an exported contract in `ArtifactAux`; (4) shard target-data lowerings by component via `LoweringShardRef`/`LoweringShard`; (5) remove target-measured kernel timings from `ExportFacts` and add explicit `EvidenceScope` to facts and feedback; (6) add an explicit `OverlayPlan` pass between `RomWindowPlan` and `ArenaPlan`; (7) move `CompilerFeedback` out of `ArtifactAux` into build/run artifacts with explicit promotion; (8) add `ScheduleCostAnalysis` as the single objective-facing cost envelope producer; (9) add `MachineEffect` and `PrivilegeClass` typing to `gbf-asm` so `ReachabilityValidation` validates against explicit intent; (10) simplify `ReproducibilityManifest` and defer `StudyManifest` to a `study_tag`; (11) add best-effort failure reduction / testcase minimization to `FailureCapsule` and `gbf-test`. The latest revision pass adds nine training-contract corrections that make the training side implementable rather than hand-wavy: (1) reframe Burn as training front-end (backend portability, autodiff, optimizers, checkpoints, metrics), not the owner of deployed quantization semantics — `gbf-model` owns ternary projection, activation fake-quant, norm approximation, and export visitation; (2) add `RuntimeChromeBudget` / `RomBudgetSlot` / `BudgetSlotClass` as a build-specific post-chrome bank capacity contract so the trainer reasons about free slot capacities after the shell build; (3) make ternary numeric semantics explicit via `TernaryWeightPlan` / `ScaleGranularity` / `ScaleFormat` / `ThresholdPlan` because `WeightEncoding::Ternary2` alone does not specify quality, accumulator ranges, export bytes, or runtime cost; (4) freeze a dense teacher before hard ternarization, export it as `ReferenceModelBundle`, and train in explicit `TrainPhaseSpec` phases (`DenseTeacherWarmup` → `RouterWarmup` → `ExpertTernaryQat` → `FullNumericQat` → `HardenAndSelect`) with per-phase `QuantHardness` and `RouterTrainMode`; (5) fix the loss to be honest about what is differentiable — add `λ_distill`, `λ_balance`, `λ_zrouter`, `λ_switch` terms, disable `λ_shape`/`λ_overflow` for fixed-shape `Ternary2` experts; (6) restrict MoE to FFN path of selected blocks with two-matrix experts, tied embeddings, optional shared dense FFN branch, and no default GLU; (7) make the router switch-aware with `TemporalSwitchDigest`, `ClipSaturationDigest`, `ExpertPayloadDigest` in `ExportFacts`, `ExpertSlotAffinity` in `CompilePreferences`, z-loss, expert dropout, and temporal smoothness regularization; (8) add shadow export/compile during training via `ShadowCompilePolicy` and Pareto frontier checkpoint selection via `CheckpointFrontierPoint`; (9) make adaptive bank-aware expert structure an explicit M6 research mode via `ExpertShapePolicy::StructuredWidthGates`. The liveness contract, the `video_commit` queue, the `DeployabilityEnvelope` preflight, the always-on `StageCache`, the typed `WorkloadManifest`, and the split `HintBundle` (facts/preferences/constraints) remain load-bearing from previous passes.
+The single most important architectural correction was the addition of `RomWindowPlan`. The single most important _additional_ correction was the three-stratum semantic framing (denotation / artifact semantics / operational schedule) overlaid on the five-product decomposition. The previous pass added three structural corrections: (a) separate **semantic identity** from **build identity** via `CompileRequest`; (b) split **deterministic data lowerings** from **execution/build planning**; and (c) add a formal **observation plan** and **whole-program reachability validation**. The next revision pass added ten more corrections making the architecture a more complete artifact system: (1) split denotational truth from deployed artifact truth via `ReferenceModelBundle`; (2) factor kernels into a dedicated `gbf-kernel` crate; (3) replace `survives_yield: bool` with `LifetimeClass` and add atomic `CommitGroupId`-based persistence; (4) let one `CompiledBuild` contain a `SchedulePack` of multiple runtime-mode variants; (5) make compile objectives quantile-aware and confidence-aware via `RiskPolicy`; (6) add `CompatibilityEnvelope` and ROM-resident `BuildIdentityBlock` as the single identity handshake; (7) make observability perturbation first-class via `ObservabilityMode`, `TraceBudget`, and `FaultSnapshot`; (8) turn harness mode into a real control plane with `StepSlice`, `RunUntilCheckpoint`, `DumpArena`, `InjectFault`, and `PowerCut` ops; (9) emit machine-checkable certificates for critical safety passes consumed by `gbf-verify`; (10) back artifact storage with a content-addressed `blobs/sha256/` store and lazy loading via `BlobRef`. The current revision pass adds eleven more corrections that sharpen boundaries and operational realism: (1) add a bounded `FeasibilityRefinementLoop` with `RepairPolicy`/`RepairProposal`; (2) split calibration into layered `PlatformCalibrationBundle`/`KernelCalibrationBundle`/`RuntimeCalibrationBundle` via `CalibrationSetRef`; (3) introduce `ResolvedCompilePolicy` with `PolicyProvenance`; (4) narrow `ArtifactCore` by moving interaction/decode policy out of immutable identity (`LexicalSpec` + `DecodeCapabilitySet` in core, `InteractionBundle` + `SessionProfile` in aux/session); (5) replace rigid slice budgeting with hybrid timer-assisted safe points (`YieldCheckClass`, `soft_deadline_margin`); (6) simplify persistence by `DurabilityClass` with `PersistChecksum` options and SRAM-authoritative recovery; (7) add first-class `ResidencyEpoch` between `RomWindowPlan` and the schedule; (8) refactor dependency surface with `gbf-foundation` and `gbf-ir-schema`; (9) make `CompiledBuild` concrete with `BuildManifest` and `StabilityTier`; (10) add low-overhead `MetricProbe`s alongside event traces; (11) make the reference side truly reference-grade with `ReferenceNumericProfile` and move slow reference implementations into `gbf-verify`. The latest revision pass adds nine more corrections that sharpen honesty and operational realism: (1) make determinism an explicit contract via `DeterminismClass` and `ReductionOrderPolicy` so exact equality gates are only legal when the contract admits them; (2) decouple data lowering from the full target profile via `DataLoweringProfile`/`DataLoweringProfileId` for better cache reuse and sharper identity boundaries; (3) separate semantic state compatibility from build identity in persistence (`semantic_state_hash`/`resume_abi_hash`/`build_identity_hash` per record kind, with `Continuation` as its own `PersistKind`); (4) add an explicit `SramPagePlan` stage so SRAM page working sets and page-switch behavior have the same first-class planning as ROM visibility; (5) introduce a dedicated `gbf-store` crate for CAS resolution, stage-cache implementation, archive/directory transport, and integrity verification so `gbf-artifact` stays schema-only and `gbf-codegen` does not grow its own blob store; (6) make operational evidence first-class with hierarchical `ConformanceEnvelope`, `RunManifest`, and `FailureCapsule` so runs and failures are queryable scientific records; (7) replace scalar slice budgeting with a multi-resource pressure model (`ResourceVector` per slice, `FrameBudget` for the scheduler); (8) strengthen `gbf-data` into a real corpus-governance layer with `CorpusManifest`, source provenance, dedup policy, and contamination checking; (9) add an explicit `Safe` runtime mode and `Recovery` build profile with `SafeModeTrigger`s and `fallback_runtime_mode` in `RiskPolicy`. The latest revision pass adds ten more corrections focused on long-term evolution, operational state, and user-visible guarantees: (1) make contract evolution a first-class subsystem via `gbf-migrate` with `CompatibilityEpochs`, `MigrationReport`, and host-side upgrade DAGs; (2) make the stage cache shard-aware via `ComponentDigestSet` and `BuildShardManifest` for localized invalidation without changing semantic identity; (3) make ROM/SRAM/overlay/interrupt state explicit in the schedule via `ResourceLease`, `ResourceLeaseKind`, and `ResourceStateValidation`; (4) propagate uncertainty and evidence through the cost model via `CostEstimate`, `EvidenceClass`, and `EstimatedCostDelta`; (5) add service-level objectives for interactive behavior via `ServiceLevelObjective` inside `CompileObjective`; (6) add a runtime drift monitor with automatic demotion via `RuntimeDriftMonitor`, `DriftTrigger`, and `DriftAction`; (7) add fault domains and graded recovery actions via `FaultDomain`, `FaultPolicy`, `RecoveryAction`, and `BootValidationPlan`; (8) turn invariant observability from a promise into a certificate via `ObservabilityCertificate` and `PerturbationSummary`; (9) add `Quality` and `Interactive` workload classes with `ExperienceGate` and lightweight `DecodeTransformSet`; (10) add minimal `ReproducibilityManifest` for scientific reproducibility. The latest revision pass adds eleven more corrections focused on contract narrowness, denotational honesty, and planning completeness: (1) narrow `gbf-artifact` to durable model lineage only, with `gbf-policy`/`gbf-workload`/`gbf-report` as adjacent operational schema families; (2) freeze denotational truth as a `ReferenceProgram` inside `ReferenceModelBundle`; (3) promote `SemanticCheckpointSchema` to an exported contract in `ArtifactAux`; (4) shard target-data lowerings by component via `LoweringShardRef`/`LoweringShard`; (5) remove target-measured kernel timings from `ExportFacts` and add explicit `EvidenceScope` to facts and feedback; (6) add an explicit `OverlayPlan` pass between `RomWindowPlan` and `ArenaPlan`; (7) move `CompilerFeedback` out of `ArtifactAux` into build/run artifacts with explicit promotion; (8) add `ScheduleCostAnalysis` as the single objective-facing cost envelope producer; (9) add `MachineEffect` and `PrivilegeClass` typing to `gbf-asm` so `ReachabilityValidation` validates against explicit intent; (10) simplify `ReproducibilityManifest` and defer `StudyManifest` to a `study_tag`; (11) add best-effort failure reduction / testcase minimization to `FailureCapsule` and `gbf-test`. The latest revision pass adds nine training-contract corrections that make the training side implementable rather than hand-wavy: (1) reframe Burn as training front-end (backend portability, autodiff, optimizers, checkpoints, metrics), not the owner of deployed quantization semantics — `gbf-model` owns ternary projection, activation fake-quant, norm approximation, and export visitation; (2) add `RuntimeChromeBudget` / `RomBudgetSlot` / `BudgetSlotClass` as a build-specific post-chrome bank capacity contract so the trainer reasons about free slot capacities after the shell build; (3) make ternary numeric semantics explicit via `TernaryWeightPlan` / `ScaleGranularity` / `ScaleFormat` / `ThresholdPlan` because `WeightEncoding::Ternary2` alone does not specify quality, accumulator ranges, export bytes, or runtime cost; (4) freeze a dense teacher before hard ternarization, export it as `ReferenceModelBundle`, and train in explicit `TrainPhaseSpec` phases (`DenseTeacherWarmup` → `RouterWarmup` → `ExpertTernaryQat` → `FullNumericQat` → `HardenAndSelect`) with per-phase `QuantHardness` and `RouterTrainMode`; (5) fix the loss to be honest about what is differentiable — add `λ_distill`, `λ_balance`, `λ_zrouter`, `λ_switch` terms, disable `λ_shape`/`λ_overflow` for fixed-shape `Ternary2` experts; (6) restrict MoE to FFN path of selected blocks with two-matrix experts, tied embeddings, optional shared dense FFN branch, and no default GLU; (7) make the router switch-aware with `TemporalSwitchDigest`, `ClipSaturationDigest`, `ExpertPayloadDigest` in `ExportFacts`, `ExpertSlotAffinity` in `CompilePreferences`, z-loss, expert dropout, and temporal smoothness regularization; (8) add shadow export/compile during training via `ShadowCompilePolicy` and Pareto frontier checkpoint selection via `CheckpointFrontierPoint`; (9) make adaptive bank-aware expert structure an explicit M6 research mode via `ExpertShapePolicy::StructuredWidthGates`. The liveness contract, the `video_commit` queue, the `DeployabilityEnvelope` preflight, the always-on `StageCache`, the typed `WorkloadManifest`, and the split `HintBundle` (facts/preferences/constraints) remain load-bearing from previous passes.
 
 That gives you a project that behaves like a maintainable hardware-aware compiler plus cooperative runtime, rather than a heroic pile of emitted bytes. The next useful artifacts are a literal workspace skeleton plus the first shared types: `ArtifactCore`, `ArtifactManifest`, `ArtifactSemanticPayload`, `TargetDataLoweringArtifact`, `ArtifactAux`, `ReferenceModelBundle`, `ReferenceLink`, `ReferenceNumericProfile`, `ReferenceObservationCache`, `ConformanceEnvelope`, `BlobRef`, `BlobCodec`, `CompileRequest`, `ResolvedCompilePolicy`, `PolicyProvenance`, `CompileObjective`, `RiskPolicy`, `RuntimeMode`, `CompileProfileId`, `CalibrationSetRef`, `PlatformCalibrationBundle`, `KernelCalibrationBundle`, `RuntimeCalibrationBundle`, `LexicalSpec`, `InteractionBundle`, `TranscriptSpec`, `SessionProfile`, `DecodeMode`, `DecodeCapabilitySet`, `DecodePolicy`, `HintBundle` (`ExportFacts` / `CompilePreferences` / `BuildConstraints`), `RepairPolicy`, `RepairProposal`, `DataLoweringProfile`, `DataLoweringProfileId`, `DeterminismClass`, `ReductionOrderPolicy`, `SidecarRef`, `WorkloadManifest` / `WorkloadClass` / `AcceptanceMatrix` / `ExecutionMatrix` / `ObservationPolicy`, `ConformanceEnvelope` (hierarchical), `RunManifest` (with `study_tag` and `ReproducibilityManifest`), `FailureCapsule` (with `minimized_workload` and `reduction_log`), `SemanticStratum`, `ReproducibilityManifest`, `CorpusManifest`, `DeployabilityEnvelope`, `SequenceSemanticsSpec`, `TargetProfile`, `KernelResidency`, `KernelSpec` / `KernelSpecId`, `StorageClass`, `LifetimeClass`, `Materialization`, `StorageBinding`, `SramPagePlan`, `GbNode` / `InferOp` (value/effect form), `ObservationPlan` / `SemanticObservation` / `OperationalProbe` / `MetricProbe`, `ObservabilityMode`, `TraceBudget`, `ResourceVector`, `FrameBudget`, `SchedSlice`, `ResidencyEpoch`, `ResourceLease` / `ResourceLeaseKind`, `SchedulePack` / `ModeSwitchPolicy` (with `SafeModeTrigger`s and `DriftTrigger`s), `RuntimeDriftMonitor`, `SchedulerPolicy` (with `FrameBudget`), `YieldCheckClass`, `UiCommitPlan`, `InterruptPolicy`, `SectionRole`, `InferenceState` (with `progress_epoch` / `last_checkpoint` / `no_progress_frames`), `CompatibilityEnvelope`, `BuildIdentityBlock`, `FaultSnapshot`, `HarnessCommandBlock`, `HarnessResultBlock`, `HarnessOp`, `HarnessResultKind`, `FaultCode`, `FaultDomain`, `FaultPolicy`, `RecoveryAction`, `BootValidationPlan`, `CompiledBuild`, `BuildManifest`, `StabilityTier`, `PersistHeader` (with `semantic_state_hash` / `resume_abi_hash` / `build_identity_hash`), `PersistGroupCommit`, `CommitGroupId`, `DurabilityClass`, `PersistChecksum`, `PersistKind` (including `Continuation`), `PageState`, `ServiceLevelObjective`, `ExperienceGate`, `DecodeTransformSet`, `CostEstimate` / `EvidenceClass` / `EstimatedCostDelta`, `ComponentDigestSet`, `BuildShardManifest`, `CompatibilityEpochs`, `MigrationReport`, `ObservabilityCertificate`, `ReferenceProgram`, `SemanticCheckpointSchema`, `LoweringShardRef` / `LoweringShard`, `EvidenceScope`, `OverlayPlan`, `ScheduleCostReport`, `MachineEffect` / `PrivilegeClass`, `SemanticCheckpointId` / `CompactCheckpointId`, `RuntimeChromeBudget` / `RomBudgetSlot` / `BudgetSlotClass`, `TernaryWeightPlan` / `ScaleGranularity` / `ScaleFormat` / `ThresholdPlan`, `TrainPhaseKind` / `TrainPhaseSpec` / `QuantHardness` / `RouterTrainMode`, `ShadowCompilePolicy` / `CheckpointFrontierPoint`, `ExpertShapePolicy`, `TemporalSwitchDigest` / `ClipSaturationDigest` / `ExpertPayloadDigest` / `ExpertSlotAffinity`, and `ExpertTransitionDigest`.
 
@@ -2579,4 +2990,5 @@ That gives you a project that behaves like a maintainable hardware-aware compile
 [3]: https://gbdev.io/pandocs/Interrupt_Sources.html "Interrupt Sources - Pan Docs"
 [4]: https://gbdev.io/pandocs/halt.html "HALT - Pan Docs"
 [5]: https://gbdev.io/pandocs/Rendering.html "Rendering - Pan Docs"
-[6]: https://github.com/LIJI32/SameBoy "SameBoy - GitHub"
+[6]: https://github.com/Rodrigodd/gameroy "gameroy - GitHub"
+[7]: https://github.com/delskayn/rquickjs "rquickjs - GitHub"
