@@ -1,17 +1,19 @@
 //! Branch relaxation and legalization.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 
 use crate::isa::{Instr, Reg8, Reg16Data};
-use crate::layout::{AddressSpace, BankIndex, LayoutPlan, PlacedSection};
+use crate::layout::{
+    AddressSpace, BankIndex, LayoutPlan, PlacedSection, ROM0_END_EXCLUSIVE, ROM0_THUNK_POOL_START,
+};
 use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
-    BranchKind, DataBlock, Label, LegalizationOp, LegalizedSection, LoweredSection, OrderedItem,
-    SectionId, SectionRole, SymbolicBranch,
+    BranchKind, CallReachability, DataBlock, ItemOrder, Label, LeaseId, LegalizationOp,
+    LegalizedSection, LoweredSection, OrderedItem, SectionId, SectionRole, SymbolicBranch,
 };
 use crate::symbols::{SymbolAddress, SymbolName, SymbolTable, SymbolTableError};
 
@@ -30,12 +32,17 @@ pub struct ResolvedThunkRequest {
     pub target: SymbolName,
     pub callee_bank: BankIndex,
     pub target_cpu_addr: u16,
+    pub lease_chain: Vec<LeaseId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelaxError {
     NoFixedPoint {
         iters: u8,
+    },
+    ThunkPoolExhausted {
+        requested: u32,
+        capacity: u32,
     },
     MissingPlacement {
         section_id: SectionId,
@@ -49,6 +56,15 @@ pub enum RelaxError {
         used_in: SectionId,
     },
     DuplicateSymbol(SymbolTableError),
+    SectionTooLarge {
+        section_id: SectionId,
+        size: u32,
+    },
+    SymbolAddressOutOfRange {
+        name: SymbolName,
+        section_id: SectionId,
+        cpu_addr: u32,
+    },
     InvalidRelativeOffset {
         offset: i32,
     },
@@ -69,6 +85,13 @@ impl fmt::Display for RelaxError {
                     "branch relaxation did not reach a fixed point in {iters} iterations"
                 )
             }
+            Self::ThunkPoolExhausted {
+                requested,
+                capacity,
+            } => write!(
+                f,
+                "far-call thunks need {requested} bytes but thunk pool has {capacity} bytes"
+            ),
             Self::MissingPlacement { section_id } => {
                 write!(f, "section {} has no placement", section_id.get())
             }
@@ -88,6 +111,20 @@ impl fmt::Display for RelaxError {
                 )
             }
             Self::DuplicateSymbol(error) => write!(f, "{error}"),
+            Self::SectionTooLarge { section_id, size } => write!(
+                f,
+                "section {} relaxed to {size} bytes, which does not fit in u16",
+                section_id.get()
+            ),
+            Self::SymbolAddressOutOfRange {
+                name,
+                section_id,
+                cpu_addr,
+            } => write!(
+                f,
+                "symbol {name} in section {} resolves to out-of-range CPU address ${cpu_addr:05X}",
+                section_id.get()
+            ),
             Self::InvalidRelativeOffset { offset } => {
                 write!(f, "relative branch offset {offset} is outside i8 range")
             }
@@ -121,8 +158,26 @@ pub fn relax_and_legalize(
                 .count()
         })
         .sum();
-    let hard_cap = 1 + relaxable_branch_count;
-    let mut wide_jumps: BTreeMap<(SectionId, u32), bool> = BTreeMap::new();
+    let unique_far_targets: BTreeSet<SymbolName> = sections
+        .iter()
+        .flat_map(|section| {
+            section
+                .legalization_ops
+                .iter()
+                .map(|op| match &op.data {
+                    LegalizationOp::FarCall { target, .. } => target.clone(),
+                })
+                .chain(section.branches.iter().filter_map(|branch| {
+                    if let CallReachability::AutoFar { .. } = &branch.data.call_reachability {
+                        Some(branch.data.target.clone())
+                    } else {
+                        None
+                    }
+                }))
+        })
+        .collect();
+    let hard_cap = 1 + relaxable_branch_count + unique_far_targets.len();
+    let mut wide_jumps: BTreeMap<(SectionId, ItemOrder), bool> = BTreeMap::new();
     let mut iterations = 0_u8;
 
     for iter in 0..=hard_cap {
@@ -131,22 +186,23 @@ pub fn relax_and_legalize(
         let mut changed = false;
         for section in sections {
             let placed = placed_for(layout, section.id)?;
-            let offsets = item_offsets(section, placed, &wide_jumps)?;
+            let offsets = section_offsets(section, placed, &wide_jumps)?;
             for branch in &section.branches {
                 if branch.data.kind != BranchKind::Jump {
                     continue;
                 }
-                let source_cpu = placed.cpu_start as i32 + offsets[&branch.seq_index] as i32;
+                let branch_order = branch.order();
+                let source_cpu = placed.cpu_start as i32 + offsets.offsets[&branch_order] as i32;
                 let target = resolve_target(&symbols, layout, &branch.data.target, section.id)?;
                 ensure_directly_reachable(section.id, placed, &target, &branch.data.target)?;
                 let delta = target.cpu_addr as i32 - (source_cpu + 2);
                 if !(-128..=127).contains(&delta)
                     && !wide_jumps
-                        .get(&(section.id, branch.seq_index))
+                        .get(&(section.id, branch_order))
                         .copied()
                         .unwrap_or(false)
                 {
-                    wide_jumps.insert((section.id, branch.seq_index), true);
+                    wide_jumps.insert((section.id, branch_order), true);
                     changed = true;
                 }
             }
@@ -176,25 +232,39 @@ pub fn relax_and_legalize(
             &mut thunk_by_target,
             &mut thunk_order,
         )?;
-        let final_size = legalized_size(&legal, placed)? as u16;
+        let final_offsets = section_offsets(section, placed, &wide_jumps)?;
+        let final_size =
+            u16::try_from(final_offsets.size).map_err(|_| RelaxError::SectionTooLarge {
+                section_id: section.id,
+                size: final_offsets.size,
+            })?;
         if let Some(placed_mut) = final_layout
             .sections
             .iter_mut()
             .find(|candidate| candidate.id == section.id)
         {
             placed_mut.final_size = final_size;
+            placed_mut.alignment_padding = final_offsets.alignment_padding;
         }
         legalized.push(legal);
     }
 
     let mut requests = Vec::with_capacity(thunk_order.len());
+    let requested_thunk_bytes = (thunk_order.len() as u32) * 0x10;
+    let thunk_capacity = u32::from(ROM0_END_EXCLUSIVE - ROM0_THUNK_POOL_START);
+    if requested_thunk_bytes > thunk_capacity {
+        return Err(RelaxError::ThunkPoolExhausted {
+            requested: requested_thunk_bytes,
+            capacity: thunk_capacity,
+        });
+    }
     for (idx, target) in thunk_order.iter().enumerate() {
         let request = thunk_by_target
             .get(target)
             .expect("thunk_order entries are present")
             .clone();
         let thunk_id = SectionId::new(0xF000 + idx as u32);
-        let cpu_start = 0x3F00 + (idx as u16 * 0x10);
+        let cpu_start = thunk_cpu_start(idx)?;
         symbols
             .insert(
                 request.thunk_symbol.clone(),
@@ -226,17 +296,17 @@ pub fn relax_and_legalize(
 fn build_symbol_table(
     sections: &[LoweredSection],
     layout: &LayoutPlan,
-    wide_jumps: &BTreeMap<(SectionId, u32), bool>,
+    wide_jumps: &BTreeMap<(SectionId, ItemOrder), bool>,
 ) -> Result<SymbolTable, RelaxError> {
     let mut table = SymbolTable::new();
     for section in sections {
         let placed = placed_for(layout, section.id)?;
-        let offsets = item_offsets(section, placed, wide_jumps)?;
+        let offsets = section_offsets(section, placed, wide_jumps)?;
         for label in &section.labels {
             table
                 .insert(
                     label.data.name.clone(),
-                    SymbolAddress::new(section.id, offsets[&label.seq_index]),
+                    SymbolAddress::new(section.id, offsets.offsets[&label.order()]),
                 )
                 .map_err(RelaxError::DuplicateSymbol)?;
         }
@@ -249,11 +319,11 @@ fn legalize_section(
     placed: &PlacedSection,
     layout: &LayoutPlan,
     symbols: &SymbolTable,
-    wide_jumps: &BTreeMap<(SectionId, u32), bool>,
+    wide_jumps: &BTreeMap<(SectionId, ItemOrder), bool>,
     thunk_by_target: &mut BTreeMap<SymbolName, ResolvedThunkRequest>,
     thunk_order: &mut Vec<SymbolName>,
 ) -> Result<LegalizedSection, RelaxError> {
-    let offsets = item_offsets(section, placed, wide_jumps)?;
+    let offsets = section_offsets(section, placed, wide_jumps)?;
     let mut labels = section.labels.clone();
     let mut instrs = section.instrs.clone();
     let data_blocks = section.data_blocks.clone();
@@ -268,13 +338,34 @@ fn legalize_section(
         wide_jumps,
     };
     for branch in &section.branches {
-        emitted.push(OrderedItem::new(
+        let instr = if branch.data.kind == BranchKind::Call
+            && let CallReachability::AutoFar { lease_chain } = &branch.data.call_reachability
+        {
+            Instr::Call {
+                cond: branch.data.cond,
+                addr: call_addr_for_target(
+                    &mut CallThunkContext {
+                        used_in: section.id,
+                        placed,
+                        layout,
+                        symbols,
+                        thunk_by_target,
+                        thunk_order,
+                    },
+                    &branch.data.target,
+                    lease_chain,
+                )?,
+            }
+        } else {
             legalize_branch(
                 &branch_ctx,
                 &branch.data,
-                branch.seq_index,
-                offsets[&branch.seq_index],
-            )?,
+                branch.order(),
+                offsets.offsets[&branch.order()],
+            )?
+        };
+        emitted.push(OrderedItem::new(
+            instr,
             branch.seq_index,
             branch.provenance.clone(),
         ));
@@ -282,31 +373,22 @@ fn legalize_section(
 
     for op in &section.legalization_ops {
         match &op.data {
-            LegalizationOp::FarCall { target, .. } => {
-                let target_resolved = resolve_target(symbols, layout, target, section.id)?;
-                let call_addr = if directly_reachable(placed.bank, target_resolved.bank) {
-                    target_resolved.cpu_addr
-                } else {
-                    if !thunk_by_target.contains_key(target) {
-                        thunk_by_target.insert(
-                            target.clone(),
-                            ResolvedThunkRequest {
-                                thunk_symbol: SymbolName::runtime_thunk_for(target)
-                                    .expect("validated target segments produce thunk symbol"),
-                                target: target.clone(),
-                                callee_bank: target_resolved.bank,
-                                target_cpu_addr: target_resolved.cpu_addr,
-                            },
-                        );
-                        thunk_order.push(target.clone());
-                    }
-                    // The final thunk address is deterministic from insertion order.
-                    let idx = thunk_order
-                        .iter()
-                        .position(|key| key == target)
-                        .expect("inserted thunk target has an order");
-                    0x3F00 + (idx as u16 * 0x10)
-                };
+            LegalizationOp::FarCall {
+                target,
+                lease_chain,
+            } => {
+                let call_addr = call_addr_for_target(
+                    &mut CallThunkContext {
+                        used_in: section.id,
+                        placed,
+                        layout,
+                        symbols,
+                        thunk_by_target,
+                        thunk_order,
+                    },
+                    target,
+                    lease_chain,
+                )?;
                 emitted.push(OrderedItem::new(
                     Instr::Call {
                         cond: None,
@@ -319,13 +401,14 @@ fn legalize_section(
         }
     }
     instrs.extend(emitted);
-    labels.sort_by_key(|item| item.seq_index);
-    instrs.sort_by_key(|item| item.seq_index);
+    labels.sort_by_key(|item| item.order());
+    instrs.sort_by_key(|item| item.order());
 
     Ok(LegalizedSection {
         id: section.id,
         role: section.role,
         name: section.name.clone(),
+        privilege: section.privilege.clone(),
         align: section.align,
         size_hint_bytes: section.size_hint_bytes,
         next_seq_index: section.next_seq_index,
@@ -341,13 +424,13 @@ struct BranchLegalizationContext<'a> {
     placed: &'a PlacedSection,
     layout: &'a LayoutPlan,
     symbols: &'a SymbolTable,
-    wide_jumps: &'a BTreeMap<(SectionId, u32), bool>,
+    wide_jumps: &'a BTreeMap<(SectionId, ItemOrder), bool>,
 }
 
 fn legalize_branch(
     ctx: &BranchLegalizationContext<'_>,
     branch: &SymbolicBranch,
-    seq_index: u32,
+    order: ItemOrder,
     offset: u32,
 ) -> Result<Instr, RelaxError> {
     let target = resolve_target(ctx.symbols, ctx.layout, &branch.target, ctx.used_in)?;
@@ -356,7 +439,7 @@ fn legalize_branch(
         BranchKind::Jump => {
             if ctx
                 .wide_jumps
-                .get(&(ctx.used_in, seq_index))
+                .get(&(ctx.used_in, order))
                 .copied()
                 .unwrap_or(false)
             {
@@ -382,6 +465,57 @@ fn legalize_branch(
     }
 }
 
+struct CallThunkContext<'a> {
+    used_in: SectionId,
+    placed: &'a PlacedSection,
+    layout: &'a LayoutPlan,
+    symbols: &'a SymbolTable,
+    thunk_by_target: &'a mut BTreeMap<SymbolName, ResolvedThunkRequest>,
+    thunk_order: &'a mut Vec<SymbolName>,
+}
+
+fn call_addr_for_target(
+    ctx: &mut CallThunkContext<'_>,
+    target: &SymbolName,
+    lease_chain: &[LeaseId],
+) -> Result<u16, RelaxError> {
+    let target_resolved = resolve_target(ctx.symbols, ctx.layout, target, ctx.used_in)?;
+    if directly_reachable(ctx.placed.bank, target_resolved.bank) {
+        return Ok(target_resolved.cpu_addr);
+    }
+    if !ctx.thunk_by_target.contains_key(target) {
+        ctx.thunk_by_target.insert(
+            target.clone(),
+            ResolvedThunkRequest {
+                thunk_symbol: SymbolName::runtime_thunk_for(target)
+                    .expect("validated target segments produce thunk symbol"),
+                target: target.clone(),
+                callee_bank: target_resolved.bank,
+                target_cpu_addr: target_resolved.cpu_addr,
+                lease_chain: lease_chain.to_vec(),
+            },
+        );
+        ctx.thunk_order.push(target.clone());
+    }
+    let idx = ctx
+        .thunk_order
+        .iter()
+        .position(|key| key == target)
+        .expect("inserted thunk target has an order");
+    thunk_cpu_start(idx)
+}
+
+fn thunk_cpu_start(idx: usize) -> Result<u16, RelaxError> {
+    let cpu_start = u32::from(ROM0_THUNK_POOL_START) + (idx as u32 * 0x10);
+    if cpu_start + 10 > u32::from(ROM0_END_EXCLUSIVE) {
+        return Err(RelaxError::ThunkPoolExhausted {
+            requested: (idx as u32 + 1) * 0x10,
+            capacity: u32::from(ROM0_END_EXCLUSIVE - ROM0_THUNK_POOL_START),
+        });
+    }
+    Ok(cpu_start as u16)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResolvedTarget {
     bank: BankIndex,
@@ -401,9 +535,15 @@ fn resolve_target(
             used_in,
         })?;
     let placed = placed_for(layout, address.section)?;
+    let cpu_addr = u32::from(placed.cpu_start) + address.offset;
+    let cpu_addr = u16::try_from(cpu_addr).map_err(|_| RelaxError::SymbolAddressOutOfRange {
+        name: target.clone(),
+        section_id: address.section,
+        cpu_addr,
+    })?;
     Ok(ResolvedTarget {
         bank: placed.bank,
-        cpu_addr: placed.cpu_start + address.offset as u16,
+        cpu_addr,
     })
 }
 
@@ -437,46 +577,53 @@ fn placed_for(layout: &LayoutPlan, section_id: SectionId) -> Result<&PlacedSecti
         .ok_or(RelaxError::MissingPlacement { section_id })
 }
 
-fn item_offsets(
+struct SectionOffsets {
+    offsets: BTreeMap<ItemOrder, u32>,
+    alignment_padding: BTreeMap<ItemOrder, u16>,
+    size: u32,
+}
+
+fn section_offsets(
     section: &LoweredSection,
     placed: &PlacedSection,
-    wide_jumps: &BTreeMap<(SectionId, u32), bool>,
-) -> Result<BTreeMap<u32, u32>, RelaxError> {
+    wide_jumps: &BTreeMap<(SectionId, ItemOrder), bool>,
+) -> Result<SectionOffsets, RelaxError> {
     let mut cursor = 0_u32;
     let mut offsets = BTreeMap::new();
+    let mut alignment_padding = BTreeMap::new();
     let mut items = Vec::new();
     items.extend(
         section
             .labels
             .iter()
-            .map(|item| (item.seq_index, OffsetItem::Label)),
+            .map(|item| (item.order(), OffsetItem::Label)),
     );
     items.extend(section.instrs.iter().map(|item| {
         (
-            item.seq_index,
+            item.order(),
             OffsetItem::Fixed(u32::from(item.data.byte_len())),
         )
     }));
     items.extend(section.data_blocks.iter().map(|item| {
         (
-            item.seq_index,
+            item.order(),
             OffsetItem::Fixed(match &item.data {
                 DataBlock::Bytes(bytes) => bytes.len() as u32,
                 DataBlock::Words(words) => words.len() as u32 * 2,
             }),
         )
     }));
-    items.extend(section.alignments.iter().map(|item| {
-        (
-            item.seq_index,
-            OffsetItem::Align(placed.alignment_padding.get(&item.seq_index).copied()),
-        )
-    }));
+    items.extend(
+        section
+            .alignments
+            .iter()
+            .map(|item| (item.order(), OffsetItem::Align(item.data.0.get()))),
+    );
     items.extend(section.branches.iter().map(|item| {
         let size = match item.data.kind {
             BranchKind::Jump => {
                 if wide_jumps
-                    .get(&(section.id, item.seq_index))
+                    .get(&(section.id, item.order()))
                     .copied()
                     .unwrap_or(false)
                 {
@@ -487,72 +634,49 @@ fn item_offsets(
             }
             BranchKind::Call => 3,
         };
-        (item.seq_index, OffsetItem::Fixed(size))
+        (item.order(), OffsetItem::Fixed(size))
     }));
     items.extend(
         section
             .legalization_ops
             .iter()
-            .map(|item| (item.seq_index, OffsetItem::Fixed(3))),
+            .map(|item| (item.order(), OffsetItem::Fixed(3))),
     );
-    items.sort_by_key(|(seq_index, _)| *seq_index);
-    for (seq_index, item) in items {
-        offsets.insert(seq_index, cursor);
+    items.sort_by_key(|(order, _)| *order);
+    for (order, item) in items {
+        offsets.insert(order, cursor);
         match item {
             OffsetItem::Label => {}
             OffsetItem::Fixed(size) => cursor += size,
-            OffsetItem::Align(padding) => {
-                let padding = padding.ok_or(RelaxError::MissingAlignmentPlan {
+            OffsetItem::Align(align) => {
+                let abs = u32::from(placed.cpu_start) + cursor;
+                let padding = align_u32(abs, align) - abs;
+                let padding = u16::try_from(padding).map_err(|_| RelaxError::SectionTooLarge {
                     section_id: section.id,
-                    seq_index,
+                    size: padding,
                 })?;
+                alignment_padding.insert(order, padding);
                 cursor += u32::from(padding);
             }
         }
     }
-    Ok(offsets)
+    Ok(SectionOffsets {
+        offsets,
+        alignment_padding,
+        size: cursor,
+    })
 }
 
-fn legalized_size(section: &LegalizedSection, placed: &PlacedSection) -> Result<u32, RelaxError> {
-    let mut cursor = 0_u32;
-    let mut items = Vec::new();
-    items.extend(section.labels.iter().map(|item| (item.seq_index, 0_u32)));
-    items.extend(
-        section
-            .instrs
-            .iter()
-            .map(|item| (item.seq_index, u32::from(item.data.byte_len()))),
-    );
-    items.extend(section.data_blocks.iter().map(|item| {
-        (
-            item.seq_index,
-            match &item.data {
-                DataBlock::Bytes(bytes) => bytes.len() as u32,
-                DataBlock::Words(words) => words.len() as u32 * 2,
-            },
-        )
-    }));
-    for item in &section.alignments {
-        let padding = placed.alignment_padding.get(&item.seq_index).ok_or(
-            RelaxError::MissingAlignmentPlan {
-                section_id: section.id,
-                seq_index: item.seq_index,
-            },
-        )?;
-        items.push((item.seq_index, u32::from(*padding)));
-    }
-    items.sort_by_key(|(seq, _)| *seq);
-    for (_, size) in items {
-        cursor += size;
-    }
-    Ok(cursor)
+fn align_u32(value: u32, align: u16) -> u32 {
+    let align = u32::from(align);
+    value.div_ceil(align) * align
 }
 
 #[derive(Debug, Clone, Copy)]
 enum OffsetItem {
     Label,
     Fixed(u32),
-    Align(Option<u16>),
+    Align(u16),
 }
 
 fn materialize_stub_thunk(
@@ -569,6 +693,7 @@ fn materialize_stub_thunk(
         id,
         role: SectionRole::Bank0Nucleus,
         name: request.thunk_symbol.clone(),
+        privilege: crate::section::SectionPrivilege::normal(),
         align: NonZeroU16::new(1).expect("nonzero"),
         size_hint_bytes: Some(10),
         next_seq_index: 5,
@@ -623,7 +748,7 @@ fn materialize_stub_thunk(
 mod tests {
     use super::*;
     use crate::layout::{PinnedPlacement, PlacementProfile, layout_into_banks};
-    use crate::section::{SymbolId, SymbolicBranch};
+    use crate::section::{Align, SymbolId, SymbolicBranch};
 
     fn prov() -> InstrProvenance {
         InstrProvenance::new(PlanningStage::Backend)
@@ -634,6 +759,7 @@ mod tests {
             id: SectionId::new(id),
             role,
             name,
+            privilege: crate::section::SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
             next_seq_index: 0,
@@ -710,6 +836,46 @@ mod tests {
             relaxed.sections[0].instrs[0].data,
             Instr::JrRel { cond: None, off: 0 }
         );
+    }
+
+    #[test]
+    fn short_jr_recomputes_alignment_padding() {
+        let target = SymbolName::runtime("test", "aligned_label").expect("symbol");
+        let mut section = empty_section(
+            1,
+            SectionRole::Bank0Nucleus,
+            SymbolName::runtime("test", "caller").expect("symbol"),
+        );
+        section.branches.push(OrderedItem::new(
+            SymbolicBranch::jump(target.clone(), None),
+            0,
+            prov(),
+        ));
+        section.alignments.push(OrderedItem::new(
+            Align(NonZeroU16::new(4).expect("nonzero")),
+            1,
+            prov(),
+        ));
+        section.labels.push(OrderedItem::new(
+            Label {
+                id: SymbolId::new(0),
+                name: target,
+            },
+            2,
+            prov(),
+        ));
+
+        let layout = layout_into_banks(&[section.clone()], PlacementProfile::PackedExperts, &[])
+            .expect("layout succeeds");
+        let align_order = section.alignments[0].order();
+        assert_eq!(layout.sections[0].alignment_padding[&align_order], 1);
+
+        let relaxed = relax_and_legalize(&[section], &layout).expect("relax succeeds");
+        assert_eq!(
+            relaxed.layout.sections[0].alignment_padding[&align_order],
+            2
+        );
+        assert_eq!(relaxed.layout.sections[0].final_size, 4);
     }
 
     #[test]
@@ -880,6 +1046,119 @@ mod tests {
                 .iter()
                 .any(|section| section.name.as_str().starts_with("runtime.banking.thunk."))
         );
+    }
+
+    #[test]
+    fn auto_far_symbolic_call_becomes_per_target_thunk() {
+        let target = SymbolName::runtime("test", "target_auto").expect("symbol");
+        let mut caller = empty_section(
+            1,
+            SectionRole::CommonBank,
+            SymbolName::runtime("test", "caller_auto").expect("symbol"),
+        );
+        caller.branches.push(OrderedItem::new(
+            SymbolicBranch::auto_far_call(target.clone(), None, vec![LeaseId::new(7)]),
+            0,
+            prov(),
+        ));
+        let mut callee = empty_section(
+            2,
+            SectionRole::CommonBank,
+            SymbolName::runtime("test", "callee_auto").expect("symbol"),
+        );
+        callee.labels.push(OrderedItem::new(
+            Label {
+                id: SymbolId::new(0),
+                name: target,
+            },
+            0,
+            prov(),
+        ));
+        let sections = vec![caller, callee];
+        let layout = layout_into_banks(
+            &sections,
+            PlacementProfile::PackedExperts,
+            &[
+                PinnedPlacement {
+                    section_id: SectionId::new(1),
+                    bank: BankIndex::Rom(1),
+                    cpu_start: 0x4000,
+                },
+                PinnedPlacement {
+                    section_id: SectionId::new(2),
+                    bank: BankIndex::Rom(2),
+                    cpu_start: 0x4000,
+                },
+            ],
+        )
+        .expect("layout succeeds");
+
+        let relaxed = relax_and_legalize(&sections, &layout).expect("relax succeeds");
+        assert_eq!(relaxed.thunk_requests.len(), 1);
+        assert_eq!(relaxed.thunk_requests[0].lease_chain, vec![LeaseId::new(7)]);
+        assert_eq!(
+            relaxed.sections[0].instrs[0].data,
+            Instr::Call {
+                cond: None,
+                addr: ROM0_THUNK_POOL_START,
+            }
+        );
+    }
+
+    #[test]
+    fn thunk_pool_overflow_is_reported() {
+        let mut caller = empty_section(
+            1,
+            SectionRole::CommonBank,
+            SymbolName::runtime("test", "many_calls").expect("symbol"),
+        );
+        let mut callee = empty_section(
+            2,
+            SectionRole::CommonBank,
+            SymbolName::runtime("test", "many_targets").expect("symbol"),
+        );
+        for idx in 0..17 {
+            let target = SymbolName::runtime("target", &format!("t_{idx}")).expect("symbol");
+            caller.legalization_ops.push(OrderedItem::new(
+                LegalizationOp::FarCall {
+                    target: target.clone(),
+                    lease_chain: vec![],
+                },
+                idx,
+                prov(),
+            ));
+            callee.labels.push(OrderedItem::new(
+                Label {
+                    id: SymbolId::new(idx),
+                    name: target,
+                },
+                idx,
+                prov(),
+            ));
+        }
+        let sections = vec![caller, callee];
+        let layout = layout_into_banks(
+            &sections,
+            PlacementProfile::PackedExperts,
+            &[
+                PinnedPlacement {
+                    section_id: SectionId::new(1),
+                    bank: BankIndex::Rom(1),
+                    cpu_start: 0x4000,
+                },
+                PinnedPlacement {
+                    section_id: SectionId::new(2),
+                    bank: BankIndex::Rom(2),
+                    cpu_start: 0x4000,
+                },
+            ],
+        )
+        .expect("layout succeeds");
+
+        assert!(matches!(
+            relax_and_legalize(&sections, &layout),
+            Err(RelaxError::ThunkPoolExhausted { .. })
+        ));
     }
 
     #[test]

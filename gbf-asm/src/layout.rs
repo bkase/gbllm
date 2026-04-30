@@ -8,12 +8,13 @@ use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::section::{
-    BranchKind, DataBlock, LegalizationOp, LoweredSection, SectionId, SectionRole,
+    BranchKind, DataBlock, ItemOrder, LegalizationOp, LoweredSection, SectionId, SectionRole,
 };
 
 pub const ROM_BANK_SIZE: u32 = 16 * 1024;
 pub const ROM0_START: u16 = 0x0000;
 pub const ROM0_END_EXCLUSIVE: u16 = 0x4000;
+pub const ROM0_THUNK_POOL_START: u16 = 0x3F00;
 pub const ROMX_START: u16 = 0x4000;
 pub const ROMX_END_EXCLUSIVE: u16 = 0x8000;
 
@@ -171,8 +172,8 @@ pub struct PlacedSection {
     pub final_size: u16,
     pub estimated_size: u16,
     /// Concrete padding chosen by layout for each `Align` item, keyed by the
-    /// item's stable `seq_index`.
-    pub alignment_padding: BTreeMap<u32, u16>,
+    /// item's stable order.
+    pub alignment_padding: BTreeMap<ItemOrder, u16>,
 }
 
 impl PlacedSection {
@@ -267,6 +268,12 @@ pub enum LayoutError {
     UserHeaderSectionRejected {
         section_id: SectionId,
     },
+    PlacementCollision {
+        section_id: SectionId,
+        bank: BankIndex,
+        start: u16,
+        end_exclusive: u16,
+    },
     CpuAddressOutOfRange {
         section_id: SectionId,
         space: AddressSpace,
@@ -315,6 +322,16 @@ impl fmt::Display for LayoutError {
                 "user section {} uses internal HeaderCartridge role",
                 section_id.get()
             ),
+            Self::PlacementCollision {
+                section_id,
+                bank,
+                start,
+                end_exclusive,
+            } => write!(
+                f,
+                "section {} placement ${start:04X}..${end_exclusive:04X} collides in {bank}",
+                section_id.get()
+            ),
             Self::CpuAddressOutOfRange {
                 section_id,
                 space,
@@ -360,6 +377,12 @@ pub fn layout_into_banks(
             end_inclusive: 0x014F,
             reason: ReservedRangeReason::CartridgeHeader,
         },
+        ReservedRange {
+            bank: BankIndex::Rom(0),
+            start: ROM0_THUNK_POOL_START,
+            end_inclusive: ROM0_END_EXCLUSIVE - 1,
+            reason: ReservedRangeReason::ThunkPool,
+        },
     ];
     for pin in pinned {
         reserved_ranges.push(ReservedRange {
@@ -368,6 +391,32 @@ pub fn layout_into_banks(
             end_inclusive: pin.cpu_start,
             reason: ReservedRangeReason::UserPinned,
         });
+    }
+    let mut occupied = occupied_from_reserved(&reserved_ranges);
+    let mut preplaced_pinned = BTreeMap::new();
+    for pin in pinned {
+        let Some(section) = sections.iter().find(|section| section.id == pin.section_id) else {
+            continue;
+        };
+        if section.role == SectionRole::HeaderCartridge {
+            return Err(LayoutError::UserHeaderSectionRejected {
+                section_id: section.id,
+            });
+        }
+        let space = space_for_bank(pin.bank, section.role);
+        let placed = place_at(section, space, pin.bank, pin.cpu_start)?;
+        validate_placed(&placed)?;
+        if matches!(placed.bank, BankIndex::Rom(0))
+            && placed.cpu_end_exclusive() > ROM0_THUNK_POOL_START as u32
+        {
+            return Err(LayoutError::SectionTooBig {
+                id: placed.id,
+                size: placed.final_size as u32,
+                bank_capacity: u32::from(ROM0_THUNK_POOL_START),
+            });
+        }
+        insert_occupied(&mut occupied, &placed)?;
+        preplaced_pinned.insert(section.id, placed);
     }
 
     let mut rom0_cursor = 0x0150_u16;
@@ -391,7 +440,8 @@ pub fn layout_into_banks(
                     (AddressSpace::Rom0, BankIndex::Rom(0), rom0_cursor)
                 }
                 SectionRole::CommonBank | SectionRole::CommonData => {
-                    let bank = first_fit_bank(section, &mut bank_cursors, profile, false)?;
+                    let bank =
+                        first_fit_bank(section, &mut bank_cursors, &occupied, profile, false)?;
                     (
                         AddressSpace::RomX,
                         BankIndex::Rom(bank),
@@ -401,10 +451,9 @@ pub fn layout_into_banks(
                 SectionRole::ExpertBank | SectionRole::ExpertData => {
                     let bank = match profile {
                         PlacementProfile::StrictOneExpertPerBank => {
-                            let bank = next_strict_expert_bank;
-                            next_strict_expert_bank = next_strict_expert_bank
-                                .checked_add(1)
-                                .ok_or(LayoutError::NoBankFits {
+                            let bank = next_strict_expert_bank.max(next_bank(&bank_cursors));
+                            next_strict_expert_bank =
+                                bank.checked_add(1).ok_or(LayoutError::NoBankFits {
                                     id: section.id,
                                     role: section.role,
                                 })?;
@@ -412,7 +461,7 @@ pub fn layout_into_banks(
                             bank
                         }
                         PlacementProfile::Budgeted { .. } | PlacementProfile::PackedExperts => {
-                            first_fit_bank(section, &mut bank_cursors, profile, true)?
+                            first_fit_bank(section, &mut bank_cursors, &occupied, profile, true)?
                         }
                     };
                     (
@@ -432,23 +481,46 @@ pub fn layout_into_banks(
             }
         };
 
-        let placed = place_at(section, space, bank, cursor)?;
+        let is_pinned = pinned_by_section.contains_key(&section.id);
+        let placed = if is_pinned {
+            preplaced_pinned
+                .get(&section.id)
+                .expect("pinned section was preplaced")
+                .clone()
+        } else {
+            place_next(section, space, bank, cursor, &occupied, profile)?
+        };
         validate_placed(&placed)?;
+        if matches!(placed.bank, BankIndex::Rom(0))
+            && placed.cpu_end_exclusive() > ROM0_THUNK_POOL_START as u32
+        {
+            return Err(LayoutError::SectionTooBig {
+                id: placed.id,
+                size: placed.final_size as u32,
+                bank_capacity: u32::from(ROM0_THUNK_POOL_START),
+            });
+        }
 
         match placed.bank {
-            BankIndex::Rom(0) => rom0_cursor = placed.cpu_end_exclusive() as u16,
+            BankIndex::Rom(0) => {
+                rom0_cursor = rom0_cursor.max(placed.cpu_end_exclusive() as u16);
+            }
             BankIndex::Rom(bank) => {
                 used_banks.insert(bank);
-                bank_cursors.insert(bank, placed.cpu_end_exclusive() as u16);
+                let cursor = bank_cursors.entry(bank).or_insert(ROMX_START);
+                *cursor = (*cursor).max(placed.cpu_end_exclusive() as u16);
             }
             _ => {}
+        }
+        if !is_pinned {
+            insert_occupied(&mut occupied, &placed)?;
         }
         sections_out.push(placed);
     }
 
     free_bytes_per_bank.insert(
         BankIndex::Rom(0),
-        ROM0_END_EXCLUSIVE as u32 - u32::from(rom0_cursor),
+        ROM0_THUNK_POOL_START as u32 - u32::from(rom0_cursor),
     );
     for bank in used_banks.iter().copied().filter(|bank| *bank != 0) {
         let cursor = *bank_cursors.get(&bank).unwrap_or(&ROMX_START);
@@ -484,6 +556,7 @@ fn pinned_map(
 fn first_fit_bank(
     section: &LoweredSection,
     bank_cursors: &mut BTreeMap<u16, u16>,
+    occupied: &BTreeMap<BankIndex, Vec<(u32, u32)>>,
     profile: PlacementProfile,
     expert: bool,
 ) -> Result<u16, LayoutError> {
@@ -505,7 +578,14 @@ fn first_fit_bank(
 
     for bank in candidate_banks {
         let cursor = *bank_cursors.entry(bank).or_insert(ROMX_START);
-        let placed = place_at(section, AddressSpace::RomX, BankIndex::Rom(bank), cursor)?;
+        let placed = place_next(
+            section,
+            AddressSpace::RomX,
+            BankIndex::Rom(bank),
+            cursor,
+            occupied,
+            profile,
+        )?;
         let limit = ROMX_END_EXCLUSIVE as u32 - reserve;
         if placed.cpu_end_exclusive() <= limit {
             return Ok(bank);
@@ -574,10 +654,55 @@ fn place_at(
     })
 }
 
+fn place_next(
+    section: &LoweredSection,
+    space: AddressSpace,
+    bank: BankIndex,
+    start: u16,
+    occupied: &BTreeMap<BankIndex, Vec<(u32, u32)>>,
+    profile: PlacementProfile,
+) -> Result<PlacedSection, LayoutError> {
+    let reserve = match profile {
+        PlacementProfile::Budgeted {
+            reserve_bytes_per_bank,
+        } => u32::from(reserve_bytes_per_bank),
+        PlacementProfile::StrictOneExpertPerBank | PlacementProfile::PackedExperts => 0,
+    };
+    let limit = match space {
+        AddressSpace::Rom0 => u32::from(ROM0_THUNK_POOL_START),
+        AddressSpace::RomX => ROMX_END_EXCLUSIVE as u32 - reserve,
+        AddressSpace::Wram => 0xE000,
+        AddressSpace::Hram => 0x1_0000,
+        AddressSpace::Sram => 0xC000,
+        AddressSpace::Vram => 0xA000,
+        AddressSpace::Oam => 0xFEA0,
+    };
+    let mut cursor = start;
+    loop {
+        let placed = place_at(section, space, bank, cursor)?;
+        if placed.cpu_end_exclusive() > limit {
+            return Err(LayoutError::SectionTooBig {
+                id: section.id,
+                size: placed.final_size as u32,
+                bank_capacity: limit,
+            });
+        }
+        if let Some((_, end)) = first_overlap(&placed, occupied) {
+            cursor = u16::try_from(end).map_err(|_| LayoutError::SectionTooBig {
+                id: section.id,
+                size: placed.final_size as u32,
+                bank_capacity: limit,
+            })?;
+            continue;
+        }
+        return Ok(placed);
+    }
+}
+
 fn section_size_from(
     section: &LoweredSection,
     cpu_start: u16,
-) -> Result<(u32, BTreeMap<u32, u16>), LayoutError> {
+) -> Result<(u32, BTreeMap<ItemOrder, u16>), LayoutError> {
     let mut cursor = u32::from(cpu_start);
     let mut padding_by_seq = BTreeMap::new();
     let mut items = Vec::new();
@@ -585,17 +710,17 @@ fn section_size_from(
         section
             .labels
             .iter()
-            .map(|item| (item.seq_index, SizeItem::Label)),
+            .map(|item| (item.order(), SizeItem::Label)),
     );
     items.extend(section.instrs.iter().map(|item| {
         (
-            item.seq_index,
+            item.order(),
             SizeItem::Fixed(u32::from(item.data.byte_len())),
         )
     }));
     items.extend(section.data_blocks.iter().map(|item| {
         (
-            item.seq_index,
+            item.order(),
             SizeItem::Fixed(match &item.data {
                 DataBlock::Bytes(bytes) => bytes.len() as u32,
                 DataBlock::Words(words) => words.len() as u32 * 2,
@@ -606,11 +731,11 @@ fn section_size_from(
         section
             .alignments
             .iter()
-            .map(|item| (item.seq_index, SizeItem::Align(item.data.0.get()))),
+            .map(|item| (item.order(), SizeItem::Align(item.data.0.get()))),
     );
     items.extend(section.branches.iter().map(|item| {
         (
-            item.seq_index,
+            item.order(),
             SizeItem::Fixed(match item.data.kind {
                 BranchKind::Jump => 3,
                 BranchKind::Call => 3,
@@ -619,15 +744,15 @@ fn section_size_from(
     }));
     items.extend(section.legalization_ops.iter().map(|item| {
         (
-            item.seq_index,
+            item.order(),
             SizeItem::Fixed(match item.data {
                 LegalizationOp::FarCall { .. } => 3,
             }),
         )
     }));
-    items.sort_by_key(|(seq, _)| *seq);
+    items.sort_by_key(|(order, _)| *order);
 
-    for (seq, item) in items {
+    for (order, item) in items {
         match item {
             SizeItem::Label => {}
             SizeItem::Fixed(size) => {
@@ -640,12 +765,64 @@ fn section_size_from(
             SizeItem::Align(align) => {
                 let aligned = align_u32(cursor, align)?;
                 let padding = aligned - cursor;
-                padding_by_seq.insert(seq, padding as u16);
+                padding_by_seq.insert(order, padding as u16);
                 cursor = aligned;
             }
         }
     }
     Ok((cursor - u32::from(cpu_start), padding_by_seq))
+}
+
+fn occupied_from_reserved(
+    reserved_ranges: &[ReservedRange],
+) -> BTreeMap<BankIndex, Vec<(u32, u32)>> {
+    let mut occupied: BTreeMap<BankIndex, Vec<(u32, u32)>> = BTreeMap::new();
+    for range in reserved_ranges {
+        if range.reason == ReservedRangeReason::UserPinned {
+            continue;
+        }
+        occupied
+            .entry(range.bank)
+            .or_default()
+            .push((u32::from(range.start), u32::from(range.end_inclusive) + 1));
+    }
+    for ranges in occupied.values_mut() {
+        ranges.sort();
+    }
+    occupied
+}
+
+fn first_overlap(
+    placed: &PlacedSection,
+    occupied: &BTreeMap<BankIndex, Vec<(u32, u32)>>,
+) -> Option<(u32, u32)> {
+    let start = u32::from(placed.cpu_start);
+    let end = placed.cpu_end_exclusive();
+    occupied
+        .get(&placed.bank)?
+        .iter()
+        .copied()
+        .find(|(occupied_start, occupied_end)| start < *occupied_end && end > *occupied_start)
+}
+
+fn insert_occupied(
+    occupied: &mut BTreeMap<BankIndex, Vec<(u32, u32)>>,
+    placed: &PlacedSection,
+) -> Result<(), LayoutError> {
+    let start = u32::from(placed.cpu_start);
+    let end = placed.cpu_end_exclusive();
+    if first_overlap(placed, occupied).is_some() {
+        return Err(LayoutError::PlacementCollision {
+            section_id: placed.id,
+            bank: placed.bank,
+            start: placed.cpu_start,
+            end_exclusive: u16::try_from(end).unwrap_or(u16::MAX),
+        });
+    }
+    let ranges = occupied.entry(placed.bank).or_default();
+    ranges.push((start, end));
+    ranges.sort();
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -695,7 +872,23 @@ fn validate_placed(placed: &PlacedSection) -> Result<(), LayoutError> {
         | AddressSpace::Hram
         | AddressSpace::Sram
         | AddressSpace::Vram
-        | AddressSpace::Oam => {}
+        | AddressSpace::Oam => {
+            let (start, end) = match placed.space {
+                AddressSpace::Wram => (0xC000_u16, 0xE000_u32),
+                AddressSpace::Hram => (0xFF80_u16, 0x1_0000_u32),
+                AddressSpace::Sram => (0xA000_u16, 0xC000_u32),
+                AddressSpace::Vram => (0x8000_u16, 0xA000_u32),
+                AddressSpace::Oam => (0xFE00_u16, 0xFEA0_u32),
+                AddressSpace::Rom0 | AddressSpace::RomX => unreachable!("ROM handled above"),
+            };
+            if placed.cpu_start < start || placed.cpu_end_exclusive() > end {
+                return Err(LayoutError::SectionTooBig {
+                    id: placed.id,
+                    size: placed.final_size as u32,
+                    bank_capacity: end - u32::from(start),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -763,7 +956,7 @@ mod tests {
     use super::*;
     use crate::isa::Instr;
     use crate::provenance::{InstrProvenance, PlanningStage};
-    use crate::section::{LoweredSection, OrderedItem};
+    use crate::section::{LoweredSection, OrderedItem, SectionPrivilege};
     use crate::symbols::SymbolName;
 
     fn section(id: u32, role: SectionRole, instr_count: usize) -> LoweredSection {
@@ -772,6 +965,7 @@ mod tests {
             id: SectionId::new(id),
             role,
             name: SymbolName::section(role, SectionId::new(id)).expect("name"),
+            privilege: SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
             next_seq_index: instr_count as u32,
@@ -822,6 +1016,17 @@ mod tests {
     }
 
     #[test]
+    fn strict_expert_banks_skip_common_banks() {
+        let sections = vec![
+            section(1, SectionRole::CommonBank, 4),
+            section(2, SectionRole::ExpertBank, 4),
+        ];
+        let plan = layout_into_banks(&sections, PlacementProfile::StrictOneExpertPerBank, &[])
+            .expect("layout succeeds");
+        assert_ne!(plan.sections[0].bank, plan.sections[1].bank);
+    }
+
+    #[test]
     fn budgeted_reserve_respected() {
         let sections = vec![section(1, SectionRole::CommonBank, 16)];
         let plan = layout_into_banks(
@@ -844,5 +1049,65 @@ mod tests {
         assert!(json.contains("rom1"));
         let decoded: LayoutPlan = serde_json::from_str(&json).expect("json deserializes");
         assert_eq!(decoded, plan);
+    }
+
+    #[test]
+    fn pinned_placements_cannot_overlap() {
+        let sections = vec![
+            section(1, SectionRole::Bank0Nucleus, 4),
+            section(2, SectionRole::Bank0Nucleus, 4),
+        ];
+        let err = layout_into_banks(
+            &sections,
+            PlacementProfile::PackedExperts,
+            &[
+                PinnedPlacement {
+                    section_id: SectionId::new(1),
+                    bank: BankIndex::Rom(0),
+                    cpu_start: 0x0150,
+                },
+                PinnedPlacement {
+                    section_id: SectionId::new(2),
+                    bank: BankIndex::Rom(0),
+                    cpu_start: 0x0152,
+                },
+            ],
+        )
+        .expect_err("overlapping pinned sections are rejected");
+
+        assert!(matches!(err, LayoutError::PlacementCollision { .. }));
+    }
+
+    #[test]
+    fn user_header_section_rejected() {
+        let sections = vec![section(1, SectionRole::HeaderCartridge, 4)];
+        let err = layout_into_banks(&sections, PlacementProfile::PackedExperts, &[])
+            .expect_err("user header rejected");
+        assert!(matches!(err, LayoutError::UserHeaderSectionRejected { .. }));
+    }
+
+    #[test]
+    fn bank0_auto_placement_skips_pinned_sections() {
+        let sections = vec![
+            section(1, SectionRole::Bank0Nucleus, 4),
+            section(2, SectionRole::Bank0Nucleus, 4),
+        ];
+        let plan = layout_into_banks(
+            &sections,
+            PlacementProfile::PackedExperts,
+            &[PinnedPlacement {
+                section_id: SectionId::new(2),
+                bank: BankIndex::Rom(0),
+                cpu_start: 0x0150,
+            }],
+        )
+        .expect("layout succeeds");
+
+        let auto = plan
+            .sections
+            .iter()
+            .find(|section| section.id == SectionId::new(1))
+            .expect("auto section placed");
+        assert!(auto.cpu_start >= 0x0154);
     }
 }

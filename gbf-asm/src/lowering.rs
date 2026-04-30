@@ -8,8 +8,8 @@ use crate::isa::Instr;
 use crate::provenance::InstrProvenance;
 use crate::section::{
     Align, DataBlock, Label, LegalizationOp, LoweredSection, MbcBankClass, OrderedItem,
-    PreLayoutOp, ProbeLevel, Section, SectionId, SectionRole, SymbolicBranch, TraceProbeId,
-    YieldKind,
+    PreLayoutOp, PrivilegeViolation, ProbeLevel, Section, SectionId, SectionPrivilege,
+    SectionPrivilegeError, SectionRole, SymbolicBranch, TraceProbeId, YieldKind,
 };
 use crate::symbols::{SymbolName, SymbolTable};
 
@@ -17,6 +17,7 @@ use crate::symbols::{SymbolName, SymbolTable};
 pub enum LoweringError {
     UnsupportedStructuredOp(&'static str),
     SymbolName(String),
+    SectionPrivilegeViolation(SectionPrivilegeError),
 }
 
 impl fmt::Display for LoweringError {
@@ -24,6 +25,9 @@ impl fmt::Display for LoweringError {
         match self {
             Self::UnsupportedStructuredOp(op) => write!(f, "unsupported structured op {op}"),
             Self::SymbolName(message) => write!(f, "invalid generated symbol name: {message}"),
+            Self::SectionPrivilegeViolation(error) => {
+                write!(f, "lowered fragment violates section privilege: {error:?}")
+            }
         }
     }
 }
@@ -41,13 +45,23 @@ pub struct LoweringContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FragmentItem<T> {
     pub data: T,
+    pub sub_index: u16,
     pub provenance: InstrProvenance,
 }
 
 impl<T> FragmentItem<T> {
     #[must_use]
     pub fn new(data: T, provenance: InstrProvenance) -> Self {
-        Self { data, provenance }
+        Self::new_with_sub_index(data, 0, provenance)
+    }
+
+    #[must_use]
+    pub fn new_with_sub_index(data: T, sub_index: u16, provenance: InstrProvenance) -> Self {
+        Self {
+            data,
+            sub_index,
+            provenance,
+        }
     }
 }
 
@@ -181,51 +195,72 @@ fn lower_one(
             symbols,
         };
         let fragment = lowerer.lower(&op.data, &ctx)?;
-        labels.extend(
-            fragment
-                .labels
-                .into_iter()
-                .map(|item| OrderedItem::new(item.data, op.seq_index, item.provenance)),
-        );
-        instrs.extend(
-            fragment
-                .instrs
-                .into_iter()
-                .map(|item| OrderedItem::new(item.data, op.seq_index, item.provenance)),
-        );
-        data_blocks.extend(
-            fragment
-                .data_blocks
-                .into_iter()
-                .map(|item| OrderedItem::new(item.data, op.seq_index, item.provenance)),
-        );
-        alignments.extend(
-            fragment
-                .alignments
-                .into_iter()
-                .map(|item| OrderedItem::new(item.data, op.seq_index, item.provenance)),
-        );
-        legalization_ops.extend(
-            fragment
-                .legalization_ops
-                .into_iter()
-                .map(|item| OrderedItem::new(item.data, op.seq_index, item.provenance)),
-        );
-        branches.extend(
-            fragment
-                .branches
-                .into_iter()
-                .map(|item| OrderedItem::new(item.data, op.seq_index, item.provenance)),
-        );
+        validate_fragment(&fragment, section.privilege(), op.seq_index)?;
+        labels.extend(fragment.labels.into_iter().map(|item| {
+            OrderedItem::new_with_sub_index(
+                item.data,
+                op.seq_index,
+                item.sub_index,
+                item.provenance,
+            )
+        }));
+        instrs.extend(fragment.instrs.into_iter().map(|item| {
+            OrderedItem::new_with_sub_index(
+                item.data,
+                op.seq_index,
+                item.sub_index,
+                item.provenance,
+            )
+        }));
+        data_blocks.extend(fragment.data_blocks.into_iter().map(|item| {
+            OrderedItem::new_with_sub_index(
+                item.data,
+                op.seq_index,
+                item.sub_index,
+                item.provenance,
+            )
+        }));
+        alignments.extend(fragment.alignments.into_iter().map(|item| {
+            OrderedItem::new_with_sub_index(
+                item.data,
+                op.seq_index,
+                item.sub_index,
+                item.provenance,
+            )
+        }));
+        legalization_ops.extend(fragment.legalization_ops.into_iter().map(|item| {
+            OrderedItem::new_with_sub_index(
+                item.data,
+                op.seq_index,
+                item.sub_index,
+                item.provenance,
+            )
+        }));
+        branches.extend(fragment.branches.into_iter().map(|item| {
+            OrderedItem::new_with_sub_index(
+                item.data,
+                op.seq_index,
+                item.sub_index,
+                item.provenance,
+            )
+        }));
     }
 
     Ok(LoweredSection {
         id: section.id(),
         role: section.role(),
         name: section.name().clone(),
+        privilege: section.privilege().clone(),
         align: section.align(),
         size_hint_bytes: section.size_hint_bytes(),
-        next_seq_index: section.total_items() as u32,
+        next_seq_index: next_seq_index_after(
+            &labels,
+            &instrs,
+            &data_blocks,
+            &alignments,
+            &legalization_ops,
+            &branches,
+        ),
         labels,
         instrs,
         data_blocks,
@@ -233,6 +268,26 @@ fn lower_one(
         legalization_ops,
         branches,
     })
+}
+
+fn next_seq_index_after(
+    labels: &[OrderedItem<Label>],
+    instrs: &[OrderedItem<Instr>],
+    data_blocks: &[OrderedItem<DataBlock>],
+    alignments: &[OrderedItem<Align>],
+    legalization_ops: &[OrderedItem<LegalizationOp>],
+    branches: &[OrderedItem<SymbolicBranch>],
+) -> u32 {
+    labels
+        .iter()
+        .map(|item| item.seq_index)
+        .chain(instrs.iter().map(|item| item.seq_index))
+        .chain(data_blocks.iter().map(|item| item.seq_index))
+        .chain(alignments.iter().map(|item| item.seq_index))
+        .chain(legalization_ops.iter().map(|item| item.seq_index))
+        .chain(branches.iter().map(|item| item.seq_index))
+        .max()
+        .map_or(0, |max| max.saturating_add(1))
 }
 
 fn branch_fragment(
@@ -245,6 +300,44 @@ fn branch_fragment(
             provenance,
         )],
         ..LoweredFragment::default()
+    })
+}
+
+fn validate_fragment(
+    fragment: &LoweredFragment,
+    privilege: &SectionPrivilege,
+    seq_index: u32,
+) -> Result<(), LoweringError> {
+    for item in &fragment.instrs {
+        let effect = crate::effect::classify_effect(&item.data);
+        privilege
+            .check_effect(effect)
+            .map_err(|violation| lowering_privilege_error(seq_index, effect, violation))?;
+    }
+    for item in &fragment.legalization_ops {
+        let effect = crate::effect::classify_legalization_op(&item.data);
+        privilege
+            .check_effect(effect)
+            .map_err(|violation| lowering_privilege_error(seq_index, effect, violation))?;
+    }
+    for item in &fragment.branches {
+        let effect = item.data.machine_effect();
+        privilege
+            .check_effect(effect)
+            .map_err(|violation| lowering_privilege_error(seq_index, effect, violation))?;
+    }
+    Ok(())
+}
+
+fn lowering_privilege_error(
+    seq_index: u32,
+    effect: crate::effect::MachineEffect,
+    violation: PrivilegeViolation,
+) -> LoweringError {
+    LoweringError::SectionPrivilegeViolation(SectionPrivilegeError {
+        seq_index,
+        effect,
+        violation,
     })
 }
 
@@ -283,7 +376,8 @@ mod tests {
 
     use super::*;
     use crate::builder::Builder;
-    use crate::section::{BankLeaseSpec, LeaseId, MbcBankClass, SectionRole};
+    use crate::isa::DirectAddr;
+    use crate::section::{BankLeaseSpec, Label, LeaseId, MbcBankClass, SectionRole, SymbolId};
 
     #[test]
     fn pre_layout_ops_are_drained() {
@@ -330,5 +424,91 @@ mod tests {
 
         assert!(lowered[0].branches.is_empty());
         assert_eq!(lowered[0].align, NonZeroU16::new(1).expect("nonzero"));
+    }
+
+    struct PrivilegedLowerer;
+
+    impl PreLayoutOpLowering for PrivilegedLowerer {
+        fn lower(
+            &self,
+            _op: &PreLayoutOp,
+            ctx: &LoweringContext<'_>,
+        ) -> Result<LoweredFragment, LoweringError> {
+            Ok(LoweredFragment {
+                instrs: vec![FragmentItem::new(
+                    Instr::LdDirectFromA {
+                        addr: DirectAddr::new(0x2000).expect("mbc register"),
+                    },
+                    ctx.provenance.clone(),
+                )],
+                ..LoweredFragment::default()
+            })
+        }
+    }
+
+    #[test]
+    fn lowered_fragments_are_revalidated_against_section_privilege() {
+        let mut builder = Builder::new(
+            SectionRole::CommonBank,
+            SymbolName::runtime("demo", "privilege").expect("section"),
+        );
+        builder.yield_op(YieldKind::Cooperative);
+
+        let err = lower_pre_layout_ops(
+            vec![builder.finish()],
+            &PrivilegedLowerer,
+            &SymbolTable::new(),
+        )
+        .expect_err("privileged lowered instruction rejected");
+
+        assert!(matches!(
+            err,
+            LoweringError::SectionPrivilegeViolation(SectionPrivilegeError { .. })
+        ));
+    }
+
+    struct OrderedFragmentLowerer;
+
+    impl PreLayoutOpLowering for OrderedFragmentLowerer {
+        fn lower(
+            &self,
+            _op: &PreLayoutOp,
+            ctx: &LoweringContext<'_>,
+        ) -> Result<LoweredFragment, LoweringError> {
+            Ok(LoweredFragment {
+                instrs: vec![FragmentItem::new_with_sub_index(
+                    Instr::Nop,
+                    0,
+                    ctx.provenance.clone(),
+                )],
+                labels: vec![FragmentItem::new_with_sub_index(
+                    Label {
+                        id: SymbolId::new(0),
+                        name: SymbolName::runtime("demo", "after_lowered_nop").expect("label"),
+                    },
+                    1,
+                    ctx.provenance.clone(),
+                )],
+                ..LoweredFragment::default()
+            })
+        }
+    }
+
+    #[test]
+    fn lowered_fragments_preserve_sub_index_order() {
+        let mut builder = Builder::new(
+            SectionRole::CommonBank,
+            SymbolName::runtime("demo", "order").expect("section"),
+        );
+        builder.yield_op(YieldKind::Cooperative);
+
+        let lowered = lower_pre_layout_ops(
+            vec![builder.finish()],
+            &OrderedFragmentLowerer,
+            &SymbolTable::new(),
+        )
+        .expect("lowering succeeds");
+
+        assert!(lowered[0].instrs[0].order() < lowered[0].labels[0].order());
     }
 }
