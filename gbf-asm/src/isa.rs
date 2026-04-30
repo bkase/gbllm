@@ -11,6 +11,8 @@
 //! this module defines the project AsmIR surface consumed by sizing, layout,
 //! cycle accounting, and provenance.
 
+use std::num::{NonZeroU8, NonZeroU16};
+
 use serde::{Deserialize, Serialize};
 
 /// Eight-bit CPU registers visible to generated code.
@@ -382,6 +384,67 @@ pub enum CbTarget {
     HlIndirect,
 }
 
+/// Static M-cycle cost for one canonical instruction shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CycleCost {
+    Fixed(NonZeroU8),
+    Branch {
+        taken: NonZeroU8,
+        not_taken: NonZeroU8,
+    },
+}
+
+impl CycleCost {
+    #[must_use]
+    pub const fn worst_case(self) -> u8 {
+        match self {
+            Self::Fixed(cycles) => cycles.get(),
+            Self::Branch { taken, not_taken } => {
+                if taken.get() >= not_taken.get() {
+                    taken.get()
+                } else {
+                    not_taken.get()
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn best_case(self) -> u8 {
+        match self {
+            Self::Fixed(cycles) => cycles.get(),
+            Self::Branch { taken, not_taken } => {
+                if taken.get() <= not_taken.get() {
+                    taken.get()
+                } else {
+                    not_taken.get()
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn t_states(self) -> TStateCost {
+        match self {
+            Self::Fixed(cycles) => TStateCost::Fixed(nz16(cycles.get() as u16 * 4)),
+            Self::Branch { taken, not_taken } => TStateCost::Branch {
+                taken: nz16(taken.get() as u16 * 4),
+                not_taken: nz16(not_taken.get() as u16 * 4),
+            },
+        }
+    }
+}
+
+/// T-state projection of a cycle cost. LR35902 timings are exactly `M * 4`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TStateCost {
+    Fixed(NonZeroU16),
+    Branch {
+        taken: NonZeroU16,
+        not_taken: NonZeroU16,
+    },
+}
+
 /// Legal LR35902 instruction families.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -453,6 +516,80 @@ pub enum Instr {
 }
 
 impl Instr {
+    /// Static M-cycle cost for this canonical instruction shape.
+    #[must_use]
+    pub const fn cycle_cost(self) -> CycleCost {
+        match self {
+            Self::Nop
+            | Self::Stop
+            | Self::Halt
+            | Self::Di
+            | Self::Ei
+            | Self::Ccf
+            | Self::Scf
+            | Self::Cpl
+            | Self::Daa
+            | Self::Ld8Reg { .. }
+            | Self::JpHl
+            | Self::Rlca
+            | Self::Rrca
+            | Self::Rla
+            | Self::Rra => fixed(1),
+            Self::Ld8RegFromImm { .. }
+            | Self::Ld8RegFromHl { .. }
+            | Self::Ld8HlFromReg { .. }
+            | Self::LdAFromHighC
+            | Self::LdHighCFromA
+            | Self::LdAFromReg16Addr { .. }
+            | Self::LdReg16AddrFromA { .. }
+            | Self::LdSpFromHl
+            | Self::Inc16 { .. }
+            | Self::Dec16 { .. }
+            | Self::AddHl { .. } => fixed(2),
+            Self::Ld8HlFromImm { .. }
+            | Self::LdAFromHighDirect { .. }
+            | Self::LdHighDirectFromA { .. }
+            | Self::Ld16Imm { .. }
+            | Self::LdHlFromSpPlus { .. } => fixed(3),
+            Self::LdAFromDirect { .. }
+            | Self::LdDirectFromA { .. }
+            | Self::AddSp { .. }
+            | Self::Ret { cond: None }
+            | Self::Reti
+            | Self::Rst { .. }
+            | Self::Push { .. } => fixed(4),
+            Self::LdDirectFromSp { .. } => fixed(5),
+            Self::Call { cond: None, .. } => fixed(6),
+            Self::AddA { src }
+            | Self::AdcA { src }
+            | Self::SubA { src }
+            | Self::SbcA { src }
+            | Self::AndA { src }
+            | Self::OrA { src }
+            | Self::XorA { src }
+            | Self::CpA { src } => alu_src_cycle_cost(src),
+            Self::Inc8 { dst } | Self::Dec8 { dst } => inc_dec_cycle_cost(dst),
+            Self::Rlc { target }
+            | Self::Rrc { target }
+            | Self::Rl { target }
+            | Self::Rr { target }
+            | Self::Sla { target }
+            | Self::Sra { target }
+            | Self::Srl { target }
+            | Self::Swap { target }
+            | Self::Res { target, .. }
+            | Self::Set { target, .. } => cb_rmw_cycle_cost(target),
+            Self::Bit { target, .. } => cb_bit_cycle_cost(target),
+            Self::JpAbs { cond: None, .. } => fixed(4),
+            Self::JpAbs { cond: Some(_), .. } => branch(4, 3),
+            Self::JrRel { cond: None, .. } => fixed(3),
+            Self::JrRel { cond: Some(_), .. } => branch(3, 2),
+            Self::Call { cond: Some(_), .. } => branch(6, 3),
+            Self::Ret { cond: Some(_) } => branch(5, 2),
+            Self::Pop { .. } => fixed(3),
+        }
+    }
+
     /// Encoded instruction length in bytes.
     ///
     /// The encoder remains the source of opcode bytes; this method is the
@@ -525,6 +662,59 @@ impl Instr {
             | Self::XorA { src }
             | Self::CpA { src } => src.byte_len(),
         }
+    }
+}
+
+const fn alu_src_cycle_cost(src: AluSrc8) -> CycleCost {
+    match src {
+        AluSrc8::Reg(_) => fixed(1),
+        AluSrc8::HlIndirect | AluSrc8::Imm(_) => fixed(2),
+    }
+}
+
+const fn inc_dec_cycle_cost(dst: IncDec8Target) -> CycleCost {
+    match dst {
+        IncDec8Target::Reg(_) => fixed(1),
+        IncDec8Target::HlIndirect => fixed(3),
+    }
+}
+
+const fn cb_rmw_cycle_cost(target: CbTarget) -> CycleCost {
+    match target {
+        CbTarget::Reg(_) => fixed(2),
+        CbTarget::HlIndirect => fixed(4),
+    }
+}
+
+const fn cb_bit_cycle_cost(target: CbTarget) -> CycleCost {
+    match target {
+        CbTarget::Reg(_) => fixed(2),
+        CbTarget::HlIndirect => fixed(3),
+    }
+}
+
+const fn fixed(cycles: u8) -> CycleCost {
+    CycleCost::Fixed(nz8(cycles))
+}
+
+const fn branch(taken: u8, not_taken: u8) -> CycleCost {
+    CycleCost::Branch {
+        taken: nz8(taken),
+        not_taken: nz8(not_taken),
+    }
+}
+
+const fn nz8(value: u8) -> NonZeroU8 {
+    match NonZeroU8::new(value) {
+        Some(value) => value,
+        None => panic!("cycle cost must be nonzero"),
+    }
+}
+
+const fn nz16(value: u16) -> NonZeroU16 {
+    match NonZeroU16::new(value) {
+        Some(value) => value,
+        None => panic!("T-state cost must be nonzero"),
     }
 }
 

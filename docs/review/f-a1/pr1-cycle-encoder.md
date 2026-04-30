@@ -4,6 +4,7 @@
 
 This PR implements the deterministic instruction-level parts of F-A1:
 
+- `gbf-asm/src/isa.rs` instruction-local byte and cycle facts
 - `gbf-asm/src/cycle_model.rs`
 - `gbf-asm/src/encoder.rs`
 - shared placement facts in `gbf-asm/src/layout.rs` needed by the encoder API
@@ -14,8 +15,8 @@ the raw-byte escape hatch from the design.
 
 ## Reviewer Order
 
-1. Use `gbf-asm/src/isa.rs` as base-tree context only. It defines the concrete
-   `Instr` variants and `Instr::byte_len`, but it is not part of this PR diff.
+1. Review `gbf-asm/src/isa.rs` for the concrete `Instr` variants,
+   `Instr::byte_len`, and centralized `Instr::cycle_cost`.
 2. Review `gbf-asm/src/section.rs` for the typed SoA section IR,
    `LoweredSection` / `LegalizedSection`, and the removed raw-byte escape
    hatch.
@@ -40,6 +41,7 @@ This is the complete changed-file set from the GitHub PR diff.
 | `gbf-asm/src/cycle_model.rs` | Deep review; this is one of PR1's primary implementation files. |
 | `gbf-asm/src/effect.rs` | Focused review of privilege classification, reserved MBC register handling, and structured-op effects. |
 | `gbf-asm/src/encoder.rs` | Deep review; this is one of PR1's primary implementation files. |
+| `gbf-asm/src/isa.rs` | Focused review of centralized instruction facts: `byte_len`, `cycle_cost`, and M/T-state cost types. |
 | `gbf-asm/src/layout.rs` | Focused review of shared placement facts and ROM offset validation. PR2 owns the full allocator. |
 | `gbf-asm/src/section.rs` | Deep review; this owns the symbolic pre-layout IR and the type-state boundary used by the encoder. |
 | `history/glossary.md` | Skim for terminology alignment only. |
@@ -51,12 +53,12 @@ This is the complete changed-file set from the GitHub PR diff.
 
 | Claim | Implementation | Gate |
 | --- | --- | --- |
-| Every `Instr` has a nonzero M-cycle cost | `cycle_model::cycle_cost` | `cargo test -p gbf-asm cycle_model::` |
+| Every `Instr` has a nonzero M-cycle cost | `Instr::cycle_cost` returns `NonZeroU8` costs | compile-time type shape plus `cycle_model::known_instructions` |
 | Conditional branch timing is family-specific | `CycleCost::Branch` arms | `conditional_branch_timings_by_family` |
 | M-cycle to T-state conversion is lossless | `CycleCost::t_states` | `t_states_lossless` |
 | The encoder is the only `Instr -> bytes` path | `encoder::encode_instr` | `known_opcodes`, `encode_instr_matches_byte_len` |
 | CB-prefixed opcodes are exhaustively checked | `encode_cb` + table test | `cb_prefix_table_is_exhaustive` |
-| `encode_section` cannot receive structured ops or unresolved branches | API accepts `LegalizedSection` only | `section::legalized_section_drops_unencoded_arrays_at_the_type_level` |
+| `encode_section` cannot receive structured ops or unresolved branches | API accepts `LegalizedSection` only | `cargo test -p gbf-asm` type-checks the boundary |
 | Alignment bytes come from layout, not recomputation | `PlacedSection::alignment_padding` | `encode_section_merges_legalized_arrays_in_order` |
 
 ## Exact Commands Run
@@ -71,7 +73,7 @@ Latest local result:
 
 ```text
 cargo test -p gbf-asm
-40 passed; 0 failed; 0 ignored
+38 passed; 0 failed; 0 ignored
 ```
 
 ## External Review Follow-Up
@@ -81,6 +83,10 @@ the disposition of those reviews; it is not another list of files to inspect.
 
 | Review finding | Disposition |
 | --- | --- |
+| GH PR review: cycle facts duplicated between `cycle_model.rs` and `isa.rs` | Accepted; cycle facts now live on `Instr::cycle_cost`, and `cycle_model::cycle_cost` is only the public adapter. |
+| GH PR review: `no_zero_cost` duplicated the `NonZero*` type guarantee | Accepted; the redundant test was removed. |
+| GH PR review: encoder had a duplicate `sample_instrs` list | Accepted; encoder tests reuse the cycle-model sample list. |
+| GH PR review: `LegalizedSection` shape test checked what the compiler already enforces | Accepted; the redundant test was removed, and the packet now cites type-checking for that boundary. |
 | `LDH A,(C)` / `LDH (C),A` cycle costs were 1 M-cycle instead of 2 | Accepted; `cycle_model::known_instructions` pins both at 2 M-cycles. |
 | ROM file offsets did not reject sections crossing ROM0/ROMX bank boundaries | Accepted; `PlacedSection::rom_file_offset` validates full-section bank windows. |
 | `encode_section` used an overloaded size-mismatch error for large offsets | Accepted; offset overflow is a distinct `EncodeError::SectionOffsetOverflow`. |
