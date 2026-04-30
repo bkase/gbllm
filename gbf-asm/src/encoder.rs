@@ -533,310 +533,53 @@ mod tests {
     use std::num::NonZeroU16;
 
     use super::*;
-    use crate::cycle_model::sample_instrs;
-    use crate::isa::{
-        AluSrc8, BitIndex, CbTarget, Cond, DirectAddr, HighDirectOffset, IncDec8Target, Instr,
-        Reg8, Reg16Addr, Reg16Data, Reg16Stack, RstVector,
-    };
+    use crate::isa::Instr;
     use crate::layout::{AddressSpace, BankIndex};
     use crate::provenance::{InstrProvenance, PlanningStage};
     use crate::section::{
         Align, Label, LegalizedSection, OrderedItem, SectionId, SectionRole, SymbolId,
     };
     use crate::symbols::SymbolName;
+    use crate::test_support::gbdev_instr_cases;
 
     fn enc(instr: Instr) -> Vec<u8> {
         encode_instr(&instr).expect("instruction encodes")
     }
 
-    fn direct(addr: u16) -> DirectAddr {
-        DirectAddr::new(addr).expect("valid direct address")
+    #[test]
+    fn unprefixed_opcodes_match_gbdev_json() {
+        let cases = gbdev_instr_cases();
+        let mut count = 0;
+        for case in cases.iter().filter(|case| !case.is_prefixed()) {
+            let instr = case.instr();
+            assert_eq!(enc(instr), case.expected_bytes(), "{}", case.label());
+            assert_eq!(
+                instr.byte_len(),
+                case.expected_byte_len(),
+                "{}",
+                case.label()
+            );
+            count += 1;
+        }
+        assert_eq!(count, 244);
     }
 
     #[test]
-    fn known_opcodes() {
-        let cases: &[(Instr, &[u8])] = &[
-            (Instr::Nop, &[0x00]),
-            (Instr::Stop, &[0x10, 0x00]),
-            (Instr::Halt, &[0x76]),
-            (Instr::Di, &[0xF3]),
-            (Instr::Ei, &[0xFB]),
-            (Instr::Ccf, &[0x3F]),
-            (Instr::Scf, &[0x37]),
-            (Instr::Cpl, &[0x2F]),
-            (Instr::Daa, &[0x27]),
-            (
-                Instr::Ld8Reg {
-                    dst: Reg8::A,
-                    src: Reg8::B,
-                },
-                &[0x78],
-            ),
-            (
-                Instr::Ld8RegFromImm {
-                    dst: Reg8::A,
-                    imm: 0x42,
-                },
-                &[0x3E, 0x42],
-            ),
-            (Instr::Ld8RegFromHl { dst: Reg8::A }, &[0x7E]),
-            (Instr::Ld8HlFromReg { src: Reg8::A }, &[0x77]),
-            (Instr::Ld8HlFromImm { imm: 0x12 }, &[0x36, 0x12]),
-            (
-                Instr::LdAFromReg16Addr {
-                    src: Reg16Addr::Hli,
-                },
-                &[0x2A],
-            ),
-            (
-                Instr::LdReg16AddrFromA {
-                    dst: Reg16Addr::Hld,
-                },
-                &[0x32],
-            ),
-            (
-                Instr::LdAFromDirect {
-                    addr: direct(0xC123),
-                },
-                &[0xFA, 0x23, 0xC1],
-            ),
-            (
-                Instr::LdDirectFromA {
-                    addr: direct(0xC123),
-                },
-                &[0xEA, 0x23, 0xC1],
-            ),
-            (
-                Instr::LdAFromHighDirect {
-                    offset: HighDirectOffset::new(0x44),
-                },
-                &[0xF0, 0x44],
-            ),
-            (
-                Instr::LdHighDirectFromA {
-                    offset: HighDirectOffset::new(0x44),
-                },
-                &[0xE0, 0x44],
-            ),
-            (Instr::LdAFromHighC, &[0xF2]),
-            (Instr::LdHighCFromA, &[0xE2]),
-            (
-                Instr::Ld16Imm {
-                    dst: Reg16Data::HL,
-                    imm: 0xCAFE,
-                },
-                &[0x21, 0xFE, 0xCA],
-            ),
-            (Instr::LdSpFromHl, &[0xF9]),
-            (Instr::LdDirectFromSp { addr: 0xC000 }, &[0x08, 0x00, 0xC0]),
-            (Instr::LdHlFromSpPlus { off: -4 }, &[0xF8, 0xFC]),
-            (
-                Instr::AddA {
-                    src: AluSrc8::Reg(Reg8::B),
-                },
-                &[0x80],
-            ),
-            (
-                Instr::AddA {
-                    src: AluSrc8::Imm(0x12),
-                },
-                &[0xC6, 0x12],
-            ),
-            (
-                Instr::AdcA {
-                    src: AluSrc8::HlIndirect,
-                },
-                &[0x8E],
-            ),
-            (
-                Instr::SubA {
-                    src: AluSrc8::Reg(Reg8::C),
-                },
-                &[0x91],
-            ),
-            (
-                Instr::SbcA {
-                    src: AluSrc8::Imm(0x34),
-                },
-                &[0xDE, 0x34],
-            ),
-            (
-                Instr::AndA {
-                    src: AluSrc8::Reg(Reg8::D),
-                },
-                &[0xA2],
-            ),
-            (
-                Instr::XorA {
-                    src: AluSrc8::HlIndirect,
-                },
-                &[0xAE],
-            ),
-            (
-                Instr::OrA {
-                    src: AluSrc8::Imm(0x56),
-                },
-                &[0xF6, 0x56],
-            ),
-            (
-                Instr::CpA {
-                    src: AluSrc8::Reg(Reg8::E),
-                },
-                &[0xBB],
-            ),
-            (
-                Instr::Inc8 {
-                    dst: IncDec8Target::Reg(Reg8::A),
-                },
-                &[0x3C],
-            ),
-            (
-                Instr::Dec8 {
-                    dst: IncDec8Target::HlIndirect,
-                },
-                &[0x35],
-            ),
-            (Instr::Inc16 { dst: Reg16Data::SP }, &[0x33]),
-            (Instr::Dec16 { dst: Reg16Data::DE }, &[0x1B]),
-            (Instr::AddHl { src: Reg16Data::BC }, &[0x09]),
-            (Instr::AddSp { off: -2 }, &[0xE8, 0xFE]),
-            (Instr::Rlca, &[0x07]),
-            (Instr::Rrca, &[0x0F]),
-            (Instr::Rla, &[0x17]),
-            (Instr::Rra, &[0x1F]),
-            (
-                Instr::Bit {
-                    bit: BitIndex::B7,
-                    target: CbTarget::Reg(Reg8::H),
-                },
-                &[0xCB, 0x7C],
-            ),
-            (
-                Instr::Swap {
-                    target: CbTarget::HlIndirect,
-                },
-                &[0xCB, 0x36],
-            ),
-            (
-                Instr::JpAbs {
-                    cond: None,
-                    addr: 0x0150,
-                },
-                &[0xC3, 0x50, 0x01],
-            ),
-            (
-                Instr::JpAbs {
-                    cond: Some(Cond::NZ),
-                    addr: 0x4000,
-                },
-                &[0xC2, 0x00, 0x40],
-            ),
-            (Instr::JpHl, &[0xE9]),
-            (
-                Instr::JrRel {
-                    cond: None,
-                    off: -2,
-                },
-                &[0x18, 0xFE],
-            ),
-            (
-                Instr::JrRel {
-                    cond: Some(Cond::C),
-                    off: 0x7F,
-                },
-                &[0x38, 0x7F],
-            ),
-            (
-                Instr::Call {
-                    cond: None,
-                    addr: 0x4000,
-                },
-                &[0xCD, 0x00, 0x40],
-            ),
-            (
-                Instr::Call {
-                    cond: Some(Cond::NC),
-                    addr: 0x1234,
-                },
-                &[0xD4, 0x34, 0x12],
-            ),
-            (Instr::Ret { cond: None }, &[0xC9]),
-            (
-                Instr::Ret {
-                    cond: Some(Cond::Z),
-                },
-                &[0xC8],
-            ),
-            (Instr::Reti, &[0xD9]),
-            (
-                Instr::Rst {
-                    vector: RstVector::V38,
-                },
-                &[0xFF],
-            ),
-            (
-                Instr::Push {
-                    src: Reg16Stack::AF,
-                },
-                &[0xF5],
-            ),
-            (
-                Instr::Pop {
-                    dst: Reg16Stack::HL,
-                },
-                &[0xE1],
-            ),
-        ];
-
-        for (instr, expected) in cases {
-            assert_eq!(enc(*instr), *expected, "{instr:?}");
+    fn cb_prefixed_opcodes_match_gbdev_json() {
+        let cases = gbdev_instr_cases();
+        let mut count = 0;
+        for case in cases.iter().filter(|case| case.is_prefixed()) {
+            let instr = case.instr();
+            assert_eq!(enc(instr), case.expected_bytes(), "{}", case.label());
+            assert_eq!(
+                instr.byte_len(),
+                case.expected_byte_len(),
+                "{}",
+                case.label()
+            );
+            count += 1;
         }
-    }
-
-    #[test]
-    fn cb_prefix_table_is_exhaustive() {
-        let targets = [
-            CbTarget::Reg(Reg8::B),
-            CbTarget::Reg(Reg8::C),
-            CbTarget::Reg(Reg8::D),
-            CbTarget::Reg(Reg8::E),
-            CbTarget::Reg(Reg8::H),
-            CbTarget::Reg(Reg8::L),
-            CbTarget::HlIndirect,
-            CbTarget::Reg(Reg8::A),
-        ];
-        for (code, target) in targets.into_iter().enumerate() {
-            assert_eq!(enc(Instr::Rlc { target }), vec![0xCB, code as u8]);
-            assert_eq!(enc(Instr::Rrc { target }), vec![0xCB, 0x08 | code as u8]);
-            assert_eq!(enc(Instr::Rl { target }), vec![0xCB, 0x10 | code as u8]);
-            assert_eq!(enc(Instr::Rr { target }), vec![0xCB, 0x18 | code as u8]);
-            assert_eq!(enc(Instr::Sla { target }), vec![0xCB, 0x20 | code as u8]);
-            assert_eq!(enc(Instr::Sra { target }), vec![0xCB, 0x28 | code as u8]);
-            assert_eq!(enc(Instr::Swap { target }), vec![0xCB, 0x30 | code as u8]);
-            assert_eq!(enc(Instr::Srl { target }), vec![0xCB, 0x38 | code as u8]);
-            for bit in 0..8 {
-                let bit = BitIndex::new(bit).expect("valid bit");
-                assert_eq!(
-                    enc(Instr::Bit { bit, target }),
-                    vec![0xCB, 0x40 | (bit.get() << 3) | code as u8]
-                );
-                assert_eq!(
-                    enc(Instr::Res { bit, target }),
-                    vec![0xCB, 0x80 | (bit.get() << 3) | code as u8]
-                );
-                assert_eq!(
-                    enc(Instr::Set { bit, target }),
-                    vec![0xCB, 0xC0 | (bit.get() << 3) | code as u8]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn encode_instr_matches_byte_len() {
-        for instr in sample_instrs() {
-            assert_eq!(enc(instr).len(), instr.byte_len() as usize, "{instr:?}");
-        }
+        assert_eq!(count, 256);
     }
 
     #[test]
