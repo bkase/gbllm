@@ -16,10 +16,31 @@ the raw-byte escape hatch from the design.
 
 1. Use `gbf-asm/src/isa.rs` as base-tree context only. It defines the concrete
    `Instr` variants and `Instr::byte_len`, but it is not part of this PR diff.
-2. Review `gbf-asm/src/cycle_model.rs`.
-3. Review `gbf-asm/src/encoder.rs`.
-4. Skim the changed pieces of `gbf-asm/src/layout.rs` for the
+2. Review `gbf-asm/src/section.rs` for the typed SoA section IR,
+   `LoweredSection` / `LegalizedSection`, and the removed raw-byte escape
+   hatch.
+3. Review `gbf-asm/src/builder.rs` for the public builder surface, section
+   role checks, and executable-section inline-data rejection.
+4. Review `gbf-asm/src/cycle_model.rs`.
+5. Skim the changed pieces of `gbf-asm/src/layout.rs` for the
    `PlacedSection` / `AddressSpace` boundary consumed by `encode_section`.
+6. Review `gbf-asm/src/encoder.rs`.
+
+## Changed File Disposition
+
+| File | Reviewer handling |
+| --- | --- |
+| `.beads/issues.jsonl` | Skip line review; issue-tracker export only. Check only if you want bead closure provenance. |
+| `docs/review/f-a1/pr1-cycle-encoder.md` | Read first; this packet explains how to review the PR. |
+| `gbf-asm/src/builder.rs` | Review focused on builder APIs, SoA emission, privilege checks, and inline-data rejection. |
+| `gbf-asm/src/cycle_model.rs` | Deep review; this is one of PR1's primary implementation files. |
+| `gbf-asm/src/encoder.rs` | Deep review; this is one of PR1's primary implementation files. |
+| `gbf-asm/src/layout.rs` | Focused review of shared placement facts and ROM offset validation. PR2 owns the full allocator. |
+| `gbf-asm/src/section.rs` | Deep review; this owns the symbolic pre-layout IR and the type-state boundary used by the encoder. |
+| `history/glossary.md` | Skim for terminology alignment only. |
+| `history/planv0.md` | Skim for F-A1 scope alignment only; not executable code. |
+| `history/rfcs/F-A1-gbf-asm.md` | Review as the implementation contract for this stack, especially PR1-owned claims. |
+| `history/rfcs/F-A1-review-packet-requirements.md` | Skim as the packet contract; use it to judge whether the review packet is sufficient. |
 
 ## Main Claims
 
