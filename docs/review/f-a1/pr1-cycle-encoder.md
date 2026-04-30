@@ -21,12 +21,16 @@ the raw-byte escape hatch from the design.
    hatch.
 3. Review `gbf-asm/src/builder.rs` for the public builder surface, section
    role checks, and executable-section inline-data rejection.
-4. Review `gbf-asm/src/cycle_model.rs`.
-5. Skim the changed pieces of `gbf-asm/src/layout.rs` for the
+4. Review `gbf-asm/src/effect.rs` for privilege classification changes,
+   especially reserved MBC writes and structured-op privilege.
+5. Review `gbf-asm/src/cycle_model.rs`.
+6. Skim the changed pieces of `gbf-asm/src/layout.rs` for the
    `PlacedSection` / `AddressSpace` boundary consumed by `encode_section`.
-6. Review `gbf-asm/src/encoder.rs`.
+7. Review `gbf-asm/src/encoder.rs`.
 
 ## Changed File Disposition
+
+This is the complete changed-file set from the GitHub PR diff.
 
 | File | Reviewer handling |
 | --- | --- |
@@ -34,6 +38,7 @@ the raw-byte escape hatch from the design.
 | `docs/review/f-a1/pr1-cycle-encoder.md` | Read first; this packet explains how to review the PR. |
 | `gbf-asm/src/builder.rs` | Review focused on builder APIs, SoA emission, privilege checks, and inline-data rejection. |
 | `gbf-asm/src/cycle_model.rs` | Deep review; this is one of PR1's primary implementation files. |
+| `gbf-asm/src/effect.rs` | Focused review of privilege classification, reserved MBC register handling, and structured-op effects. |
 | `gbf-asm/src/encoder.rs` | Deep review; this is one of PR1's primary implementation files. |
 | `gbf-asm/src/layout.rs` | Focused review of shared placement facts and ROM offset validation. PR2 owns the full allocator. |
 | `gbf-asm/src/section.rs` | Deep review; this owns the symbolic pre-layout IR and the type-state boundary used by the encoder. |
