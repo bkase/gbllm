@@ -13,16 +13,51 @@ It is stacked on PR 1, which owns the cycle model and encoder. PR 3 owns the
 listing emitter, `.sym` writer, ROM builder, `tiny_rom`, and the umbrella
 reproducibility packet required by `history/rfcs/F-A1-review-packet-requirements.md`.
 
+## Base Context
+
+Review this PR against PR 1, not against `main`. PR 1 owns the cycle model,
+the canonical opcode encoder, the initial SoA section split, effect typing, and
+the no-raw-byte builder boundary. PR 2 only changes those surfaces where layout,
+lowering, relaxation, or thunking need additional metadata.
+
 ## Reviewer Order
 
-1. Review `gbf-asm/src/section.rs` for the new data-only ROM roles and branch
-   constructors.
-2. Review `gbf-asm/src/lowering.rs` for the pre-layout lowering seam and stub
-   policy behavior.
-3. Review `gbf-asm/src/layout.rs` for bank/address placement, reserved ranges,
-   concrete alignment padding, and JSON-safe bank keys.
-4. Review `gbf-asm/src/relax.rs` for JR widening, direct reachability checks,
-   explicit far-call thunk allocation, and final `LegalizedSection` output.
+1. Use `docs/review/f-a1/pr1-cycle-encoder.md` as base context for the SoA,
+   privilege, cycle, and encoder contracts already reviewed in PR 1.
+2. Review `gbf-asm/src/section.rs` for the new data-only ROM roles,
+   `ItemOrder`, `CallReachability`, and privilege retention across
+   `LoweredSection` / `LegalizedSection`.
+3. Review `gbf-asm/src/symbols.rs` for deterministic thunk naming and symbol
+   table iteration helpers.
+4. Review `gbf-asm/src/lowering.rs` for the pre-layout lowering seam, fragment
+   sub-ordering, fragment privilege revalidation, and stub policy behavior.
+5. Review `gbf-asm/src/layout.rs` for bank/address placement, reserved ranges,
+   occupied-interval collision checks, concrete alignment padding, and
+   JSON-safe bank keys.
+6. Review `gbf-asm/src/relax.rs` for JR widening, direct reachability checks,
+   explicit far-call thunk allocation, thunk-pool capacity, and final
+   `LegalizedSection` output.
+7. Review the changed pieces of `gbf-asm/src/encoder.rs` for `ItemOrder`
+   ordering, `sub_index` spans, and alignment-plan keying.
+8. Skim `gbf-asm/src/builder.rs` and `gbf-asm/src/lib.rs`; they only expose
+   PR2-owned roles/modules or extend tests for those roles.
+
+## Changed File Disposition
+
+This is the complete changed-file set from the GitHub PR diff.
+
+| File | Reviewer handling |
+| --- | --- |
+| `.beads/issues.jsonl` | Skip line review; issue-tracker export only. Check only if you want bead closure provenance. |
+| `docs/review/f-a1/pr2-layout-relax-lowering.md` | Read first; this packet explains how to review the PR. |
+| `gbf-asm/src/builder.rs` | Skim the test update for data-only ROM roles. Builder API behavior is otherwise PR1-owned. |
+| `gbf-asm/src/encoder.rs` | Focused review of `ItemOrder` / `sub_index` span ordering and alignment-plan key changes. Opcode byte encoding is PR1-owned. |
+| `gbf-asm/src/layout.rs` | Deep review; this is one of PR2's primary implementation files. |
+| `gbf-asm/src/lib.rs` | Skim; it exposes the new `lowering` module. |
+| `gbf-asm/src/lowering.rs` | Deep review; this is one of PR2's primary implementation files. |
+| `gbf-asm/src/relax.rs` | Deep review; this is one of PR2's primary implementation files. |
+| `gbf-asm/src/section.rs` | Focused review of PR2-added roles, `ItemOrder`, `CallReachability`, and stage privilege fields. |
+| `gbf-asm/src/symbols.rs` | Focused review of thunk symbol naming and symbol-table iteration. |
 
 ## Main Claims
 
@@ -53,7 +88,7 @@ Latest local result:
 
 ```text
 cargo test -p gbf-asm
-61 passed; 0 failed; 0 ignored
+59 passed; 0 failed; 0 ignored
 ```
 
 Additional local gate:
@@ -64,19 +99,26 @@ cargo clippy -p gbf-asm --all-features -- -D warnings
 
 ## External Review Follow-Up
 
-Codex, Gemini, and Claude review passes were requested for this PR. Accepted
-findings applied here:
+Gemini and Codex review passes returned actionable PR2 findings. The table
+below is the disposition of those reviews; it is not another list of files to
+inspect.
 
-- `ItemOrder { seq_index, sub_index }` now preserves lowered fragment order.
-- Lowered fragments are revalidated against `SectionPrivilege` before splice.
-- Pinned and reserved ranges are tracked as occupied intervals; pinned Bank0
-  sections no longer reset auto-placement into vectors/header space.
-- Bank0 reserves `$3F00..=$3FFF` for far-call thunks and reports thunk-pool
-  overflow.
-- Relax recomputes alignment padding after final JR width decisions.
-- `CallReachability` distinguishes direct near calls from explicit auto-far
-  symbolic calls, and thunk requests preserve lease chains.
-- Strict expert placement skips banks already occupied by common sections.
+| Review finding | Disposition |
+| --- | --- |
+| Lowered fragments with multiple items lost authoring order | Accepted; `ItemOrder { seq_index, sub_index }` is carried through lowering, relax, encoder spans, and alignment plans. |
+| Lowered fragments could bypass section privilege | Accepted; lowered instrs, branches, and late ops are revalidated against `SectionPrivilege` before splice. |
+| `LoweredSection` / `LegalizedSection` dropped privilege metadata | Accepted; both stage-transition structs now retain `SectionPrivilege`. |
+| Pinned Bank0 sections could reset placement into vectors/header space | Accepted; pinned and reserved ranges are tracked as occupied intervals. |
+| Bank0 code could collide with far-call thunks | Accepted; `$3F00..=$3FFF` is reserved as the thunk pool. |
+| Thunk slots could overflow out of Bank0 | Accepted; overflow returns `RelaxError::ThunkPoolExhausted`. |
+| Relax did not recompute alignment after final JR widths | Accepted; relax recomputes item offsets and alignment padding after width decisions. |
+| Strict expert placement could reuse a common bank | Accepted; strict expert placement skips banks already occupied by common sections. |
+| Near calls and explicit auto-far calls were not distinguished | Accepted; `CallReachability::{NearOnly, AutoFar}` records author intent. |
+| Far-call lease chains were dropped | Accepted; `ResolvedThunkRequest` preserves `lease_chain`. |
+| User-authored `HeaderCartridge` sections need a clear owner | Accepted for PR2; layout rejects user-authored header sections. PR3 owns the internal ROM header overlay. |
+| Stub runtime call targets are only placeholders | Deferred; PR2 keeps stub lowering explicit, but production runtime materialization/linking is outside this PR. |
+| Full `ThunkMaterializer` / production banking ABI was requested | Deferred to the runtime/banking ABI work; PR2 owns deterministic request/thunk allocation, not final F-A4 ABI bytes. |
+| Additional RFC matrix tests were requested beyond current gates | Partially accepted; packet claims now cite only tests that exist in this stack, with remaining ROM/listing/artifact gates deferred to PR3. |
 
 ## Deferred To PR 3
 
