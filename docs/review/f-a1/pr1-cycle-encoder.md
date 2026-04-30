@@ -14,12 +14,12 @@ the raw-byte escape hatch from the design.
 
 ## Reviewer Order
 
-1. Read `gbf-asm/src/isa.rs` enough to see the concrete `Instr` variants and
-   `Instr::byte_len`.
+1. Use `gbf-asm/src/isa.rs` as base-tree context only. It defines the concrete
+   `Instr` variants and `Instr::byte_len`, but it is not part of this PR diff.
 2. Review `gbf-asm/src/cycle_model.rs`.
 3. Review `gbf-asm/src/encoder.rs`.
-4. Skim `gbf-asm/src/layout.rs` for the `PlacedSection` / `AddressSpace`
-   boundary consumed by `encode_section`.
+4. Skim the changed pieces of `gbf-asm/src/layout.rs` for the
+   `PlacedSection` / `AddressSpace` boundary consumed by `encode_section`.
 
 ## Main Claims
 
