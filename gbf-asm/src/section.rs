@@ -23,8 +23,11 @@ use crate::symbols::SymbolName;
 #[serde(rename_all = "snake_case")]
 pub enum SectionRole {
     Bank0Nucleus,
+    Bank0Data,
     CommonBank,
+    CommonData,
     ExpertBank,
+    ExpertData,
     WramHotArena,
     WramOverlay,
     HramFastFlags,
@@ -35,10 +38,13 @@ pub enum SectionRole {
 }
 
 impl SectionRole {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Bank0Nucleus,
+        Self::Bank0Data,
         Self::CommonBank,
+        Self::CommonData,
         Self::ExpertBank,
+        Self::ExpertData,
         Self::WramHotArena,
         Self::WramOverlay,
         Self::HramFastFlags,
@@ -52,8 +58,11 @@ impl SectionRole {
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::Bank0Nucleus => "bank0_nucleus",
+            Self::Bank0Data => "bank0_data",
             Self::CommonBank => "common_bank",
+            Self::CommonData => "common_data",
             Self::ExpertBank => "expert_bank",
+            Self::ExpertData => "expert_data",
             Self::WramHotArena => "wram_hot_arena",
             Self::WramOverlay => "wram_overlay",
             Self::HramFastFlags => "hram_fast_flags",
@@ -80,6 +89,9 @@ impl SectionRole {
         match self {
             Self::Bank0Nucleus | Self::CommonBank | Self::ExpertBank => false,
             Self::HeaderCartridge
+            | Self::Bank0Data
+            | Self::CommonData
+            | Self::ExpertData
             | Self::WramHotArena
             | Self::WramOverlay
             | Self::HramFastFlags
@@ -455,6 +467,13 @@ pub enum BranchKind {
     Call,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "data")]
+pub enum CallReachability {
+    NearOnly,
+    AutoFar { lease_chain: Vec<LeaseId> },
+}
+
 /// Symbolic branch that keeps a target `SymbolName` until layout and relaxation
 /// can pick the legal concrete encoding.
 ///
@@ -467,12 +486,52 @@ pub struct SymbolicBranch {
     pub kind: BranchKind,
     pub cond: Option<Cond>,
     pub target: SymbolName,
+    pub call_reachability: CallReachability,
 }
 
 impl SymbolicBranch {
     #[must_use]
     pub const fn new(kind: BranchKind, cond: Option<Cond>, target: SymbolName) -> Self {
-        Self { kind, cond, target }
+        Self {
+            kind,
+            cond,
+            target,
+            call_reachability: CallReachability::NearOnly,
+        }
+    }
+
+    #[must_use]
+    pub const fn jump(target: SymbolName, cond: Option<Cond>) -> Self {
+        Self {
+            kind: BranchKind::Jump,
+            cond,
+            target,
+            call_reachability: CallReachability::NearOnly,
+        }
+    }
+
+    #[must_use]
+    pub const fn call(target: SymbolName, cond: Option<Cond>) -> Self {
+        Self {
+            kind: BranchKind::Call,
+            cond,
+            target,
+            call_reachability: CallReachability::NearOnly,
+        }
+    }
+
+    #[must_use]
+    pub fn auto_far_call(
+        target: SymbolName,
+        cond: Option<Cond>,
+        lease_chain: Vec<LeaseId>,
+    ) -> Self {
+        Self {
+            kind: BranchKind::Call,
+            cond,
+            target,
+            call_reachability: CallReachability::AutoFar { lease_chain },
+        }
     }
 
     #[must_use]
@@ -485,34 +544,72 @@ impl SymbolicBranch {
     }
 }
 
-/// Per-array item wrapper carrying a globally-monotone sequence index and
-/// provenance.
+/// Stable lexicographic order for one section item.
+///
+/// `seq_index` is the global authoring sequence index. Lowering may replace one
+/// authoring site with multiple concrete items; those items keep the original
+/// `seq_index` and use increasing `sub_index` values so they remain at the
+/// source site instead of being appended to the end of the section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ItemOrder {
+    pub seq_index: u32,
+    pub sub_index: u16,
+}
+
+impl ItemOrder {
+    #[must_use]
+    pub const fn new(seq_index: u32, sub_index: u16) -> Self {
+        Self {
+            seq_index,
+            sub_index,
+        }
+    }
+}
+
+/// Per-array item wrapper carrying stable order and provenance.
 ///
 /// The `Section` IR is laid out as a Struct-of-Arrays (SoA): each kind of item
 /// (instructions, labels, data blocks, ...) lives in its own typed `Vec`. The
-/// `seq_index` is unique within the owning `Section` and increases with every
-/// emit, so callers can recover authoring order across the parallel arrays by
-/// merging on `seq_index`. The SoA layout exists so stage-transition types
-/// (`LoweredSection`, `LegalizedSection`) can *physically* drop arrays whose
-/// items have been lowered away — the encoder consumes a `LegalizedSection`
-/// that has no `pre_layout_ops` / `legalization_ops` / `branches` array at all,
-/// making "encountered an un-legalized op" a compile-time impossibility instead
-/// of a runtime error.
+/// `seq_index` increases with every author emit and lowering uses `sub_index`
+/// to preserve fragment-local order, so callers can recover authoring order
+/// across the parallel arrays by merging on `ItemOrder`. The SoA layout exists
+/// so stage-transition types (`LoweredSection`, `LegalizedSection`) can
+/// *physically* drop arrays whose items have been lowered away — the encoder
+/// consumes a `LegalizedSection` that has no `pre_layout_ops` /
+/// `legalization_ops` / `branches` array at all, making "encountered an
+/// un-legalized op" a compile-time impossibility instead of a runtime error.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OrderedItem<T> {
     pub data: T,
     pub seq_index: u32,
+    pub sub_index: u16,
     pub provenance: InstrProvenance,
 }
 
 impl<T> OrderedItem<T> {
     #[must_use]
     pub const fn new(data: T, seq_index: u32, provenance: InstrProvenance) -> Self {
+        Self::new_with_sub_index(data, seq_index, 0, provenance)
+    }
+
+    #[must_use]
+    pub const fn new_with_sub_index(
+        data: T,
+        seq_index: u32,
+        sub_index: u16,
+        provenance: InstrProvenance,
+    ) -> Self {
         Self {
             data,
             seq_index,
+            sub_index,
             provenance,
         }
+    }
+
+    #[must_use]
+    pub const fn order(&self) -> ItemOrder {
+        ItemOrder::new(self.seq_index, self.sub_index)
     }
 }
 
@@ -549,10 +646,10 @@ impl DataBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Align(pub NonZeroU16);
 
-/// Borrowed view of an item in `seq_index` order.
+/// Borrowed view of an item in `ItemOrder` order.
 ///
 /// `Section::iter_items()` returns `SectionItemView`s by k-way-merging the
-/// parallel arrays on `seq_index`. The view exists for code that genuinely
+/// parallel arrays on `ItemOrder`. The view exists for code that genuinely
 /// needs ordered traversal (listing, JSON-encoded debug dumps, the legacy test
 /// surface). Stage-transformations and the encoder iterate the typed arrays
 /// directly — they do not pay the merge cost.
@@ -578,6 +675,19 @@ impl<'a> SectionItemView<'a> {
             Self::PreLayoutOp(o) => o.seq_index,
             Self::LegalizationOp(o) => o.seq_index,
             Self::Branch(o) => o.seq_index,
+        }
+    }
+
+    #[must_use]
+    pub const fn order(&self) -> ItemOrder {
+        match self {
+            Self::Label(o) => o.order(),
+            Self::Instr(o) => o.order(),
+            Self::DataBlock(o) => o.order(),
+            Self::Align(o) => o.order(),
+            Self::PreLayoutOp(o) => o.order(),
+            Self::LegalizationOp(o) => o.order(),
+            Self::Branch(o) => o.order(),
         }
     }
 
@@ -827,7 +937,7 @@ impl Section {
             + self.branches.len()
     }
 
-    /// Returns the per-array borrowed items merged in `seq_index` order.
+    /// Returns the per-array borrowed items merged in `ItemOrder` order.
     ///
     /// O(N log K) for N items across K arrays — used by listing and tests
     /// that genuinely need authoring order. The encoder and stage
@@ -846,7 +956,7 @@ impl Section {
                 .map(SectionItemView::LegalizationOp),
         );
         views.extend(self.branches.iter().map(SectionItemView::Branch));
-        views.sort_by_key(SectionItemView::seq_index);
+        views.sort_by_key(SectionItemView::order);
         views
     }
 
@@ -884,6 +994,7 @@ pub struct LoweredSection {
     pub id: SectionId,
     pub role: SectionRole,
     pub name: SymbolName,
+    pub privilege: SectionPrivilege,
     pub align: NonZeroU16,
     pub size_hint_bytes: Option<u32>,
     pub next_seq_index: u32,
@@ -905,6 +1016,7 @@ pub struct LegalizedSection {
     pub id: SectionId,
     pub role: SectionRole,
     pub name: SymbolName,
+    pub privilege: SectionPrivilege,
     pub align: NonZeroU16,
     pub size_hint_bytes: Option<u32>,
     pub next_seq_index: u32,
@@ -969,8 +1081,11 @@ fn role_exhaustive() {
         SectionRole::ALL,
         [
             SectionRole::Bank0Nucleus,
+            SectionRole::Bank0Data,
             SectionRole::CommonBank,
+            SectionRole::CommonData,
             SectionRole::ExpertBank,
+            SectionRole::ExpertData,
             SectionRole::WramHotArena,
             SectionRole::WramOverlay,
             SectionRole::HramFastFlags,
@@ -984,8 +1099,11 @@ fn role_exhaustive() {
         SectionRole::ALL.map(SectionRole::canonical_name),
         [
             "bank0_nucleus",
+            "bank0_data",
             "common_bank",
+            "common_data",
             "expert_bank",
+            "expert_data",
             "wram_hot_arena",
             "wram_overlay",
             "hram_fast_flags",
@@ -1192,4 +1310,44 @@ fn section_items_carry_provenance_and_size() {
     let encoded = serde_json::to_string(&section).expect("section serializes");
     let decoded: Section = serde_json::from_str(&encoded).expect("section deserializes");
     assert_eq!(decoded, section);
+}
+#[cfg(test)]
+#[test]
+fn legalized_section_drops_unencoded_arrays_at_the_type_level() {
+    // The structural guarantee: LegalizedSection has no fields for
+    // pre_layout_ops, legalization_ops, or branches. Attempting to construct
+    // one with such an array is a compile error. This test pins the surface
+    // so a future refactor cannot quietly bring the un-legalized arrays back.
+    use crate::isa::Instr;
+    use crate::provenance::{InstrProvenance, PlanningStage};
+
+    let provenance = InstrProvenance::new(PlanningStage::Backend).with_source_op("legalized");
+    let legalized = LegalizedSection {
+        id: SectionId::new(1),
+        role: SectionRole::Bank0Nucleus,
+        name: SymbolName::runtime("boot", "entry").expect("name"),
+        privilege: SectionPrivilege::normal(),
+        align: NonZeroU16::new(1).expect("align"),
+        size_hint_bytes: None,
+        next_seq_index: 1,
+        labels: vec![],
+        instrs: vec![OrderedItem::new(Instr::Nop, 0, provenance)],
+        data_blocks: vec![],
+        alignments: vec![],
+    };
+    assert_eq!(legalized.instrs.len(), 1);
+
+    let json = serde_json::to_string(&legalized).expect("legalized serializes");
+    assert!(
+        !json.contains("pre_layout_ops"),
+        "LegalizedSection JSON must not contain pre_layout_ops"
+    );
+    assert!(
+        !json.contains("legalization_ops"),
+        "LegalizedSection JSON must not contain legalization_ops"
+    );
+    assert!(
+        !json.contains("branches"),
+        "LegalizedSection JSON must not contain branches"
+    );
 }

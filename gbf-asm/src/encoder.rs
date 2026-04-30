@@ -29,6 +29,7 @@ pub struct EncodedSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EncodedItemSpan {
     pub seq_index: u32,
+    pub sub_index: u16,
     pub kind: EncodedItemKind,
     pub offset: u16,
     pub len: u16,
@@ -199,36 +200,36 @@ pub fn encode_section(
         section
             .labels
             .iter()
-            .map(|item| (item.seq_index, SectionEncodeItem::Label)),
+            .map(|item| (item.order(), SectionEncodeItem::Label)),
     );
     items.extend(
         section
             .instrs
             .iter()
             .enumerate()
-            .map(|(idx, item)| (item.seq_index, SectionEncodeItem::Instr(idx))),
+            .map(|(idx, item)| (item.order(), SectionEncodeItem::Instr(idx))),
     );
     items.extend(
         section
             .data_blocks
             .iter()
             .enumerate()
-            .map(|(idx, item)| (item.seq_index, SectionEncodeItem::DataBlock(idx))),
+            .map(|(idx, item)| (item.order(), SectionEncodeItem::DataBlock(idx))),
     );
     items.extend(
         section
             .alignments
             .iter()
             .enumerate()
-            .map(|(idx, item)| (item.seq_index, SectionEncodeItem::Align(idx))),
+            .map(|(idx, item)| (item.order(), SectionEncodeItem::Align(idx))),
     );
-    items.sort_by_key(|(seq_index, _)| *seq_index);
+    items.sort_by_key(|(order, _)| *order);
 
     let mut bytes = Vec::with_capacity(usize::from(placed.final_size));
     let mut item_spans = Vec::new();
     let mut seen_alignments = std::collections::BTreeSet::new();
 
-    for (seq_index, item) in items {
+    for (order, item) in items {
         match item {
             SectionEncodeItem::Label => {}
             SectionEncodeItem::Instr(idx) => {
@@ -237,10 +238,11 @@ pub fn encode_section(
                 let offset = checked_offset(bytes.len(), section.id)?;
                 bytes.extend_from_slice(&encoded);
                 item_spans.push(EncodedItemSpan {
-                    seq_index,
+                    seq_index: order.seq_index,
+                    sub_index: order.sub_index,
                     kind: EncodedItemKind::Instr,
                     offset,
-                    len: checked_span_len(encoded.len(), section.id, seq_index)?,
+                    len: checked_span_len(encoded.len(), section.id, order.seq_index)?,
                 });
             }
             SectionEncodeItem::DataBlock(idx) => {
@@ -248,16 +250,18 @@ pub fn encode_section(
                 let before = bytes.len();
                 encode_data_block(&section.data_blocks[idx].data, &mut bytes);
                 item_spans.push(EncodedItemSpan {
-                    seq_index,
+                    seq_index: order.seq_index,
+                    sub_index: order.sub_index,
                     kind: EncodedItemKind::DataBlock,
                     offset,
-                    len: checked_span_len(bytes.len() - before, section.id, seq_index)?,
+                    len: checked_span_len(bytes.len() - before, section.id, order.seq_index)?,
                 });
             }
             SectionEncodeItem::Align(idx) => {
                 let align = &section.alignments[idx];
-                seen_alignments.insert(align.seq_index);
-                let padding = *placed.alignment_padding.get(&align.seq_index).ok_or(
+                let align_order = align.order();
+                seen_alignments.insert(align_order);
+                let padding = *placed.alignment_padding.get(&align_order).ok_or(
                     EncodeError::MissingAlignmentPlan {
                         section_id: section.id,
                         seq_index: align.seq_index,
@@ -266,7 +270,8 @@ pub fn encode_section(
                 let offset = checked_offset(bytes.len(), section.id)?;
                 bytes.resize(bytes.len() + usize::from(padding), PAD_BYTE);
                 item_spans.push(EncodedItemSpan {
-                    seq_index,
+                    seq_index: order.seq_index,
+                    sub_index: order.sub_index,
                     kind: EncodedItemKind::AlignmentPadding,
                     offset,
                     len: padding,
@@ -275,11 +280,11 @@ pub fn encode_section(
         }
     }
 
-    for seq_index in placed.alignment_padding.keys() {
-        if !seen_alignments.contains(seq_index) {
+    for order in placed.alignment_padding.keys() {
+        if !seen_alignments.contains(order) {
             return Err(EncodeError::ExtraAlignmentPlan {
                 section_id: section.id,
-                seq_index: *seq_index,
+                seq_index: order.seq_index,
             });
         }
     }
@@ -589,6 +594,7 @@ mod tests {
             id: SectionId::new(9),
             role: SectionRole::HeaderCartridge,
             name: SymbolName::runtime("test", "section").expect("symbol"),
+            privilege: crate::section::SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
             next_seq_index: 5,
@@ -613,7 +619,7 @@ mod tests {
             )],
         };
         let mut alignment_padding = BTreeMap::new();
-        alignment_padding.insert(2, 3);
+        alignment_padding.insert(section.alignments[0].order(), 3);
         let placed = PlacedSection {
             id: section.id,
             space: AddressSpace::Rom0,
@@ -631,18 +637,21 @@ mod tests {
             vec![
                 EncodedItemSpan {
                     seq_index: 1,
+                    sub_index: 0,
                     kind: EncodedItemKind::Instr,
                     offset: 0,
                     len: 1,
                 },
                 EncodedItemSpan {
                     seq_index: 2,
+                    sub_index: 0,
                     kind: EncodedItemKind::AlignmentPadding,
                     offset: 1,
                     len: 3,
                 },
                 EncodedItemSpan {
                     seq_index: 3,
+                    sub_index: 0,
                     kind: EncodedItemKind::DataBlock,
                     offset: 4,
                     len: 2,
@@ -658,6 +667,7 @@ mod tests {
             id: SectionId::new(1),
             role: SectionRole::Bank0Nucleus,
             name: SymbolName::runtime("test", "section").expect("symbol"),
+            privilege: crate::section::SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
             next_seq_index: 1,
@@ -709,6 +719,7 @@ mod tests {
             id: SectionId::new(1),
             role: SectionRole::Bank0Nucleus,
             name: SymbolName::runtime("test", "alignment").expect("symbol"),
+            privilege: crate::section::SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
             next_seq_index: 2,
@@ -735,8 +746,12 @@ mod tests {
             Err(EncodeError::MissingAlignmentPlan { seq_index: 0, .. })
         ));
 
-        placed.alignment_padding.insert(0, 0);
-        placed.alignment_padding.insert(7, 0);
+        placed
+            .alignment_padding
+            .insert(section.alignments[0].order(), 0);
+        placed
+            .alignment_padding
+            .insert(crate::section::ItemOrder::new(7, 0), 0);
         assert!(matches!(
             encode_section(&section, &placed),
             Err(EncodeError::ExtraAlignmentPlan { seq_index: 7, .. })
