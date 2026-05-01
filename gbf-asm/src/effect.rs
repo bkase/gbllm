@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use gbf_hw::{mbc5 as hw_mbc5, memory as hw_memory};
+
 use crate::isa::{
     AluSrc8, CbTarget, DirectAddr, HighDirectOffset, IncDec8Target, Instr, Reg16Addr, RstVector,
 };
@@ -72,13 +74,13 @@ pub enum MbcRegisterClass {
 impl MbcRegisterClass {
     #[must_use]
     pub const fn for_addr(addr: u16) -> Option<Self> {
-        match addr {
-            0x0000..=0x1FFF => Some(Self::RamEnable),
-            0x2000..=0x2FFF => Some(Self::RomBankLow),
-            0x3000..=0x3FFF => Some(Self::RomBankHigh),
-            0x4000..=0x5FFF => Some(Self::SramBank),
-            0x6000..=0x7FFF => Some(Self::Reserved),
-            _ => None,
+        match hw_mbc5::classify_mbc_write_address(addr) {
+            Some(hw_mbc5::MbcRegisterClass::Ramg) => Some(Self::RamEnable),
+            Some(hw_mbc5::MbcRegisterClass::Bank1) => Some(Self::RomBankLow),
+            Some(hw_mbc5::MbcRegisterClass::Bank2) => Some(Self::RomBankHigh),
+            Some(hw_mbc5::MbcRegisterClass::Ramb) => Some(Self::SramBank),
+            Some(hw_mbc5::MbcRegisterClass::Reserved) => Some(Self::Reserved),
+            None => None,
         }
     }
 }
@@ -530,21 +532,25 @@ const fn store_to_high_direct(offset: HighDirectOffset) -> MachineEffect {
 }
 
 const fn static_region(addr: u16) -> StaticMemoryRegion {
-    match addr {
-        0x0000..=0x3FFF => StaticMemoryRegion::Bank0,
-        0x4000..=0x7FFF => StaticMemoryRegion::SwitchableRom,
-        0x8000..=0x9FFF => StaticMemoryRegion::Vram,
-        0xA000..=0xBFFF => StaticMemoryRegion::SwitchableSram,
-        0xC000..=0xFDFF => StaticMemoryRegion::Wram,
-        0xFE00..=0xFE9F => StaticMemoryRegion::Oam,
-        0xFEA0..=0xFEFF => StaticMemoryRegion::Unusable,
-        0xFF00..=0xFF7F | 0xFFFF => StaticMemoryRegion::Io,
-        0xFF80..=0xFFFE => StaticMemoryRegion::Hram,
+    match hw_memory::classify(addr) {
+        hw_memory::MemoryRegion::RomBank0 => StaticMemoryRegion::Bank0,
+        hw_memory::MemoryRegion::RomSwitchable => StaticMemoryRegion::SwitchableRom,
+        hw_memory::MemoryRegion::Vram => StaticMemoryRegion::Vram,
+        hw_memory::MemoryRegion::Sram => StaticMemoryRegion::SwitchableSram,
+        hw_memory::MemoryRegion::Wram0 | hw_memory::MemoryRegion::WramX => StaticMemoryRegion::Wram,
+        hw_memory::MemoryRegion::EchoRam | hw_memory::MemoryRegion::Unmapped => {
+            StaticMemoryRegion::Unusable
+        }
+        hw_memory::MemoryRegion::Oam => StaticMemoryRegion::Oam,
+        hw_memory::MemoryRegion::Io | hw_memory::MemoryRegion::InterruptEnable => {
+            StaticMemoryRegion::Io
+        }
+        hw_memory::MemoryRegion::Hram => StaticMemoryRegion::Hram,
     }
 }
 
 const fn is_hram_addr(addr: u16) -> bool {
-    matches!(addr, 0xFF80..=0xFFFE)
+    hw_memory::is_hram(addr)
 }
 
 const fn same_static_region(left: StaticMemoryRegion, right: StaticMemoryRegion) -> bool {
@@ -943,6 +949,26 @@ fn mbc_writes_are_privileged() {
         let effect = classify_effect(&Instr::LdDirectFromA { addr });
         assert_eq!(effect, MachineEffect::StoreToMbcRegister { reg });
         assert_eq!(privilege_of(&effect), PrivilegeClass::Privileged);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn static_memory_boundaries_follow_gbf_hw() {
+    let cases = [
+        (0xDFFF, StaticMemoryRegion::Wram),
+        (0xE000, StaticMemoryRegion::Unusable),
+        (0xFDFF, StaticMemoryRegion::Unusable),
+        (0xFE00, StaticMemoryRegion::Oam),
+        (0xFE9F, StaticMemoryRegion::Oam),
+        (0xFEA0, StaticMemoryRegion::Unusable),
+        (0xFF00, StaticMemoryRegion::Io),
+        (0xFF80, StaticMemoryRegion::Hram),
+        (0xFFFF, StaticMemoryRegion::Io),
+    ];
+
+    for (addr, region) in cases {
+        assert_eq!(static_region(addr), region, "{addr:#06x}");
     }
 }
 

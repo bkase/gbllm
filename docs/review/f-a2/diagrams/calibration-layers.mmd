@@ -1,0 +1,8 @@
+flowchart TB
+  REF["CalibrationSetRef"]
+  REF --> P["PlatformCalibrationBundle"]
+  REF --> K["KernelCalibrationBundle"]
+  REF --> R["RuntimeCalibrationBundle"]
+  P --> TARGET["TargetProfileId + TargetFamilyId"]
+  K --> FAMILY["TargetFamilyId"]
+  R --> FAMILY
