@@ -535,7 +535,7 @@ fn format_record(
 
 fn format_addr(addr: u16, radix: AddressRadix) -> String {
     match radix {
-        AddressRadix::Hex => format!("${addr:04X}"),
+        AddressRadix::Hex => crate::isa::hex16(addr),
         AddressRadix::Decimal => format!("{addr:05}"),
     }
 }

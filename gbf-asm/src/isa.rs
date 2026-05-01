@@ -670,9 +670,9 @@ impl Instr {
 /// Returned by [`Instr::describe`]. Encoder and listing both consume this so
 /// per-variant byte/mnemonic logic lives in exactly one match.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstrDescriptor {
-    pub bytes: Vec<u8>,
-    pub mnemonic: String,
+pub(crate) struct InstrDescriptor {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) mnemonic: String,
 }
 
 impl Instr {
@@ -681,7 +681,7 @@ impl Instr {
     /// `here` is the CPU address of the instruction, used to resolve `JrRel`
     /// targets to an absolute hex string. Pass `0` if you only need bytes.
     #[must_use]
-    pub fn describe(self, here: u16) -> InstrDescriptor {
+    pub(crate) fn describe(self, here: u16) -> InstrDescriptor {
         match self {
             Self::Nop => one(0x00, "nop"),
             Self::Stop => bytes_pair(0x10, 0x00, "stop"),
@@ -1075,11 +1075,11 @@ fn ret_opcode(cond: Option<Cond>) -> u8 {
     }
 }
 
-fn hex8(value: u8) -> String {
+pub(crate) fn hex8(value: u8) -> String {
     format!("${value:02X}")
 }
 
-fn hex16(value: u16) -> String {
+pub(crate) fn hex16(value: u16) -> String {
     format!("${value:04X}")
 }
 
