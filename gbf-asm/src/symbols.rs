@@ -3,9 +3,11 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::{AddressSpace, BankIndex, LayoutPlan};
 use crate::section::{SectionId, SectionRole};
 
 /// Error returned when a symbol name is not canonical.
@@ -288,6 +290,226 @@ impl SymbolTable {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymOptions {
+    pub include_externals_as_comments: bool,
+    pub rom_only: bool,
+    pub dot_safe_separator: bool,
+}
+
+impl Default for SymOptions {
+    fn default() -> Self {
+        Self {
+            include_externals_as_comments: true,
+            rom_only: false,
+            dot_safe_separator: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymError {
+    MissingPlacement {
+        section_id: SectionId,
+    },
+    AddressOverflow {
+        section_id: SectionId,
+        offset: u32,
+    },
+    DotSafeNameCollision {
+        rewritten: String,
+        originals: [SymbolName; 2],
+    },
+    Parse(String),
+}
+
+impl fmt::Display for SymError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingPlacement { section_id } => {
+                write!(
+                    f,
+                    "symbol table references unplaced section {}",
+                    section_id.get()
+                )
+            }
+            Self::AddressOverflow { section_id, offset } => write!(
+                f,
+                "symbol in section {} at offset {offset} overflows a 16-bit CPU address",
+                section_id.get()
+            ),
+            Self::DotSafeNameCollision {
+                rewritten,
+                originals,
+            } => write!(
+                f,
+                "dot-safe .sym name {rewritten} collides for {} and {}",
+                originals[0], originals[1]
+            ),
+            Self::Parse(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for SymError {}
+
+/// One parsed RGBDS-compatible `.sym` line.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SymEntry {
+    pub bank: Option<u16>,
+    pub addr: u16,
+    pub name: String,
+}
+
+impl fmt::Display for SymEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.bank {
+            Some(bank) => write!(f, "{bank:02X}:{:04X} {}", self.addr, self.name),
+            None => write!(f, "{:04X} {}", self.addr, self.name),
+        }
+    }
+}
+
+impl FromStr for SymEntry {
+    type Err = SymError;
+
+    fn from_str(line: &str) -> Result<Self, Self::Err> {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') {
+            return Err(SymError::Parse("empty/comment .sym line".to_owned()));
+        }
+        let (loc, name) = line
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| SymError::Parse(format!("missing symbol name in {line:?}")))?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(SymError::Parse(format!("missing symbol name in {line:?}")));
+        }
+        if let Some((bank, addr)) = loc.split_once(':') {
+            let bank = u16::from_str_radix(bank, 16)
+                .map_err(|_| SymError::Parse(format!("invalid bank in {line:?}")))?;
+            let addr = u16::from_str_radix(addr, 16)
+                .map_err(|_| SymError::Parse(format!("invalid address in {line:?}")))?;
+            Ok(Self {
+                bank: Some(bank),
+                addr,
+                name: name.to_owned(),
+            })
+        } else {
+            let addr = u16::from_str_radix(loc, 16)
+                .map_err(|_| SymError::Parse(format!("invalid address in {line:?}")))?;
+            Ok(Self {
+                bank: None,
+                addr,
+                name: name.to_owned(),
+            })
+        }
+    }
+}
+
+pub fn parse_sym_entries(input: &str) -> Result<Vec<SymEntry>, SymError> {
+    input
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with(';')
+        })
+        .map(str::parse)
+        .collect()
+}
+
+/// Writes a deterministic RGBDS-compatible Game Boy `.sym` file.
+pub fn write_sym(
+    layout: &LayoutPlan,
+    symbols: &SymbolTable,
+    opts: &SymOptions,
+) -> Result<String, SymError> {
+    write_sym_with_escape(layout, symbols, opts, dot_safe_name)
+}
+
+fn write_sym_with_escape(
+    layout: &LayoutPlan,
+    symbols: &SymbolTable,
+    opts: &SymOptions,
+    escape: fn(&SymbolName) -> String,
+) -> Result<String, SymError> {
+    let mut rewritten_names: BTreeMap<String, SymbolName> = BTreeMap::new();
+    let mut entries = Vec::new();
+
+    for (name, address) in symbols.iter() {
+        let placed = layout
+            .placement_for(address.section)
+            .ok_or(SymError::MissingPlacement {
+                section_id: address.section,
+            })?;
+        let cpu_addr = u32::from(placed.cpu_start) + address.offset;
+        let cpu_addr = u16::try_from(cpu_addr).map_err(|_| SymError::AddressOverflow {
+            section_id: address.section,
+            offset: address.offset,
+        })?;
+        let bank = match (placed.space, placed.bank) {
+            (AddressSpace::Rom0, BankIndex::Rom(0)) => Some(0),
+            (AddressSpace::RomX, BankIndex::Rom(bank)) => Some(bank),
+            _ if opts.rom_only => continue,
+            _ => None,
+        };
+        let rendered_name = if opts.dot_safe_separator {
+            let rewritten = escape(name);
+            if let Some(existing) = rewritten_names.insert(rewritten.clone(), name.clone()) {
+                return Err(SymError::DotSafeNameCollision {
+                    rewritten,
+                    originals: [existing, name.clone()],
+                });
+            }
+            rewritten
+        } else {
+            name.as_str().to_owned()
+        };
+        entries.push(SymSortEntry {
+            unbanked: bank.is_none(),
+            bank,
+            addr: cpu_addr,
+            name: rendered_name,
+        });
+    }
+
+    entries.sort();
+    let mut out = String::new();
+    if opts.include_externals_as_comments {
+        out.push_str("; externals: none\n");
+    }
+    for entry in entries {
+        let line = SymEntry {
+            bank: entry.bank,
+            addr: entry.addr,
+            name: entry.name,
+        };
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SymSortEntry {
+    unbanked: bool,
+    bank: Option<u16>,
+    addr: u16,
+    name: String,
+}
+
+fn dot_safe_name(name: &SymbolName) -> String {
+    let mut out = String::from("gbf_");
+    for ch in name.as_str().chars() {
+        match ch {
+            '.' => out.push_str("_d"),
+            '_' => out.push_str("__"),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[test]
 fn canonical_naming() {
@@ -350,4 +572,194 @@ fn canonical_naming() {
     let encoded = serde_json::to_string(&table).expect("symbol table serializes to json");
     let decoded: SymbolTable = serde_json::from_str(&encoded).expect("symbol table deserializes");
     assert_eq!(decoded, table);
+}
+
+#[cfg(test)]
+mod sym_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::layout::{AddressSpace, BankIndex, LayoutPlan, PlacedSection};
+
+    fn sym(value: &'static str) -> SymbolName {
+        SymbolName::new(value).expect("symbol")
+    }
+
+    fn layout() -> LayoutPlan {
+        LayoutPlan {
+            sections: vec![
+                PlacedSection {
+                    id: SectionId::new(1),
+                    space: AddressSpace::Rom0,
+                    bank: BankIndex::Rom(0),
+                    cpu_start: 0x0150,
+                    final_size: 4,
+                    estimated_size: 4,
+                    alignment_padding: BTreeMap::new(),
+                },
+                PlacedSection {
+                    id: SectionId::new(2),
+                    space: AddressSpace::RomX,
+                    bank: BankIndex::Rom(0x100),
+                    cpu_start: 0x4000,
+                    final_size: 4,
+                    estimated_size: 4,
+                    alignment_padding: BTreeMap::new(),
+                },
+                PlacedSection {
+                    id: SectionId::new(3),
+                    space: AddressSpace::Wram,
+                    bank: BankIndex::Wram,
+                    cpu_start: 0xC000,
+                    final_size: 4,
+                    estimated_size: 4,
+                    alignment_padding: BTreeMap::new(),
+                },
+            ],
+            bank_count: 0x101,
+            free_bytes_per_bank: BTreeMap::new(),
+            reserved_ranges: Vec::new(),
+        }
+    }
+
+    fn table() -> SymbolTable {
+        let mut symbols = SymbolTable::new();
+        symbols
+            .insert(
+                sym("runtime.tiny.loop"),
+                SymbolAddress::new(SectionId::new(1), 2),
+            )
+            .expect("insert");
+        symbols
+            .insert(sym("expert.1.0"), SymbolAddress::new(SectionId::new(2), 0))
+            .expect("insert");
+        symbols
+            .insert(
+                sym("runtime.tiny.entry"),
+                SymbolAddress::new(SectionId::new(1), 0),
+            )
+            .expect("insert");
+        symbols
+            .insert(
+                sym("runtime.tiny.wram"),
+                SymbolAddress::new(SectionId::new(3), 0),
+            )
+            .expect("insert");
+        symbols
+    }
+
+    #[test]
+    fn write_sym_sorted() {
+        let out = write_sym(
+            &layout(),
+            &table(),
+            &SymOptions {
+                include_externals_as_comments: false,
+                ..SymOptions::default()
+            },
+        )
+        .expect("write sym");
+        assert_eq!(
+            out,
+            "00:0150 runtime.tiny.entry\n00:0152 runtime.tiny.loop\n100:4000 expert.1.0\nC000 runtime.tiny.wram\n"
+        );
+        let parsed = parse_sym_entries(&out).expect("parse sym");
+        assert_eq!(parsed[0].bank, Some(0));
+        assert_eq!(parsed[2].bank, Some(0x100));
+        assert_eq!(parsed[3].bank, None);
+    }
+
+    #[test]
+    fn write_sym_dot_safe() {
+        let out = write_sym(
+            &layout(),
+            &table(),
+            &SymOptions {
+                include_externals_as_comments: false,
+                dot_safe_separator: true,
+                ..SymOptions::default()
+            },
+        )
+        .expect("write sym");
+        for line in out.lines() {
+            let (_, name) = line.split_once(' ').expect("name");
+            assert!(name.starts_with("gbf_"));
+            assert!(!name.contains('.'));
+        }
+        assert!(out.contains("gbf_runtime_dtiny_dentry"));
+    }
+
+    #[test]
+    fn write_sym_dot_safe_escape_avoids_naive_collision() {
+        let mut symbols = SymbolTable::new();
+        symbols
+            .insert(sym("foo.bar_baz"), SymbolAddress::new(SectionId::new(1), 0))
+            .expect("insert");
+        symbols
+            .insert(sym("foo_bar.baz"), SymbolAddress::new(SectionId::new(1), 1))
+            .expect("insert");
+        let out = write_sym(
+            &layout(),
+            &symbols,
+            &SymOptions {
+                include_externals_as_comments: false,
+                dot_safe_separator: true,
+                ..SymOptions::default()
+            },
+        )
+        .expect("write sym");
+        assert!(out.contains("gbf_foo_dbar__baz"));
+        assert!(out.contains("gbf_foo__bar_dbaz"));
+    }
+
+    #[test]
+    fn write_sym_dot_safe_collision_detected() {
+        fn lossy(_: &SymbolName) -> String {
+            "same".to_owned()
+        }
+        let mut symbols = SymbolTable::new();
+        symbols
+            .insert(sym("a.b"), SymbolAddress::new(SectionId::new(1), 0))
+            .expect("insert");
+        symbols
+            .insert(sym("a_b"), SymbolAddress::new(SectionId::new(1), 1))
+            .expect("insert");
+        let err = write_sym_with_escape(
+            &layout(),
+            &symbols,
+            &SymOptions {
+                dot_safe_separator: true,
+                ..SymOptions::default()
+            },
+            lossy,
+        )
+        .expect_err("collision");
+        assert!(matches!(err, SymError::DotSafeNameCollision { .. }));
+    }
+
+    #[test]
+    fn write_sym_dot_safe_collision_table_driven() {
+        let names = [
+            "a.b_c", "a_b.c", "x.y.z", "x_y.z", "x.y_z", "foo__bar", "foo.bar",
+        ];
+        let mut rewritten = std::collections::BTreeSet::new();
+        for name in names {
+            assert!(rewritten.insert(dot_safe_name(&sym(name))), "{name}");
+        }
+    }
+
+    #[test]
+    fn rom_only_omits_bankless_symbols() {
+        let out = write_sym(
+            &layout(),
+            &table(),
+            &SymOptions {
+                include_externals_as_comments: false,
+                rom_only: true,
+                ..SymOptions::default()
+            },
+        )
+        .expect("write sym");
+        assert!(!out.contains("C000"));
+    }
 }

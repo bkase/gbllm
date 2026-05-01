@@ -1,0 +1,29 @@
+gbf-asm v0.1.0 (/Users/bkase/Documents/gbllm/gbf-asm)
+├── gbf-foundation v0.1.0 (/Users/bkase/Documents/gbllm/gbf-foundation)
+│   ├── serde v1.0.228
+│   │   ├── serde_core v1.0.228
+│   │   └── serde_derive v1.0.228 (proc-macro)
+│   │       ├── proc-macro2 v1.0.106
+│   │       │   └── unicode-ident v1.0.24
+│   │       ├── quote v1.0.45
+│   │       │   └── proc-macro2 v1.0.106 (*)
+│   │       └── syn v2.0.117
+│   │           ├── proc-macro2 v1.0.106 (*)
+│   │           ├── quote v1.0.45 (*)
+│   │           └── unicode-ident v1.0.24
+│   └── serde_json v1.0.149
+│       ├── itoa v1.0.18
+│       ├── memchr v2.8.0
+│       ├── serde_core v1.0.228
+│       └── zmij v1.0.21
+├── gbf-hw v0.1.0 (/Users/bkase/Documents/gbllm/gbf-hw)
+│   ├── gbf-foundation v0.1.0 (/Users/bkase/Documents/gbllm/gbf-foundation) (*)
+│   ├── serde v1.0.228 (*)
+│   └── serde_json v1.0.149 (*)
+├── gbf-kernel v0.1.0 (/Users/bkase/Documents/gbllm/gbf-kernel)
+│   ├── gbf-foundation v0.1.0 (/Users/bkase/Documents/gbllm/gbf-foundation) (*)
+│   ├── gbf-hw v0.1.0 (/Users/bkase/Documents/gbllm/gbf-hw) (*)
+│   ├── serde v1.0.228 (*)
+│   └── serde_json v1.0.149 (*)
+├── serde v1.0.228 (*)
+└── serde_json v1.0.149 (*)

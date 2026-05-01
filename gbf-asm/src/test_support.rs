@@ -58,6 +58,10 @@ impl GbdevInstrCase {
         self.spec.bytes
     }
 
+    pub(crate) fn gbdev_mnemonic(&self) -> &str {
+        &self.spec.mnemonic
+    }
+
     pub(crate) fn expected_bytes(&self) -> Vec<u8> {
         let mut bytes = if self.prefixed {
             vec![0xCB, self.opcode]

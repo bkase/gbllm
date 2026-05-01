@@ -1,0 +1,4 @@
+flowchart LR
+  S["Section\npre_layout_ops\nlegalization_ops\nbranches"] --> L["LoweredSection\nlegalization_ops\nbranches"]
+  L --> Z["LegalizedSection\nlabels\ninstrs\ndata_blocks\nalignments"]
+  Z --> E["EncodedSection\nbytes\nitem_spans"]

@@ -1,0 +1,8 @@
+; section: runtime.tiny.entry (Bank0Nucleus)
+; bank=rom0 origin=$0150 size=0x0006
+$0150  <runtime.tiny.entry>:
+$0150  3E 42                                           ; ld   a, $42               ; cycles=2 stage=backend op=builder.default
+$0152  E0 80                                           ; ldh  ($80), a             ; cycles=3 stage=backend op=builder.default
+$0154  <runtime.tiny.loop>:
+$0154  18 FE                                           ; jr   -2 ($0154)           ; cycles=3 stage=backend op=builder.default
+

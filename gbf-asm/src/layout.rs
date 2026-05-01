@@ -246,6 +246,13 @@ pub struct LayoutPlan {
     pub reserved_ranges: Vec<ReservedRange>,
 }
 
+impl LayoutPlan {
+    #[must_use]
+    pub fn placement_for(&self, id: SectionId) -> Option<&PlacedSection> {
+        self.sections.iter().find(|section| section.id == id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutError {
     SectionTooBig {
