@@ -438,9 +438,7 @@ fn write_sym_with_escape(
 
     for (name, address) in symbols.iter() {
         let placed = layout
-            .sections
-            .iter()
-            .find(|section| section.id == address.section)
+            .placement_for(address.section)
             .ok_or(SymError::MissingPlacement {
                 section_id: address.section,
             })?;
@@ -468,7 +466,7 @@ fn write_sym_with_escape(
             name.as_str().to_owned()
         };
         entries.push(SymSortEntry {
-            location_kind: if bank.is_some() { 0 } else { 1 },
+            unbanked: bank.is_none(),
             bank,
             addr: cpu_addr,
             name: rendered_name,
@@ -494,7 +492,7 @@ fn write_sym_with_escape(
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SymSortEntry {
-    location_kind: u8,
+    unbanked: bool,
     bank: Option<u16>,
     addr: u16,
     name: String,

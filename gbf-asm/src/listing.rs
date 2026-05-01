@@ -318,9 +318,7 @@ pub fn emit_program_listing(
                 section_id: encoded.id,
             })?;
         let placed = layout
-            .sections
-            .iter()
-            .find(|candidate| candidate.id == encoded.id)
+            .placement_for(encoded.id)
             .ok_or(ListingError::MissingPlacement {
                 section_id: encoded.id,
             })?;

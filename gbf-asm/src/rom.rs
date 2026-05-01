@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::encoder::{EncodeError, EncodedSection, encode_section};
 use crate::isa::Instr;
-use crate::layout::{AddressSpace, BankIndex, LayoutError, LayoutPlan, PlacedSection};
+use crate::layout::{
+    AddressSpace, BankIndex, LayoutError, LayoutPlan, PlacedSection,
+    ROM_BANK_SIZE as LAYOUT_ROM_BANK_SIZE, ROM0_END_EXCLUSIVE, ROMX_END_EXCLUSIVE,
+};
 use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
     DataBlock, Label, LegalizedSection, OrderedItem, SectionId, SectionPrivilege, SectionRole,
@@ -19,11 +22,11 @@ use crate::symbols::SymbolName;
 pub const HEADER_START: usize = 0x0100;
 pub const HEADER_END_EXCLUSIVE: usize = 0x0150;
 pub const ENTRY_POINT: u16 = 0x0150;
-pub const ROM_BANK_SIZE: usize = 16 * 1024;
+pub const ROM_BANK_SIZE: usize = LAYOUT_ROM_BANK_SIZE as usize;
 const HEADER_SECTION_ID: SectionId = SectionId::new(0xFFFF_FFFE);
 
 // TODO(F-A2): move these cartridge constants to gbf-hw once the MBC5 module is
-// populated. Keeping them here makes F-A1's ROM builder self-contained.
+// populated.
 pub const NINTENDO_LOGO: [u8; 48] = [
     0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
     0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
@@ -477,9 +480,9 @@ fn copy_section(
             len: encoded.bytes.len() as u32,
             end_exclusive: placed.cpu_end_exclusive(),
             bank_end_exclusive: match placed.space {
-                AddressSpace::Rom0 => 0x4000,
-                AddressSpace::RomX => 0x8000,
-                _ => 0,
+                AddressSpace::Rom0 => u32::from(ROM0_END_EXCLUSIVE),
+                AddressSpace::RomX => u32::from(ROMX_END_EXCLUSIVE),
+                _ => unreachable!("non-ROM placements are rejected earlier"),
             },
         });
     }
@@ -509,7 +512,7 @@ fn build_header_section(header: &CartridgeHeader) -> Result<LegalizedSection, Ro
     let provenance =
         InstrProvenance::new(PlanningStage::Backend).with_source_op("rom.cartridge_header");
     let header_fields = header_fields(header);
-    let checksum = header_checksum_from_fields(&header_fields);
+    let checksum = header_checksum_bytes(&header_fields);
     let name = SymbolName::runtime("cartridge", "header").expect("valid static symbol");
 
     Ok(LegalizedSection {
@@ -572,16 +575,12 @@ fn header_fields(header: &CartridgeHeader) -> Vec<u8> {
 
 #[must_use]
 pub fn header_checksum(rom: &[u8]) -> u8 {
-    let mut x = 0_u8;
-    for byte in &rom[0x0134..=0x014C] {
-        x = x.wrapping_sub(*byte).wrapping_sub(1);
-    }
-    x
+    header_checksum_bytes(&rom[0x0134..=0x014C])
 }
 
-fn header_checksum_from_fields(fields: &[u8]) -> u8 {
+fn header_checksum_bytes(bytes: &[u8]) -> u8 {
     let mut x = 0_u8;
-    for byte in fields {
+    for byte in bytes {
         x = x.wrapping_sub(*byte).wrapping_sub(1);
     }
     x
@@ -662,7 +661,7 @@ mod tests {
     fn header_checksum_known_vector() {
         let rom = assemble(CartridgeHeader::default());
         assert_eq!(rom[0x014D], header_checksum(&rom));
-        let expected = header_checksum_from_fields(&header_fields(&CartridgeHeader::default()));
+        let expected = header_checksum_bytes(&header_fields(&CartridgeHeader::default()));
         assert_eq!(rom[0x014D], expected);
     }
 
