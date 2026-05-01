@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cycle_model::{CycleCost, cycle_cost};
 use crate::encoder::{EncodedItemKind, EncodedItemSpan, EncodedSection};
-use crate::isa::{
-    AluSrc8, CbTarget, Cond, IncDec8Target, Instr, Reg8, Reg16Addr, Reg16Data, Reg16Stack,
-};
+use crate::isa::Instr;
 use crate::layout::{LayoutPlan, PlacedSection};
 use crate::provenance::InstrProvenance;
 use crate::section::{DataBlock, ItemOrder, LegalizedSection, OrderedItem, SectionId};
@@ -191,44 +189,32 @@ pub fn emit_listing(
     }
 
     let spans = span_map(section.id, &encoded.item_spans)?;
-    let mut consumed_spans = BTreeSet::new();
-    let mut emitted_symbol_offsets = BTreeSet::new();
+    let mut ctx = EmitCtx {
+        out: &mut out,
+        spans: &spans,
+        encoded,
+        section_id: section.id,
+        cpu_start: placed.cpu_start,
+        symbols,
+        opts,
+        consumed: BTreeSet::new(),
+        emitted_offsets: BTreeSet::new(),
+    };
     for item in ordered_items(section) {
         match item {
             ListingItem::Label(label) => {
                 if let Some(offset) = symbols.resolve(&label.data.name).and_then(|addr| {
                     (addr.section == section.id).then_some(u16::try_from(addr.offset).ok()?)
                 }) {
-                    emit_symbol_lines(
-                        &mut out,
-                        section.id,
-                        offset,
-                        placed.cpu_start,
-                        symbols,
-                        opts.address_radix,
-                        &mut emitted_symbol_offsets,
-                    );
+                    ctx.emit_symbols(offset);
                 }
             }
             ListingItem::Instr(instr) => {
-                let key = (instr.order(), EncodedItemKind::Instr);
-                let span = require_span(section.id, &spans, key)?;
-                consumed_spans.insert(key);
-                emit_symbol_lines(
-                    &mut out,
-                    section.id,
-                    span.offset,
-                    placed.cpu_start,
-                    symbols,
-                    opts.address_radix,
-                    &mut emitted_symbol_offsets,
-                );
-                let bytes = span_bytes(encoded, *span, key)?;
-                let addr = placed.cpu_start.wrapping_add(span.offset);
-                let mnemonic = format_instr(&instr.data, addr, symbols);
-                out.push_str(&format_record(
-                    addr,
-                    &bytes,
+                let resolved = ctx.consume(instr.order(), EncodedItemKind::Instr)?;
+                let mnemonic = format_instr(&instr.data, resolved.addr, symbols);
+                ctx.out.push_str(&format_record(
+                    resolved.addr,
+                    &resolved.bytes,
                     &mnemonic,
                     &instr.provenance,
                     Some(cycle_cost(&instr.data)),
@@ -236,48 +222,24 @@ pub fn emit_listing(
                 ));
             }
             ListingItem::DataBlock(block) => {
-                let key = (block.order(), EncodedItemKind::DataBlock);
-                let span = require_span(section.id, &spans, key)?;
-                consumed_spans.insert(key);
-                emit_symbol_lines(
-                    &mut out,
-                    section.id,
-                    span.offset,
-                    placed.cpu_start,
-                    symbols,
-                    opts.address_radix,
-                    &mut emitted_symbol_offsets,
-                );
-                let bytes = span_bytes(encoded, *span, key)?;
+                let resolved = ctx.consume(block.order(), EncodedItemKind::DataBlock)?;
                 emit_chunked_record(
-                    &mut out,
+                    ctx.out,
                     placed.cpu_start,
-                    span.offset,
-                    bytes,
-                    &format!("db {} bytes", span.len),
+                    resolved.span.offset,
+                    resolved.bytes,
+                    &format!("db {} bytes", resolved.span.len),
                     &block.provenance,
                     opts,
                 );
             }
             ListingItem::Align(align) => {
-                let key = (align.order(), EncodedItemKind::AlignmentPadding);
-                let span = require_span(section.id, &spans, key)?;
-                consumed_spans.insert(key);
-                emit_symbol_lines(
-                    &mut out,
-                    section.id,
-                    span.offset,
-                    placed.cpu_start,
-                    symbols,
-                    opts.address_radix,
-                    &mut emitted_symbol_offsets,
-                );
-                let bytes = span_bytes(encoded, *span, key)?;
+                let resolved = ctx.consume(align.order(), EncodedItemKind::AlignmentPadding)?;
                 emit_chunked_record(
-                    &mut out,
+                    ctx.out,
                     placed.cpu_start,
-                    span.offset,
-                    bytes,
+                    resolved.span.offset,
+                    resolved.bytes,
                     &format!("align {} padding", align.data.0),
                     &align.provenance,
                     opts,
@@ -285,6 +247,7 @@ pub fn emit_listing(
             }
         }
     }
+    let consumed_spans = ctx.consumed;
 
     for key in spans.keys() {
         if !consumed_spans.contains(key) {
@@ -380,6 +343,52 @@ fn ordered_items(section: &LegalizedSection) -> Vec<ListingItem<'_>> {
 }
 
 type SpanKey = (ItemOrder, EncodedItemKind);
+
+struct EmitCtx<'a> {
+    out: &'a mut String,
+    spans: &'a BTreeMap<SpanKey, EncodedItemSpan>,
+    encoded: &'a EncodedSection,
+    section_id: SectionId,
+    cpu_start: u16,
+    symbols: &'a SymbolTable,
+    opts: &'a ListingOptions,
+    consumed: BTreeSet<SpanKey>,
+    emitted_offsets: BTreeSet<u16>,
+}
+
+struct ResolvedSpan {
+    span: EncodedItemSpan,
+    bytes: Vec<u8>,
+    addr: u16,
+}
+
+impl EmitCtx<'_> {
+    fn emit_symbols(&mut self, offset: u16) {
+        emit_symbol_lines(
+            self.out,
+            self.section_id,
+            offset,
+            self.cpu_start,
+            self.symbols,
+            self.opts.address_radix,
+            &mut self.emitted_offsets,
+        );
+    }
+
+    fn consume(
+        &mut self,
+        order: ItemOrder,
+        kind: EncodedItemKind,
+    ) -> Result<ResolvedSpan, ListingError> {
+        let key = (order, kind);
+        let span = *require_span(self.section_id, self.spans, key)?;
+        self.consumed.insert(key);
+        self.emit_symbols(span.offset);
+        let bytes = span_bytes(self.encoded, span, key)?;
+        let addr = self.cpu_start.wrapping_add(span.offset);
+        Ok(ResolvedSpan { span, bytes, addr })
+    }
+}
 
 fn span_map(
     section_id: SectionId,
@@ -563,176 +572,12 @@ fn format_cycles(cost: CycleCost) -> String {
 }
 
 /// Formats one canonical LR35902 instruction mnemonic.
+///
+/// Thin wrapper around [`Instr::describe`] — the canonical per-variant
+/// byte/mnemonic dispatch lives in `isa`.
 #[must_use]
 pub fn format_instr(instr: &Instr, here: u16, _symbols: &SymbolTable) -> String {
-    match *instr {
-        Instr::Nop => "nop".to_owned(),
-        Instr::Stop => "stop".to_owned(),
-        Instr::Halt => "halt".to_owned(),
-        Instr::Di => "di".to_owned(),
-        Instr::Ei => "ei".to_owned(),
-        Instr::Ccf => "ccf".to_owned(),
-        Instr::Scf => "scf".to_owned(),
-        Instr::Cpl => "cpl".to_owned(),
-        Instr::Daa => "daa".to_owned(),
-        Instr::Ld8Reg { dst, src } => format!("ld   {}, {}", reg8(dst), reg8(src)),
-        Instr::Ld8RegFromImm { dst, imm } => format!("ld   {}, {}", reg8(dst), hex8(imm)),
-        Instr::Ld8RegFromHl { dst } => format!("ld   {}, (hl)", reg8(dst)),
-        Instr::Ld8HlFromReg { src } => format!("ld   (hl), {}", reg8(src)),
-        Instr::Ld8HlFromImm { imm } => format!("ld   (hl), {}", hex8(imm)),
-        Instr::LdAFromReg16Addr { src } => format!("ld   a, {}", reg16_addr_mem(src)),
-        Instr::LdReg16AddrFromA { dst } => format!("ld   {}, a", reg16_addr_mem(dst)),
-        Instr::LdAFromDirect { addr } => format!("ld   a, ({})", hex16(addr.get())),
-        Instr::LdDirectFromA { addr } => format!("ld   ({}), a", hex16(addr.get())),
-        Instr::LdAFromHighDirect { offset } => {
-            format!("ldh  a, ({})", hex8(offset.get()))
-        }
-        Instr::LdHighDirectFromA { offset } => {
-            format!("ldh  ({}), a", hex8(offset.get()))
-        }
-        Instr::LdAFromHighC => "ldh  a, (c)".to_owned(),
-        Instr::LdHighCFromA => "ldh  (c), a".to_owned(),
-        Instr::Ld16Imm { dst, imm } => format!("ld   {}, {}", reg16_data(dst), hex16(imm)),
-        Instr::LdSpFromHl => "ld   sp, hl".to_owned(),
-        Instr::LdDirectFromSp { addr } => format!("ld   ({}), sp", hex16(addr)),
-        Instr::LdHlFromSpPlus { off } => format!("ld   hl, sp{:+}", off),
-        Instr::AddA { src } => format!("add  a, {}", alu_src(src)),
-        Instr::AdcA { src } => format!("adc  a, {}", alu_src(src)),
-        Instr::SubA { src } => format!("sub  a, {}", alu_src(src)),
-        Instr::SbcA { src } => format!("sbc  a, {}", alu_src(src)),
-        Instr::AndA { src } => format!("and  a, {}", alu_src(src)),
-        Instr::OrA { src } => format!("or   a, {}", alu_src(src)),
-        Instr::XorA { src } => format!("xor  a, {}", alu_src(src)),
-        Instr::CpA { src } => format!("cp   a, {}", alu_src(src)),
-        Instr::Inc8 { dst } => format!("inc  {}", inc_dec8(dst)),
-        Instr::Dec8 { dst } => format!("dec  {}", inc_dec8(dst)),
-        Instr::Inc16 { dst } => format!("inc  {}", reg16_data(dst)),
-        Instr::Dec16 { dst } => format!("dec  {}", reg16_data(dst)),
-        Instr::AddHl { src } => format!("add  hl, {}", reg16_data(src)),
-        Instr::AddSp { off } => format!("add  sp, {:+}", off),
-        Instr::Rlca => "rlca".to_owned(),
-        Instr::Rrca => "rrca".to_owned(),
-        Instr::Rla => "rla".to_owned(),
-        Instr::Rra => "rra".to_owned(),
-        Instr::Rlc { target } => format!("rlc  {}", cb_target(target)),
-        Instr::Rrc { target } => format!("rrc  {}", cb_target(target)),
-        Instr::Rl { target } => format!("rl   {}", cb_target(target)),
-        Instr::Rr { target } => format!("rr   {}", cb_target(target)),
-        Instr::Sla { target } => format!("sla  {}", cb_target(target)),
-        Instr::Sra { target } => format!("sra  {}", cb_target(target)),
-        Instr::Srl { target } => format!("srl  {}", cb_target(target)),
-        Instr::Swap { target } => format!("swap {}", cb_target(target)),
-        Instr::Bit { bit, target } => format!("bit  {}, {}", bit.get(), cb_target(target)),
-        Instr::Res { bit, target } => format!("res  {}, {}", bit.get(), cb_target(target)),
-        Instr::Set { bit, target } => format!("set  {}, {}", bit.get(), cb_target(target)),
-        Instr::JpAbs { cond, addr } => branch_abs("jp", cond, addr),
-        Instr::JpHl => "jp   hl".to_owned(),
-        Instr::JrRel { cond, off } => {
-            let target = here.wrapping_add(2).wrapping_add_signed(i16::from(off));
-            branch_rel("jr", cond, off, target)
-        }
-        Instr::Call { cond, addr } => branch_abs("call", cond, addr),
-        Instr::Ret { cond } => match cond {
-            None => "ret".to_owned(),
-            Some(cond) => format!("ret  {}", cond_name(cond)),
-        },
-        Instr::Reti => "reti".to_owned(),
-        Instr::Rst { vector } => format!("rst  {}", hex8(vector.addr())),
-        Instr::Push { src } => format!("push {}", reg16_stack(src)),
-        Instr::Pop { dst } => format!("pop  {}", reg16_stack(dst)),
-    }
-}
-
-fn branch_abs(op: &str, cond: Option<Cond>, addr: u16) -> String {
-    match cond {
-        None => format!("{op:<4} {}", hex16(addr)),
-        Some(cond) => format!("{op:<4} {}, {}", cond_name(cond), hex16(addr)),
-    }
-}
-
-fn branch_rel(op: &str, cond: Option<Cond>, off: i8, target: u16) -> String {
-    match cond {
-        None => format!("{op:<4} {:+} ({})", off, hex16(target)),
-        Some(cond) => format!("{op:<4} {}, {:+} ({})", cond_name(cond), off, hex16(target)),
-    }
-}
-
-fn reg8(reg: Reg8) -> &'static str {
-    match reg {
-        Reg8::A => "a",
-        Reg8::B => "b",
-        Reg8::C => "c",
-        Reg8::D => "d",
-        Reg8::E => "e",
-        Reg8::H => "h",
-        Reg8::L => "l",
-    }
-}
-
-fn reg16_data(reg: Reg16Data) -> &'static str {
-    match reg {
-        Reg16Data::BC => "bc",
-        Reg16Data::DE => "de",
-        Reg16Data::HL => "hl",
-        Reg16Data::SP => "sp",
-    }
-}
-
-fn reg16_stack(reg: Reg16Stack) -> &'static str {
-    match reg {
-        Reg16Stack::BC => "bc",
-        Reg16Stack::DE => "de",
-        Reg16Stack::HL => "hl",
-        Reg16Stack::AF => "af",
-    }
-}
-
-fn reg16_addr_mem(reg: Reg16Addr) -> &'static str {
-    match reg {
-        Reg16Addr::BC => "(bc)",
-        Reg16Addr::DE => "(de)",
-        Reg16Addr::Hli => "(hl+)",
-        Reg16Addr::Hld => "(hl-)",
-    }
-}
-
-fn alu_src(src: AluSrc8) -> String {
-    match src {
-        AluSrc8::Reg(reg) => reg8(reg).to_owned(),
-        AluSrc8::HlIndirect => "(hl)".to_owned(),
-        AluSrc8::Imm(imm) => hex8(imm),
-    }
-}
-
-fn inc_dec8(target: IncDec8Target) -> &'static str {
-    match target {
-        IncDec8Target::Reg(reg) => reg8(reg),
-        IncDec8Target::HlIndirect => "(hl)",
-    }
-}
-
-fn cb_target(target: CbTarget) -> &'static str {
-    match target {
-        CbTarget::Reg(reg) => reg8(reg),
-        CbTarget::HlIndirect => "(hl)",
-    }
-}
-
-fn cond_name(cond: Cond) -> &'static str {
-    match cond {
-        Cond::NZ => "nz",
-        Cond::Z => "z",
-        Cond::NC => "nc",
-        Cond::C => "c",
-    }
-}
-
-fn hex8(value: u8) -> String {
-    format!("${value:02X}")
-}
-
-fn hex16(value: u16) -> String {
-    format!("${value:04X}")
+    instr.describe(here).mnemonic
 }
 
 #[cfg(test)]
@@ -742,7 +587,7 @@ mod tests {
 
     use super::*;
     use crate::encoder::{EncodedItemKind, EncodedItemSpan, PAD_BYTE, encode_section};
-    use crate::isa::{BitIndex, Cond, HighDirectOffset, Reg8, Reg16Data};
+    use crate::isa::{BitIndex, CbTarget, Cond, HighDirectOffset, Reg8, Reg16Data};
     use crate::layout::{AddressSpace, BankIndex};
     use crate::provenance::{InstrProvenance, PlanningStage};
     use crate::section::{Align, Label, LegalizedSection, OrderedItem, SectionRole, SymbolId};

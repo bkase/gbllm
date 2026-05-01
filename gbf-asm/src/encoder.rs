@@ -4,10 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::isa::{
-    AluSrc8, CbTarget, Cond, IncDec8Target, Instr, Reg8, Reg16Addr, Reg16Data, Reg16Stack,
-    RstVector,
-};
+use crate::isa::Instr;
 use crate::layout::{AddressSpace, LayoutError, PlacedSection};
 use crate::section::{DataBlock, LegalizedSection, SectionId};
 
@@ -336,200 +333,19 @@ fn encode_data_block(block: &DataBlock, out: &mut Vec<u8>) {
 }
 
 /// Encode one concrete LR35902 instruction.
+///
+/// Thin wrapper around [`Instr::describe`] — the canonical per-variant
+/// byte/mnemonic dispatch lives in `isa`.
 pub fn encode_instr(instr: &Instr) -> Result<Vec<u8>, EncodeError> {
-    let mut out = Vec::with_capacity(usize::from(instr.byte_len()));
-    match *instr {
-        Instr::Nop => out.push(0x00),
-        Instr::Stop => out.extend_from_slice(&[0x10, 0x00]),
-        Instr::Halt => out.push(0x76),
-        Instr::Di => out.push(0xF3),
-        Instr::Ei => out.push(0xFB),
-        Instr::Ccf => out.push(0x3F),
-        Instr::Scf => out.push(0x37),
-        Instr::Cpl => out.push(0x2F),
-        Instr::Daa => out.push(0x27),
-        Instr::Ld8Reg { dst, src } => out.push(0x40 | (reg8_code(dst) << 3) | reg8_code(src)),
-        Instr::Ld8RegFromImm { dst, imm } => {
-            out.extend_from_slice(&[0x06 | (reg8_code(dst) << 3), imm])
-        }
-        Instr::Ld8RegFromHl { dst } => out.push(0x46 | (reg8_code(dst) << 3)),
-        Instr::Ld8HlFromReg { src } => out.push(0x70 | reg8_code(src)),
-        Instr::Ld8HlFromImm { imm } => out.extend_from_slice(&[0x36, imm]),
-        Instr::LdAFromReg16Addr { src } => out.push(match src {
-            Reg16Addr::BC => 0x0A,
-            Reg16Addr::DE => 0x1A,
-            Reg16Addr::Hli => 0x2A,
-            Reg16Addr::Hld => 0x3A,
-        }),
-        Instr::LdReg16AddrFromA { dst } => out.push(match dst {
-            Reg16Addr::BC => 0x02,
-            Reg16Addr::DE => 0x12,
-            Reg16Addr::Hli => 0x22,
-            Reg16Addr::Hld => 0x32,
-        }),
-        Instr::LdAFromDirect { addr } => push_u16(&mut out, 0xFA, addr.get()),
-        Instr::LdDirectFromA { addr } => push_u16(&mut out, 0xEA, addr.get()),
-        Instr::LdAFromHighDirect { offset } => out.extend_from_slice(&[0xF0, offset.get()]),
-        Instr::LdHighDirectFromA { offset } => out.extend_from_slice(&[0xE0, offset.get()]),
-        Instr::LdAFromHighC => out.push(0xF2),
-        Instr::LdHighCFromA => out.push(0xE2),
-        Instr::Ld16Imm { dst, imm } => push_u16(&mut out, 0x01 | (reg16_data_code(dst) << 4), imm),
-        Instr::LdSpFromHl => out.push(0xF9),
-        Instr::LdDirectFromSp { addr } => push_u16(&mut out, 0x08, addr),
-        Instr::LdHlFromSpPlus { off } => out.extend_from_slice(&[0xF8, off as u8]),
-        Instr::AddA { src } => encode_alu(&mut out, 0x80, 0xC6, src),
-        Instr::AdcA { src } => encode_alu(&mut out, 0x88, 0xCE, src),
-        Instr::SubA { src } => encode_alu(&mut out, 0x90, 0xD6, src),
-        Instr::SbcA { src } => encode_alu(&mut out, 0x98, 0xDE, src),
-        Instr::AndA { src } => encode_alu(&mut out, 0xA0, 0xE6, src),
-        Instr::XorA { src } => encode_alu(&mut out, 0xA8, 0xEE, src),
-        Instr::OrA { src } => encode_alu(&mut out, 0xB0, 0xF6, src),
-        Instr::CpA { src } => encode_alu(&mut out, 0xB8, 0xFE, src),
-        Instr::Inc8 { dst } => out.push(match dst {
-            IncDec8Target::Reg(reg) => 0x04 | (reg8_code(reg) << 3),
-            IncDec8Target::HlIndirect => 0x34,
-        }),
-        Instr::Dec8 { dst } => out.push(match dst {
-            IncDec8Target::Reg(reg) => 0x05 | (reg8_code(reg) << 3),
-            IncDec8Target::HlIndirect => 0x35,
-        }),
-        Instr::Inc16 { dst } => out.push(0x03 | (reg16_data_code(dst) << 4)),
-        Instr::Dec16 { dst } => out.push(0x0B | (reg16_data_code(dst) << 4)),
-        Instr::AddHl { src } => out.push(0x09 | (reg16_data_code(src) << 4)),
-        Instr::AddSp { off } => out.extend_from_slice(&[0xE8, off as u8]),
-        Instr::Rlca => out.push(0x07),
-        Instr::Rrca => out.push(0x0F),
-        Instr::Rla => out.push(0x17),
-        Instr::Rra => out.push(0x1F),
-        Instr::Rlc { target } => encode_cb(&mut out, 0x00, target),
-        Instr::Rrc { target } => encode_cb(&mut out, 0x08, target),
-        Instr::Rl { target } => encode_cb(&mut out, 0x10, target),
-        Instr::Rr { target } => encode_cb(&mut out, 0x18, target),
-        Instr::Sla { target } => encode_cb(&mut out, 0x20, target),
-        Instr::Sra { target } => encode_cb(&mut out, 0x28, target),
-        Instr::Swap { target } => encode_cb(&mut out, 0x30, target),
-        Instr::Srl { target } => encode_cb(&mut out, 0x38, target),
-        Instr::Bit { bit, target } => encode_cb(&mut out, 0x40 | (bit.get() << 3), target),
-        Instr::Res { bit, target } => encode_cb(&mut out, 0x80 | (bit.get() << 3), target),
-        Instr::Set { bit, target } => encode_cb(&mut out, 0xC0 | (bit.get() << 3), target),
-        Instr::JpAbs { cond, addr } => push_u16(&mut out, jp_opcode(cond), addr),
-        Instr::JpHl => out.push(0xE9),
-        Instr::JrRel { cond, off } => out.extend_from_slice(&[jr_opcode(cond), off as u8]),
-        Instr::Call { cond, addr } => push_u16(&mut out, call_opcode(cond), addr),
-        Instr::Ret { cond } => out.push(ret_opcode(cond)),
-        Instr::Reti => out.push(0xD9),
-        Instr::Rst { vector } => out.push(rst_opcode(vector)),
-        Instr::Push { src } => out.push(0xC5 | (reg16_stack_code(src) << 4)),
-        Instr::Pop { dst } => out.push(0xC1 | (reg16_stack_code(dst) << 4)),
-    }
-
-    if out.len() != usize::from(instr.byte_len()) {
+    let bytes = instr.describe(0).bytes;
+    if bytes.len() != usize::from(instr.byte_len()) {
         return Err(EncodeError::EncodedLengthMismatch {
             expected: instr.byte_len(),
-            actual: out.len() as u8,
+            actual: bytes.len() as u8,
             instr: *instr,
         });
     }
-
-    Ok(out)
-}
-
-fn push_u16(out: &mut Vec<u8>, opcode: u8, value: u16) {
-    out.push(opcode);
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn encode_alu(out: &mut Vec<u8>, base: u8, imm_opcode: u8, src: AluSrc8) {
-    match src {
-        AluSrc8::Reg(reg) => out.push(base | reg8_code(reg)),
-        AluSrc8::HlIndirect => out.push(base | 0x06),
-        AluSrc8::Imm(imm) => out.extend_from_slice(&[imm_opcode, imm]),
-    }
-}
-
-fn encode_cb(out: &mut Vec<u8>, base: u8, target: CbTarget) {
-    out.extend_from_slice(&[0xCB, base | cb_target_code(target)]);
-}
-
-fn reg8_code(reg: Reg8) -> u8 {
-    match reg {
-        Reg8::B => 0,
-        Reg8::C => 1,
-        Reg8::D => 2,
-        Reg8::E => 3,
-        Reg8::H => 4,
-        Reg8::L => 5,
-        Reg8::A => 7,
-    }
-}
-
-fn cb_target_code(target: CbTarget) -> u8 {
-    match target {
-        CbTarget::Reg(reg) => reg8_code(reg),
-        CbTarget::HlIndirect => 6,
-    }
-}
-
-fn reg16_data_code(reg: Reg16Data) -> u8 {
-    match reg {
-        Reg16Data::BC => 0,
-        Reg16Data::DE => 1,
-        Reg16Data::HL => 2,
-        Reg16Data::SP => 3,
-    }
-}
-
-fn reg16_stack_code(reg: Reg16Stack) -> u8 {
-    match reg {
-        Reg16Stack::BC => 0,
-        Reg16Stack::DE => 1,
-        Reg16Stack::HL => 2,
-        Reg16Stack::AF => 3,
-    }
-}
-
-fn jp_opcode(cond: Option<Cond>) -> u8 {
-    match cond {
-        None => 0xC3,
-        Some(Cond::NZ) => 0xC2,
-        Some(Cond::Z) => 0xCA,
-        Some(Cond::NC) => 0xD2,
-        Some(Cond::C) => 0xDA,
-    }
-}
-
-fn jr_opcode(cond: Option<Cond>) -> u8 {
-    match cond {
-        None => 0x18,
-        Some(Cond::NZ) => 0x20,
-        Some(Cond::Z) => 0x28,
-        Some(Cond::NC) => 0x30,
-        Some(Cond::C) => 0x38,
-    }
-}
-
-fn call_opcode(cond: Option<Cond>) -> u8 {
-    match cond {
-        None => 0xCD,
-        Some(Cond::NZ) => 0xC4,
-        Some(Cond::Z) => 0xCC,
-        Some(Cond::NC) => 0xD4,
-        Some(Cond::C) => 0xDC,
-    }
-}
-
-fn ret_opcode(cond: Option<Cond>) -> u8 {
-    match cond {
-        None => 0xC9,
-        Some(Cond::NZ) => 0xC0,
-        Some(Cond::Z) => 0xC8,
-        Some(Cond::NC) => 0xD0,
-        Some(Cond::C) => 0xD8,
-    }
-}
-
-fn rst_opcode(vector: RstVector) -> u8 {
-    0xC7 | vector.addr()
+    Ok(bytes)
 }
 
 #[cfg(test)]

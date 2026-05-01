@@ -665,6 +665,424 @@ impl Instr {
     }
 }
 
+/// Bytes plus canonical assembly mnemonic for one [`Instr`].
+///
+/// Returned by [`Instr::describe`]. Encoder and listing both consume this so
+/// per-variant byte/mnemonic logic lives in exactly one match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstrDescriptor {
+    pub bytes: Vec<u8>,
+    pub mnemonic: String,
+}
+
+impl Instr {
+    /// Single source of truth for per-variant encoding and assembly mnemonic.
+    ///
+    /// `here` is the CPU address of the instruction, used to resolve `JrRel`
+    /// targets to an absolute hex string. Pass `0` if you only need bytes.
+    #[must_use]
+    pub fn describe(self, here: u16) -> InstrDescriptor {
+        match self {
+            Self::Nop => one(0x00, "nop"),
+            Self::Stop => bytes_pair(0x10, 0x00, "stop"),
+            Self::Halt => one(0x76, "halt"),
+            Self::Di => one(0xF3, "di"),
+            Self::Ei => one(0xFB, "ei"),
+            Self::Ccf => one(0x3F, "ccf"),
+            Self::Scf => one(0x37, "scf"),
+            Self::Cpl => one(0x2F, "cpl"),
+            Self::Daa => one(0x27, "daa"),
+            Self::Ld8Reg { dst, src } => InstrDescriptor {
+                bytes: vec![0x40 | (reg8_code(dst) << 3) | reg8_code(src)],
+                mnemonic: format!("ld   {}, {}", reg8_name(dst), reg8_name(src)),
+            },
+            Self::Ld8RegFromImm { dst, imm } => InstrDescriptor {
+                bytes: vec![0x06 | (reg8_code(dst) << 3), imm],
+                mnemonic: format!("ld   {}, {}", reg8_name(dst), hex8(imm)),
+            },
+            Self::Ld8RegFromHl { dst } => InstrDescriptor {
+                bytes: vec![0x46 | (reg8_code(dst) << 3)],
+                mnemonic: format!("ld   {}, (hl)", reg8_name(dst)),
+            },
+            Self::Ld8HlFromReg { src } => InstrDescriptor {
+                bytes: vec![0x70 | reg8_code(src)],
+                mnemonic: format!("ld   (hl), {}", reg8_name(src)),
+            },
+            Self::Ld8HlFromImm { imm } => InstrDescriptor {
+                bytes: vec![0x36, imm],
+                mnemonic: format!("ld   (hl), {}", hex8(imm)),
+            },
+            Self::LdAFromReg16Addr { src } => {
+                let opcode = match src {
+                    Reg16Addr::BC => 0x0A,
+                    Reg16Addr::DE => 0x1A,
+                    Reg16Addr::Hli => 0x2A,
+                    Reg16Addr::Hld => 0x3A,
+                };
+                InstrDescriptor {
+                    bytes: vec![opcode],
+                    mnemonic: format!("ld   a, {}", reg16_addr_name(src)),
+                }
+            }
+            Self::LdReg16AddrFromA { dst } => {
+                let opcode = match dst {
+                    Reg16Addr::BC => 0x02,
+                    Reg16Addr::DE => 0x12,
+                    Reg16Addr::Hli => 0x22,
+                    Reg16Addr::Hld => 0x32,
+                };
+                InstrDescriptor {
+                    bytes: vec![opcode],
+                    mnemonic: format!("ld   {}, a", reg16_addr_name(dst)),
+                }
+            }
+            Self::LdAFromDirect { addr } => InstrDescriptor {
+                bytes: u16_op(0xFA, addr.get()),
+                mnemonic: format!("ld   a, ({})", hex16(addr.get())),
+            },
+            Self::LdDirectFromA { addr } => InstrDescriptor {
+                bytes: u16_op(0xEA, addr.get()),
+                mnemonic: format!("ld   ({}), a", hex16(addr.get())),
+            },
+            Self::LdAFromHighDirect { offset } => InstrDescriptor {
+                bytes: vec![0xF0, offset.get()],
+                mnemonic: format!("ldh  a, ({})", hex8(offset.get())),
+            },
+            Self::LdHighDirectFromA { offset } => InstrDescriptor {
+                bytes: vec![0xE0, offset.get()],
+                mnemonic: format!("ldh  ({}), a", hex8(offset.get())),
+            },
+            Self::LdAFromHighC => one(0xF2, "ldh  a, (c)"),
+            Self::LdHighCFromA => one(0xE2, "ldh  (c), a"),
+            Self::Ld16Imm { dst, imm } => InstrDescriptor {
+                bytes: u16_op(0x01 | (reg16_data_code(dst) << 4), imm),
+                mnemonic: format!("ld   {}, {}", reg16_data_name(dst), hex16(imm)),
+            },
+            Self::LdSpFromHl => one(0xF9, "ld   sp, hl"),
+            Self::LdDirectFromSp { addr } => InstrDescriptor {
+                bytes: u16_op(0x08, addr),
+                mnemonic: format!("ld   ({}), sp", hex16(addr)),
+            },
+            Self::LdHlFromSpPlus { off } => InstrDescriptor {
+                bytes: vec![0xF8, off as u8],
+                mnemonic: format!("ld   hl, sp{off:+}"),
+            },
+            Self::AddA { src } => alu_describe(0x80, 0xC6, "add", src),
+            Self::AdcA { src } => alu_describe(0x88, 0xCE, "adc", src),
+            Self::SubA { src } => alu_describe(0x90, 0xD6, "sub", src),
+            Self::SbcA { src } => alu_describe(0x98, 0xDE, "sbc", src),
+            Self::AndA { src } => alu_describe(0xA0, 0xE6, "and", src),
+            Self::XorA { src } => alu_describe(0xA8, 0xEE, "xor", src),
+            Self::OrA { src } => alu_describe(0xB0, 0xF6, "or ", src),
+            Self::CpA { src } => alu_describe(0xB8, 0xFE, "cp ", src),
+            Self::Inc8 { dst } => {
+                let opcode = match dst {
+                    IncDec8Target::Reg(reg) => 0x04 | (reg8_code(reg) << 3),
+                    IncDec8Target::HlIndirect => 0x34,
+                };
+                InstrDescriptor {
+                    bytes: vec![opcode],
+                    mnemonic: format!("inc  {}", inc_dec_name(dst)),
+                }
+            }
+            Self::Dec8 { dst } => {
+                let opcode = match dst {
+                    IncDec8Target::Reg(reg) => 0x05 | (reg8_code(reg) << 3),
+                    IncDec8Target::HlIndirect => 0x35,
+                };
+                InstrDescriptor {
+                    bytes: vec![opcode],
+                    mnemonic: format!("dec  {}", inc_dec_name(dst)),
+                }
+            }
+            Self::Inc16 { dst } => InstrDescriptor {
+                bytes: vec![0x03 | (reg16_data_code(dst) << 4)],
+                mnemonic: format!("inc  {}", reg16_data_name(dst)),
+            },
+            Self::Dec16 { dst } => InstrDescriptor {
+                bytes: vec![0x0B | (reg16_data_code(dst) << 4)],
+                mnemonic: format!("dec  {}", reg16_data_name(dst)),
+            },
+            Self::AddHl { src } => InstrDescriptor {
+                bytes: vec![0x09 | (reg16_data_code(src) << 4)],
+                mnemonic: format!("add  hl, {}", reg16_data_name(src)),
+            },
+            Self::AddSp { off } => InstrDescriptor {
+                bytes: vec![0xE8, off as u8],
+                mnemonic: format!("add  sp, {off:+}"),
+            },
+            Self::Rlca => one(0x07, "rlca"),
+            Self::Rrca => one(0x0F, "rrca"),
+            Self::Rla => one(0x17, "rla"),
+            Self::Rra => one(0x1F, "rra"),
+            Self::Rlc { target } => cb_describe(0x00, "rlc ", target),
+            Self::Rrc { target } => cb_describe(0x08, "rrc ", target),
+            Self::Rl { target } => cb_describe(0x10, "rl  ", target),
+            Self::Rr { target } => cb_describe(0x18, "rr  ", target),
+            Self::Sla { target } => cb_describe(0x20, "sla ", target),
+            Self::Sra { target } => cb_describe(0x28, "sra ", target),
+            Self::Swap { target } => cb_describe(0x30, "swap", target),
+            Self::Srl { target } => cb_describe(0x38, "srl ", target),
+            Self::Bit { bit, target } => cb_bit_describe(0x40, "bit", bit, target),
+            Self::Res { bit, target } => cb_bit_describe(0x80, "res", bit, target),
+            Self::Set { bit, target } => cb_bit_describe(0xC0, "set", bit, target),
+            Self::JpAbs { cond, addr } => InstrDescriptor {
+                bytes: u16_op(jp_opcode(cond), addr),
+                mnemonic: branch_abs_text("jp", cond, addr),
+            },
+            Self::JpHl => one(0xE9, "jp   hl"),
+            Self::JrRel { cond, off } => {
+                let target = here.wrapping_add(2).wrapping_add_signed(i16::from(off));
+                InstrDescriptor {
+                    bytes: vec![jr_opcode(cond), off as u8],
+                    mnemonic: branch_rel_text("jr", cond, off, target),
+                }
+            }
+            Self::Call { cond, addr } => InstrDescriptor {
+                bytes: u16_op(call_opcode(cond), addr),
+                mnemonic: branch_abs_text("call", cond, addr),
+            },
+            Self::Ret { cond } => {
+                let mnemonic = match cond {
+                    None => "ret".to_owned(),
+                    Some(cond) => format!("ret  {}", cond_name(cond)),
+                };
+                InstrDescriptor {
+                    bytes: vec![ret_opcode(cond)],
+                    mnemonic,
+                }
+            }
+            Self::Reti => one(0xD9, "reti"),
+            Self::Rst { vector } => InstrDescriptor {
+                bytes: vec![0xC7 | vector.addr()],
+                mnemonic: format!("rst  {}", hex8(vector.addr())),
+            },
+            Self::Push { src } => InstrDescriptor {
+                bytes: vec![0xC5 | (reg16_stack_code(src) << 4)],
+                mnemonic: format!("push {}", reg16_stack_name(src)),
+            },
+            Self::Pop { dst } => InstrDescriptor {
+                bytes: vec![0xC1 | (reg16_stack_code(dst) << 4)],
+                mnemonic: format!("pop  {}", reg16_stack_name(dst)),
+            },
+        }
+    }
+}
+
+fn one(byte: u8, mnem: &str) -> InstrDescriptor {
+    InstrDescriptor {
+        bytes: vec![byte],
+        mnemonic: mnem.to_owned(),
+    }
+}
+
+fn bytes_pair(a: u8, b: u8, mnem: &str) -> InstrDescriptor {
+    InstrDescriptor {
+        bytes: vec![a, b],
+        mnemonic: mnem.to_owned(),
+    }
+}
+
+fn u16_op(opcode: u8, value: u16) -> Vec<u8> {
+    let bytes = value.to_le_bytes();
+    vec![opcode, bytes[0], bytes[1]]
+}
+
+fn alu_describe(base: u8, imm_opcode: u8, op: &str, src: AluSrc8) -> InstrDescriptor {
+    let bytes = match src {
+        AluSrc8::Reg(reg) => vec![base | reg8_code(reg)],
+        AluSrc8::HlIndirect => vec![base | 0x06],
+        AluSrc8::Imm(imm) => vec![imm_opcode, imm],
+    };
+    InstrDescriptor {
+        bytes,
+        mnemonic: format!("{op}  a, {}", alu_src_name(src)),
+    }
+}
+
+fn cb_describe(base: u8, op: &str, target: CbTarget) -> InstrDescriptor {
+    InstrDescriptor {
+        bytes: vec![0xCB, base | cb_target_code(target)],
+        mnemonic: format!("{op} {}", cb_target_name(target)),
+    }
+}
+
+fn cb_bit_describe(base: u8, op: &str, bit: BitIndex, target: CbTarget) -> InstrDescriptor {
+    InstrDescriptor {
+        bytes: vec![0xCB, base | (bit.get() << 3) | cb_target_code(target)],
+        mnemonic: format!("{op:<5}{}, {}", bit.get(), cb_target_name(target)),
+    }
+}
+
+fn branch_abs_text(op: &str, cond: Option<Cond>, addr: u16) -> String {
+    match cond {
+        None => format!("{op:<4} {}", hex16(addr)),
+        Some(cond) => format!("{op:<4} {}, {}", cond_name(cond), hex16(addr)),
+    }
+}
+
+fn branch_rel_text(op: &str, cond: Option<Cond>, off: i8, target: u16) -> String {
+    match cond {
+        None => format!("{op:<4} {off:+} ({})", hex16(target)),
+        Some(cond) => format!("{op:<4} {}, {off:+} ({})", cond_name(cond), hex16(target)),
+    }
+}
+
+fn reg8_code(reg: Reg8) -> u8 {
+    match reg {
+        Reg8::B => 0,
+        Reg8::C => 1,
+        Reg8::D => 2,
+        Reg8::E => 3,
+        Reg8::H => 4,
+        Reg8::L => 5,
+        Reg8::A => 7,
+    }
+}
+
+fn reg8_name(reg: Reg8) -> &'static str {
+    match reg {
+        Reg8::A => "a",
+        Reg8::B => "b",
+        Reg8::C => "c",
+        Reg8::D => "d",
+        Reg8::E => "e",
+        Reg8::H => "h",
+        Reg8::L => "l",
+    }
+}
+
+fn reg16_data_code(reg: Reg16Data) -> u8 {
+    match reg {
+        Reg16Data::BC => 0,
+        Reg16Data::DE => 1,
+        Reg16Data::HL => 2,
+        Reg16Data::SP => 3,
+    }
+}
+
+fn reg16_data_name(reg: Reg16Data) -> &'static str {
+    match reg {
+        Reg16Data::BC => "bc",
+        Reg16Data::DE => "de",
+        Reg16Data::HL => "hl",
+        Reg16Data::SP => "sp",
+    }
+}
+
+fn reg16_stack_code(reg: Reg16Stack) -> u8 {
+    match reg {
+        Reg16Stack::BC => 0,
+        Reg16Stack::DE => 1,
+        Reg16Stack::HL => 2,
+        Reg16Stack::AF => 3,
+    }
+}
+
+fn reg16_stack_name(reg: Reg16Stack) -> &'static str {
+    match reg {
+        Reg16Stack::BC => "bc",
+        Reg16Stack::DE => "de",
+        Reg16Stack::HL => "hl",
+        Reg16Stack::AF => "af",
+    }
+}
+
+fn reg16_addr_name(reg: Reg16Addr) -> &'static str {
+    match reg {
+        Reg16Addr::BC => "(bc)",
+        Reg16Addr::DE => "(de)",
+        Reg16Addr::Hli => "(hl+)",
+        Reg16Addr::Hld => "(hl-)",
+    }
+}
+
+fn alu_src_name(src: AluSrc8) -> String {
+    match src {
+        AluSrc8::Reg(reg) => reg8_name(reg).to_owned(),
+        AluSrc8::HlIndirect => "(hl)".to_owned(),
+        AluSrc8::Imm(imm) => hex8(imm),
+    }
+}
+
+fn inc_dec_name(target: IncDec8Target) -> &'static str {
+    match target {
+        IncDec8Target::Reg(reg) => reg8_name(reg),
+        IncDec8Target::HlIndirect => "(hl)",
+    }
+}
+
+fn cb_target_code(target: CbTarget) -> u8 {
+    match target {
+        CbTarget::Reg(reg) => reg8_code(reg),
+        CbTarget::HlIndirect => 6,
+    }
+}
+
+fn cb_target_name(target: CbTarget) -> &'static str {
+    match target {
+        CbTarget::Reg(reg) => reg8_name(reg),
+        CbTarget::HlIndirect => "(hl)",
+    }
+}
+
+fn cond_name(cond: Cond) -> &'static str {
+    match cond {
+        Cond::NZ => "nz",
+        Cond::Z => "z",
+        Cond::NC => "nc",
+        Cond::C => "c",
+    }
+}
+
+fn jp_opcode(cond: Option<Cond>) -> u8 {
+    match cond {
+        None => 0xC3,
+        Some(Cond::NZ) => 0xC2,
+        Some(Cond::Z) => 0xCA,
+        Some(Cond::NC) => 0xD2,
+        Some(Cond::C) => 0xDA,
+    }
+}
+
+fn jr_opcode(cond: Option<Cond>) -> u8 {
+    match cond {
+        None => 0x18,
+        Some(Cond::NZ) => 0x20,
+        Some(Cond::Z) => 0x28,
+        Some(Cond::NC) => 0x30,
+        Some(Cond::C) => 0x38,
+    }
+}
+
+fn call_opcode(cond: Option<Cond>) -> u8 {
+    match cond {
+        None => 0xCD,
+        Some(Cond::NZ) => 0xC4,
+        Some(Cond::Z) => 0xCC,
+        Some(Cond::NC) => 0xD4,
+        Some(Cond::C) => 0xDC,
+    }
+}
+
+fn ret_opcode(cond: Option<Cond>) -> u8 {
+    match cond {
+        None => 0xC9,
+        Some(Cond::NZ) => 0xC0,
+        Some(Cond::Z) => 0xC8,
+        Some(Cond::NC) => 0xD0,
+        Some(Cond::C) => 0xD8,
+    }
+}
+
+fn hex8(value: u8) -> String {
+    format!("${value:02X}")
+}
+
+fn hex16(value: u16) -> String {
+    format!("${value:04X}")
+}
+
 const fn alu_src_cycle_cost(src: AluSrc8) -> CycleCost {
     match src {
         AluSrc8::Reg(_) => fixed(1),
@@ -1044,5 +1462,34 @@ fn instr_size_in_bytes() {
 
     for (instr, expected) in cases {
         assert_eq!(instr.byte_len(), expected, "{instr:?}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn describe_matches_gbdev_opcode_json() {
+    use crate::test_support::gbdev_instr_cases;
+
+    for case in gbdev_instr_cases() {
+        let descriptor = case.instr().describe(0);
+        assert_eq!(
+            descriptor.bytes,
+            case.expected_bytes(),
+            "describe.bytes mismatch for {}",
+            case.label()
+        );
+        let actual_op = descriptor
+            .mnemonic
+            .split_whitespace()
+            .next()
+            .expect("mnemonic must be nonempty");
+        let expected_op = case.gbdev_mnemonic().to_lowercase();
+        assert_eq!(
+            actual_op,
+            expected_op.as_str(),
+            "describe.mnemonic op mismatch for {} (full mnemonic = {:?})",
+            case.label(),
+            descriptor.mnemonic
+        );
     }
 }
