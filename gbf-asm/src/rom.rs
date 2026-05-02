@@ -19,19 +19,13 @@ use crate::section::{
 };
 use crate::symbols::SymbolName;
 
+pub use gbf_hw::cartridge_header::{DestinationCode, MbcType, NINTENDO_LOGO, RamSize, RomSize};
+
 pub const HEADER_START: usize = 0x0100;
 pub const HEADER_END_EXCLUSIVE: usize = 0x0150;
 pub const ENTRY_POINT: u16 = 0x0150;
 pub const ROM_BANK_SIZE: usize = LAYOUT_ROM_BANK_SIZE as usize;
 const HEADER_SECTION_ID: SectionId = SectionId::new(0xFFFF_FFFE);
-
-// TODO(F-A2): move these cartridge constants to gbf-hw once the MBC5 module is
-// populated.
-pub const NINTENDO_LOGO: [u8; 48] = [
-    0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
-    0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
-    0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CartridgeHeader {
@@ -90,116 +84,6 @@ impl Default for CartridgeHeader {
             destination_code: DestinationCode::Overseas,
             new_licensee_code: *b"00",
             mask_rom_version: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MbcType {
-    Mbc5,
-    Mbc5Ram,
-    Mbc5RamBattery,
-}
-
-impl MbcType {
-    #[must_use]
-    pub const fn header_byte(self) -> u8 {
-        match self {
-            Self::Mbc5 => 0x19,
-            Self::Mbc5Ram => 0x1A,
-            Self::Mbc5RamBattery => 0x1B,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RomSize {
-    Kib32,
-    Kib64,
-    Kib128,
-    Kib256,
-    Kib512,
-    Mib1,
-    Mib2,
-    Mib4,
-    Mib8,
-}
-
-impl RomSize {
-    #[must_use]
-    pub const fn header_byte(self) -> u8 {
-        match self {
-            Self::Kib32 => 0x00,
-            Self::Kib64 => 0x01,
-            Self::Kib128 => 0x02,
-            Self::Kib256 => 0x03,
-            Self::Kib512 => 0x04,
-            Self::Mib1 => 0x05,
-            Self::Mib2 => 0x06,
-            Self::Mib4 => 0x07,
-            Self::Mib8 => 0x08,
-        }
-    }
-
-    #[must_use]
-    pub const fn bank_count(self) -> u16 {
-        match self {
-            Self::Kib32 => 2,
-            Self::Kib64 => 4,
-            Self::Kib128 => 8,
-            Self::Kib256 => 16,
-            Self::Kib512 => 32,
-            Self::Mib1 => 64,
-            Self::Mib2 => 128,
-            Self::Mib4 => 256,
-            Self::Mib8 => 512,
-        }
-    }
-
-    #[must_use]
-    pub const fn bytes(self) -> usize {
-        self.bank_count() as usize * ROM_BANK_SIZE
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RamSize {
-    None,
-    Kib8,
-    Kib32,
-    Kib64,
-    Kib128,
-}
-
-impl RamSize {
-    #[must_use]
-    pub const fn header_byte(self) -> u8 {
-        match self {
-            Self::None => 0x00,
-            Self::Kib8 => 0x02,
-            Self::Kib32 => 0x03,
-            Self::Kib128 => 0x04,
-            Self::Kib64 => 0x05,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DestinationCode {
-    Japan,
-    Overseas,
-}
-
-impl DestinationCode {
-    #[must_use]
-    pub const fn header_byte(self) -> u8 {
-        match self {
-            Self::Japan => 0x00,
-            Self::Overseas => 0x01,
         }
     }
 }

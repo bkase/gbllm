@@ -1,0 +1,6 @@
+flowchart LR
+  RAMG["$0000-$1FFF RAMG"] --> STATE["MBC5 state"]
+  BANK1["$2000-$2FFF BANK1 low 8"] --> STATE
+  BANK2["$3000-$3FFF BANK2 high bit"] --> STATE
+  RAMB["$4000-$5FFF RAMB SRAM bank"] --> STATE
+  RESERVED["$6000-$7FFF Reserved"] --> REJECT["guarded illegal write"]

@@ -1,0 +1,7 @@
+stateDiagram-v2
+  [*] --> OamSearch
+  OamSearch --> Drawing
+  Drawing --> HBlank
+  HBlank --> OamSearch
+  HBlank --> VBlank: LY 144
+  VBlank --> OamSearch: LY 0

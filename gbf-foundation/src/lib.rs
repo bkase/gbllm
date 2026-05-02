@@ -9,7 +9,8 @@ pub mod semver;
 pub use cost::ByteCost;
 pub use hash::{Hash256, Hash256ParseError};
 pub use ids::{
-    BudgetSlotId, CalibrationSetRef, CheckpointId, CompileProfileId, ExpertId, LayerId,
-    TargetFamilyId, TargetProfileId, WorkloadId,
+    BudgetSlotId, CalibrationCohortId, CheckpointId, CompileProfileId, ExpertId,
+    KernelCalibrationId, KernelImplId, KernelSpecId, LayerId, PlatformCalibrationId,
+    RuntimeCalibrationId, RuntimeNucleusId, TargetFamilyId, TargetProfileId, WorkloadId,
 };
 pub use semver::{SemVer, SemVerParseError};

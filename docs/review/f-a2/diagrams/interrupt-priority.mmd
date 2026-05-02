@@ -1,0 +1,5 @@
+flowchart LR
+  V["VBlank bit 0 $0040"] --> L["LCD STAT bit 1 $0048"]
+  L --> T["Timer bit 2 $0050"]
+  T --> S["Serial bit 3 $0058"]
+  S --> J["Joypad bit 4 $0060"]

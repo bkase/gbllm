@@ -1,0 +1,14 @@
+# F-A2 single-source smoke allowlist.
+#
+# This file is intentionally small and comment-heavy because the test is ignored
+# until the workspace-wide gbf-test gate is promoted. Each allowed path below is
+# legacy ASM surface or fixture data, not new F-A2 drift.
+allowed_paths:
+  - gbf-asm/src/isa.rs
+  - gbf-asm/src/layout.rs
+  - gbf-asm/src/listing.rs
+  - gbf-asm/src/relax.rs
+  - gbf-asm/src/rom.rs
+  - gbf-asm/src/section.rs
+  - gbf-asm/src/symbols.rs
+  - gbf-asm/tests/fixtures/gbdev-opcodes.json

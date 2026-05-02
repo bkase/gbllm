@@ -1,0 +1,13 @@
+flowchart TB
+  ROM0["$0000-$3FFF ROM bank 0"]
+  ROMX["$4000-$7FFF switchable ROM"]
+  VRAM["$8000-$9FFF VRAM"]
+  SRAM["$A000-$BFFF cartridge SRAM"]
+  WRAM0["$C000-$CFFF WRAM0"]
+  WRAMX["$D000-$DFFF WRAMX"]
+  ECHO["$E000-$FDFF echo RAM"]
+  OAM["$FE00-$FE9F OAM"]
+  BAD["$FEA0-$FEFF unmapped"]
+  IO["$FF00-$FF7F IO"]
+  HRAM["$FF80-$FFFE HRAM"]
+  IE["$FFFF IE"]
