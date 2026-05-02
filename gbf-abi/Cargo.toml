@@ -5,9 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = ["host"]
+host = ["std", "alloc", "dep:gbf-foundation"]
+std = ["serde/std"]
+alloc = ["serde/alloc"]
+
 [dependencies]
-gbf-artifact = { path = "../gbf-artifact" }
-gbf-foundation = { path = "../gbf-foundation" }
-gbf-hw = { path = "../gbf-hw" }
-serde.workspace = true
+gbf-foundation = { path = "../gbf-foundation", optional = true }
+memoffset = "0.9"
+serde = { version = "=1.0.228", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1"
 serde_json.workspace = true

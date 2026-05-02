@@ -1,0 +1,417 @@
+{
+  "crate": "gbf-abi",
+  "endianness": "little",
+  "layouts": [
+    {
+      "align": 1,
+      "fields": [
+        {
+          "name": "major",
+          "offset": 0,
+          "size": 1
+        },
+        {
+          "name": "minor",
+          "offset": 1,
+          "size": 1
+        },
+        {
+          "name": "patch",
+          "offset": 2,
+          "size": 1
+        }
+      ],
+      "module": "version",
+      "rom_resident": true,
+      "size": 3,
+      "type": "AbiVersion"
+    },
+    {
+      "align": 8,
+      "fields": [
+        {
+          "name": "magic",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "abi",
+          "offset": 4,
+          "size": 3
+        },
+        {
+          "name": "_reserved0",
+          "offset": 7,
+          "size": 1
+        },
+        {
+          "name": "build_hash",
+          "offset": 8,
+          "size": 32
+        },
+        {
+          "name": "artifact_core_hash",
+          "offset": 40,
+          "size": 32
+        },
+        {
+          "name": "runtime_nucleus_hash",
+          "offset": 72,
+          "size": 32
+        },
+        {
+          "name": "compile_request_hash",
+          "offset": 104,
+          "size": 32
+        },
+        {
+          "name": "timestamp_unix",
+          "offset": 136,
+          "size": 8
+        },
+        {
+          "name": "continuation_tail_bytes",
+          "offset": 144,
+          "size": 4
+        },
+        {
+          "name": "semantic_schema_version",
+          "offset": 148,
+          "size": 2
+        },
+        {
+          "name": "_reserved1",
+          "offset": 150,
+          "size": 2
+        }
+      ],
+      "module": "version",
+      "rom_resident": true,
+      "size": 152,
+      "type": "BuildIdentityBlock"
+    },
+    {
+      "align": 4,
+      "fields": [
+        {
+          "name": "progress_epoch",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "last_checkpoint",
+          "offset": 4,
+          "size": 2
+        },
+        {
+          "name": "no_progress_frames",
+          "offset": 6,
+          "size": 2
+        },
+        {
+          "name": "livelock_threshold_frames",
+          "offset": 8,
+          "size": 2
+        },
+        {
+          "name": "_reserved",
+          "offset": 10,
+          "size": 2
+        }
+      ],
+      "module": "liveness",
+      "rom_resident": true,
+      "size": 12,
+      "type": "LivenessCounters"
+    },
+    {
+      "align": 4,
+      "fields": [
+        {
+          "name": "abi",
+          "offset": 0,
+          "size": 3
+        },
+        {
+          "name": "_reserved0",
+          "offset": 3,
+          "size": 1
+        },
+        {
+          "name": "schema",
+          "offset": 4,
+          "size": 2
+        },
+        {
+          "name": "last_fault",
+          "offset": 6,
+          "size": 2
+        },
+        {
+          "name": "session_id",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "token_count",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "slice_id",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "liveness",
+          "offset": 20,
+          "size": 12
+        }
+      ],
+      "module": "continuation",
+      "rom_resident": true,
+      "size": 32,
+      "type": "InferenceStateHeader"
+    },
+    {
+      "align": 2,
+      "fields": [
+        {
+          "name": "raw",
+          "offset": 0,
+          "size": 2
+        }
+      ],
+      "module": "continuation",
+      "rom_resident": true,
+      "size": 2,
+      "type": "FaultCodeOptional"
+    },
+    {
+      "align": 2,
+      "fields": [
+        {
+          "name": "a",
+          "offset": 0,
+          "size": 1
+        },
+        {
+          "name": "f",
+          "offset": 1,
+          "size": 1
+        },
+        {
+          "name": "b",
+          "offset": 2,
+          "size": 1
+        },
+        {
+          "name": "c",
+          "offset": 3,
+          "size": 1
+        },
+        {
+          "name": "d",
+          "offset": 4,
+          "size": 1
+        },
+        {
+          "name": "e",
+          "offset": 5,
+          "size": 1
+        },
+        {
+          "name": "h",
+          "offset": 6,
+          "size": 1
+        },
+        {
+          "name": "l",
+          "offset": 7,
+          "size": 1
+        },
+        {
+          "name": "sp",
+          "offset": 8,
+          "size": 2
+        }
+      ],
+      "module": "fault",
+      "rom_resident": true,
+      "size": 10,
+      "type": "RegisterSnapshot"
+    },
+    {
+      "align": 4,
+      "fields": [
+        {
+          "name": "code",
+          "offset": 0,
+          "size": 2
+        },
+        {
+          "name": "domain",
+          "offset": 2,
+          "size": 2
+        },
+        {
+          "name": "at_pc",
+          "offset": 4,
+          "size": 2
+        },
+        {
+          "name": "at_bank",
+          "offset": 6,
+          "size": 2
+        },
+        {
+          "name": "at_checkpoint",
+          "offset": 8,
+          "size": 2
+        },
+        {
+          "name": "_resv",
+          "offset": 10,
+          "size": 2
+        },
+        {
+          "name": "regs",
+          "offset": 12,
+          "size": 10
+        },
+        {
+          "name": "_resv1",
+          "offset": 22,
+          "size": 2
+        },
+        {
+          "name": "liveness",
+          "offset": 24,
+          "size": 12
+        }
+      ],
+      "module": "fault",
+      "rom_resident": true,
+      "size": 36,
+      "type": "FaultSnapshot"
+    },
+    {
+      "align": 4,
+      "fields": [
+        {
+          "name": "magic",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "seq",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "op",
+          "offset": 8,
+          "size": 2
+        },
+        {
+          "name": "doorbell",
+          "offset": 10,
+          "size": 1
+        },
+        {
+          "name": "_resv",
+          "offset": 11,
+          "size": 1
+        },
+        {
+          "name": "args",
+          "offset": 12,
+          "size": 32
+        }
+      ],
+      "module": "harness",
+      "rom_resident": true,
+      "size": 44,
+      "type": "HarnessCommandBlock"
+    },
+    {
+      "align": 4,
+      "fields": [
+        {
+          "name": "magic",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "seq",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "kind",
+          "offset": 8,
+          "size": 2
+        },
+        {
+          "name": "ready",
+          "offset": 10,
+          "size": 1
+        },
+        {
+          "name": "_resv",
+          "offset": 11,
+          "size": 1
+        },
+        {
+          "name": "data",
+          "offset": 12,
+          "size": 32
+        }
+      ],
+      "module": "harness",
+      "rom_resident": true,
+      "size": 44,
+      "type": "HarnessResultBlock"
+    },
+    {
+      "align": 4,
+      "fields": [
+        {
+          "name": "seq",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "timestamp_m_cycles",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "slice",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "probe",
+          "offset": 12,
+          "size": 2
+        },
+        {
+          "name": "checkpoint",
+          "offset": 14,
+          "size": 2
+        },
+        {
+          "name": "data",
+          "offset": 16,
+          "size": 16
+        }
+      ],
+      "module": "trace",
+      "rom_resident": true,
+      "size": 32,
+      "type": "TraceEvent"
+    }
+  ],
+  "rfc": "history/rfcs/F-A3-gbf-abi.md"
+}

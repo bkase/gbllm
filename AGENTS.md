@@ -91,6 +91,9 @@ git push                # Push to remote
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
+- When asking Gemini for architecture/correctness/code-quality review, use
+  `gemini --skip-trust -m gemini-3.1-pro-preview ...` so the review command
+  can run in this workspace.
 
 ### Training Loss Beads
 
