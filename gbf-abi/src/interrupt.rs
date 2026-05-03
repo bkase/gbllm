@@ -40,6 +40,12 @@ impl OverlayId {
     pub const ALL_VALUES_FIT: bool = size_of::<Self>() == size_of::<u16>();
 }
 
+const _: () = {
+    assert!(LeaseId::ALL_VALUES_FIT);
+    assert!(SliceId::ALL_VALUES_FIT);
+    assert!(OverlayId::ALL_VALUES_FIT);
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RomWindowBinding {
     pub bank: u16,
@@ -163,13 +169,6 @@ mod tests {
             core::any::type_name::<LeaseId>(),
             core::any::type_name::<OverlayId>()
         );
-    }
-
-    #[test]
-    fn lease_id_uniqueness() {
-        assert!(LeaseId::ALL_VALUES_FIT);
-        assert!(SliceId::ALL_VALUES_FIT);
-        assert!(OverlayId::ALL_VALUES_FIT);
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub const VBLANK_DOTS: u32 = 4_560;
 /// Normal-speed M-cycles in the VBlank interval.
 pub const VBLANK_M_CYCLES: u32 = VBLANK_DOTS / 4;
 
+const _: () = assert!(VBLANK_M_CYCLES < FRAME_M_CYCLES);
+
 /// Approximate normal-speed frames per second.
 pub const FRAMES_PER_SECOND: f32 = NORMAL_M_CYCLES_PER_SECOND as f32 / FRAME_M_CYCLES as f32;
 
@@ -236,11 +238,6 @@ mod tests {
             "vblank_dots":4560
         }"#;
         assert!(serde_json::from_str::<TimingProfile>(bad).is_err());
-    }
-
-    #[test]
-    fn vblank_smaller_than_frame() {
-        assert!(VBLANK_M_CYCLES < FRAME_M_CYCLES);
     }
 
     #[test]

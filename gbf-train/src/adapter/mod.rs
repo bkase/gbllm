@@ -278,15 +278,11 @@ pub fn scalar_only() -> u32 {
             if let Some(package) = table.get("package").and_then(toml::Value::as_str) {
                 return package.to_owned();
             }
-            if !resolving_workspace && table_bool(table, "workspace") {
-                if let Some(workspace_spec) = workspace_deps.get(dep_name) {
-                    return dependency_package_inner(
-                        dep_name,
-                        workspace_spec,
-                        workspace_deps,
-                        true,
-                    );
-                }
+            if !resolving_workspace
+                && table_bool(table, "workspace")
+                && let Some(workspace_spec) = workspace_deps.get(dep_name)
+            {
+                return dependency_package_inner(dep_name, workspace_spec, workspace_deps, true);
             }
         }
 
