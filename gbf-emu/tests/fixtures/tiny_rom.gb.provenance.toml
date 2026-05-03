@@ -1,0 +1,5 @@
+producer = "docs/review/f-a1/artifacts/tiny_rom.gb"
+sha256 = "04dbcff2c0ce8f91f50ce1adf2166fbe163d7719f9400b11afe7f0a2885c4a79"
+size_bytes = 32768
+regeneration_command = "cargo run -p gbf-asm --example tiny_rom -- --out gbf-emu/tests/fixtures/tiny_rom.gb"
+notes = "Checked in for F-A7 so cargo test -p gbf-emu does not shell out to gbf-asm."

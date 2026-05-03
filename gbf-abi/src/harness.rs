@@ -104,6 +104,7 @@ pub struct HarnessResultBlock {
 }
 
 impl HarnessCommandBlock {
+    pub const SIZE: usize = 44;
     pub const MAGIC: [u8; 4] = *b"HCMD";
 
     #[must_use]
@@ -148,9 +149,37 @@ impl HarnessCommandBlock {
         self.decode_op()?;
         Ok(())
     }
+
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; Self::SIZE] {
+        let mut out = [0_u8; Self::SIZE];
+        out[0..4].copy_from_slice(&self.magic);
+        out[4..8].copy_from_slice(&self.seq.to_le_bytes());
+        out[8..10].copy_from_slice(&self.op.to_le_bytes());
+        out[10] = self.doorbell;
+        out[11] = self._resv;
+        out[12..Self::SIZE].copy_from_slice(&self.args);
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8; Self::SIZE]) -> Result<Self, HarnessProtocolError> {
+        let block = Self {
+            magic: bytes[0..4].try_into().expect("slice length is fixed"),
+            seq: u32::from_le_bytes(bytes[4..8].try_into().expect("slice length is fixed")),
+            op: u16::from_le_bytes(bytes[8..10].try_into().expect("slice length is fixed")),
+            doorbell: bytes[10],
+            _resv: bytes[11],
+            args: bytes[12..Self::SIZE]
+                .try_into()
+                .expect("slice length is fixed"),
+        };
+        block.validate()?;
+        Ok(block)
+    }
 }
 
 impl HarnessResultBlock {
+    pub const SIZE: usize = 44;
     pub const MAGIC: [u8; 4] = *b"HRES";
 
     #[must_use]
@@ -199,6 +228,36 @@ impl HarnessResultBlock {
             });
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; Self::SIZE] {
+        let mut out = [0_u8; Self::SIZE];
+        out[0..4].copy_from_slice(&self.magic);
+        out[4..8].copy_from_slice(&self.seq.to_le_bytes());
+        out[8..10].copy_from_slice(&self.kind.to_le_bytes());
+        out[10] = self.ready;
+        out[11] = self._resv;
+        out[12..Self::SIZE].copy_from_slice(&self.data);
+        out
+    }
+
+    pub fn from_bytes(
+        bytes: &[u8; Self::SIZE],
+        command_seq: u32,
+    ) -> Result<Self, HarnessProtocolError> {
+        let block = Self {
+            magic: bytes[0..4].try_into().expect("slice length is fixed"),
+            seq: u32::from_le_bytes(bytes[4..8].try_into().expect("slice length is fixed")),
+            kind: u16::from_le_bytes(bytes[8..10].try_into().expect("slice length is fixed")),
+            ready: bytes[10],
+            _resv: bytes[11],
+            data: bytes[12..Self::SIZE]
+                .try_into()
+                .expect("slice length is fixed"),
+        };
+        block.validate_for_command(command_seq)?;
+        Ok(block)
     }
 }
 
@@ -445,6 +504,28 @@ mod tests {
         let encoded = serde_json::to_string(&result).expect("result serializes");
         let decoded: HarnessResultBlock =
             serde_json::from_str(&encoded).expect("result deserializes");
+
+        assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn command_bytes_round_trip_through_abi_owner() {
+        let mut command = HarnessCommandBlock::new(9, HarnessOp::PowerCut, [4; 32]);
+        command.raise_doorbell();
+
+        let decoded =
+            HarnessCommandBlock::from_bytes(&command.to_bytes()).expect("command decodes");
+
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn result_bytes_round_trip_through_abi_owner() {
+        let mut result = HarnessResultBlock::new(9, HarnessResultKind::Done, [5; 32]);
+        result.mark_ready();
+
+        let decoded =
+            HarnessResultBlock::from_bytes(&result.to_bytes(), 9).expect("result decodes");
 
         assert_eq!(decoded, result);
     }

@@ -4,10 +4,15 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+build = "build.rs"
 
 [dependencies]
 gbf-abi = { path = "../gbf-abi" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
+gameroy = { package = "gameroy-core", git = "https://github.com/Rodrigodd/gameroy", rev = "a5acdc921c0561ed93a077622b598df0e068583c", default-features = false, features = ["io_trace"] }
 serde.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
 serde_json.workspace = true

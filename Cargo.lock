@@ -2033,6 +2033,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "gameroy-core"
+version = "0.3.1"
+source = "git+https://github.com/Rodrigodd/gameroy?rev=a5acdc921c0561ed93a077622b598df0e068583c#a5acdc921c0561ed93a077622b598df0e068583c"
+
+[[package]]
 name = "gbf-abi"
 version = "0.1.0"
 dependencies = [
@@ -2118,11 +2123,13 @@ dependencies = [
 name = "gbf-emu"
 version = "0.1.0"
 dependencies = [
+ "gameroy-core",
  "gbf-abi",
  "gbf-foundation",
  "gbf-hw",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
