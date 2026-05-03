@@ -93,6 +93,7 @@ git push                # Push to remote
 - When asking Gemini for architecture/correctness/code-quality review, use
   `gemini --skip-trust -m gemini-3.1-pro-preview -p "<prompt>"` so the review command
   can run in this workspace.
+- For PR bodies with Markdown, always use `gh pr edit/create --body-file - <<'EOF'`.
 
 ### Training Loss Beads
 
