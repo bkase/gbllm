@@ -1,0 +1,6 @@
+flowchart TB
+  header["24-byte header: magic, version, counts, total_bytes"]
+  pinsets["pinset table: name, annotation, roots"]
+  records["blob records in Hash256 order"]
+  record["hash[32] | len[u64 LE] | body[len]"]
+  header --> pinsets --> records --> record

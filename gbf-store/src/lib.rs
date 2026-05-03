@@ -1,5 +1,7 @@
 //! Content-addressed storage, stage cache, archive transport, pinsets, GC, and integrity verification.
 
+#![forbid(unsafe_code)]
+
 pub mod archive;
 pub mod blob;
 pub mod gc;

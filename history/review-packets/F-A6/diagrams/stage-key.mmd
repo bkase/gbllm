@@ -1,0 +1,9 @@
+flowchart LR
+  stage["StageId"] --> canon["canonical length-prefixed bytes"]
+  local["ComponentDigestSet (BTreeMap)"] --> canon
+  global["global Hash256"] --> canon
+  flags["FeatureFlag set (BTreeSet)"] --> canon
+  version["SemVer as u32 triplet"] --> canon
+  canon --> digest["StageCacheKey"]
+  digest --> index["cache/<prefix>/<key>"]
+  index --> blob["payload Hash256 in BlobStore"]

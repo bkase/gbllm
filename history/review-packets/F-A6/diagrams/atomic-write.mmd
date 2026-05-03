@@ -1,0 +1,13 @@
+sequenceDiagram
+  participant Caller
+  participant Temp as tmp/blob-*.tmp
+  participant Final as blobs/sha256/ab/hash
+  Caller->>Temp: write bytes
+  Caller->>Temp: sync_all
+  Temp->>Final: rename
+  alt existing final path
+    Caller->>Final: stream-verify existing hash
+  end
+  opt DurabilityMode::Full
+    Caller->>Final: best-effort parent directory sync
+  end
