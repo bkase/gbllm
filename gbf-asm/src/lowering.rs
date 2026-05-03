@@ -18,6 +18,7 @@ pub enum LoweringError {
     UnsupportedStructuredOp(&'static str),
     SymbolName(String),
     SectionPrivilegeViolation(SectionPrivilegeError),
+    Runtime(String),
 }
 
 impl fmt::Display for LoweringError {
@@ -28,6 +29,7 @@ impl fmt::Display for LoweringError {
             Self::SectionPrivilegeViolation(error) => {
                 write!(f, "lowered fragment violates section privilege: {error:?}")
             }
+            Self::Runtime(message) => f.write_str(message),
         }
     }
 }
@@ -38,6 +40,7 @@ impl std::error::Error for LoweringError {}
 pub struct LoweringContext<'a> {
     pub source_section_id: SectionId,
     pub source_section_role: SectionRole,
+    pub source_section_privilege: &'a SectionPrivilege,
     pub provenance: &'a InstrProvenance,
     pub symbols: &'a SymbolTable,
 }
@@ -73,6 +76,18 @@ pub struct LoweredFragment {
     pub alignments: Vec<FragmentItem<Align>>,
     pub legalization_ops: Vec<FragmentItem<LegalizationOp>>,
     pub branches: Vec<FragmentItem<SymbolicBranch>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoweringDisposition {
+    Lowered(LoweredFragment),
+    NotOwned,
+    Error(LoweringError),
+}
+
+pub trait DispositionPreLayoutOpLowering {
+    fn lower_disposition(&self, op: &PreLayoutOp, ctx: &LoweringContext<'_>)
+    -> LoweringDisposition;
 }
 
 pub trait PreLayoutOpLowering {
@@ -132,7 +147,7 @@ impl PreLayoutOpLowering for StubPreLayoutOpLowering {
                 ))?,
                 ctx.provenance.clone(),
             ),
-            PreLayoutOp::BankRelease { lease_id } => branch_fragment(
+            PreLayoutOp::BankRelease { lease_id, .. } => branch_fragment(
                 runtime_symbol(&format!("release_{}", lease_id.get()))?,
                 ctx.provenance.clone(),
             ),
@@ -175,6 +190,17 @@ pub fn lower_pre_layout_ops(
         .collect()
 }
 
+pub fn lower_pre_layout_ops_with_disposition(
+    sections: Vec<Section>,
+    lowerers: &[&dyn DispositionPreLayoutOpLowering],
+    symbols: &SymbolTable,
+) -> Result<Vec<LoweredSection>, LoweringError> {
+    sections
+        .into_iter()
+        .map(|section| lower_one_with_disposition(section, lowerers, symbols))
+        .collect()
+}
+
 fn lower_one(
     section: Section,
     lowerer: &dyn PreLayoutOpLowering,
@@ -191,59 +217,22 @@ fn lower_one(
         let ctx = LoweringContext {
             source_section_id: section.id(),
             source_section_role: section.role(),
+            source_section_privilege: section.privilege(),
             provenance: &op.provenance,
             symbols,
         };
         let fragment = lowerer.lower(&op.data, &ctx)?;
         validate_fragment(&fragment, section.privilege(), op.seq_index)?;
-        labels.extend(fragment.labels.into_iter().map(|item| {
-            OrderedItem::new_with_sub_index(
-                item.data,
-                op.seq_index,
-                item.sub_index,
-                item.provenance,
-            )
-        }));
-        instrs.extend(fragment.instrs.into_iter().map(|item| {
-            OrderedItem::new_with_sub_index(
-                item.data,
-                op.seq_index,
-                item.sub_index,
-                item.provenance,
-            )
-        }));
-        data_blocks.extend(fragment.data_blocks.into_iter().map(|item| {
-            OrderedItem::new_with_sub_index(
-                item.data,
-                op.seq_index,
-                item.sub_index,
-                item.provenance,
-            )
-        }));
-        alignments.extend(fragment.alignments.into_iter().map(|item| {
-            OrderedItem::new_with_sub_index(
-                item.data,
-                op.seq_index,
-                item.sub_index,
-                item.provenance,
-            )
-        }));
-        legalization_ops.extend(fragment.legalization_ops.into_iter().map(|item| {
-            OrderedItem::new_with_sub_index(
-                item.data,
-                op.seq_index,
-                item.sub_index,
-                item.provenance,
-            )
-        }));
-        branches.extend(fragment.branches.into_iter().map(|item| {
-            OrderedItem::new_with_sub_index(
-                item.data,
-                op.seq_index,
-                item.sub_index,
-                item.provenance,
-            )
-        }));
+        merge_fragment(
+            fragment,
+            op.seq_index,
+            &mut labels,
+            &mut instrs,
+            &mut data_blocks,
+            &mut alignments,
+            &mut legalization_ops,
+            &mut branches,
+        );
     }
 
     Ok(LoweredSection {
@@ -268,6 +257,118 @@ fn lower_one(
         legalization_ops,
         branches,
     })
+}
+
+fn lower_one_with_disposition(
+    section: Section,
+    lowerers: &[&dyn DispositionPreLayoutOpLowering],
+    symbols: &SymbolTable,
+) -> Result<LoweredSection, LoweringError> {
+    let mut labels = section.labels().to_vec();
+    let mut instrs = section.instrs().to_vec();
+    let mut data_blocks = section.data_blocks().to_vec();
+    let mut alignments = section.alignments().to_vec();
+    let mut legalization_ops = section.legalization_ops().to_vec();
+    let mut branches = section.branches().to_vec();
+
+    for op in section.pre_layout_ops() {
+        let ctx = LoweringContext {
+            source_section_id: section.id(),
+            source_section_role: section.role(),
+            source_section_privilege: section.privilege(),
+            provenance: &op.provenance,
+            symbols,
+        };
+
+        let mut lowered = None;
+        for lowerer in lowerers {
+            match lowerer.lower_disposition(&op.data, &ctx) {
+                LoweringDisposition::Lowered(fragment) => {
+                    lowered = Some(fragment);
+                    break;
+                }
+                LoweringDisposition::NotOwned => {}
+                LoweringDisposition::Error(err) => return Err(err),
+            }
+        }
+
+        let fragment = lowered.ok_or(LoweringError::UnsupportedStructuredOp(op_kind(&op.data)))?;
+        validate_fragment(&fragment, section.privilege(), op.seq_index)?;
+        merge_fragment(
+            fragment,
+            op.seq_index,
+            &mut labels,
+            &mut instrs,
+            &mut data_blocks,
+            &mut alignments,
+            &mut legalization_ops,
+            &mut branches,
+        );
+    }
+
+    Ok(LoweredSection {
+        id: section.id(),
+        role: section.role(),
+        name: section.name().clone(),
+        privilege: section.privilege().clone(),
+        align: section.align(),
+        size_hint_bytes: section.size_hint_bytes(),
+        next_seq_index: next_seq_index_after(
+            &labels,
+            &instrs,
+            &data_blocks,
+            &alignments,
+            &legalization_ops,
+            &branches,
+        ),
+        labels,
+        instrs,
+        data_blocks,
+        alignments,
+        legalization_ops,
+        branches,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_fragment(
+    fragment: LoweredFragment,
+    seq_index: u32,
+    labels: &mut Vec<OrderedItem<Label>>,
+    instrs: &mut Vec<OrderedItem<Instr>>,
+    data_blocks: &mut Vec<OrderedItem<DataBlock>>,
+    alignments: &mut Vec<OrderedItem<Align>>,
+    legalization_ops: &mut Vec<OrderedItem<LegalizationOp>>,
+    branches: &mut Vec<OrderedItem<SymbolicBranch>>,
+) {
+    labels.extend(fragment.labels.into_iter().map(|item| {
+        OrderedItem::new_with_sub_index(item.data, seq_index, item.sub_index, item.provenance)
+    }));
+    instrs.extend(fragment.instrs.into_iter().map(|item| {
+        OrderedItem::new_with_sub_index(item.data, seq_index, item.sub_index, item.provenance)
+    }));
+    data_blocks.extend(fragment.data_blocks.into_iter().map(|item| {
+        OrderedItem::new_with_sub_index(item.data, seq_index, item.sub_index, item.provenance)
+    }));
+    alignments.extend(fragment.alignments.into_iter().map(|item| {
+        OrderedItem::new_with_sub_index(item.data, seq_index, item.sub_index, item.provenance)
+    }));
+    legalization_ops.extend(fragment.legalization_ops.into_iter().map(|item| {
+        OrderedItem::new_with_sub_index(item.data, seq_index, item.sub_index, item.provenance)
+    }));
+    branches.extend(fragment.branches.into_iter().map(|item| {
+        OrderedItem::new_with_sub_index(item.data, seq_index, item.sub_index, item.provenance)
+    }));
+}
+
+const fn op_kind(op: &PreLayoutOp) -> &'static str {
+    match op {
+        PreLayoutOp::BankLease(_) => "BankLease",
+        PreLayoutOp::BankRelease { .. } => "BankRelease",
+        PreLayoutOp::Yield { .. } => "Yield",
+        PreLayoutOp::TraceProbe { .. } => "TraceProbe",
+        PreLayoutOp::AssertBank { .. } => "AssertBank",
+    }
 }
 
 fn next_seq_index_after(
@@ -377,7 +478,10 @@ mod tests {
     use super::*;
     use crate::builder::Builder;
     use crate::isa::DirectAddr;
-    use crate::section::{BankLeaseSpec, Label, LeaseId, MbcBankClass, SectionRole, SymbolId};
+    use crate::section::{
+        BankLeaseSpec, Label, LeaseGeneration, LeaseId, LeaseLifetime, MbcBankClass, SectionRole,
+        SymbolId,
+    };
 
     #[test]
     fn pre_layout_ops_are_drained() {
@@ -386,9 +490,18 @@ mod tests {
             SymbolName::runtime("demo", "ops").expect("section"),
         );
         let lease = LeaseId::new(1);
-        builder.bank_lease(BankLeaseSpec::new(lease, MbcBankClass::Rom, 2).expect("valid lease"));
-        builder.yield_op(YieldKind::Cooperative);
+        builder.bank_lease(
+            BankLeaseSpec::new(
+                lease,
+                LeaseGeneration(lease.get()),
+                MbcBankClass::Rom,
+                2,
+                LeaseLifetime::Slice,
+            )
+            .expect("valid lease"),
+        );
         builder.bank_release(lease);
+        builder.yield_op(YieldKind::Cooperative);
 
         let lowered = lower_pre_layout_ops(
             vec![builder.finish()],

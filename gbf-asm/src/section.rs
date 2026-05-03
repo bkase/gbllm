@@ -336,6 +336,36 @@ impl fmt::Display for BankLeaseSpecError {
 
 impl std::error::Error for BankLeaseSpecError {}
 
+/// Host-side generation for a leased bank token.
+///
+/// The value is part of the symbolic pre-layout lease record so downstream
+/// lowering can distinguish a still-active guard from a stale token with a
+/// colliding `LeaseId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct LeaseGeneration(pub u32);
+
+/// Lifetime contract attached to a bank lease.
+///
+/// F-A4 lowering materializes only the local acquire/release side. Lifetimes
+/// that need scheduler restoration (`ResumeWindow`, `Token`) remain visible in
+/// this durable record so production lowering can reject them until that owner
+/// lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseLifetime {
+    Slice,
+    ResumeWindow,
+    Token,
+    Manual,
+}
+
+impl LeaseLifetime {
+    #[must_use]
+    pub const fn yield_safe(self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+}
+
 /// Bank lease marker accepted by the builder.
 ///
 /// This is authoring intent, not the runtime BankLease ABI layout. The runtime
@@ -343,8 +373,10 @@ impl std::error::Error for BankLeaseSpecError {}
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BankLeaseSpec {
     lease_id: LeaseId,
+    generation: LeaseGeneration,
     class: MbcBankClass,
     bank: u16,
+    lifetime: LeaseLifetime,
 }
 
 impl BankLeaseSpec {
@@ -353,8 +385,10 @@ impl BankLeaseSpec {
 
     pub fn new(
         lease_id: LeaseId,
+        generation: LeaseGeneration,
         class: MbcBankClass,
         bank: u16,
+        lifetime: LeaseLifetime,
     ) -> Result<Self, BankLeaseSpecError> {
         match class {
             MbcBankClass::Rom if bank > Self::MAX_ROM_BANK => {
@@ -368,14 +402,21 @@ impl BankLeaseSpec {
 
         Ok(Self {
             lease_id,
+            generation,
             class,
             bank,
+            lifetime,
         })
     }
 
     #[must_use]
     pub const fn lease_id(&self) -> LeaseId {
         self.lease_id
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> LeaseGeneration {
+        self.generation
     }
 
     #[must_use]
@@ -387,6 +428,27 @@ impl BankLeaseSpec {
     pub const fn bank(&self) -> u16 {
         self.bank
     }
+
+    #[must_use]
+    pub const fn lifetime(&self) -> LeaseLifetime {
+        self.lifetime
+    }
+}
+
+/// Serializable return disposition for a bank-release structured op.
+///
+/// The runtime-facing `gbf_runtime::banking::ReturnState` carries an
+/// unforgeable `KeepCurrentProof`; this wire type deliberately does not. The
+/// runtime banking API validates and converts into this plain shape before it
+/// reaches `PreLayoutOp`, keeping `gbf-asm` independent of `gbf-runtime`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "data")]
+pub enum BankReleaseDisposition {
+    KeepCurrent,
+    RomBank1,
+    RomManual(u16),
+    SramDisable,
+    SramBank(u8),
 }
 
 /// Cooperative runtime yield marker.
@@ -432,6 +494,7 @@ pub enum PreLayoutOp {
     BankLease(BankLeaseSpec),
     BankRelease {
         lease_id: LeaseId,
+        return_to: BankReleaseDisposition,
     },
     Yield {
         kind: YieldKind,

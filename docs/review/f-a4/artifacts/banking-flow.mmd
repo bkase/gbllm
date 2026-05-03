@@ -1,0 +1,10 @@
+flowchart LR
+    spec["ValidatedBankLeaseSpec"] --> lease["lease_rom_switchable"]
+    lease --> guard["BankGuard"]
+    guard --> release["release_bank"]
+    lease --> prelease["PreLayoutOp::BankLease"]
+    release --> prerelease["PreLayoutOp::BankRelease"]
+    prelease --> lower["BankingPreLayoutLowering"]
+    prerelease --> lower
+    lower --> instr["Instr stream"]
+    instr --> bytes["encoded bytes"]
