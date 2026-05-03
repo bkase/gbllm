@@ -1,0 +1,18 @@
+      <svg xmlns="http://www.w3.org/2000/svg" width="980" height="376" viewBox="0 0 980 376">
+        <rect x="0" y="0" width="980" height="376" fill="#ffffff"/>
+        <rect x="12" y="12" width="956" height="352" fill="#f8fafc" stroke="#334155" stroke-width="1"/>
+        <text x="24" y="34" font-family="monospace" font-size="18">Atomic Write</text>
+<text x="24" y="58" font-family="monospace" font-size="14">sequenceDiagram</text>
+<text x="24" y="82" font-family="monospace" font-size="14">participant Caller</text>
+<text x="24" y="106" font-family="monospace" font-size="14">participant Temp as tmp/blob-*.tmp</text>
+<text x="24" y="130" font-family="monospace" font-size="14">participant Final as blobs/sha256/ab/hash</text>
+<text x="24" y="154" font-family="monospace" font-size="14">Caller-&gt;&gt;Temp: write bytes</text>
+<text x="24" y="178" font-family="monospace" font-size="14">Caller-&gt;&gt;Temp: sync_all</text>
+<text x="24" y="202" font-family="monospace" font-size="14">Temp-&gt;&gt;Final: rename</text>
+<text x="24" y="226" font-family="monospace" font-size="14">alt existing final path</text>
+<text x="24" y="250" font-family="monospace" font-size="14">Caller-&gt;&gt;Final: stream-verify existing hash</text>
+<text x="24" y="274" font-family="monospace" font-size="14">end</text>
+<text x="24" y="298" font-family="monospace" font-size="14">opt DurabilityMode::Full</text>
+<text x="24" y="322" font-family="monospace" font-size="14">Caller-&gt;&gt;Final: best-effort parent directory sync</text>
+<text x="24" y="346" font-family="monospace" font-size="14">end</text>
+      </svg>

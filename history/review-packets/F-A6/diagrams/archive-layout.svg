@@ -1,0 +1,11 @@
+      <svg xmlns="http://www.w3.org/2000/svg" width="980" height="208" viewBox="0 0 980 208">
+        <rect x="0" y="0" width="980" height="208" fill="#ffffff"/>
+        <rect x="12" y="12" width="956" height="184" fill="#f8fafc" stroke="#334155" stroke-width="1"/>
+        <text x="24" y="34" font-family="monospace" font-size="18">Archive Layout</text>
+<text x="24" y="58" font-family="monospace" font-size="14">flowchart TB</text>
+<text x="24" y="82" font-family="monospace" font-size="14">header['24-byte header: magic, version, counts, total_bytes']</text>
+<text x="24" y="106" font-family="monospace" font-size="14">pinsets['pinset table: name, annotation, roots']</text>
+<text x="24" y="130" font-family="monospace" font-size="14">records['blob records in Hash256 order']</text>
+<text x="24" y="154" font-family="monospace" font-size="14">record['hash[32] | len[u64 LE] | body[len]']</text>
+<text x="24" y="178" font-family="monospace" font-size="14">header --&gt; pinsets --&gt; records --&gt; record</text>
+      </svg>

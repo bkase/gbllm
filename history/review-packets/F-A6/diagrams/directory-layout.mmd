@@ -1,0 +1,10 @@
+flowchart TB
+  root["store root"]
+  root --> blobs["blobs/sha256"]
+  blobs --> shard["ab/"]
+  shard --> blob["ab...64 hex content hash"]
+  root --> tmp["tmp/blob-*.tmp"]
+  root --> cache["cache/"]
+  cache --> cshard["cd/"]
+  cshard --> index["cd...64 hex stage-cache key"]
+  index --> payload["file body: payload Hash256"]

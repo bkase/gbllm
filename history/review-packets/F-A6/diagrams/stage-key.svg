@@ -1,0 +1,14 @@
+      <svg xmlns="http://www.w3.org/2000/svg" width="980" height="280" viewBox="0 0 980 280">
+        <rect x="0" y="0" width="980" height="280" fill="#ffffff"/>
+        <rect x="12" y="12" width="956" height="256" fill="#f8fafc" stroke="#334155" stroke-width="1"/>
+        <text x="24" y="34" font-family="monospace" font-size="18">Stage Key</text>
+<text x="24" y="58" font-family="monospace" font-size="14">flowchart LR</text>
+<text x="24" y="82" font-family="monospace" font-size="14">stage['StageId'] --&gt; canon['canonical length-prefixed bytes']</text>
+<text x="24" y="106" font-family="monospace" font-size="14">local['ComponentDigestSet (BTreeMap)'] --&gt; canon</text>
+<text x="24" y="130" font-family="monospace" font-size="14">global['global Hash256'] --&gt; canon</text>
+<text x="24" y="154" font-family="monospace" font-size="14">flags['FeatureFlag set (BTreeSet)'] --&gt; canon</text>
+<text x="24" y="178" font-family="monospace" font-size="14">version['SemVer as u32 triplet'] --&gt; canon</text>
+<text x="24" y="202" font-family="monospace" font-size="14">canon --&gt; digest['StageCacheKey']</text>
+<text x="24" y="226" font-family="monospace" font-size="14">digest --&gt; index['cache/&lt;prefix&gt;/&lt;key&gt;']</text>
+<text x="24" y="250" font-family="monospace" font-size="14">index --&gt; blob['payload Hash256 in BlobStore']</text>
+      </svg>

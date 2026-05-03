@@ -1,0 +1,10 @@
+flowchart TD
+  pinsets["Pinset roots"] --> queue["work queue"]
+  queue --> load["BlobStore::get"]
+  load --> refs["BlobReferencesRegistry"]
+  refs --> children["child Hash256 values"]
+  children --> queue
+  load --> keep["keep set"]
+  all["BlobStore::list_blobs"] --> candidates["all - keep"]
+  candidates --> sweep["remove in Hash256 order"]
+  sweep --> indexes["optional stage-cache index sweep"]

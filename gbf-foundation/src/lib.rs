@@ -6,6 +6,7 @@ pub mod hash;
 pub mod ids;
 pub mod semver;
 
+pub use blob::{BlobCodec, BlobRef};
 pub use cost::ByteCost;
 pub use hash::{Hash256, Hash256ParseError};
 pub use ids::{
