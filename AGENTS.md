@@ -1,5 +1,3 @@
-
-
 <!-- br-agent-instructions-v1 -->
 
 ---
@@ -57,6 +55,7 @@ python3 scripts/beads_pr_scope_check.py --base origin/main --head WORKTREE --all
 Before the first commit in a fresh clone, run `./scripts/install-hooks.sh`.
 
 A pre-commit hook automatically runs on every `git commit`. Do NOT run it manually — just commit and it gates you. The hook runs (fail-fast):
+
 1. `cargo fmt --check --all`
 2. `cargo clippy --workspace --all-features -- -D warnings`
 3. `cargo test --workspace --all-features`
@@ -92,7 +91,7 @@ git push                # Push to remote
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
 - When asking Gemini for architecture/correctness/code-quality review, use
-  `gemini --skip-trust -m gemini-3.1-pro-preview ...` so the review command
+  `gemini --skip-trust -m gemini-3.1-pro-preview -p "<prompt>"` so the review command
   can run in this workspace.
 
 ### Training Loss Beads
