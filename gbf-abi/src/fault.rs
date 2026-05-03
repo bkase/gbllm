@@ -31,6 +31,7 @@ pub enum FaultCode {
     LivenessTimeout = 0x0032,
     RepeatedCheckpointNoProgress = 0x0033,
     UiCommitOutsideLegalMode = 0x0040,
+    UiCommitQueueFull = 0x0041,
     UnknownChecksumKind = 0x0050,
     UnknownPersistKind = 0x0051,
     HarnessProtocolError = 0x0060,
@@ -55,6 +56,7 @@ impl FaultCode {
         Self::LivenessTimeout,
         Self::RepeatedCheckpointNoProgress,
         Self::UiCommitOutsideLegalMode,
+        Self::UiCommitQueueFull,
         Self::UnknownChecksumKind,
         Self::UnknownPersistKind,
         Self::HarnessProtocolError,
@@ -80,6 +82,7 @@ impl FaultCode {
             0x0032 => Some(Self::LivenessTimeout),
             0x0033 => Some(Self::RepeatedCheckpointNoProgress),
             0x0040 => Some(Self::UiCommitOutsideLegalMode),
+            0x0041 => Some(Self::UiCommitQueueFull),
             0x0050 => Some(Self::UnknownChecksumKind),
             0x0051 => Some(Self::UnknownPersistKind),
             0x0060 => Some(Self::HarnessProtocolError),
@@ -178,7 +181,7 @@ pub const fn classify_fault(code: FaultCode) -> FaultDomain {
         FaultCode::LivenessTimeout | FaultCode::RepeatedCheckpointNoProgress => {
             FaultDomain::Liveness
         }
-        FaultCode::UiCommitOutsideLegalMode => FaultDomain::Ui,
+        FaultCode::UiCommitOutsideLegalMode | FaultCode::UiCommitQueueFull => FaultDomain::Ui,
         FaultCode::UnknownChecksumKind | FaultCode::UnknownPersistKind => FaultDomain::Schema,
         FaultCode::HarnessProtocolError => FaultDomain::Harness,
         FaultCode::TraceBudgetExceeded => FaultDomain::Trace,

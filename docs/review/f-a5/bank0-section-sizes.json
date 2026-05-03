@@ -1,0 +1,80 @@
+[
+  {
+    "module": "boot",
+    "section_id": 42240,
+    "name": "runtime.boot.section",
+    "bytes": 160
+  },
+  {
+    "module": "boot",
+    "section_id": 42241,
+    "name": "runtime.boot.irq_vectors",
+    "bytes": 40
+  },
+  {
+    "module": "interrupts",
+    "section_id": 42242,
+    "name": "runtime.interrupts.isr_stubs",
+    "bytes": 70
+  },
+  {
+    "module": "interrupts",
+    "section_id": 42243,
+    "name": "runtime.interrupts.handlers",
+    "bytes": 220
+  },
+  {
+    "module": "scheduler",
+    "section_id": 42244,
+    "name": "runtime.scheduler.section",
+    "bytes": 640
+  },
+  {
+    "module": "joypad",
+    "section_id": 42245,
+    "name": "runtime.joypad.section",
+    "bytes": 96
+  },
+  {
+    "module": "text",
+    "section_id": 42246,
+    "name": "runtime.text.section",
+    "bytes": 192
+  },
+  {
+    "module": "keyboard",
+    "section_id": 42247,
+    "name": "runtime.keyboard.section",
+    "bytes": 360
+  },
+  {
+    "module": "video_commit",
+    "section_id": 42248,
+    "name": "runtime.video_commit.section",
+    "bytes": 1100
+  },
+  {
+    "module": "panic",
+    "section_id": 42249,
+    "name": "runtime.panic.section",
+    "bytes": 256
+  },
+  {
+    "module": "boot",
+    "section_id": 42250,
+    "name": "runtime.boot.build_identity_placeholder",
+    "bytes": 152
+  },
+  {
+    "module": "text",
+    "section_id": 42251,
+    "name": "runtime.text.font_data",
+    "bytes": 2048
+  },
+  {
+    "module": "keyboard",
+    "section_id": 42252,
+    "name": "runtime.keyboard.layout_data",
+    "bytes": 82
+  }
+]
