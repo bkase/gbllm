@@ -136,7 +136,7 @@ gbforge/
   crates/
     gbf-foundation/  # ids, hashes, semver wrappers, BlobRef, tiny shared enums/newtypes
     gbf-store/       # content-addressed object store, stage-cache implementation, archive/directory transport, pinsets, GC/eviction, integrity verification
-    gbf-migrate/     # host-side upgrade DAGs, deprecation windows, artifact/report/workload/calibration migrators
+    gbf-migrate/     # host-side upgrade DAGs, deprecation windows, artifact/report/workload/calibration migrators — DEFERRED until first real schema bump (see RFC F-A6 §0.0.0); all modules stay `//! Module stub.` and the workspace policy for schema mismatch is "rebuild from sources" until the follow-up bead F-A6b lands
     gbf-hw/          # verified memory map, timing model, calibration schema, target/cartridge profiles, MBC5 registers, LCD/interrupt constants
     gbf-artifact/    # durable model lineage only: canonical semantic core, target-data lowerings, aux sidecars, ReferenceModelBundle
     gbf-policy/      # compile requests, objectives, profiles, repair policy, deployability envelope
@@ -1500,7 +1500,10 @@ must also have an explicit upgrade path. Core crates define current schemas
 only; host-side migration logic lives in `gbf-migrate` so the compiler,
 oracles, and report consumers can assume "current schema in memory."
 
+> **DEFERRED — `gbf-migrate` is not yet implemented.** As of this revision, the workspace has shipped zero versioned schemas in production (no real artifacts, no measured calibration bundles, no captured failure capsules, no run reports). The cost of "wipe and rebuild from sources on schema bump" is therefore essentially zero today, while the cost of carrying ~600 LOC of unused scaffolding is paid every day. RFC F-A6 (§0.0.0) defers all `gbf-migrate` work to a follow-up feature bead **F-A6b** that opens when the first real schema bump demands it. Until then: `gbf-migrate/src/{dag,epochs,report}.rs` stay `//! Module stub.`, loaders error loudly on schema mismatch rather than silently transforming, and `CompatibilityEpochs` / `MigrationReport` / `MigrationLossClass` remain *design intent* rather than implemented types. The shapes below are preserved as the starting design for F-A6b.
+
 ```rust
+// DESIGN INTENT (NOT IMPLEMENTED — see RFC F-A6 §0.0.0; deferred to F-A6b).
 pub struct CompatibilityEpochs {
     pub artifact: u16,
     pub abi: u16,
