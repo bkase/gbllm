@@ -12,7 +12,7 @@
 //! opaque-byte escape hatch — every emitted byte goes through `Instr`, `db`, or
 //! `dw`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU16;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -23,9 +23,10 @@ use crate::effect::{
 use crate::isa::Instr;
 use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
-    Align, BankLeaseSpec, DataBlock, Label, LeaseId, LegalizationOp, MbcBankClass, PreLayoutOp,
-    PrivilegeViolation, ProbeLevel, Section, SectionId, SectionPrivilege, SectionPrivilegeError,
-    SectionRole, SymbolId, SymbolicBranch, TraceProbeId, YieldKind,
+    Align, BankLeaseSpec, BankReleaseDisposition, DataBlock, Label, LeaseId, LegalizationOp,
+    MbcBankClass, PreLayoutOp, PrivilegeViolation, ProbeLevel, Section, SectionId,
+    SectionPrivilege, SectionPrivilegeError, SectionRole, SymbolId, SymbolicBranch, TraceProbeId,
+    YieldKind,
 };
 use crate::symbols::SymbolName;
 
@@ -42,6 +43,12 @@ pub enum BuilderError {
     },
     UnknownLease {
         lease_id: LeaseId,
+    },
+    UnreleasedBankGuard {
+        leases: Vec<LeaseId>,
+    },
+    YieldWithActiveLease {
+        leases: Vec<LeaseId>,
     },
     SramBankOutOfRange {
         bank: u16,
@@ -75,6 +82,26 @@ impl fmt::Display for BuilderError {
             }
             Self::UnknownLease { lease_id } => {
                 write!(f, "lease id {} is not active", lease_id.get())
+            }
+            Self::UnreleasedBankGuard { leases } => {
+                write!(f, "unreleased bank guard(s) at finish: ")?;
+                for (idx, lease) in leases.iter().enumerate() {
+                    if idx > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", lease.get())?;
+                }
+                Ok(())
+            }
+            Self::YieldWithActiveLease { leases } => {
+                write!(f, "yield emitted while bank lease(s) are active: ")?;
+                for (idx, lease) in leases.iter().enumerate() {
+                    if idx > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", lease.get())?;
+                }
+                Ok(())
             }
             Self::SramBankOutOfRange { bank } => {
                 write!(f, "SRAM bank {bank} is outside MBC5 range 0..=15")
@@ -114,8 +141,9 @@ pub struct Builder {
     section: Section,
     cur_provenance: InstrProvenance,
     next_label_id: u32,
+    next_lease_id: u32,
     labels: BTreeSet<SymbolName>,
-    active_leases: BTreeSet<LeaseId>,
+    active_leases: BTreeMap<LeaseId, BankLeaseSpec>,
 }
 
 impl Builder {
@@ -130,14 +158,60 @@ impl Builder {
             cur_provenance: InstrProvenance::new(PlanningStage::Backend)
                 .with_source_op("builder.default"),
             next_label_id: 0,
+            next_lease_id: 0,
             labels: BTreeSet::new(),
-            active_leases: BTreeSet::new(),
+            active_leases: BTreeMap::new(),
         }
     }
 
     #[must_use]
     pub fn current_provenance(&self) -> &InstrProvenance {
         &self.cur_provenance
+    }
+
+    #[must_use]
+    pub fn section_id(&self) -> SectionId {
+        self.section.id()
+    }
+
+    #[must_use]
+    pub fn section_role(&self) -> SectionRole {
+        self.section.role()
+    }
+
+    #[must_use]
+    pub fn section_privilege(&self) -> &SectionPrivilege {
+        self.section.privilege()
+    }
+
+    #[must_use]
+    pub fn active_lease_ids(&self) -> Vec<LeaseId> {
+        self.active_leases.keys().copied().collect()
+    }
+
+    #[must_use]
+    pub fn first_active_lease_id(&self) -> Option<LeaseId> {
+        self.active_leases.keys().next().copied()
+    }
+
+    #[must_use]
+    pub fn active_lease_spec(&self, lease_id: LeaseId) -> Option<&BankLeaseSpec> {
+        self.active_leases.get(&lease_id)
+    }
+
+    #[must_use]
+    pub fn has_active_leases(&self) -> bool {
+        !self.active_leases.is_empty()
+    }
+
+    pub fn allocate_lease_id(&mut self) -> LeaseId {
+        loop {
+            let lease_id = LeaseId::new(self.next_lease_id);
+            self.next_lease_id = self.next_lease_id.wrapping_add(1);
+            if !self.active_leases.contains_key(&lease_id) {
+                return lease_id;
+            }
+        }
     }
 
     #[must_use]
@@ -281,9 +355,10 @@ impl Builder {
         let op = PreLayoutOp::BankLease(lease.clone());
         self.validate_effect(classify_pre_layout_op(&op))?;
         let lease_id = lease.lease_id();
-        if !self.active_leases.insert(lease_id) {
+        if self.active_leases.contains_key(&lease_id) {
             return Err(BuilderError::DuplicateLease { lease_id });
         }
+        self.active_leases.insert(lease_id, lease);
 
         self.pre_layout_op_unchecked(op);
         Ok(())
@@ -295,9 +370,34 @@ impl Builder {
     }
 
     pub fn try_bank_release(&mut self, lease_id: LeaseId) -> Result<(), BuilderError> {
-        let op = PreLayoutOp::BankRelease { lease_id };
+        let class = self
+            .active_leases
+            .get(&lease_id)
+            .map(BankLeaseSpec::class)
+            .ok_or(BuilderError::UnknownLease { lease_id })?;
+        let return_to = match class {
+            MbcBankClass::Rom => BankReleaseDisposition::RomBank1,
+            MbcBankClass::Sram => BankReleaseDisposition::SramDisable,
+        };
+        self.try_bank_release_to(lease_id, return_to)
+    }
+
+    pub fn bank_release_to(&mut self, lease_id: LeaseId, return_to: BankReleaseDisposition) {
+        self.try_bank_release_to(lease_id, return_to)
+            .expect("invalid lease lifecycle in Builder::bank_release_to");
+    }
+
+    pub fn try_bank_release_to(
+        &mut self,
+        lease_id: LeaseId,
+        return_to: BankReleaseDisposition,
+    ) -> Result<(), BuilderError> {
+        let op = PreLayoutOp::BankRelease {
+            lease_id,
+            return_to,
+        };
         self.validate_effect(classify_pre_layout_op(&op))?;
-        if !self.active_leases.remove(&lease_id) {
+        if self.active_leases.remove(&lease_id).is_none() {
             return Err(BuilderError::UnknownLease { lease_id });
         }
 
@@ -337,7 +437,7 @@ impl Builder {
         };
         self.validate_effect(classify_legalization_op(&op))?;
         for lease_id in lease_chain {
-            if !self.active_leases.contains(lease_id) {
+            if !self.active_leases.contains_key(lease_id) {
                 return Err(BuilderError::UnknownLease {
                     lease_id: *lease_id,
                 });
@@ -354,6 +454,11 @@ impl Builder {
     }
 
     pub fn try_yield_op(&mut self, kind: YieldKind) -> Result<(), BuilderError> {
+        if !self.active_leases.is_empty() {
+            return Err(BuilderError::YieldWithActiveLease {
+                leases: self.active_lease_ids(),
+            });
+        }
         self.pre_layout_op(PreLayoutOp::Yield { kind })
     }
 
@@ -396,8 +501,18 @@ impl Builder {
         Ok(())
     }
 
+    pub fn try_finish(self) -> Result<Section, BuilderError> {
+        if !self.active_leases.is_empty() {
+            return Err(BuilderError::UnreleasedBankGuard {
+                leases: self.active_leases.keys().copied().collect(),
+            });
+        }
+        Ok(self.section)
+    }
+
     pub fn finish(self) -> Section {
-        self.section
+        self.try_finish()
+            .expect("unreleased bank guard in Builder::finish")
     }
 
     fn validate_effect(&self, effect: MachineEffect) -> Result<(), BuilderError> {
@@ -422,6 +537,21 @@ impl Builder {
         self.section
             .push_legalization_op(op, self.cur_provenance.clone());
     }
+}
+
+#[cfg(test)]
+fn test_bank_lease_spec(
+    lease: LeaseId,
+    class: MbcBankClass,
+    bank: u16,
+) -> Result<BankLeaseSpec, crate::section::BankLeaseSpecError> {
+    BankLeaseSpec::new(
+        lease,
+        crate::section::LeaseGeneration(lease.get()),
+        class,
+        bank,
+        crate::section::LeaseLifetime::Slice,
+    )
 }
 
 #[cfg(test)]
@@ -538,12 +668,12 @@ fn structured_ops_record_exact_payloads() {
     .with_section_privilege(SectionPrivilege::privileged());
     let lease = LeaseId::new(7);
     let target = SymbolName::runtime("expert", "enter").expect("target");
-    builder.bank_lease(BankLeaseSpec::new(lease, MbcBankClass::Rom, 12).expect("lease"));
+    builder.bank_lease(test_bank_lease_spec(lease, MbcBankClass::Rom, 12).expect("lease"));
     builder.assert_bank(MbcBankClass::Rom, 12);
     builder.trace_probe(TraceProbeId::new(3), ProbeLevel::Debug);
-    builder.yield_op(YieldKind::PollInterrupts);
     builder.far_call(target.clone(), &[lease]);
     builder.bank_release(lease);
+    builder.yield_op(YieldKind::PollInterrupts);
 
     let section = builder.finish();
 
@@ -560,7 +690,7 @@ fn structured_ops_record_exact_payloads() {
         pre_payloads,
         vec![
             &PreLayoutOp::BankLease(
-                BankLeaseSpec::new(lease, MbcBankClass::Rom, 12).expect("lease")
+                test_bank_lease_spec(lease, MbcBankClass::Rom, 12).expect("lease")
             ),
             &PreLayoutOp::AssertBank {
                 expected: MbcBankClass::Rom,
@@ -570,10 +700,13 @@ fn structured_ops_record_exact_payloads() {
                 id: TraceProbeId::new(3),
                 level: ProbeLevel::Debug,
             },
+            &PreLayoutOp::BankRelease {
+                lease_id: lease,
+                return_to: BankReleaseDisposition::RomBank1,
+            },
             &PreLayoutOp::Yield {
                 kind: YieldKind::PollInterrupts,
             },
-            &PreLayoutOp::BankRelease { lease_id: lease },
         ]
     );
     assert_eq!(
@@ -623,8 +756,8 @@ fn builder_validates_lease_lifecycle_and_bank_ranges() {
     .with_section_privilege(SectionPrivilege::privileged());
     let lease = LeaseId::new(4);
 
-    assert!(BankLeaseSpec::new(lease, MbcBankClass::Rom, 512).is_err());
-    assert!(BankLeaseSpec::new(lease, MbcBankClass::Sram, 16).is_err());
+    assert!(test_bank_lease_spec(lease, MbcBankClass::Rom, 512).is_err());
+    assert!(test_bank_lease_spec(lease, MbcBankClass::Sram, 16).is_err());
     assert_eq!(
         builder.try_bank_release(lease),
         Err(BuilderError::UnknownLease { lease_id: lease })
@@ -648,7 +781,7 @@ fn builder_validates_lease_lifecycle_and_bank_ranges() {
         Err(BuilderError::RomBankOutOfRange { bank: 512 })
     );
 
-    let spec = BankLeaseSpec::new(lease, MbcBankClass::Sram, 15).expect("valid sram lease");
+    let spec = test_bank_lease_spec(lease, MbcBankClass::Sram, 15).expect("valid sram lease");
     builder.try_bank_lease(spec.clone()).expect("lease");
     assert_eq!(
         builder.try_bank_lease(spec),
@@ -752,7 +885,7 @@ fn structured_ops_run_in_normal_sections() {
     let target = SymbolName::runtime("expert", "enter").expect("target");
 
     builder
-        .try_bank_lease(BankLeaseSpec::new(lease, MbcBankClass::Rom, 7).expect("lease"))
+        .try_bank_lease(test_bank_lease_spec(lease, MbcBankClass::Rom, 7).expect("lease"))
         .expect("bank lease in Normal section");
     builder
         .try_assert_bank(MbcBankClass::Rom, 7)
