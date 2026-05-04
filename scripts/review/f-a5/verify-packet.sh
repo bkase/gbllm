@@ -11,6 +11,7 @@ cargo test -p gbf-abi -p gbf-asm -p gbf-runtime
 python3 tools/font/build_font.py "$OUT_DIR/font_8x8.bin"
 cargo run -p gbf-runtime --example demo_bank0_rom -- "$OUT_DIR"
 cargo run -p gbf-runtime --example render_demo_screen -- "$OUT_DIR/demo-screen.png"
+cargo run -p gbf-runtime --example render_demo_screen -- "$OUT_DIR/keyboard-screen.png" keyboard
 
 expected_hash="$(sed -n 's/.*`\([0-9a-f]\{64\}\)`.*/\1/p' artifacts/calibration/PINNED_HASH_HISTORY.md | head -n 1)"
 if [[ -z "$expected_hash" ]]; then
@@ -37,5 +38,10 @@ fi
 
 if ! cmp -s "$OUT_DIR/demo-screen.png" docs/review/f-a5/demo-screen.png; then
   echo "demo screen PNG is stale; refresh docs/review/f-a5/demo-screen.png" >&2
+  exit 1
+fi
+
+if ! cmp -s "$OUT_DIR/keyboard-screen.png" docs/review/f-a5/keyboard-screen.png; then
+  echo "keyboard screen PNG is stale; refresh docs/review/f-a5/keyboard-screen.png" >&2
   exit 1
 fi
