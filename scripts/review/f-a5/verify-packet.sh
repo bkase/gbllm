@@ -8,6 +8,7 @@ OUT_DIR="${1:-target/review/f-a5}"
 
 cargo fmt --check --all
 cargo test -p gbf-abi -p gbf-asm -p gbf-runtime
+python3 tools/font/build_font.py "$OUT_DIR/font_8x8.bin"
 cargo run -p gbf-runtime --example demo_bank0_rom -- "$OUT_DIR"
 cargo run -p gbf-runtime --example render_demo_screen -- "$OUT_DIR/demo-screen.png"
 
@@ -26,6 +27,11 @@ fi
 if ! cmp -s "$OUT_DIR/bank0_section_sizes.json" docs/review/f-a5/bank0-section-sizes.json; then
   echo "bank0 section sizes are stale; refresh docs/review/f-a5/bank0-section-sizes.json" >&2
   diff -u docs/review/f-a5/bank0-section-sizes.json "$OUT_DIR/bank0_section_sizes.json" >&2 || true
+  exit 1
+fi
+
+if ! cmp -s "$OUT_DIR/font_8x8.bin" gbf-runtime/assets/font_8x8.bin; then
+  echo "font asset is stale; run python3 tools/font/build_font.py" >&2
   exit 1
 fi
 

@@ -12,7 +12,7 @@ Generated artifacts:
 
 - demo ROM: `target/review/f-a5/demo_bank0_rom.gb`
 - demo screen PNG: `docs/review/f-a5/demo-screen.png`
-- runtime nucleus hash: `4e6e8efc07194c1fde353e3a1a3cb10224efcb87a4f4193c4ca84554e7e3323a`
+- runtime nucleus hash: `ecc453b4abfe182a2463d35433df95953db32a47952da69be1fcf8b101b3b465`
 - section sizes: `docs/review/f-a5/bank0-section-sizes.json`
 
 ![F-A5 demo screen](demo-screen.png)

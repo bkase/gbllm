@@ -99,6 +99,27 @@ mod tests {
     }
 
     #[test]
+    fn font_space_blank_and_demo_prompt_glyphs_visible() {
+        let space_offset = usize::from(b' ') * FONT_BYTES_PER_TILE;
+        assert!(
+            font_bytes()[space_offset..space_offset + FONT_BYTES_PER_TILE]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+
+        for glyph in b"FA5OK" {
+            let offset = usize::from(*glyph) * FONT_BYTES_PER_TILE;
+            assert!(
+                font_bytes()[offset..offset + FONT_BYTES_PER_TILE]
+                    .iter()
+                    .any(|byte| *byte != 0),
+                "glyph {} should render as a visible prompt character",
+                char::from(*glyph)
+            );
+        }
+    }
+
+    #[test]
     fn layout_dmg() {
         let layout = TextLayout::dmg_default();
         assert_eq!(layout.visible_columns, 20);
