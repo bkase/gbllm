@@ -2385,14 +2385,19 @@ dependencies = [
 name = "gbf-test"
 version = "0.1.0"
 dependencies = [
+ "gbf-abi",
  "gbf-artifact",
+ "gbf-asm",
+ "gbf-debug",
  "gbf-foundation",
  "gbf-model",
  "gbf-oracle",
+ "gbf-runtime",
  "gbf-train",
  "gbf-verify",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

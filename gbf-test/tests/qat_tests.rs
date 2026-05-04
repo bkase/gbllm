@@ -296,7 +296,7 @@ fn qat_tests_router_low_rank_projection_matches_manual_factorization() {
     let input = [2.0, -1.0, 0.5];
     let hidden = [
         1.0 * 2.0 + -1.0 * -1.0 + 0.5 * 0.5 + 0.25,
-        0.0 * 2.0 + 2.0 * -1.0 + 1.0 * 0.5 - 0.5,
+        0.0 * 2.0 - 2.0 + 1.0 * 0.5 - 0.5,
     ];
     let expected_logits = [
         2.0 * hidden[0] + -hidden[1] + 0.125,
