@@ -70,6 +70,7 @@ There is no escape hatch. If tests fail, fix them.
 - For sequence-state beads, also use `.agents/skills/sequence-state-bead-closure/SKILL.md`.
 - For tiny fixture beads, also use `.agents/skills/fixture-bead-closure/SKILL.md`.
 - For structured logging beads, also use `.agents/skills/logging-bead-closure/SKILL.md`.
+- For F-A8 (`gbf-debug`) usage — driving the CLI, writing scripts, reading envelopes — use `.agents/skills/gbf-debug-usage/SKILL.md`.
 
 ### Session Protocol
 

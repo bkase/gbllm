@@ -1,0 +1,29 @@
+[package]
+name = "gbf-debug"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "gbf-debug"
+path = "src/bin/gbf-debug.rs"
+
+[dependencies]
+gbf-abi = { path = "../gbf-abi" }
+gbf-asm = { path = "../gbf-asm" }
+gbf-emu = { path = "../gbf-emu" }
+gbf-foundation = { path = "../gbf-foundation" }
+gbf-hw = { path = "../gbf-hw" }
+base64 = "=0.22.1"
+clap = { version = "=4.6.1", features = ["derive"] }
+rquickjs = { version = "=0.11.0", default-features = false, features = ["std"] }
+rquickjs-serde = "=0.5.0"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+zstd = { version = "=0.13.3", default-features = false }
+
+[dev-dependencies]
+proptest = "=1.11.0"

@@ -1,0 +1,6 @@
+- [ ] Session rejects bad magic/flags/schema/hash/lineage.
+- [ ] CLI emits one JSON object on success/failure.
+- [ ] `gb.read` and `gb.bus_read` remain separate.
+- [ ] Closure predicates warn and do not persist.
+- [ ] Skill docs match the actual CLI surface.
+- [ ] No `unsafe` in `gbf-debug/src`.
