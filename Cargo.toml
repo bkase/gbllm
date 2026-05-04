@@ -24,6 +24,8 @@ members = [
     "gbf-bench",
     "gbf-migrate",
     "gbf-cli",
+    "gbf-debug",
+    "xtask",
 ]
 resolver = "3"
 

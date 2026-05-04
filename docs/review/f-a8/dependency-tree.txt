@@ -1,0 +1,421 @@
+gbf-debug v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-debug)
+├── zstd v0.13.3
+│   └── zstd-safe feature "std"
+│       ├── zstd-safe v7.2.4
+│       │   └── zstd-sys v2.0.16+zstd.1.5.7
+│       │       [build-dependencies]
+│       │       ├── cc feature "default"
+│       │       │   └── cc v1.2.61
+│       │       │       ├── jobserver v0.1.34
+│       │       │       │   └── libc feature "default"
+│       │       │       │       ├── libc v0.2.186
+│       │       │       │       └── libc feature "std"
+│       │       │       │           └── libc v0.2.186
+│       │       │       ├── libc v0.2.186
+│       │       │       ├── find-msvc-tools feature "default"
+│       │       │       │   └── find-msvc-tools v0.1.9
+│       │       │       └── shlex feature "default"
+│       │       │           ├── shlex v1.3.0
+│       │       │           └── shlex feature "std"
+│       │       │               └── shlex v1.3.0
+│       │       ├── cc feature "parallel"
+│       │       │   └── cc v1.2.61 (*)
+│       │       └── pkg-config feature "default"
+│       │           └── pkg-config v0.3.33
+│       └── zstd-sys feature "std"
+│           └── zstd-sys v2.0.16+zstd.1.5.7 (*)
+├── base64 feature "default"
+│   ├── base64 v0.22.1
+│   └── base64 feature "std"
+│       ├── base64 v0.22.1
+│       └── base64 feature "alloc"
+│           └── base64 v0.22.1
+├── clap feature "default"
+│   ├── clap v4.6.1
+│   │   ├── clap_builder v4.6.0
+│   │   │   ├── anstream feature "default"
+│   │   │   │   ├── anstream v1.0.0
+│   │   │   │   │   ├── anstyle feature "default"
+│   │   │   │   │   │   ├── anstyle v1.0.14
+│   │   │   │   │   │   └── anstyle feature "std"
+│   │   │   │   │   │       └── anstyle v1.0.14
+│   │   │   │   │   ├── anstyle-parse feature "default"
+│   │   │   │   │   │   ├── anstyle-parse v1.0.0
+│   │   │   │   │   │   │   └── utf8parse feature "default"
+│   │   │   │   │   │   │       └── utf8parse v0.2.2
+│   │   │   │   │   │   └── anstyle-parse feature "utf8"
+│   │   │   │   │   │       └── anstyle-parse v1.0.0 (*)
+│   │   │   │   │   ├── utf8parse feature "default" (*)
+│   │   │   │   │   ├── anstyle-query feature "default"
+│   │   │   │   │   │   └── anstyle-query v1.1.5
+│   │   │   │   │   ├── colorchoice feature "default"
+│   │   │   │   │   │   └── colorchoice v1.0.5
+│   │   │   │   │   └── is_terminal_polyfill feature "default"
+│   │   │   │   │       └── is_terminal_polyfill v1.70.2
+│   │   │   │   ├── anstream feature "auto"
+│   │   │   │   │   └── anstream v1.0.0 (*)
+│   │   │   │   └── anstream feature "wincon"
+│   │   │   │       └── anstream v1.0.0 (*)
+│   │   │   ├── anstyle feature "default" (*)
+│   │   │   ├── clap_lex feature "default"
+│   │   │   │   └── clap_lex v1.1.0
+│   │   │   └── strsim feature "default"
+│   │   │       └── strsim v0.11.1
+│   │   └── clap_derive feature "default"
+│   │       └── clap_derive v4.6.1 (proc-macro)
+│   │           ├── heck feature "default"
+│   │           │   └── heck v0.5.0
+│   │           ├── proc-macro2 feature "default"
+│   │           │   ├── proc-macro2 v1.0.106
+│   │           │   │   └── unicode-ident feature "default"
+│   │           │   │       └── unicode-ident v1.0.24
+│   │           │   └── proc-macro2 feature "proc-macro"
+│   │           │       └── proc-macro2 v1.0.106 (*)
+│   │           ├── quote feature "default"
+│   │           │   ├── quote v1.0.45
+│   │           │   │   └── proc-macro2 v1.0.106 (*)
+│   │           │   └── quote feature "proc-macro"
+│   │           │       ├── quote v1.0.45 (*)
+│   │           │       └── proc-macro2 feature "proc-macro" (*)
+│   │           ├── syn feature "default"
+│   │           │   ├── syn v2.0.117
+│   │           │   │   ├── proc-macro2 v1.0.106 (*)
+│   │           │   │   ├── quote v1.0.45 (*)
+│   │           │   │   └── unicode-ident feature "default" (*)
+│   │           │   ├── syn feature "clone-impls"
+│   │           │   │   └── syn v2.0.117 (*)
+│   │           │   ├── syn feature "derive"
+│   │           │   │   └── syn v2.0.117 (*)
+│   │           │   ├── syn feature "parsing"
+│   │           │   │   └── syn v2.0.117 (*)
+│   │           │   ├── syn feature "printing"
+│   │           │   │   └── syn v2.0.117 (*)
+│   │           │   └── syn feature "proc-macro"
+│   │           │       ├── syn v2.0.117 (*)
+│   │           │       ├── proc-macro2 feature "proc-macro" (*)
+│   │           │       └── quote feature "proc-macro" (*)
+│   │           └── syn feature "full"
+│   │               └── syn v2.0.117 (*)
+│   ├── clap feature "color"
+│   │   ├── clap v4.6.1 (*)
+│   │   └── clap_builder feature "color"
+│   │       └── clap_builder v4.6.0 (*)
+│   ├── clap feature "error-context"
+│   │   ├── clap v4.6.1 (*)
+│   │   └── clap_builder feature "error-context"
+│   │       └── clap_builder v4.6.0 (*)
+│   ├── clap feature "help"
+│   │   ├── clap v4.6.1 (*)
+│   │   └── clap_builder feature "help"
+│   │       └── clap_builder v4.6.0 (*)
+│   ├── clap feature "std"
+│   │   ├── clap v4.6.1 (*)
+│   │   └── clap_builder feature "std"
+│   │       ├── clap_builder v4.6.0 (*)
+│   │       └── anstyle feature "std" (*)
+│   ├── clap feature "suggestions"
+│   │   ├── clap v4.6.1 (*)
+│   │   └── clap_builder feature "suggestions"
+│   │       ├── clap_builder v4.6.0 (*)
+│   │       └── clap_builder feature "error-context" (*)
+│   └── clap feature "usage"
+│       ├── clap v4.6.1 (*)
+│       └── clap_builder feature "usage"
+│           └── clap_builder v4.6.0 (*)
+├── clap feature "derive"
+│   └── clap v4.6.1 (*)
+├── gbf-abi feature "default"
+│   ├── gbf-abi v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-abi)
+│   │   ├── gbf-foundation feature "default"
+│   │   │   └── gbf-foundation v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-foundation)
+│   │   │       ├── serde feature "default"
+│   │   │       │   ├── serde v1.0.228
+│   │   │       │   │   ├── serde_core feature "result"
+│   │   │       │   │   │   └── serde_core v1.0.228
+│   │   │       │   │   └── serde_derive feature "default"
+│   │   │       │   │       └── serde_derive v1.0.228 (proc-macro)
+│   │   │       │   │           ├── proc-macro2 feature "proc-macro" (*)
+│   │   │       │   │           ├── quote feature "proc-macro" (*)
+│   │   │       │   │           ├── syn feature "clone-impls" (*)
+│   │   │       │   │           ├── syn feature "derive" (*)
+│   │   │       │   │           ├── syn feature "parsing" (*)
+│   │   │       │   │           ├── syn feature "printing" (*)
+│   │   │       │   │           └── syn feature "proc-macro" (*)
+│   │   │       │   └── serde feature "std"
+│   │   │       │       ├── serde v1.0.228 (*)
+│   │   │       │       └── serde_core feature "std"
+│   │   │       │           └── serde_core v1.0.228
+│   │   │       └── serde feature "derive"
+│   │   │           ├── serde v1.0.228 (*)
+│   │   │           └── serde feature "serde_derive"
+│   │   │               └── serde v1.0.228 (*)
+│   │   ├── serde feature "derive" (*)
+│   │   └── memoffset feature "default"
+│   │       └── memoffset v0.9.1
+│   │           [build-dependencies]
+│   │           └── autocfg feature "default"
+│   │               └── autocfg v1.5.0
+│   └── gbf-abi feature "host"
+│       ├── gbf-abi v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-abi) (*)
+│       ├── gbf-abi feature "alloc"
+│       │   ├── gbf-abi v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-abi) (*)
+│       │   └── serde feature "alloc"
+│       │       ├── serde v1.0.228 (*)
+│       │       └── serde_core feature "alloc"
+│       │           └── serde_core v1.0.228
+│       └── gbf-abi feature "std"
+│           ├── gbf-abi v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-abi) (*)
+│           └── serde feature "std" (*)
+├── gbf-foundation feature "default" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── gbf-asm feature "default"
+│   └── gbf-asm v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-asm)
+│       ├── gbf-foundation feature "default" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── gbf-hw feature "default"
+│       │   └── gbf-hw v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-hw)
+│       │       ├── gbf-foundation feature "default" (*)
+│       │       ├── serde feature "default" (*)
+│       │       └── serde feature "derive" (*)
+│       ├── gbf-kernel feature "default"
+│       │   └── gbf-kernel v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-kernel)
+│       │       ├── gbf-foundation feature "default" (*)
+│       │       ├── serde feature "default" (*)
+│       │       ├── serde feature "derive" (*)
+│       │       ├── gbf-hw feature "default" (*)
+│       │       └── serde_json feature "default"
+│       │           ├── serde_json v1.0.149
+│       │           │   ├── memchr v2.8.0
+│       │           │   ├── serde_core v1.0.228
+│       │           │   ├── itoa feature "default"
+│       │           │   │   └── itoa v1.0.18
+│       │           │   └── zmij feature "default"
+│       │           │       └── zmij v1.0.21
+│       │           └── serde_json feature "std"
+│       │               ├── serde_json v1.0.149 (*)
+│       │               ├── serde_core feature "std" (*)
+│       │               └── memchr feature "std"
+│       │                   ├── memchr v2.8.0
+│       │                   └── memchr feature "alloc"
+│       │                       └── memchr v2.8.0
+│       └── serde_json feature "default" (*)
+├── gbf-hw feature "default" (*)
+├── serde_json feature "default" (*)
+├── gbf-emu feature "default"
+│   └── gbf-emu v0.1.0 (/Users/bkase/.codex/worktrees/8791/gbllm/gbf-emu)
+│       ├── gbf-abi feature "default" (*)
+│       ├── gbf-foundation feature "default" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── gbf-hw feature "default" (*)
+│       ├── gameroy-core feature "io_trace"
+│       │   └── gameroy-core v0.3.1 (https://github.com/Rodrigodd/gameroy?rev=a5acdc921c0561ed93a077622b598df0e068583c#a5acdc92)
+│       └── sha2 feature "default"
+│           ├── sha2 v0.10.9
+│           │   ├── cfg-if feature "default"
+│           │   │   └── cfg-if v1.0.4
+│           │   ├── cpufeatures feature "default"
+│           │   │   └── cpufeatures v0.2.17
+│           │   │       └── libc v0.2.186
+│           │   └── digest feature "default"
+│           │       ├── digest v0.10.7
+│           │       │   ├── block-buffer feature "default"
+│           │       │   │   └── block-buffer v0.10.4
+│           │       │   │       └── generic-array feature "default"
+│           │       │   │           └── generic-array v0.14.7
+│           │       │   │               └── typenum feature "default"
+│           │       │   │                   └── typenum v1.20.0
+│           │       │   │               [build-dependencies]
+│           │       │   │               └── version_check feature "default"
+│           │       │   │                   └── version_check v0.9.5
+│           │       │   └── crypto-common feature "default"
+│           │       │       └── crypto-common v0.1.7
+│           │       │           ├── generic-array feature "default" (*)
+│           │       │           ├── generic-array feature "more_lengths"
+│           │       │           │   └── generic-array v0.14.7 (*)
+│           │       │           └── typenum feature "default" (*)
+│           │       └── digest feature "core-api"
+│           │           ├── digest v0.10.7 (*)
+│           │           └── digest feature "block-buffer"
+│           │               └── digest v0.10.7 (*)
+│           └── sha2 feature "std"
+│               ├── sha2 v0.10.9 (*)
+│               └── digest feature "std"
+│                   ├── digest v0.10.7 (*)
+│                   ├── digest feature "alloc"
+│                   │   └── digest v0.10.7 (*)
+│                   └── crypto-common feature "std"
+│                       └── crypto-common v0.1.7 (*)
+├── sha2 feature "default" (*)
+├── tempfile feature "default"
+│   ├── tempfile v3.27.0
+│   │   ├── getrandom v0.4.2
+│   │   │   ├── libc v0.2.186
+│   │   │   └── cfg-if feature "default" (*)
+│   │   ├── fastrand feature "default"
+│   │   │   ├── fastrand v2.4.1
+│   │   │   └── fastrand feature "std"
+│   │   │       ├── fastrand v2.4.1
+│   │   │       └── fastrand feature "alloc"
+│   │   │           └── fastrand v2.4.1
+│   │   ├── once_cell feature "std"
+│   │   │   ├── once_cell v1.21.4
+│   │   │   └── once_cell feature "alloc"
+│   │   │       ├── once_cell v1.21.4
+│   │   │       └── once_cell feature "race"
+│   │   │           └── once_cell v1.21.4
+│   │   ├── rustix feature "default"
+│   │   │   ├── rustix v1.1.4
+│   │   │   │   ├── bitflags v2.11.1
+│   │   │   │   ├── errno v0.3.14
+│   │   │   │   │   └── libc v0.2.186
+│   │   │   │   └── libc v0.2.186
+│   │   │   └── rustix feature "std"
+│   │   │       ├── rustix v1.1.4 (*)
+│   │   │       ├── libc feature "std" (*)
+│   │   │       ├── bitflags feature "std"
+│   │   │       │   └── bitflags v2.11.1
+│   │   │       ├── rustix feature "alloc"
+│   │   │       │   └── rustix v1.1.4 (*)
+│   │   │       └── errno feature "std"
+│   │   │           ├── errno v0.3.14 (*)
+│   │   │           └── libc feature "std" (*)
+│   │   └── rustix feature "fs"
+│   │       └── rustix v1.1.4 (*)
+│   └── tempfile feature "getrandom"
+│       └── tempfile v3.27.0 (*)
+├── rquickjs feature "std"
+│   ├── rquickjs v0.11.0
+│   │   └── rquickjs-core v0.11.0
+│   │       ├── rquickjs-sys v0.11.0
+│   │       │   [build-dependencies]
+│   │       │   └── cc feature "default" (*)
+│   │       └── hashbrown feature "default"
+│   │           ├── hashbrown v0.16.1
+│   │           │   ├── equivalent v1.0.2
+│   │           │   ├── foldhash v0.2.0
+│   │           │   └── allocator-api2 feature "alloc"
+│   │           │       └── allocator-api2 v0.2.21
+│   │           ├── hashbrown feature "allocator-api2"
+│   │           │   └── hashbrown v0.16.1 (*)
+│   │           ├── hashbrown feature "default-hasher"
+│   │           │   └── hashbrown v0.16.1 (*)
+│   │           ├── hashbrown feature "equivalent"
+│   │           │   └── hashbrown v0.16.1 (*)
+│   │           ├── hashbrown feature "inline-more"
+│   │           │   └── hashbrown v0.16.1 (*)
+│   │           └── hashbrown feature "raw-entry"
+│   │               └── hashbrown v0.16.1 (*)
+│   └── rquickjs-core feature "std"
+│       └── rquickjs-core v0.11.0 (*)
+└── rquickjs-serde feature "default"
+    └── rquickjs-serde v0.5.0
+        ├── rquickjs v0.11.0 (*)
+        └── serde feature "alloc" (*)
+[dev-dependencies]
+└── proptest feature "default"
+    ├── proptest v1.11.0
+    │   ├── num-traits v0.2.19
+    │   │   [build-dependencies]
+    │   │   └── autocfg feature "default" (*)
+    │   ├── rand_chacha v0.9.0
+    │   │   ├── rand_core feature "default"
+    │   │   │   └── rand_core v0.9.5
+    │   │   │       └── getrandom feature "default"
+    │   │   │           └── getrandom v0.3.4
+    │   │   │               ├── libc v0.2.186
+    │   │   │               └── cfg-if feature "default" (*)
+    │   │   └── ppv-lite86 feature "simd"
+    │   │       └── ppv-lite86 v0.2.21
+    │   │           ├── zerocopy feature "default"
+    │   │           │   └── zerocopy v0.8.48
+    │   │           └── zerocopy feature "simd"
+    │   │               └── zerocopy v0.8.48
+    │   ├── rusty-fork v0.3.1
+    │   │   ├── fnv feature "default"
+    │   │   │   ├── fnv v1.0.7
+    │   │   │   └── fnv feature "std"
+    │   │   │       └── fnv v1.0.7
+    │   │   ├── quick-error feature "default"
+    │   │   │   └── quick-error v1.2.3
+    │   │   ├── tempfile feature "default" (*)
+    │   │   └── wait-timeout feature "default"
+    │   │       └── wait-timeout v0.2.1
+    │   │           └── libc feature "default" (*)
+    │   ├── bit-set feature "default"
+    │   │   ├── bit-set v0.8.0
+    │   │   │   └── bit-vec v0.8.0
+    │   │   └── bit-set feature "std"
+    │   │       ├── bit-set v0.8.0 (*)
+    │   │       └── bit-vec feature "std"
+    │   │           └── bit-vec v0.8.0
+    │   ├── bit-vec feature "default"
+    │   │   ├── bit-vec v0.8.0
+    │   │   └── bit-vec feature "std" (*)
+    │   ├── bitflags feature "default"
+    │   │   └── bitflags v2.11.1
+    │   ├── rand feature "alloc"
+    │   │   └── rand v0.9.4
+    │   │       └── rand_core v0.9.5 (*)
+    │   ├── rand_xorshift feature "default"
+    │   │   └── rand_xorshift v0.4.0
+    │   │       └── rand_core feature "default" (*)
+    │   ├── regex-syntax feature "default"
+    │   │   ├── regex-syntax v0.8.10
+    │   │   ├── regex-syntax feature "std"
+    │   │   │   └── regex-syntax v0.8.10
+    │   │   └── regex-syntax feature "unicode"
+    │   │       ├── regex-syntax v0.8.10
+    │   │       ├── regex-syntax feature "unicode-age"
+    │   │       │   └── regex-syntax v0.8.10
+    │   │       ├── regex-syntax feature "unicode-bool"
+    │   │       │   └── regex-syntax v0.8.10
+    │   │       ├── regex-syntax feature "unicode-case"
+    │   │       │   └── regex-syntax v0.8.10
+    │   │       ├── regex-syntax feature "unicode-gencat"
+    │   │       │   └── regex-syntax v0.8.10
+    │   │       ├── regex-syntax feature "unicode-perl"
+    │   │       │   └── regex-syntax v0.8.10
+    │   │       ├── regex-syntax feature "unicode-script"
+    │   │       │   └── regex-syntax v0.8.10
+    │   │       └── regex-syntax feature "unicode-segment"
+    │   │           └── regex-syntax v0.8.10
+    │   ├── tempfile feature "default" (*)
+    │   └── unarray feature "default"
+    │       └── unarray v0.1.4
+    ├── proptest feature "bit-set"
+    │   └── proptest v1.11.0 (*)
+    ├── proptest feature "fork"
+    │   ├── proptest v1.11.0 (*)
+    │   ├── proptest feature "rusty-fork"
+    │   │   └── proptest v1.11.0 (*)
+    │   ├── proptest feature "std"
+    │   │   ├── proptest v1.11.0 (*)
+    │   │   ├── proptest feature "regex-syntax"
+    │   │   │   └── proptest v1.11.0 (*)
+    │   │   ├── num-traits feature "std"
+    │   │   │   └── num-traits v0.2.19 (*)
+    │   │   ├── rand feature "os_rng"
+    │   │   │   ├── rand v0.9.4 (*)
+    │   │   │   └── rand_core feature "os_rng"
+    │   │   │       └── rand_core v0.9.5 (*)
+    │   │   └── rand feature "std"
+    │   │       ├── rand v0.9.4 (*)
+    │   │       ├── rand feature "alloc" (*)
+    │   │       └── rand_core feature "std"
+    │   │           ├── rand_core v0.9.5 (*)
+    │   │           └── getrandom feature "std"
+    │   │               └── getrandom v0.3.4 (*)
+    │   └── proptest feature "tempfile"
+    │       └── proptest v1.11.0 (*)
+    ├── proptest feature "std" (*)
+    └── proptest feature "timeout"
+        ├── proptest v1.11.0 (*)
+        ├── proptest feature "fork" (*)
+        ├── proptest feature "rusty-fork" (*)
+        └── rusty-fork feature "timeout"
+            ├── rusty-fork v0.3.1 (*)
+            └── rusty-fork feature "wait-timeout"
+                └── rusty-fork v0.3.1 (*)
