@@ -14,6 +14,7 @@ pub mod fault;
 pub mod harness;
 pub mod interrupt;
 pub mod liveness;
+pub mod shell;
 pub mod trace;
 pub mod version;
 
@@ -40,6 +41,7 @@ pub use interrupt::{
     SliceId, SramPageBinding,
 };
 pub use liveness::LivenessCounters;
+pub use shell::{RuntimeShellAnnotated, RuntimeShellModule};
 pub use trace::{
     ProbeBudgetClass, ProbeLevel, TraceBudget, TraceBudgetError, TraceDropPolicy, TraceEvent,
     TraceProbeId,

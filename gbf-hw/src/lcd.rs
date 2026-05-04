@@ -48,6 +48,15 @@ pub const OBP1_REG: u16 = crate::memory::io_register(0x49);
 pub const WY_REG: u16 = crate::memory::io_register(0x4A);
 pub const WX_REG: u16 = crate::memory::io_register(0x4B);
 
+pub const STAT_INTERRUPT_LYC_ENABLE: u8 = 0b0100_0000;
+pub const STAT_INTERRUPT_OAM_ENABLE: u8 = 0b0010_0000;
+pub const STAT_INTERRUPT_VBLANK_ENABLE: u8 = 0b0001_0000;
+pub const STAT_INTERRUPT_HBLANK_ENABLE: u8 = 0b0000_1000;
+pub const STAT_INTERRUPT_ENABLE_MASK: u8 = STAT_INTERRUPT_LYC_ENABLE
+    | STAT_INTERRUPT_OAM_ENABLE
+    | STAT_INTERRUPT_VBLANK_ENABLE
+    | STAT_INTERRUPT_HBLANK_ENABLE;
+
 pub const SCREEN_WIDTH_PIXELS: u8 = 160;
 pub const SCREEN_HEIGHT_PIXELS: u8 = 144;
 pub const VBLANK_FIRST_LY: u8 = SCREEN_HEIGHT_PIXELS;
@@ -151,5 +160,14 @@ mod tests {
         assert_eq!(OBP1_REG, 0xFF49);
         assert_eq!(WY_REG, 0xFF4A);
         assert_eq!(WX_REG, 0xFF4B);
+    }
+
+    #[test]
+    fn stat_interrupt_enable_bits_are_writable_upper_bits() {
+        assert_eq!(STAT_INTERRUPT_HBLANK_ENABLE, 0x08);
+        assert_eq!(STAT_INTERRUPT_VBLANK_ENABLE, 0x10);
+        assert_eq!(STAT_INTERRUPT_OAM_ENABLE, 0x20);
+        assert_eq!(STAT_INTERRUPT_LYC_ENABLE, 0x40);
+        assert_eq!(STAT_INTERRUPT_ENABLE_MASK & 0b1000_0111, 0);
     }
 }

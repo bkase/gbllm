@@ -102,6 +102,31 @@ impl SectionRole {
     }
 }
 
+/// Audit-relevant execution context attached to a section.
+///
+/// This is separate from [`PrivilegeClass`]. Privilege says which instruction
+/// effects the section may emit; execution context says which runtime invariant
+/// the section participates in, such as ISR residency or the video-commit-only
+/// VRAM/OAM writer rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionContext {
+    #[default]
+    Normal,
+    InterruptHandler,
+    PanicOnly,
+    VideoCommitOnly,
+}
+
+/// Interrupt-state discipline declared for a section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptDiscipline {
+    #[default]
+    Default,
+    ImeDisabled,
+}
+
 /// Why a section privilege policy rejected an effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrivilegeViolation {
@@ -138,6 +163,12 @@ pub struct SectionPrivilege {
     pub default_privilege: PrivilegeClass,
     pub allows_interrupt_disabled: bool,
     pub allowed_effects: Option<BTreeSet<MachineEffectKind>>,
+    #[serde(default)]
+    pub execution_context: ExecutionContext,
+    #[serde(default)]
+    pub interrupt_discipline: InterruptDiscipline,
+    #[serde(default)]
+    pub panic_bypass: bool,
 }
 
 impl Default for SectionPrivilege {
@@ -153,6 +184,9 @@ impl SectionPrivilege {
             default_privilege: PrivilegeClass::Normal,
             allows_interrupt_disabled: false,
             allowed_effects: None,
+            execution_context: ExecutionContext::Normal,
+            interrupt_discipline: InterruptDiscipline::Default,
+            panic_bypass: false,
         }
     }
 
@@ -162,6 +196,9 @@ impl SectionPrivilege {
             default_privilege: PrivilegeClass::Privileged,
             allows_interrupt_disabled: true,
             allowed_effects: None,
+            execution_context: ExecutionContext::Normal,
+            interrupt_discipline: InterruptDiscipline::Default,
+            panic_bypass: false,
         }
     }
 
@@ -171,6 +208,9 @@ impl SectionPrivilege {
             default_privilege: PrivilegeClass::InterruptHandler,
             allows_interrupt_disabled: false,
             allowed_effects: None,
+            execution_context: ExecutionContext::InterruptHandler,
+            interrupt_discipline: InterruptDiscipline::ImeDisabled,
+            panic_bypass: false,
         }
     }
 
@@ -186,6 +226,24 @@ impl SectionPrivilege {
         allowed_effects: impl IntoIterator<Item = MachineEffectKind>,
     ) -> Self {
         self.allowed_effects = Some(allowed_effects.into_iter().collect());
+        self
+    }
+
+    #[must_use]
+    pub fn with_execution_context(mut self, execution_context: ExecutionContext) -> Self {
+        self.execution_context = execution_context;
+        self
+    }
+
+    #[must_use]
+    pub fn with_interrupt_discipline(mut self, interrupt_discipline: InterruptDiscipline) -> Self {
+        self.interrupt_discipline = interrupt_discipline;
+        self
+    }
+
+    #[must_use]
+    pub fn with_panic_bypass(mut self, panic_bypass: bool) -> Self {
+        self.panic_bypass = panic_bypass;
         self
     }
 
@@ -1217,6 +1275,9 @@ fn privilege_inheritance() {
             default_privilege: PrivilegeClass::Normal,
             allows_interrupt_disabled: false,
             allowed_effects: None,
+            execution_context: ExecutionContext::Normal,
+            interrupt_discipline: InterruptDiscipline::Default,
+            panic_bypass: false,
         }
     );
     assert_eq!(
@@ -1249,6 +1310,14 @@ fn privilege_inheritance() {
     );
 
     let isr_section = SectionPrivilege::interrupt_handler();
+    assert_eq!(
+        isr_section.execution_context,
+        ExecutionContext::InterruptHandler
+    );
+    assert_eq!(
+        isr_section.interrupt_discipline,
+        InterruptDiscipline::ImeDisabled
+    );
     assert!(isr_section.permits_effect(MachineEffect::Reti));
     assert_eq!(
         SectionPrivilege::normal().check_effect(MachineEffect::Reti),
@@ -1263,6 +1332,23 @@ fn privilege_inheritance() {
         )),
         Err(PrivilegeViolation::InterruptDisabledNotAllowed)
     );
+}
+
+#[cfg(test)]
+#[test]
+fn section_privilege_annotations_are_serialized() {
+    let privilege = SectionPrivilege::privileged()
+        .with_execution_context(ExecutionContext::PanicOnly)
+        .with_interrupt_discipline(InterruptDiscipline::ImeDisabled)
+        .with_panic_bypass(true);
+    let json = serde_json::to_value(&privilege).expect("privilege serializes");
+
+    assert_eq!(json["execution_context"], "panic_only");
+    assert_eq!(json["interrupt_discipline"], "ime_disabled");
+    assert_eq!(json["panic_bypass"], true);
+
+    let decoded: SectionPrivilege = serde_json::from_value(json).expect("privilege deserializes");
+    assert_eq!(decoded, privilege);
 }
 
 #[cfg(test)]
