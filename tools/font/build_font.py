@@ -19,9 +19,9 @@ BYTES_PER_TILE = 16
 def glyph_rows(glyph: int) -> list[int]:
     rows: list[int] = []
     for row in range(8):
-        # Deterministic, compact bring-up pattern: printable ASCII gets a boxy
-        # non-empty tile keyed by the glyph code; control bytes stay blank.
-        if glyph < 0x20:
+        # Deterministic, compact bring-up pattern: visible ASCII gets a boxy
+        # non-empty tile keyed by the glyph code; control bytes and space stay blank.
+        if glyph < 0x20 or glyph == 0x20:
             bits = 0
         elif row == 0 or row == 7:
             bits = 0b0111_1110

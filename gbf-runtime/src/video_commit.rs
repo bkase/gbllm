@@ -30,6 +30,7 @@ pub const COMMIT_QUEUE_WORK_SPRITE_INDEX_ADDR: WramAddr = COMMIT_QUEUE_WORK_VALU
 pub const COMMIT_QUEUE_WORK_ATTRS_ADDR: WramAddr = COMMIT_QUEUE_WORK_SPRITE_INDEX_ADDR.add(1);
 pub const COMMIT_QUEUE_WORK_FRAME_REMAINING_ADDR: WramAddr = COMMIT_QUEUE_WORK_ATTRS_ADDR.add(1);
 pub const BOOTSTRAP_BG_MAP_ORIGIN: u16 = 0x9800;
+pub const BOOTSTRAP_BG_MAP_BYTES: u16 = 32 * 32;
 
 const HBLANK_PREFIX: &str = "video_commit_hblank";
 const VBLANK_PREFIX: &str = "video_commit_vblank";
@@ -452,13 +453,7 @@ pub fn emit_bootstrap_vram_init(b: &mut Builder) {
         cond: Some(Cond::NZ),
     });
     emit_copy_font_to_vram(b);
-    b.emit(Instr::Ld8RegFromImm {
-        dst: Reg8::A,
-        imm: 0,
-    });
-    b.emit(Instr::LdDirectFromA {
-        addr: direct(BOOTSTRAP_BG_MAP_ORIGIN),
-    });
+    emit_clear_bg_map(b);
 }
 
 fn emit_compute_next_tail_or_fault(b: &mut Builder) {
@@ -876,6 +871,42 @@ fn emit_copy_font_to_vram(b: &mut Builder) {
         dst: IncDec8Target::Reg(Reg8::B),
     });
     branch_jump(b, BOOTSTRAP_PREFIX, "font_outer", Some(Cond::NZ));
+}
+
+fn emit_clear_bg_map(b: &mut Builder) {
+    // Keep one fixed VRAM write visible to the static effect audit; the loop clears the full map.
+    b.emit(Instr::Ld8RegFromImm {
+        dst: Reg8::A,
+        imm: 0,
+    });
+    b.emit(Instr::LdDirectFromA {
+        addr: direct(BOOTSTRAP_BG_MAP_ORIGIN),
+    });
+    b.emit(Instr::Ld16Imm {
+        dst: Reg16Data::HL,
+        imm: BOOTSTRAP_BG_MAP_ORIGIN,
+    });
+    b.emit(Instr::Ld8RegFromImm {
+        dst: Reg8::B,
+        imm: (BOOTSTRAP_BG_MAP_BYTES / 256) as u8,
+    });
+    b.label(symbol(BOOTSTRAP_PREFIX, "bg_clear_outer"));
+    b.emit(Instr::Ld8RegFromImm {
+        dst: Reg8::C,
+        imm: 0,
+    });
+    b.label(symbol(BOOTSTRAP_PREFIX, "bg_clear_inner"));
+    b.emit(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    b.emit(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    branch_jump(b, BOOTSTRAP_PREFIX, "bg_clear_inner", Some(Cond::NZ));
+    b.emit(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    branch_jump(b, BOOTSTRAP_PREFIX, "bg_clear_outer", Some(Cond::NZ));
 }
 
 fn emit_read_stat_mode(b: &mut Builder) {

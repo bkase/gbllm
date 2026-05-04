@@ -724,6 +724,14 @@ mod tests {
                 .expect("VRAM glyph bytes readable"),
             font[glyph_a..glyph_a + 16]
         );
+        assert_eq!(
+            emu.peek_range(
+                video_commit::BOOTSTRAP_BG_MAP_ORIGIN,
+                usize::from(video_commit::BOOTSTRAP_BG_MAP_BYTES)
+            )
+            .expect("BG map readable"),
+            vec![0; usize::from(video_commit::BOOTSTRAP_BG_MAP_BYTES)]
+        );
     }
 
     #[test]
