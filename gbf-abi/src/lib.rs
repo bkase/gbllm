@@ -9,6 +9,7 @@
 extern crate alloc;
 
 pub mod checkpoint;
+pub mod compute_shape;
 pub mod continuation;
 pub mod fault;
 pub mod harness;
@@ -23,6 +24,7 @@ pub use checkpoint::{CheckpointEntry, SchemaValidationError, SemanticCheckpointS
 #[cfg(feature = "alloc")]
 pub use checkpoint::{CheckpointIdError, CheckpointResolver, SemanticCheckpointId};
 pub use checkpoint::{CompactCheckpointId, SemanticStratum};
+pub use compute_shape::{MatmulShapeError, SquareDim};
 pub use continuation::{
     ContinuationError, FaultCodeOptional, InferenceStateHeader, UnknownFaultCode, decode_header,
     header_size_bytes, split_header_tail, total_continuation_bytes,

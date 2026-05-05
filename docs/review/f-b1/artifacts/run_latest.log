@@ -1,0 +1,11 @@
+target=gbf::fb1 event=ReviewPacketRegenStarted schema=realism_report.v1
+target=gbf::fb1 event=StreamingRunComplete n=32 products=32768 output_tiles=4 bank_leases=16 frame_service_misses=0 byte_exact_candidate=true cycles_per_full_matmul_mcycles=14199116
+target=gbf::fb1 event=StreamingRunComplete n=64 products=262144 output_tiles=16 bank_leases=128 frame_service_misses=0 byte_exact_candidate=true cycles_per_full_matmul_mcycles=113479896
+target=gbf::fb1 event=StreamingRunComplete n=96 products=884736 output_tiles=36 bank_leases=432 frame_service_misses=0 byte_exact_candidate=true cycles_per_full_matmul_mcycles=382989808
+target=gbf::fb1 event=StreamingRunComplete n=128 products=2097152 output_tiles=64 bank_leases=1024 frame_service_misses=0 byte_exact_candidate=true cycles_per_full_matmul_mcycles=907426499
+target=gbf::fb1 event=BankLeaseAcquired count=1024
+target=gbf::fb1 event=BankLeaseReleased count=1024
+target=gbf::fb1 event=WidgetTickDispatched count=51686
+target=gbf::fb1 event=SchedulerServicedFrame count=51686
+target=gbf::fb1 event=RepresentativeRom sha256=sha256:21bddf0c0563970c090d3745a99ce94f9bfed7c25aa269123ee865d281dbf860
+target=gbf::fb1 event=ReviewPacketRegenFinished

@@ -2169,13 +2169,19 @@ dependencies = [
 name = "gbf-bench"
 version = "0.1.0"
 dependencies = [
+ "gbf-abi",
  "gbf-artifact",
+ "gbf-codegen",
+ "gbf-emu",
  "gbf-foundation",
  "gbf-hw",
  "gbf-policy",
+ "gbf-report",
+ "gbf-runtime",
  "gbf-workload",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2192,6 +2198,7 @@ dependencies = [
 name = "gbf-codegen"
 version = "0.1.0"
 dependencies = [
+ "gbf-abi",
  "gbf-artifact",
  "gbf-asm",
  "gbf-foundation",
@@ -2201,8 +2208,10 @@ dependencies = [
  "gbf-policy",
  "gbf-report",
  "gbf-runtime",
+ "gbf-verify",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2242,8 +2251,13 @@ version = "0.1.0"
 dependencies = [
  "gameroy-core",
  "gbf-abi",
+ "gbf-asm",
+ "gbf-codegen",
  "gbf-foundation",
  "gbf-hw",
+ "gbf-report",
+ "gbf-runtime",
+ "gbf-verify",
  "serde",
  "serde_json",
  "sha2",
@@ -2270,6 +2284,7 @@ dependencies = [
 name = "gbf-ir"
 version = "0.1.0"
 dependencies = [
+ "gbf-abi",
  "gbf-artifact",
  "gbf-foundation",
  "gbf-hw",
@@ -2296,6 +2311,14 @@ dependencies = [
  "gbf-hw",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "gbf-meta-checks"
+version = "0.1.0"
+dependencies = [
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -2347,12 +2370,15 @@ dependencies = [
 name = "gbf-report"
 version = "0.1.0"
 dependencies = [
+ "gbf-abi",
  "gbf-artifact",
  "gbf-foundation",
+ "gbf-hw",
  "gbf-policy",
  "gbf-workload",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2368,6 +2394,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "static_assertions",
+ "tracing",
 ]
 
 [[package]]
@@ -2388,10 +2415,13 @@ dependencies = [
  "gbf-abi",
  "gbf-artifact",
  "gbf-asm",
+ "gbf-bench",
+ "gbf-codegen",
  "gbf-debug",
  "gbf-foundation",
  "gbf-model",
  "gbf-oracle",
+ "gbf-report",
  "gbf-runtime",
  "gbf-train",
  "gbf-verify",
@@ -2422,6 +2452,7 @@ dependencies = [
 name = "gbf-verify"
 version = "0.1.0"
 dependencies = [
+ "gbf-abi",
  "gbf-artifact",
  "gbf-foundation",
  "serde",

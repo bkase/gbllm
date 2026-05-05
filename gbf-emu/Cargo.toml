@@ -15,4 +15,9 @@ serde.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+gbf-asm = { path = "../gbf-asm" }
+gbf-codegen = { path = "../gbf-codegen" }
+gbf-report = { path = "../gbf-report" }
+gbf-runtime = { path = "../gbf-runtime" }
+gbf-verify = { path = "../gbf-verify" }
 serde_json.workspace = true
