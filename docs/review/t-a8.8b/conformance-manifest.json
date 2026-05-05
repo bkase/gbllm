@@ -1,0 +1,129 @@
+{
+  "feature": "T-A8.8b",
+  "bead": "bd-2j4m",
+  "purpose": "Scripted gbf-debug conformance smoke suite for emitted Epic-A ROMs",
+  "fixtures": [
+    {
+      "id": "f-a1-tiny-rom",
+      "source": "committed F-A1 tiny ROM fixture",
+      "rom_path": "gbf-emu/tests/fixtures/tiny_rom.gb",
+      "sym_path": "docs/review/f-a1/artifacts/tiny_rom.sym",
+      "rom_sha256": "04dbcff2c0ce8f91f50ce1adf2166fbe163d7719f9400b11afe7f0a2885c4a79",
+      "sym_sha256": "d3a2443e27250f7ec98df4272c3386af7b4c6d880728aef537ef3c5385dfc343",
+      "observation_sha256": "8d99bb96993ca741a3ca146b89be8b56274f2b5ae339c7c7a836de5cbd8979ca",
+      "script": "docs/review/t-a8.8b/scripts/tiny_rom_entry.js",
+      "trace_capacity": 64,
+      "expected": {
+        "stop_reason": "pc_reached",
+        "hram_ff80": 66
+      }
+    },
+    {
+      "id": "f-a4-banklease-rom-switch",
+      "source": "gbf-test generated ROM using gbf-runtime::banking BankLease lowering",
+      "rom_path": "target/review/t-a8.8b/generated/f-a4-banklease-rom-switch.gb",
+      "sym_path": "target/review/t-a8.8b/generated/f-a4-banklease-rom-switch.sym",
+      "rom_sha256": "0e7457d72947f67fdbe751d29007158ab64a1f85b669ce7ae79e4d05066a491b",
+      "sym_sha256": "e137fc6c462506e415e7a528a66254b9bb0c5eaaa7873486a66f64f828423b58",
+      "observation_sha256": "a50b7c2d3d13810e9c74f034f6bcb2d6b6aff175d174826e39775c5dbe8788ad",
+      "script": "docs/review/t-a8.8b/scripts/banklease_trace.js",
+      "trace_capacity": 128,
+      "expected": {
+        "stop_reason": "pc_reached",
+        "rom_bank_shadow": 1,
+        "bank3_sentinel": 163,
+        "bank256_sentinel": 192,
+        "rom_bank_switches": [3, 1, 0, 256, 257, 1],
+        "mbc_writes": [[8192, 3], [12288, 0], [8192, 1], [12288, 0], [8192, 0], [12288, 1], [8192, 1], [12288, 0]]
+      }
+    },
+    {
+      "id": "f-a4-banklease-sram-window",
+      "source": "gbf-test generated ROM using gbf-runtime::banking SRAM BankLease lowering",
+      "rom_path": "target/review/t-a8.8b/generated/f-a4-banklease-sram-window.gb",
+      "sym_path": "target/review/t-a8.8b/generated/f-a4-banklease-sram-window.sym",
+      "rom_sha256": "2737825226eabecce7863f91fcf2029f83e3a5003521ba20748db9b2820acba5",
+      "sym_sha256": "b1988255b214ea8e425f0621c7fc9a21b2c0437dc68617dd5c5749a2882853be",
+      "observation_sha256": "a0a75e48b88c80bee9058a2090e66b44fd24220e302cac6e4c48940e59ea81bf",
+      "script": "docs/review/t-a8.8b/scripts/banklease_sram_window.js",
+      "trace_capacity": 128,
+      "expected": {
+        "stop_reason": "pc_reached",
+        "current_sram_bank": 2,
+        "sram_enabled": 0,
+        "sram_bank_switches": [2],
+        "mbc_writes": [[0, 10], [16384, 2], [0, 0]],
+        "sram_writes": [90],
+        "direct_sram_banks": [0, 0, 90]
+      }
+    },
+    {
+      "id": "f-a5-runtime-boot-scheduler",
+      "source": "gbf-runtime::demo_bank0_rom_image plus gbf-runtime::demo_bank0_sym_file",
+      "rom_path": "target/review/t-a8.8b/generated/f-a5-runtime-boot-scheduler.gb",
+      "sym_path": "target/review/t-a8.8b/generated/f-a5-runtime-boot-scheduler.sym",
+      "rom_sha256": "1e3a05ad0556ec57436c32e7aae16755de85775d8ff5c9521136c6044d2c9540",
+      "sym_sha256": "c27790f85d21402d5f4ff7bba80cdd3e0b2f923f4b2bb99bdd995e13c432fa93",
+      "observation_sha256": "4a4337a72efd7792d2083d78a0cf191e439ea495ba5480de9656bc2cdbf3fa81",
+      "script": "docs/review/t-a8.8b/scripts/runtime_boot_scheduler.js",
+      "trace_capacity": 65536,
+      "expected": {
+        "boot_reason": "pc_reached",
+        "hram_rom_bank_shadow": 0,
+        "lcdc": 145
+      }
+    },
+    {
+      "id": "f-a5-runtime-irq-timer",
+      "source": "gbf-runtime::demo_bank0_rom_image plus gbf-runtime::demo_bank0_sym_file",
+      "rom_path": "target/review/t-a8.8b/generated/f-a5-runtime-irq-timer.gb",
+      "sym_path": "target/review/t-a8.8b/generated/f-a5-runtime-irq-timer.sym",
+      "rom_sha256": "1e3a05ad0556ec57436c32e7aae16755de85775d8ff5c9521136c6044d2c9540",
+      "sym_sha256": "c27790f85d21402d5f4ff7bba80cdd3e0b2f923f4b2bb99bdd995e13c432fa93",
+      "observation_sha256": "a4a0cc77875b0e12ba4b848434b522f532bbd4e5fccd5ab20499e0e936c82a2d",
+      "script": "docs/review/t-a8.8b/scripts/runtime_irq_timer.js",
+      "trace_capacity": 65536,
+      "expected": {
+        "boot_reason": "pc_reached",
+        "isr_reason": "breakpoint",
+        "yield_write_reason": "watchpoint",
+        "yield_requested": 1
+      }
+    },
+    {
+      "id": "f-a5-runtime-yield-safe-point",
+      "source": "gbf-test generated ROM using gbf-runtime::scheduler::emit_yield_check",
+      "rom_path": "target/review/t-a8.8b/generated/f-a5-runtime-yield-safe-point.gb",
+      "sym_path": "target/review/t-a8.8b/generated/f-a5-runtime-yield-safe-point.sym",
+      "rom_sha256": "8ba11a91e6159d07f9fa6470f807c5aa4e78d6fbc294fb4fea6a3e2903208af4",
+      "sym_sha256": "a3e7a5e8aa2fad180a02b9e5c3c4326447875489087e5eab1c6e1d1a97c3bea6",
+      "observation_sha256": "8bf72ccad0bdcad6b0303296169623f9930af9b0cd5b373349f21d3faaf7a3c7",
+      "script": "docs/review/t-a8.8b/scripts/runtime_yield_safe_point.js",
+      "trace_capacity": 128,
+      "expected": {
+        "stop_reason": "pc_reached",
+        "yield_requested": 0,
+        "cleared_sentinel": 89,
+        "skipped_sentinel": 0
+      }
+    },
+    {
+      "id": "f-a5-runtime-panic-smoke",
+      "source": "gbf-test generated ROM using gbf-runtime::panic emitted panic path",
+      "rom_path": "target/review/t-a8.8b/generated/f-a5-runtime-panic-smoke.gb",
+      "sym_path": "target/review/t-a8.8b/generated/f-a5-runtime-panic-smoke.sym",
+      "rom_sha256": "1604195a43a9727bbe1f5d0fac0e45aad8bab99ccc4a8fe9de4aa45c853695b9",
+      "sym_sha256": "c2aa245e9f141715eb3544ce15720dca06c3293be27d0cc2bb7091f183ecb546",
+      "observation_sha256": "7380cb108f312618b353adccf712c6d21da618a879ab41d105c50a1ebee7ece1",
+      "script": "docs/review/t-a8.8b/scripts/runtime_panic_smoke.js",
+      "trace_capacity": 65536,
+      "expected": {
+        "fault_write_reason": "watchpoint",
+        "halt_reason": "idle_halt",
+        "fault_code": 65,
+        "rendered": "FAULT 0041",
+        "lcdc": 145
+      }
+    }
+  ]
+}

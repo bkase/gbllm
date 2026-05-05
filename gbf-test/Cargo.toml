@@ -14,3 +14,10 @@ gbf-train = { path = "../gbf-train", features = ["burn-adapter"] }
 gbf-verify = { path = "../gbf-verify" }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+gbf-abi = { path = "../gbf-abi" }
+gbf-asm = { path = "../gbf-asm" }
+gbf-debug = { path = "../gbf-debug" }
+gbf-runtime = { path = "../gbf-runtime" }
+sha2.workspace = true

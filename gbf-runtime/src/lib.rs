@@ -315,14 +315,52 @@ pub fn compute_runtime_nucleus_hash_for_test() -> Hash256 {
 }
 
 pub fn demo_bank0_rom_image() -> Result<Vec<u8>, gbf_asm::rom::RomAssemblyError> {
+    let (bank0, _, _) = normalized_bank0_image_and_symbols_for_test();
+    build_demo_rom_from_bank0(&bank0)
+}
+
+/// `.sym` file for the Bank0 demo ROM, sharing layout with [`demo_bank0_rom_image`].
+pub fn demo_bank0_sym_file() -> Result<String, gbf_asm::symbols::SymError> {
+    let (_, symbols, layout) = normalized_bank0_image_and_symbols_for_test();
+    gbf_asm::symbols::write_sym(&layout, &symbols, &demo_bank0_sym_options())
+}
+
+/// Bank0 demo outputs produced by a single Bank0 lower/layout/relax pass.
+///
+/// Use this when a caller (the F-A5 example, conformance fixtures) needs more
+/// than one of `bank0`/`rom`/`sym` and would otherwise re-run the pipeline.
+#[derive(Debug, Clone)]
+pub struct DemoBank0Artifacts {
+    pub bank0: [u8; 16 * 1024],
+    pub rom: Vec<u8>,
+    pub sym: String,
+}
+
+pub fn demo_bank0_artifacts() -> Result<DemoBank0Artifacts, gbf_asm::rom::RomAssemblyError> {
+    let (bank0, symbols, layout) = normalized_bank0_image_and_symbols_for_test();
+    let rom = build_demo_rom_from_bank0(&bank0)?;
+    let sym = gbf_asm::symbols::write_sym(&layout, &symbols, &demo_bank0_sym_options())
+        .expect("Bank0 demo symbol table emits");
+    Ok(DemoBank0Artifacts { bank0, rom, sym })
+}
+
+fn demo_bank0_sym_options() -> gbf_asm::symbols::SymOptions {
+    gbf_asm::symbols::SymOptions {
+        rom_only: true,
+        ..Default::default()
+    }
+}
+
+fn build_demo_rom_from_bank0(
+    bank0: &[u8; 16 * 1024],
+) -> Result<Vec<u8>, gbf_asm::rom::RomAssemblyError> {
     use gbf_asm::rom::global_checksum;
 
-    let bank0 = normalized_bank0_image_for_test();
     let mut rom = header_stamped_demo_rom()?;
     let cartridge_header: [u8; 0x50] = rom[0x0100..0x0150]
         .try_into()
         .expect("0x50 byte cartridge header slice");
-    rom[..bank0.len()].copy_from_slice(&bank0);
+    rom[..bank0.len()].copy_from_slice(bank0);
     rom[0x0100..0x0150].copy_from_slice(&cartridge_header);
     let checksum = global_checksum(&rom);
     rom[0x014E] = (checksum >> 8) as u8;
