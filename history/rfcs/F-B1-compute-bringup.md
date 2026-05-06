@@ -244,9 +244,23 @@ The chosen quantum is recorded in `realism_report.v1.json`.
 
 The tile shape remains `16 × 16 × 16`; only the scheduler-visible compute quantum varies.
 
-### 2.7 Multiply implementation: quarter-square table
+### 2.7 Multiply implementation: fixed emitted kernel, QST reference support
 
-F-B1 uses the integer quarter-square identity:
+F-B1's checked streaming ROM emits the deterministic
+`fixed_8_step_shift_add_i8_i32` product-accumulate kernel. The kernel is
+constant-structure for all `i8` inputs and records:
+
+```text
+multiply_kernel = fixed_8_step_shift_add_i8_i32
+rom_bank0_table_bytes_read = 0
+```
+
+This is the source of truth for the F-B1 realism report. The headline packet
+does **not** emit quarter-square table loads, and no F-B1 closure claim depends
+on QST being wired into the generated ROM.
+
+F-B1 still keeps quarter-square support as a reference/future-kernel asset. The
+integer quarter-square identity is:
 
 ```text
 a × b = Q[a + b] - Q[a - b]
@@ -271,19 +285,21 @@ i16 per entry
 
 Maximum value is at `x = -256`: `256² / 4 = 16,384`. All values are non-negative and fit in `i16` with margin.
 
-The quarter-square approach was chosen against three alternatives:
+Keeping QST as the next kernel candidate was weighed against three alternatives:
 
-- **Naive shift-and-add.** Variable cycle cost unless deliberately padded, weaker lookup-table pattern reuse for M1, and likely worse scheduler predictability. F-B1 should not claim a precise speedup before measurement.
-- **Booth multiplication or other CPU-intensive variants.** All expected to be worse than quarter-square table on this CPU; not entertained further.
+- **Unpadded naive shift-and-add.** Variable cycle cost and weaker scheduler predictability. F-B1 deliberately uses a fixed shift/add variant instead, so the bringup report has stable per-product structure even without QST emission.
+- **Booth multiplication or other CPU-intensive variants.** Plausibly useful only if measured against the fixed baseline and the future QST kernel; not a closure dependency for F-B1.
 - **HRAM-mirrored sub-table for hot entries.** Tempting on the inner loop but contends with F-A4's HRAM bank-shadow and the widget state; deferred to M1 if measurements suggest it pays off.
 
-Estimated logical work per product-accumulate: two table lookups, one `i16` subtract, sign-extension to `i32`, and one `i32` accumulator add. The actual LR35902 cost is measurement-defined because address formation, table indexing, carry propagation, loop overhead, and memory traffic dominate the naive formula.
+Estimated logical work for a future emitted QST product-accumulate: two table lookups, one `i16` subtract, sign-extension to `i32`, and one `i32` accumulator add. The actual LR35902 cost is measurement-defined because address formation, table indexing, carry propagation, loop overhead, and memory traffic dominate the naive formula.
 
-The quarter-square implementation is chosen because it is deterministic, branch-light, and establishes the lookup-table idiom that M1 will reuse for activations, softmax, and quantization rescales. The realism report, not this RFC text, decides whether it is actually faster than alternatives.
+The quarter-square implementation remains attractive because it is deterministic, branch-light, and establishes the lookup-table idiom that M1 will reuse for activations, softmax, and quantization rescales. The F-B1 result says only that the fixed shift/add bringup kernel is correct and measurable under the real scheduler. Follow-up bead `bd-3akv` must emit QST before any report may claim QST timing.
 
 The production table generator lives in `gbf-codegen`. An independent reference generator lives in `gbf-verify`. A test asserts byte equality between the two generated tables.
 
-The table is Bank0-resident. F-B1 does not mirror it into HRAM. HRAM is reserved for the runtime’s banking shadow, scheduler-critical state, and small UI state.
+When QST is emitted, the table is Bank0-resident. F-B1 does not mirror it into
+HRAM. HRAM is reserved for the runtime's banking shadow, scheduler-critical
+state, and small UI state.
 
 ### 2.8 Kernel residency
 
@@ -292,7 +308,7 @@ The matmul kernel code lives in Bank0.
 This is required because the kernel performs bank switching. Code executing from the switchable ROM window cannot safely switch that same window out from underneath itself. Keeping the kernel in Bank0 makes the bank visibility story simple:
 
 ```text
-Bank0: runtime + scheduler + matmul kernel + quarter-square table
+Bank0: runtime + scheduler + matmul kernel (+ future QST table when emitted)
 ROMX:  one selected operand bank at a time
 ```
 
@@ -412,7 +428,7 @@ F-B1 implements:
 
 1. `gbf-verify::matmul_reference_i8`, including checked matrix view types.
 2. A production-neutral `OperandFixtureSpec::DeterministicAffineV1`, with a production operand materializer in `gbf-codegen` and an independent verifier materializer in `gbf-verify`.
-3. Independent production and reference quarter-square table generators.
+3. A checked emitted fixed shift/add multiply kernel, plus independent production and reference quarter-square table generators for future-kernel coverage.
 4. A skeletal F-B1-local compile request, named `ComputeBringupRequest`, whose production-used shape, fixture, and layout types do not depend on `gbf-verify`.
 5. A skeletal `gbf-ir::infer` node for `MatmulI8`.
 6. A skeletal ROM-window plan for fixed Bank0 resources and two switchable operand banks.
@@ -511,7 +527,7 @@ BringupRomWindowPlan
   ├─ Bank0 permanent resources
   │   ├─ runtime nucleus
   │   ├─ matmul kernel
-  │   └─ quarter-square table
+  │   └─ optional future QST table reservation
   └─ switchable operand resources
       ├─ A in bank 1
       └─ B in bank 2
@@ -831,7 +847,7 @@ Validation:
 * A and B banks are distinct;
 * `offset + length <= rom_bank_size`, using checked arithmetic widened to at least `u32`;
 * for `N = 128`, operand length is exactly one 16 KiB bank, so operand offset must be zero unless the target profile explicitly provides a larger switchable bank;
-* generated ROM layout must not overlap Bank0 interrupt vectors, header, runtime nucleus, kernel, or quarter-square table.
+* generated ROM layout must not overlap Bank0 interrupt vectors, header, runtime nucleus, kernel, or any reserved future-QST table region.
 
 **Deferred to M1** (these fields *will not* appear on `ComputeBringupRequest`; M1 introduces them on the real `CompileRequest`):
 
@@ -1034,24 +1050,28 @@ for mt in output_tile_rows:
         if yield_quantum == KLaneFullTile:
           for mm in 0..16:
             for nn in 0..16:
-              acc[mm,nn] += quarter_square_mul(a_panel[mm,kk], b_panel[kk,nn])
+              acc[mm,nn] += emitted_mul_i8_i32(a_panel[mm,kk], b_panel[kk,nn])
           maybe_yield()
 
         if yield_quantum == KLaneRows4:
           for mm_base in [0, 4, 8, 12]:
             for mm in mm_base..mm_base+4:
               for nn in 0..16:
-                acc[mm,nn] += quarter_square_mul(a_panel[mm,kk], b_panel[kk,nn])
+                acc[mm,nn] += emitted_mul_i8_i32(a_panel[mm,kk], b_panel[kk,nn])
             maybe_yield()
 
         if yield_quantum == KLaneRow:
           for mm in 0..16:
             for nn in 0..16:
-              acc[mm,nn] += quarter_square_mul(a_panel[mm,kk], b_panel[kk,nn])
+              acc[mm,nn] += emitted_mul_i8_i32(a_panel[mm,kk], b_panel[kk,nn])
             maybe_yield()
 
     expose accumulator tile for harness dump
 ```
+
+For the checked F-B1 packet, `emitted_mul_i8_i32` is
+`fixed_8_step_shift_add_i8_i32`. QST may replace that symbol only under the
+follow-up measurement bead `bd-3akv`.
 
 The host reassembles output tiles in this order:
 
@@ -1424,12 +1444,12 @@ Schema fixtures may use small synthetic values. The checked-in `docs/review/f-b1
     "operand_layout": {
       "a": { "bank": 1, "offset": 0 },
       "b": { "bank": 2, "offset": 0 },
-      "multiply_table_bank": 0
+      "multiply_kernel": "fixed_8_step_shift_add_i8_i32"
     }
   },
   "runtime_knobs": {
-    "yield_quantum": "KLaneFullTile",
-    "soft_deadline_margin_mcycles": 0,
+    "yield_quantum": "KLaneRow",
+    "soft_deadline_margin_mcycles": 128,
     "scheduler_profile": "Bringup"
   },
   "runs": [
@@ -1442,7 +1462,7 @@ Schema fixtures may use small synthetic values. The checked-in `docs/review/f-b1
         "asm_ir_hash": "sha256:...",
         "rom_sha256": "sha256:...",
         "operand_fixture_hash": "sha256:...",
-        "quarter_square_table_hash": "sha256:..."
+        "multiply_kernel_hash": "sha256:..."
       },
       "structural_counts": {
         "products": 2097152,
@@ -1548,7 +1568,7 @@ For `N = 128`:
 | K-tiles per output tile | exactly `8`                         |
 | operand panel copies    | exactly `64 × 8 × 2 = 1,024`        |
 | operand bytes copied    | about `1,024 × 256 = 262,144` bytes |
-| Bank0 table bytes read  | about `2 × products × 2 = 8,388,608` bytes, before caching/micro-optimizations |
+| Bank0 table bytes read  | exactly `0` for the F-B1 fixed shift/add packet; future QST emission would measure `2 × products × 2 = 8,388,608` bytes before caching/micro-optimizations |
 | bank lease acquires     | about `1,024`                       |
 | bank lease releases     | same as acquires                    |
 | bank lease balance      | exactly `0`                         |
@@ -1599,14 +1619,17 @@ gbf-codegen::operand_fixture_matches_verify_for_review_sizes
 
 Claims:
 
-* table has exactly 512 entries
-* serialized table is 1,024 bytes
-* production and reference generators match
-* table multiplication equals direct multiplication over all i8 pairs
+* checked emitted kernel is `fixed_8_step_shift_add_i8_i32`
+* checked report records zero Bank0 multiply-table reads
+* QST table has exactly 512 entries
+* QST serialized table is 1,024 bytes
+* production and reference QST generators match
+* QST table multiplication equals direct multiplication over all i8 pairs
 
 Gates:
 
 ```text
+gbf-report::realism_report_v1_accepts_checked_fixture
 gbf-codegen::quarter_square_table_shape
 gbf-codegen::quarter_square_table_matches_verify
 gbf-codegen::quarter_square_mul_exhaustive_i8
@@ -1702,13 +1725,14 @@ gbf-report::realism_report_v1_self_hash_round_trip
 | ---------------------------------------------------------------- | ------------------------------------------------------------ |
 | F-B1 uses exact `i8 × i8 → i32` semantics                        | `gbf-verify::matmul_reference_i8_known_fixture`              |
 | Reference shape validation rejects invalid matrices              | `gbf-verify::matmul_reference_rejects_bad_shape`             |
-| Quarter-square table has 512 entries / 1,024 bytes               | `gbf-codegen::quarter_square_table_shape`                    |
-| Quarter-square multiply matches direct multiply for all i8 pairs | `gbf-codegen::quarter_square_mul_exhaustive_i8`              |
-| Production and reference table generators agree                  | `gbf-codegen::quarter_square_table_matches_verify`           |
+| Emitted packet uses the fixed shift/add kernel and reads no Bank0 table | `gbf-report::realism_report_v1_accepts_checked_fixture`      |
+| Future QST table has 512 entries / 1,024 bytes                   | `gbf-codegen::quarter_square_table_shape`                    |
+| Future QST multiply matches direct multiply for all i8 pairs     | `gbf-codegen::quarter_square_mul_exhaustive_i8`              |
+| Production and reference future-QST table generators agree       | `gbf-codegen::quarter_square_table_matches_verify`           |
 | `ComputeBringupRequest` rejects same-bank operands               | `gbf-codegen::compute_bringup_request_rejects_same_bank`     |
 | `ComputeBringupRequest` rejects bank 0 operands for A/B          | `gbf-codegen::compute_bringup_request_rejects_bank0_operand` |
 | Tile size is fixed at 16×16×16                                   | `gbf-codegen::compute_bringup_request_rejects_bad_tile`      |
-| Kernel and table are Bank0-resident                              | `gbf-codegen::rom_window_plan_bank0_resources`               |
+| Kernel is Bank0-resident and future QST table placement is reserved by plan tests | `gbf-codegen::rom_window_plan_bank0_resources`               |
 | Generated code uses BankLease/BankGuard                          | `gbf-codegen::f_b1_l2_lowering_uses_banklease_ops`           |
 | Generated code contains no raw MBC writes                        | `gbf-codegen::f_b1_l2_generated_code_has_no_raw_mbc_writes`  |
 | Lease acquire/release balance is zero                            | `gbf-runtime::f_b1_l2_banklease_balance`                     |
@@ -1768,7 +1792,7 @@ artifacts/matmul_n128.sym
 artifacts/matmul_n128.lst
 artifacts/matmul_n128.sha256
 artifacts/matmul_n128.map.json
-artifacts/frame_trace_n128.json
+artifacts/frame_trace_n128.summary.md
 artifacts/tile_dump_index_n128.json
 artifacts/cycle_attribution_n128.json
 ```
@@ -1812,17 +1836,18 @@ Unit tests may include ignored versions of the `N = 128` gates, but ordinary `ca
 | L0/L1 smoke layouts drift into closure artifacts | `WramSmoke` is allowed only for smoke profiles; L5 report must use distinct ROM banks |
 | Production crates depend on `gbf-verify` shape types | Shared shape types live outside `gbf-verify`; verifier depends on shared types, not vice versa |
 | Bank0 layout overflows silently | ROM layout reports Bank0 free bytes and fails if kernel/table/runtime overlap reserved regions |
+| QST timing is inferred from the fixed-kernel packet | Report names `fixed_8_step_shift_add_i8_i32`; QST emission requires follow-up bead `bd-3akv` |
 
 ### 15.2 First-principles structural counts that F-B1 is testing
 
 The realism report replaces every cycle estimate with a measurement. This subsection states only the *structural* counts that flow from the chosen tile schedule and operand layout:
 
-* **Product-accumulate via quarter-square table:** measurement-defined. The logical operation is two table lookups, one `i16` subtract, sign-extension, and one `i32` accumulator add. The LR35902 cost is expected to be dominated by address formation, memory traffic, carry propagation, and loop overhead.
+* **Product-accumulate via fixed shift/add:** measurement-defined. F-B1's emitted packet uses `fixed_8_step_shift_add_i8_i32`; the realism report's cycle and bandwidth fields describe this kernel only.
 * **Inner product over `K = 128`:** 128 product-accumulate steps per output element.
 * **Output element count at `N = 128`:** 16,384.
 * **Per-matmul compute:** measurement-defined. The structural product count is exactly `128³ = 2,097,152`.
 * **Operand panel copies:** `64 output tiles × 8 k-tiles × 2 panels = 1,024` panel copies. Each panel is 256 bytes, so operand panel traffic is `262,144` bytes.
-* **Bank0 table traffic:** two 16-bit table reads per product implies roughly `8,388,608` Bank0 table bytes read before any micro-optimization.
+* **Bank0 table traffic:** exactly `0` bytes for the checked F-B1 packet. A later emitted QST kernel would start from the structural expectation of two 16-bit table reads per product, roughly `8,388,608` Bank0 table bytes before any micro-optimization.
 * **Estimated wall-clock:** intentionally not asserted here. F-B1 exists to measure it.
 
 These counts let reviewers sanity-check the realism report's structural fields (products, output tiles, K-tiles, panel copies, lease counts). Cycle and wall-clock numbers come exclusively from the report.
@@ -1833,9 +1858,9 @@ Concrete inputs to M1's design:
 
 | Realism report field                                | M1 design input it feeds                                                              |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `cycles_per_product_accumulate` mean                | Product-accumulate cost in the dense kernel; sets the absolute floor for cycles per token |
+| `cycles_per_product_accumulate` mean                | Product-accumulate cost for the emitted fixed shift/add dense kernel; sets the measured baseline a QST follow-up must beat |
 | `cycles_per_full_matmul`                            | Wall-clock budget per dense layer; informs M1's `D_model` and layer-count choices     |
-| `effective_bank0_table_read_bandwidth_bytes_per_sec_f64` | Sets M1's fixed-bank table-read budget per tile                                  |
+| `effective_bank0_table_read_bandwidth_bytes_per_sec_f64` | Confirms zero table traffic for F-B1; QST follow-up must produce the fixed-bank table-read budget per tile |
 | `effective_romx_operand_read_bandwidth_bytes_per_sec_f64` | Sets M1's switchable-ROM operand-read budget per tile                            |
 | `logical_bank_switches_per_full_matmul`             | Sets M1's `RomWindowPlan` re-residency budget                                         |
 | `cycles_remaining_at_widget_tick.p99`               | Calibrates M1's `soft_deadline_margin` default                                        |
@@ -1852,7 +1877,7 @@ If the report says M1's quantised dense kernel will take >5 s per token at the d
 
 | Seed question                     | Resolution                                                         |
 | --------------------------------- | ------------------------------------------------------------------ |
-| Multiply table ROM vs HRAM mirror | Bank0 ROM only; no HRAM mirror in F-B1                             |
+| Multiply table ROM vs HRAM mirror | F-B1 emits no multiply table reads; future QST table is Bank0 ROM only, with no HRAM mirror |
 | Kernel bank                       | Bank0                                                              |
 | DumpRegion payload sizing         | No new `DumpRegion`; use existing F-A3 dump operation              |
 | Multiply table residency epoch    | Named `PermanentBank0`, no numeric epoch sentinel                  |

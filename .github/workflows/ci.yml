@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -24,3 +27,14 @@ jobs:
         run: cargo clippy --workspace --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: F-B1 dev-loop smoke
+        run: scripts/review/f-b1/smoke.sh
+
+  f-b1-review-packet:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify F-B1 review packet
+        run: scripts/review/f-b1/verify-packet.sh

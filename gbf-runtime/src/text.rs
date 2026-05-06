@@ -86,6 +86,23 @@ pub fn emit_text_clear_row(b: &mut Builder, y: u8) {
     );
 }
 
+#[must_use]
+pub fn frame_service_widget_glyphs(frame: u16) -> [u8; 4] {
+    let nybbles = [
+        ((frame >> 12) & 0xF) as u8,
+        ((frame >> 8) & 0xF) as u8,
+        ((frame >> 4) & 0xF) as u8,
+        (frame & 0xF) as u8,
+    ];
+    nybbles.map(hex_glyph)
+}
+
+#[must_use]
+pub const fn hex_glyph(nybble: u8) -> u8 {
+    let n = nybble & 0xF;
+    if n < 10 { b'0' + n } else { b'A' + (n - 10) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +185,12 @@ mod tests {
         let section = builder.finish();
         assert!(section_effect_kinds(&section).contains(&MachineEffectKind::LoadFromIo));
         assert!(section_effect_kinds(&section).contains(&MachineEffectKind::StoreToVram));
+    }
+
+    #[test]
+    fn f_b1_frame_widget_tile_render_known_vector() {
+        assert_eq!(frame_service_widget_glyphs(0x0000), *b"0000");
+        assert_eq!(frame_service_widget_glyphs(0x00AF), *b"00AF");
+        assert_eq!(frame_service_widget_glyphs(0xBEEF), *b"BEEF");
     }
 }

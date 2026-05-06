@@ -6,9 +6,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+gbf-abi = { path = "../gbf-abi" }
 gbf-artifact = { path = "../gbf-artifact" }
 gbf-foundation = { path = "../gbf-foundation" }
+gbf-hw = { path = "../gbf-hw" }
 gbf-policy = { path = "../gbf-policy" }
 gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true

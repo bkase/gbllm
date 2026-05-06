@@ -1,0 +1,30 @@
+{
+  "byte_len": 1024,
+  "compute_yield_safe_point_pc": 4679,
+  "copy_yield_safe_point_pc": 4702,
+  "execution_model": "single_emulated_streaming_rom_dump_arena_safe_points",
+  "kernel": {
+    "bank": 0,
+    "offset": 8192
+  },
+  "multiply_kernel": {
+    "algorithm": "fixed_8_step_shift_add_i8_i32",
+    "bank0_table_bytes": 0
+  },
+  "operand_a": {
+    "bank": 1,
+    "bytes": 16384,
+    "offset": 0
+  },
+  "operand_b": {
+    "bank": 2,
+    "bytes": 16384,
+    "offset": 0
+  },
+  "representative_rom": "matmul_n128_streaming.gb",
+  "source_wram_addr": 49152,
+  "tile_internal_layout": "row_major_i32_le",
+  "tile_safe_point_pc": 3922,
+  "vblank_handler_pc": 12288,
+  "yield_quantum": "KLaneRow"
+}

@@ -1,0 +1,9 @@
+{
+  "rust_log": "info,gbf=debug",
+  "tracing_event_counts": {
+    "BankLeaseAcquired": 1024,
+    "BankLeaseReleased": 1024,
+    "SchedulerServicedFrame": 51686,
+    "WidgetTickDispatched": 51686
+  }
+}

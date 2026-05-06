@@ -7,17 +7,20 @@ publish = false
 
 [dependencies]
 gbf-artifact = { path = "../gbf-artifact" }
+gbf-bench = { path = "../gbf-bench" }
+gbf-codegen = { path = "../gbf-codegen" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-model = { path = "../gbf-model" }
 gbf-oracle = { path = "../gbf-oracle" }
+gbf-report = { path = "../gbf-report" }
 gbf-train = { path = "../gbf-train", features = ["burn-adapter"] }
 gbf-verify = { path = "../gbf-verify" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 gbf-abi = { path = "../gbf-abi" }
 gbf-asm = { path = "../gbf-asm" }
 gbf-debug = { path = "../gbf-debug" }
 gbf-runtime = { path = "../gbf-runtime" }
-sha2.workspace = true

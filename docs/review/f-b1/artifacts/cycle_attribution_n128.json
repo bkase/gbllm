@@ -1,0 +1,9 @@
+{
+  "cycle_unit": "mcycle",
+  "cycles_per_output_tile": 14178539,
+  "cycles_per_product_accumulate": 432,
+  "dump_pause_excluded_from_compute_costs": true,
+  "max_unyielded_compute_mcycles": 17059,
+  "products": 2097152,
+  "vblank_isr_included_in_end_to_end_frames": true
+}

@@ -1960,10 +1960,20 @@ The runtime remains a cooperative kernel centered on Bank0, but the bank partiti
 
 **Additional hard rule: all ISR code and ISR-reachable data live in Bank0, HRAM, or fixed WRAM only. Interrupt handlers may not depend on the currently selected switchable ROM or SRAM bank.** This is computed by `ReachabilityValidation`, not declared and hoped for. It is the difference between "my cooperative runtime is cooperative" and "my runtime locks up on cartridge after twenty minutes because bank shadow state and hardware bank state diverged across an interrupt boundary."
 
+Interrupt vectors are part of that typed runtime surface. `gbf-asm` owns named
+vector slots such as `$0040` VBlank, emits their stubs through typed
+instructions, reserves the bytes during layout, and exposes them as reachability
+roots. Post-assembly vector byte mutation is allowed only as a legacy bringup
+adapter for packets such as F-B1; production backends should place vectors
+first-class so vector ownership appears in listings, symbol maps, and
+reachability reports. The concrete follow-up thread is `bd-18bu` with task beads
+for `gbf-asm` layout (`bd-3q2w`), reachability roots (`bd-3s0s`), and F-B1
+migration (`bd-1q40`).
+
 Bank classes:
 
 - **`Bank0 / RuntimeNucleus`**
-  - interrupt vectors and boot/header glue,
+  - first-class interrupt vectors and boot/header glue,
   - scheduler,
   - joypad,
   - text renderer,
@@ -2022,7 +2032,7 @@ Memory hierarchy is explicitly tied to `RomWindowPlan`, the scheduler, and the a
 
 ```text
 ROM bank 00 (fixed) — RuntimeNucleus
-  boot/header/vectors
+  boot/header/first-class vectors
   ISR + scheduler                 ; ISR-reachable code/data only (proven)
   UI + keyboard + text renderer
   video commit queue
