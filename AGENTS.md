@@ -72,6 +72,40 @@ There is no escape hatch. If tests fail, fix them.
 - For structured logging beads, also use `.agents/skills/logging-bead-closure/SKILL.md`.
 - For F-A8 (`gbf-debug`) usage — driving the CLI, writing scripts, reading envelopes — use `.agents/skills/gbf-debug-usage/SKILL.md`.
 
+### Reviewer Personas (Per-Bead Review)
+
+Every completed bead is reviewed by automated reviewer personas before close.
+The full persona catalog — mandates, signals, out-of-scope boundaries, and
+harness assignments — lives in `REVIEWERS.md`. That document is the source of
+truth; do not duplicate persona definitions elsewhere.
+
+**Meta-rule for routing:** do not run all ten personas on every bead. Pick the
+**4–7 most relevant** based on the bead's type, scope, and risk surface. Two
+personas — **P5 (Proof-of-Work Detective)** and **P6 (RFC Scope Sentinel)** —
+run on **every** bead; the other eight are conditional. When choosing among
+the conditional personas, prefer fewer personas with multiple harnesses each
+(cross-check) over many personas with single harnesses. `REVIEWERS.md` carries
+a routing table mapping common bead types to recommended persona sets.
+
+**Harness assignments at a glance** (full detail in `REVIEWERS.md`):
+
+| #  | Persona                                  | Harnesses                |
+|----|------------------------------------------|--------------------------|
+| P1 | Architecture & Boundary Steward          | claude + codex           |
+| P2 | Code Cleanliness / Idiomatic Rust        | claude + codex + gemini  |
+| P3 | AI Researcher / Experimenter Analyzer    | claude + gemini          |
+| P4 | QA / Test Engineer                       | gemini + codex           |
+| P5 | Proof-of-Work Detective (always-on)      | gemini + claude          |
+| P6 | RFC Scope Sentinel (always-on)           | gemini + claude          |
+| P7 | Numerical & Determinism Reviewer         | codex + gemini           |
+| P8 | Public Contract / Schema Stability       | gemini + claude          |
+| P9 | Performance & Resource Reviewer          | gemini + claude          |
+| P10| Observability & Telemetry Reviewer       | gemini + claude          |
+
+When a persona names two or three harnesses, **run all of them** — the
+multi-harness assignment is an explicit cross-check. Disagreement between
+harnesses on the same persona is itself a signal worth surfacing to a human.
+
 ### Session Protocol
 
 **Before ending any session, run this checklist:**
