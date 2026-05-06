@@ -91,9 +91,13 @@ git push                # Push to remote
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
-- When asking Gemini for architecture/correctness/code-quality review, use
-  `gemini --skip-trust -m gemini-3.1-pro-preview -p "<prompt>"` so the review command
-  can run in this workspace.
+- When asking external coding agents for architecture/correctness/code-quality
+  review, run them through ACPX instead of scraping or driving a PTY. Use
+  `bunx acpx@latest`, one-shot `exec`, `--cwd /Users/bkase/Documents/gbllm`,
+  `--approve-all`, `--format text`, `--suppress-reads`, and a bounded timeout.
+  Tested review commands:
+  - Gemini: `bunx acpx@latest --agent 'gemini --skip-trust -m gemini-3.1-pro-preview --acp' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<prompt>"`.
+  - Claude: `bunx acpx@latest --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 claude exec "<prompt>"`.
 - For PR bodies with Markdown, always use `gh pr edit/create --body-file - <<'EOF'`.
 
 ### Training Loss Beads
