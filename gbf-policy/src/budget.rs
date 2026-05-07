@@ -121,6 +121,29 @@ mod tests {
     }
 
     #[test]
+    fn memory_cap_section_preserves_u32_json_widths() {
+        let memory_caps = RuntimeMemoryCapSection {
+            wram_usable_bytes: 70_000,
+            sram_usable_bytes: 131_072,
+            hram_usable_bytes: 300,
+            source_target_profile_hash: Hash256::from_bytes([3; 32]),
+        };
+        let expected = serde_json::json!({
+            "wram_usable_bytes": 70000,
+            "sram_usable_bytes": 131072,
+            "hram_usable_bytes": 300,
+            "source_target_profile_hash": hash_json(3)
+        });
+
+        let encoded = serde_json::to_value(memory_caps).expect("memory caps serialize");
+        let decoded: RuntimeMemoryCapSection =
+            serde_json::from_value(expected.clone()).expect("memory caps deserialize");
+
+        assert_eq!(encoded, expected);
+        assert_eq!(decoded, memory_caps);
+    }
+
+    #[test]
     fn budget_rejects_unknown_field() {
         let mut value = serde_json::to_value(budget_fixture()).expect("budget serializes");
         value["unexpected"] = serde_json::json!("nope");
