@@ -1382,14 +1382,58 @@ mod tests {
     }
 
     #[test]
-    fn constraint_value_carries_placement_profile() {
-        let value = ConstraintValue::PlacementProfile {
-            value: PlacementProfile::Budgeted,
-        };
-        let encoded = serde_json::to_string(&value).expect("value serializes");
-        let decoded: ConstraintValue = serde_json::from_str(&encoded).expect("value deserializes");
+    fn constraint_value_json_shapes_are_pinned() {
+        let cases = [
+            (
+                ConstraintValue::PlacementProfile {
+                    value: PlacementProfile::Budgeted,
+                },
+                serde_json::json!({
+                    "kind": "PlacementProfile",
+                    "value": {"kind": "Budgeted"}
+                }),
+            ),
+            (
+                ConstraintValue::U16 { value: 512 },
+                serde_json::json!({
+                    "kind": "U16",
+                    "value": 512
+                }),
+            ),
+            (
+                ConstraintValue::U32 { value: 70_000 },
+                serde_json::json!({
+                    "kind": "U32",
+                    "value": 70_000
+                }),
+            ),
+            (
+                ConstraintValue::Bool { value: true },
+                serde_json::json!({
+                    "kind": "Bool",
+                    "value": true
+                }),
+            ),
+            (
+                ConstraintValue::Text {
+                    value: "bank0.kernel".to_owned(),
+                },
+                serde_json::json!({
+                    "kind": "Text",
+                    "value": "bank0.kernel"
+                }),
+            ),
+        ];
 
-        assert_eq!(decoded, value);
+        for (value, expected_json) in cases {
+            assert_eq!(
+                serde_json::to_value(&value).expect("value serializes"),
+                expected_json
+            );
+            let decoded: ConstraintValue =
+                serde_json::from_value(expected_json).expect("value deserializes");
+            assert_eq!(decoded, value);
+        }
     }
 
     #[test]
