@@ -144,6 +144,47 @@ mod tests {
     }
 
     #[test]
+    fn runtime_chrome_budget_preserves_reserved_field_boundaries() {
+        let budget = RuntimeChromeBudget {
+            wram_reserved: u16::MAX,
+            sram_reserved: u32::MAX,
+            ..budget_fixture()
+        };
+        let expected = serde_json::json!({
+            "target": "dmg-mbc5",
+            "profile": "Bringup",
+            "runtime_nucleus_hash": hash_json(1),
+            "rom_slots": [
+                {
+                    "id": 7,
+                    "class": {"kind": "ExpertBank"},
+                    "usable_bytes": 16000,
+                    "reserved_slack": 384,
+                    "placement_caps": [
+                        {"kind": "StrictOnePerBank"},
+                        {"kind": "Budgeted"}
+                    ]
+                }
+            ],
+            "memory_caps": {
+                "wram_usable_bytes": 8192,
+                "sram_usable_bytes": 32768,
+                "hram_usable_bytes": 127,
+                "source_target_profile_hash": hash_json(2)
+            },
+            "wram_reserved": u16::MAX,
+            "sram_reserved": u32::MAX
+        });
+
+        let encoded = serde_json::to_value(&budget).expect("budget serializes");
+        let decoded: RuntimeChromeBudget =
+            serde_json::from_value(expected.clone()).expect("budget deserializes");
+
+        assert_eq!(encoded, expected);
+        assert_eq!(decoded, budget);
+    }
+
+    #[test]
     fn budget_rejects_unknown_field() {
         let mut value = serde_json::to_value(budget_fixture()).expect("budget serializes");
         value["unexpected"] = serde_json::json!("nope");

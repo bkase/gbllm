@@ -1047,10 +1047,19 @@ mod tests {
 
     #[test]
     fn sequence_semantics_ref_round_trips_through_serde() {
+        let expected = serde_json::json!({"kind": "BoundedKv"});
+
+        assert_eq!(
+            serde_json::to_value(SequenceSemanticsRef::BoundedKv).unwrap(),
+            expected
+        );
+
         let encoded = serde_json::to_string(&SequenceSemanticsRef::BoundedKv).unwrap();
         let decoded: SequenceSemanticsRef = serde_json::from_str(&encoded).unwrap();
+        let decoded_from_shape: SequenceSemanticsRef = serde_json::from_value(expected).unwrap();
 
         assert_eq!(decoded, SequenceSemanticsRef::BoundedKv);
+        assert_eq!(decoded_from_shape, SequenceSemanticsRef::BoundedKv);
     }
 
     #[test]
@@ -1320,10 +1329,23 @@ mod tests {
         let source = PolicySource::RepairProposal {
             id: RepairProposalId("future-rp-1".to_owned()),
         };
+        let expected = serde_json::json!({
+            "kind": "RepairProposal",
+            "id": "future-rp-1"
+        });
+
+        assert_eq!(
+            serde_json::to_value(&source).expect("source serializes"),
+            expected
+        );
+
         let encoded = serde_json::to_string(&source).expect("source serializes");
         let decoded: PolicySource = serde_json::from_str(&encoded).expect("source deserializes");
+        let decoded_from_shape: PolicySource =
+            serde_json::from_value(expected).expect("source deserializes from public shape");
 
         assert_eq!(decoded, source);
+        assert_eq!(decoded_from_shape, source);
         assert!(
             !compile_knobs_fixture()
                 .provenance
