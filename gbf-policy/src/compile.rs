@@ -1047,19 +1047,29 @@ mod tests {
 
     #[test]
     fn sequence_semantics_ref_round_trips_through_serde() {
-        let expected = serde_json::json!({"kind": "BoundedKv"});
+        let linear_state_expected = serde_json::json!({"kind": "LinearState"});
+        let bounded_kv_expected = serde_json::json!({"kind": "BoundedKv"});
+
+        assert_eq!(
+            serde_json::to_value(SequenceSemanticsRef::LinearState).unwrap(),
+            linear_state_expected
+        );
 
         assert_eq!(
             serde_json::to_value(SequenceSemanticsRef::BoundedKv).unwrap(),
-            expected
+            bounded_kv_expected
         );
 
         let encoded = serde_json::to_string(&SequenceSemanticsRef::BoundedKv).unwrap();
         let decoded: SequenceSemanticsRef = serde_json::from_str(&encoded).unwrap();
-        let decoded_from_shape: SequenceSemanticsRef = serde_json::from_value(expected).unwrap();
+        let linear_state_from_shape: SequenceSemanticsRef =
+            serde_json::from_value(linear_state_expected).unwrap();
+        let bounded_kv_from_shape: SequenceSemanticsRef =
+            serde_json::from_value(bounded_kv_expected).unwrap();
 
         assert_eq!(decoded, SequenceSemanticsRef::BoundedKv);
-        assert_eq!(decoded_from_shape, SequenceSemanticsRef::BoundedKv);
+        assert_eq!(linear_state_from_shape, SequenceSemanticsRef::LinearState);
+        assert_eq!(bounded_kv_from_shape, SequenceSemanticsRef::BoundedKv);
     }
 
     #[test]
