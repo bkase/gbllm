@@ -67,6 +67,7 @@ mod tests {
                 "class": {"kind": "WithinFamily"}
             })
         );
+        assert!(!requirement.accepts(CalibrationConfidenceClass::None));
         assert!(!requirement.accepts(CalibrationConfidenceClass::Transferred));
         assert!(requirement.accepts(CalibrationConfidenceClass::WithinFamily));
         assert!(requirement.accepts(CalibrationConfidenceClass::Onsite));
@@ -86,8 +87,25 @@ mod tests {
     #[test]
     fn no_minimum_confidence_is_distinct_from_none_bundle_confidence() {
         let requirement = CalibrationConfidenceRequirement::NoMinimumConfidence;
+        let expected_shape = serde_json::json!({
+            "kind": "NoMinimumConfidence"
+        });
 
-        assert!(requirement.accepts(CalibrationConfidenceClass::None));
+        assert_eq!(
+            serde_json::to_value(requirement).expect("requirement serializes"),
+            expected_shape
+        );
+        let decoded: CalibrationConfidenceRequirement =
+            serde_json::from_value(expected_shape).expect("requirement deserializes");
+        assert_eq!(decoded, requirement);
+        for observed in [
+            CalibrationConfidenceClass::None,
+            CalibrationConfidenceClass::Transferred,
+            CalibrationConfidenceClass::WithinFamily,
+            CalibrationConfidenceClass::Onsite,
+        ] {
+            assert!(requirement.accepts(observed));
+        }
         assert_ne!(
             serde_json::to_value(requirement).expect("requirement serializes"),
             serde_json::to_value(CalibrationConfidenceClass::None).expect("class serializes")
