@@ -1394,6 +1394,15 @@ mod tests {
                 }),
             ),
             (
+                ConstraintValue::ObservabilityMode {
+                    value: ObservabilityMode::Flexible,
+                },
+                serde_json::json!({
+                    "kind": "ObservabilityMode",
+                    "value": {"kind": "Flexible"}
+                }),
+            ),
+            (
                 ConstraintValue::U16 { value: 512 },
                 serde_json::json!({
                     "kind": "U16",
