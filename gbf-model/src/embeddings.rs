@@ -3,7 +3,14 @@
 use std::error::Error;
 use std::fmt;
 
-pub const BYTE_LEVEL_TIED_VOCAB_LIMIT: usize = 256;
+/// Default cutoff at which `EmbeddingConfig::new` chooses `Tied` over `Untied`.
+///
+/// Named for the locked-in v1 character vocabulary (Tier 2 — "Accelerando voice",
+/// 80 tokens; see `history/planv0.md` and bd-2ym0). The threshold is intentionally
+/// permissive: any production vocabulary likely to ship is well under 256 tokens,
+/// so the defaulted shape is `Tied` and untied embeddings are the explicit opt-in.
+/// Despite the name, this is **not** a byte-level model — the v1 charset is curated.
+pub const CHARSET_V1_VOCAB_TIE_DEFAULT_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddingConfig {
@@ -14,7 +21,7 @@ pub struct EmbeddingConfig {
 
 impl EmbeddingConfig {
     pub fn new(vocab_size: usize, d_model: usize) -> Result<Self, EmbeddingError> {
-        let tie_mode = if vocab_size <= BYTE_LEVEL_TIED_VOCAB_LIMIT {
+        let tie_mode = if vocab_size <= CHARSET_V1_VOCAB_TIE_DEFAULT_LIMIT {
             EmbeddingTieMode::Tied
         } else {
             EmbeddingTieMode::Untied
@@ -522,7 +529,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedding_config_defaults_to_tied_for_byte_vocab_and_untied_for_large_vocab() {
+    fn embedding_config_defaults_to_tied_for_small_vocab_and_untied_for_large_vocab() {
         assert_eq!(
             EmbeddingConfig::new(256, 8).unwrap().tie_mode(),
             EmbeddingTieMode::Tied

@@ -477,7 +477,7 @@ The first deployed `LexicalSpec` is fixed at the values below. This is part of `
     3. Smart quotes `“ ” ‘ ’` → `"` `'`; em-dash `—` → `--` (rendered back to em-dash by `TranscriptSpec` on output); ellipsis `…` → `...`.
     4. Tab → single space; collapse runs of internal spaces; preserve `\n` exactly.
     5. Drop training examples with > 2% unmappable characters; otherwise replace unmappable codepoints with `<unk>`.
-- **Tied embeddings apply** (`vocab ≤ 256`); see `gbf-model::embeddings::BYTE_LEVEL_TIED_VOCAB_LIMIT`.
+- **Tied embeddings apply** (`vocab ≤ 256`); see `gbf-model::embeddings::CHARSET_V1_VOCAB_TIE_DEFAULT_LIMIT`. The constant was renamed from the misleading `BYTE_LEVEL_TIED_VOCAB_LIMIT` on 2026-05-06: this is **not** a byte-level model — the v1 charset is a curated 80-token Tier 2 set.
 - **Keyboard layout** (`InteractionBundle::KeyboardLayoutSpec`, *not* part of identity hash) — three-page on-screen grid: lowercase / uppercase / symbols-and-digits, with `B` button as one-shot shift on the lowercase page. Iterable without artifact reissue.
 - **Genre intent**: dense Stross / *Accelerando*-style prose. Caps-only and script-style dialogue conventions are explicitly rejected as off-genre.
 
@@ -935,6 +935,7 @@ Model family:
 - **first production candidate**: fixed-state recurrent / linear-attention-like sequence block under `SequenceSemanticsSpec::LinearState`;
 - **equally supported alternate production path**: bounded-KV causal model under `SequenceSemanticsSpec::BoundedKv`;
 - bring-up still starts under tiny `BoundedKv`, but the architecture does not assume `LinearState` will necessarily win the quality/latency trade;
+- per the 2026-05-06 amendment: `BoundedKv` is the **conformance reference** during bring-up — its semantics map cleanly onto a known attention oracle, so the runtime/compiler can be validated against it before `LinearState` runs are trusted;
 - deployment default: top-1 routing;
 - sparse MoE applies only to the FFN path of selected blocks; the sequence-state update path remains shared and higher precision in the first production model;
 - first serious profile uses MoE in alternating or middle blocks rather than every block;
@@ -1060,6 +1061,37 @@ The dataset side should also become more disciplined:
 - `LexicalSpec` is the shared lexical contract between training, oracle stack, compiler, and runtime; `InteractionBundle` carries keyboard/transcript policy in `ArtifactAux`;
 - sampling policies are deterministic, versioned, and exported alongside the artifact for reproducibility;
 - evaluation prompts belong to versioned `WorkloadManifest`s in `fixtures/workloads/`.
+
+### Session amendment 2026-05-06 — sizing realism, dense baseline, multi-timescale state
+
+This block amends, but does **not** retract, the training/model commitments above. Earlier prose in this document referred informally to "16 KiB experts" and to expert dimensions like `d_model=256, d_ff=512` as illustrative. Honest math against the deployed `TernaryWeightPlan` formula `ceil(rows·cols/4) + per-row Q8.8 scales + metadata` shows those numbers do not fit a 16 KiB `ExpertBank`. A `(256, 512)` two-matrix expert is roughly 65.5 KiB before metadata, ~4× a single bank.
+
+**1. Tiny model size profiles only (new feature F14, registry in `gbf-policy`).** Every experimental and bring-up `ModelTopologyConfig` must be constructed via a registered `ModelSizeProfile`:
+
+| Profile | d_model | d_ff | n_blocks | n_experts | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `Toy0` | 16 | 32 | 1 | 0 | dense-only |
+| `Toy1` | 32 | 64 | 2 | 0 | dense-only |
+| `MoeTiny` | 64 | 128 | 4 | 2 or 4 | first MoE bring-up; ~4.5 KiB/expert |
+| `UpperBankCandidate` | 96 or 128 | 192 | small | 4 | ~9.8 KiB or ~13.0 KiB/expert; risky upper |
+
+`(d_model, d_ff) = (128, 256)` already exceeds 16 KiB (16384 bytes) for one expert's two matrices alone, so it is **outside** the "strict one-bank" regime and must not be used in early experiments. `(d_model, d_ff) = (256, 512)` is explicitly disallowed in this profile registry.
+
+The profile is the source of truth for safe dimension caps; `ModelTopologyConfig::from_profile` must validate dim caps and is preferred over the raw constructor for any new code path.
+
+**2. Dense baseline first (new feature F13, parent under bd-1rb).** The first model is a dense-only `ModelTopologyConfig` (every block uses `FfnPathConfig::Dense`). It runs through the *same* training scaffold (loss composer, phase scheduler, teacher freeze, shadow_compile) — phase B `RouterWarmup` and `λ_balance` / `λ_zrouter` / `λ_switch` are no-ops when there is no router. The dense run produces a baseline `CheckpointFrontierPoint`. **MoE is justified only if it beats dense at matched deployed bytes** — i.e. dense-FFN `d_ff` is scaled up to consume the bytes that experts would have used, then compared on bits-per-character at equal ROM. A new conformance gate under F-C4 enforces this matched-bytes parity.
+
+**3. LinearState multi-timescale decay (new task T12.5 under F12).** The currently-shipped `LinearStateBlock` uses a `const STATE_DECAY: f32 = 0.5`, half-life ≈ 1 token. That is too strong a recency bias for topic / prompt coherence even at character level. T12.5 replaces the constant with `DecayPolicy::{Fixed(f32), MultiTimescale(Vec<f32>), Learned}` and partitions the state vector across decay rates — e.g. `[0.5, 0.75, 0.875, 0.9375]` partitioned into four equal-width state bands gives four memory horizons for negligible extra cost. The closed `Fixed(0.5)` baseline (T12.2) stays runnable as the simplest reference; the new variants are additive.
+
+**4. BoundedKv as conformance reference, LinearState slips behind it (re-scope of T12.4).** Even if `LinearState` is the production hope, BoundedKv has well-understood semantics (bounded causal attention) and is a better bring-up reference: it can be checked against a known attention oracle. T12.4 (shadow_compile A/B wiring) is re-scoped so BoundedKv lands first as the conformance baseline; LinearState comes online once the runtime/compiler are validated against BoundedKv. This does not block multi-timescale experimentation, which can run on either block.
+
+**5. Router collapse guardrail metrics during normal training (expansion of T7.6, plus a new F10 task).** `L_switch` is differentiable but a too-strong `λ_switch` collapses routing to a fake win (bank switches drop because the router stops routing meaningfully and quality plummets). Standard producer telemetry must include, on every step: `expert_usage_entropy`, `same_expert_rate` (already in `TemporalSwitchDigest`), `router_confidence` (max softmax mass distribution), `tokens_per_expert`, `bank_switches_per_token`, plus a periodic sweep over `λ_switch` recording `quality_delta_per_lambda_switch`. A new F10 task adds a guardrail test that fails if a `λ_switch` sweep drops bits-per-character below threshold.
+
+**6. v0 success envelope (new task under F-C4 ConformanceEnvelope).** A "working enough" v0 model is one that, on tiny fixtures: accepts a 64–128 character prompt; generates ≥128 characters; avoids immediate repetition collapse; produces only valid v1 charset characters; beats a character n-gram baseline (default: 5-gram with backoff) on bits-per-character; survives hard ternary QAT with bounded quality loss (target: bpc(ternary) − bpc(fp) ≤ 0.5 bits on the same workload); fits a conservative `RuntimeChromeBudget` estimate; and runs at least one token through the emulator harness end-to-end. This becomes a `WorkloadManifest` in `fixtures/workloads/` and the F-C4 `ConformanceEnvelope` regression set.
+
+**7. Artifact oracle gate, scoped forward (re-statement on bd-c4wg F-C2).** F-B1 (compute bringup) is already merged on `main` (`c2edbaa`). The ordering rule "no ROM emission until `train_output ≈ exported_reference_bundle ≈ artifact_oracle_output` is asserted" therefore applies to every **future** ROM-emitting bead — F-B15 backend codegen, any new compute-path beads, future workload runs — but does not retroactively block F-B1. Operationally: training-side verification is the priority; compiler work proceeds in parallel but secondary, and any new bead that emits LR35902 from a model artifact must add a `blocks` edge from F-C2's closure.
+
+**8. Constant rename.** `BYTE_LEVEL_TIED_VOCAB_LIMIT` → `CHARSET_V1_VOCAB_TIE_DEFAULT_LIMIT`. The model is **not** byte-level; the locked-in v1 charset (Tier 2 — "Accelerando voice") is curated 80-token. The constant value is unchanged at 256; only the name is corrected.
 
 ## The compiler pipeline
 
@@ -2535,6 +2567,20 @@ Defaults:
 deterministic local tile/slice repairs while still preventing profile fallback,
 trace demotion, overlay promotion, and recompute promotion. A stricter
 first-fit mode may set `max_refinement_iters = 0` explicitly.
+
+`Bringup` is a profile selection, not a relaxation surface. Profiles do not
+carry profile-time relaxations of validation gates (calibration freshness,
+calibration confidence, `RuntimeChromeBudget` slack, knob bounds). Early-stage
+builds that have no measured calibration use an explicit, content-addressed
+`BootstrapCalibrationBundle` artifact whose declared
+`CalibrationConfidenceClass` is `None`; only profiles whose
+`RiskPolicy::require_confidence_at_least` is `None` (e.g. `Bringup`) accept
+it, and the same `CalibrationConfidenceTooLow` gate that protects every other
+profile rejects it under `Default`/`Trace`/`Recovery`. Reduced reserved-slack
+for Bringup is similarly an explicit input: each target profile ships a
+`bringup-*.chrome_budget.json` variant and Bringup builds pass that
+`RuntimeChromeBudget` as their invocation input. The compiler never mutates
+the source `RuntimeChromeBudget` in flight. See RFC F-B2/F-B4 §2.13.
 
 `Default` starts from `PlacementProfile::Budgeted` and may advance to
 `PackedExperts`. It may demote optional probes, promote pure values to
