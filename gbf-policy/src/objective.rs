@@ -70,12 +70,44 @@ mod tests {
     #[test]
     fn objective_types_round_trip() {
         let objective = objective_fixture();
+        let expected_risk = serde_json::json!({
+            "cycle_quantile": 95,
+            "switch_quantile": 99,
+            "calibration_confidence_requirement": {
+                "kind": "AtLeast",
+                "class": {"kind": "WithinFamily"}
+            },
+            "fallback_profile": "Recovery",
+            "fallback_runtime_mode": {"kind": "Safe"}
+        });
+        let expected_objective = serde_json::json!({
+            "service": {
+                "max_first_token_cycles_p95": 21000,
+                "max_checkpoint_gap_cycles_p95": 13000,
+                "max_resume_latency_cycles_p95": 8000,
+                "max_ui_jitter_frames_p99": 2
+            },
+            "max_cycles_per_token": 24000,
+            "max_bank_switches_per_token": 17,
+            "max_sram_page_switches_per_token": 3,
+            "min_ui_headroom_pct": 11,
+            "max_rom_bytes": 2097152,
+            "risk": expected_risk.clone()
+        });
 
         let encoded = serde_json::to_string(&objective).expect("objective serializes");
         let decoded: CompileObjective =
             serde_json::from_str(&encoded).expect("objective deserializes");
 
         assert_eq!(decoded, objective);
+        assert_eq!(
+            serde_json::to_value(&objective).expect("objective serializes"),
+            expected_objective
+        );
+        assert_eq!(
+            serde_json::to_value(&objective.risk).expect("risk policy serializes"),
+            expected_risk
+        );
     }
 
     #[test]

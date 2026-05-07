@@ -112,11 +112,22 @@ mod tests {
     #[test]
     fn repair_policy_round_trip() {
         let policy = RepairPolicy::for_profile(RepairPolicyProfile::Default);
+        let expected = serde_json::json!({
+            "max_refinement_iters": 4,
+            "allow_placement_profile_fallback": true,
+            "allow_trace_demotion": true,
+            "allow_overlay_promotion": true,
+            "allow_recompute_promotion": true
+        });
 
         let encoded = serde_json::to_string(&policy).expect("repair policy serializes");
         let decoded: RepairPolicy =
             serde_json::from_str(&encoded).expect("repair policy deserializes");
 
         assert_eq!(decoded, policy);
+        assert_eq!(
+            serde_json::to_value(policy).expect("repair policy serializes"),
+            expected
+        );
     }
 }

@@ -221,8 +221,12 @@ pub enum ConstraintOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyProvenance {
+    /// Source-schema hashes for inputs that always participate in policy resolution.
     pub target_defaults: Hash256,
     pub profile_defaults: Hash256,
+    /// Optional because a source `ResolvedCompilePolicy` may be built before a
+    /// hint bundle or calibration layer exists. Report sections that embed a
+    /// consumed hint/calibration hash can require those fields after validation.
     pub hint_bundle_hash: Option<Hash256>,
     pub compile_request_hash: Hash256,
     pub calibration_hash: Option<Hash256>,
@@ -436,30 +440,6 @@ pub struct ScheduleKnobBounds {
     pub max_tile_search: ScheduleTileSearch,
     pub max_slice_coarsening: ScheduleSliceCoarsening,
     pub max_resource_pressure: ScheduleResourcePressure,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConstraintFrame {
-    pub source: PolicySource,
-    pub evidence: Vec<EvidenceRef>,
-    pub defaults: CompileKnobPartialValues,
-    pub hard_bounds: CompileKnobPartialBounds,
-    pub preferences: CompileKnobPreferences,
-    pub locks: KnobLockSet,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompileKnobPreferences {
-    pub preferred_values: Vec<CompileKnobPreference>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompileKnobPreference {
-    pub path: CompileKnobPath,
-    pub value: ConstraintValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -840,6 +820,223 @@ mod tests {
         }
     }
 
+    fn hash_json(byte: u8) -> serde_json::Value {
+        serde_json::to_value(Hash256::from_bytes([byte; 32])).expect("hash serializes")
+    }
+
+    fn risk_policy_json(class: &str) -> serde_json::Value {
+        serde_json::json!({
+            "cycle_quantile": 95,
+            "switch_quantile": 99,
+            "calibration_confidence_requirement": {
+                "kind": "AtLeast",
+                "class": {"kind": class}
+            },
+            "fallback_profile": null,
+            "fallback_runtime_mode": {"kind": "Safe"}
+        })
+    }
+
+    fn objective_json() -> serde_json::Value {
+        serde_json::json!({
+            "service": {
+                "max_first_token_cycles_p95": 3000,
+                "max_checkpoint_gap_cycles_p95": null,
+                "max_resume_latency_cycles_p95": 1000,
+                "max_ui_jitter_frames_p99": 1
+            },
+            "max_cycles_per_token": 8000,
+            "max_bank_switches_per_token": 5,
+            "max_sram_page_switches_per_token": 1,
+            "min_ui_headroom_pct": 9,
+            "max_rom_bytes": 524288,
+            "risk": risk_policy_json("Transferred")
+        })
+    }
+
+    fn values_json() -> serde_json::Value {
+        serde_json::json!({
+            "placement": {"profile": {"kind": "Budgeted"}},
+            "observation": {
+                "observability": {"kind": "Invariant"},
+                "probe_level": {"kind": "Operational"}
+            },
+            "range": {"reduction_ceiling": {"kind": "Conservative"}},
+            "storage": {"materialization": {"kind": "RecomputePureValues"}},
+            "sram": {"page_aggression": {"kind": "PackCold"}},
+            "rom_window": {
+                "kernel_residency_bias": {"kind": "PreferExpertBank"},
+                "kernel_duplication_bias": {"kind": "DuplicateHot"}
+            },
+            "overlay": {"promotion": {"kind": "TinyLuts"}},
+            "schedule": {
+                "tile_search": {"kind": "Local"},
+                "slice_coarsening": {"kind": "Balanced"},
+                "resource_pressure": {"kind": "Balanced"}
+            }
+        })
+    }
+
+    fn default_bounds_json() -> serde_json::Value {
+        serde_json::json!({
+            "placement": {"max_profile": {"kind": "PackedExperts"}},
+            "observation": {"max_probe_level": {"kind": "Verbose"}},
+            "range": {"max_reduction_ceiling": {"kind": "Adaptive"}},
+            "storage": {"max_materialization": {"kind": "SpillColdValues"}},
+            "sram": {"max_page_aggression": {"kind": "MinimizeResident"}},
+            "rom_window": {
+                "max_kernel_residency_bias": {"kind": "PreferWramOverlay"},
+                "max_kernel_duplication_bias": {"kind": "DuplicateAllFit"}
+            },
+            "overlay": {"max_promotion": {"kind": "EligibleKernels"}},
+            "schedule": {
+                "max_tile_search": {"kind": "ProfileGuided"},
+                "max_slice_coarsening": {"kind": "Coarse"},
+                "max_resource_pressure": {"kind": "FitFirst"}
+            }
+        })
+    }
+
+    fn empty_partial_values_json() -> serde_json::Value {
+        serde_json::json!({
+            "placement": null,
+            "observation": null,
+            "range": null,
+            "storage": null,
+            "sram": null,
+            "rom_window": null,
+            "overlay": null,
+            "schedule": null
+        })
+    }
+
+    fn empty_partial_bounds_json() -> serde_json::Value {
+        serde_json::json!({
+            "placement": null,
+            "observation": null,
+            "range": null,
+            "storage": null,
+            "sram": null,
+            "rom_window": null,
+            "overlay": null,
+            "schedule": null
+        })
+    }
+
+    fn knobs_json() -> serde_json::Value {
+        serde_json::json!({
+            "global": values_json(),
+            "bounds": default_bounds_json(),
+            "locks": {"locked": [{"kind": "RomWindow"}]},
+            "overrides": {
+                "values": {
+                    "placement": {"profile": {"kind": "Budgeted"}},
+                    "observation": null,
+                    "range": null,
+                    "storage": null,
+                    "sram": null,
+                    "rom_window": null,
+                    "overlay": null,
+                    "schedule": null
+                },
+                "bounds": empty_partial_bounds_json()
+            },
+            "provenance": [
+                {
+                    "path": {
+                        "knob": {"kind": "Placement"},
+                        "selector": null,
+                        "field": "profile"
+                    },
+                    "chain": [
+                        {
+                            "source": {"kind": "ProfileDefault"},
+                            "operation": {"kind": "SeedDefault"},
+                            "evidence": [
+                                {
+                                    "kind": "ProfileFile",
+                                    "reference": "Bringup.toml",
+                                    "hash": hash_json(5)
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn request_json() -> serde_json::Value {
+        serde_json::json!({
+            "target": "dmg-mbc5",
+            "profile": "Bringup",
+            "objective": objective_json(),
+            "calibration_set_ref": {
+                "platform": null,
+                "kernel": null,
+                "runtime": null
+            },
+            "required_features": [
+                {"kind": "ArtifactValidation"},
+                {"kind": "PolicyResolution"}
+            ],
+            "constraint_overrides": {
+                "values": {
+                    "placement": {"profile": {"kind": "StrictOnePerBank"}},
+                    "observation": null,
+                    "range": null,
+                    "storage": null,
+                    "sram": null,
+                    "rom_window": null,
+                    "overlay": null,
+                    "schedule": null
+                },
+                "bounds": empty_partial_bounds_json()
+            },
+            "requested_runtime_modes": [{"kind": "Interactive"}]
+        })
+    }
+
+    fn policy_provenance_json() -> serde_json::Value {
+        serde_json::json!({
+            "target_defaults": hash_json(1),
+            "profile_defaults": hash_json(2),
+            "hint_bundle_hash": hash_json(3),
+            "compile_request_hash": hash_json(4),
+            "calibration_hash": hash_json(5)
+        })
+    }
+
+    fn policy_json() -> serde_json::Value {
+        serde_json::json!({
+            "target": "dmg-mbc5",
+            "profile": "Bringup",
+            "objective": objective_json(),
+            "effective_constraints": {
+                "target_caps": default_bounds_json(),
+                "required_features": [{"kind": "ArtifactValidation"}],
+                "requested_runtime_modes": [{"kind": "Interactive"}],
+                "runtime_chrome_budget": null
+            },
+            "observability": {"kind": "Invariant"},
+            "trace_budget": {
+                "max_events_per_slice": 4,
+                "max_bytes_per_frame": 128,
+                "drop_policy": {"kind": "HaltAndFault"}
+            },
+            "requested_runtime_modes": [{"kind": "Interactive"}],
+            "knobs": knobs_json(),
+            "repair": {
+                "max_refinement_iters": 1,
+                "allow_placement_profile_fallback": false,
+                "allow_trace_demotion": false,
+                "allow_overlay_promotion": false,
+                "allow_recompute_promotion": false
+            },
+            "provenance": policy_provenance_json()
+        })
+    }
+
     #[test]
     fn sequence_semantics_ref_defaults_to_unspecified_until_profiles_are_defined() {
         assert_eq!(
@@ -862,12 +1059,20 @@ mod tests {
         let encoded = serde_json::to_string(&request).expect("request serializes");
         let decoded: CompileRequest = serde_json::from_str(&encoded).expect("request deserializes");
         assert_eq!(decoded, request);
+        assert_eq!(
+            serde_json::to_value(&request).expect("request serializes"),
+            request_json()
+        );
 
         let policy = policy_fixture();
         let encoded = serde_json::to_string(&policy).expect("policy serializes");
         let decoded: ResolvedCompilePolicy =
             serde_json::from_str(&encoded).expect("policy deserializes");
         assert_eq!(decoded, policy);
+        assert_eq!(
+            serde_json::to_value(&policy).expect("policy serializes"),
+            policy_json()
+        );
     }
 
     #[test]
@@ -894,7 +1099,39 @@ mod tests {
         };
 
         let value = serde_json::to_value(&spec).expect("profile spec serializes");
-        assert!(value.get("risk_policy").is_some());
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "id": "Default",
+                "defaults_hash": hash_json(9),
+                "observability": {"kind": "Invariant"},
+                "trace_budget": {
+                    "max_events_per_slice": 1,
+                    "max_bytes_per_frame": 32,
+                    "drop_policy": {"kind": "DropOldest"}
+                },
+                "repair_policy": {
+                    "max_refinement_iters": 4,
+                    "allow_placement_profile_fallback": true,
+                    "allow_trace_demotion": true,
+                    "allow_overlay_promotion": true,
+                    "allow_recompute_promotion": true
+                },
+                "risk_policy": risk_policy_json("Transferred"),
+                "knob_defaults": empty_partial_values_json(),
+                "knob_bounds": {
+                    "placement": {"max_profile": {"kind": "PackedExperts"}},
+                    "observation": null,
+                    "range": null,
+                    "storage": null,
+                    "sram": null,
+                    "rom_window": null,
+                    "overlay": null,
+                    "schedule": null
+                },
+                "locks": {"locked": []}
+            })
+        );
         let decoded: CompileProfileSpec =
             serde_json::from_value(value).expect("profile spec deserializes");
         assert_eq!(decoded, spec);
@@ -952,6 +1189,130 @@ mod tests {
                 max_profile: PlacementProfile::PackedExperts,
             })
         );
+        assert!(
+            PlacementKnobBounds {
+                max_profile: PlacementProfile::Budgeted,
+            }
+            .is_monotone_successor_of(&PlacementKnobBounds {
+                max_profile: PlacementProfile::Budgeted,
+            })
+        );
+        assert!(
+            !PlacementKnobBounds {
+                max_profile: PlacementProfile::PackedExperts,
+            }
+            .is_monotone_successor_of(&PlacementKnobBounds {
+                max_profile: PlacementProfile::Budgeted,
+            })
+        );
+        assert!(
+            !PlacementProfile::StrictOnePerBank
+                .is_monotone_successor_of(&PlacementProfile::Budgeted)
+        );
+        assert!(
+            !ObservationKnobBounds {
+                max_probe_level: ProbeCollectionLevel::Verbose,
+            }
+            .is_monotone_successor_of(&ObservationKnobBounds {
+                max_probe_level: ProbeCollectionLevel::Operational,
+            })
+        );
+        assert!(
+            ObservationKnobBounds {
+                max_probe_level: ProbeCollectionLevel::Operational,
+            }
+            .is_monotone_successor_of(&ObservationKnobBounds {
+                max_probe_level: ProbeCollectionLevel::Operational,
+            })
+        );
+        assert!(
+            !RangeKnobBounds {
+                max_reduction_ceiling: ReductionPlanCeiling::Adaptive,
+            }
+            .is_monotone_successor_of(&RangeKnobBounds {
+                max_reduction_ceiling: ReductionPlanCeiling::Conservative,
+            })
+        );
+        assert!(
+            !StorageKnobBounds {
+                max_materialization: StorageMaterialization::SpillColdValues,
+            }
+            .is_monotone_successor_of(&StorageKnobBounds {
+                max_materialization: StorageMaterialization::RecomputePureValues,
+            })
+        );
+        assert!(
+            !SramKnobBounds {
+                max_page_aggression: SramPageAggression::MinimizeResident,
+            }
+            .is_monotone_successor_of(&SramKnobBounds {
+                max_page_aggression: SramPageAggression::PackCold,
+            })
+        );
+        assert!(
+            !RomWindowKnobBounds {
+                max_kernel_residency_bias: RomKernelResidencyBias::PreferWramOverlay,
+                max_kernel_duplication_bias: RomKernelDuplicationBias::DuplicateHot,
+            }
+            .is_monotone_successor_of(&RomWindowKnobBounds {
+                max_kernel_residency_bias: RomKernelResidencyBias::PreferExpertBank,
+                max_kernel_duplication_bias: RomKernelDuplicationBias::DuplicateHot,
+            })
+        );
+        assert!(
+            !RomWindowKnobBounds {
+                max_kernel_residency_bias: RomKernelResidencyBias::PreferExpertBank,
+                max_kernel_duplication_bias: RomKernelDuplicationBias::DuplicateAllFit,
+            }
+            .is_monotone_successor_of(&RomWindowKnobBounds {
+                max_kernel_residency_bias: RomKernelResidencyBias::PreferExpertBank,
+                max_kernel_duplication_bias: RomKernelDuplicationBias::DuplicateHot,
+            })
+        );
+        assert!(
+            !OverlayKnobBounds {
+                max_promotion: OverlayPromotion::EligibleKernels,
+            }
+            .is_monotone_successor_of(&OverlayKnobBounds {
+                max_promotion: OverlayPromotion::TinyLuts,
+            })
+        );
+        assert!(
+            !ScheduleKnobBounds {
+                max_tile_search: ScheduleTileSearch::ProfileGuided,
+                max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
+                max_resource_pressure: ScheduleResourcePressure::Balanced,
+            }
+            .is_monotone_successor_of(&ScheduleKnobBounds {
+                max_tile_search: ScheduleTileSearch::Local,
+                max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
+                max_resource_pressure: ScheduleResourcePressure::Balanced,
+            })
+        );
+        assert!(
+            !ScheduleKnobBounds {
+                max_tile_search: ScheduleTileSearch::Local,
+                max_slice_coarsening: ScheduleSliceCoarsening::Coarse,
+                max_resource_pressure: ScheduleResourcePressure::Balanced,
+            }
+            .is_monotone_successor_of(&ScheduleKnobBounds {
+                max_tile_search: ScheduleTileSearch::Local,
+                max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
+                max_resource_pressure: ScheduleResourcePressure::Balanced,
+            })
+        );
+        assert!(
+            !ScheduleKnobBounds {
+                max_tile_search: ScheduleTileSearch::Local,
+                max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
+                max_resource_pressure: ScheduleResourcePressure::FitFirst,
+            }
+            .is_monotone_successor_of(&ScheduleKnobBounds {
+                max_tile_search: ScheduleTileSearch::Local,
+                max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
+                max_resource_pressure: ScheduleResourcePressure::Balanced,
+            })
+        );
     }
 
     #[test]
@@ -995,6 +1356,10 @@ mod tests {
             serde_json::from_str(&encoded).expect("bounds deserializes");
 
         assert_eq!(decoded, bounds);
+        assert_eq!(
+            serde_json::to_value(bounds).expect("bounds serialize"),
+            default_bounds_json()
+        );
     }
 
     #[test]
@@ -1035,6 +1400,10 @@ mod tests {
             serde_json::from_str(&encoded).expect("provenance deserializes");
 
         assert_eq!(decoded, provenance);
+        assert_eq!(
+            serde_json::to_value(&provenance).expect("provenance serializes"),
+            policy_provenance_json()
+        );
     }
 
     #[test]
@@ -1044,6 +1413,10 @@ mod tests {
         let decoded: CompileKnobs = serde_json::from_str(&encoded).expect("knobs deserializes");
 
         assert_eq!(decoded, knobs);
+        assert_eq!(
+            serde_json::to_value(&knobs).expect("knobs serializes"),
+            knobs_json()
+        );
     }
 
     #[test]
@@ -1067,27 +1440,5 @@ mod tests {
             serde_json::from_str(&encoded).expect("constraints deserializes");
 
         assert_eq!(decoded, constraints);
-    }
-
-    #[test]
-    fn compile_knob_preferences_round_trip() {
-        let preferences = CompileKnobPreferences {
-            preferred_values: vec![CompileKnobPreference {
-                path: CompileKnobPath {
-                    knob: CompileKnobId::Placement,
-                    selector: None,
-                    field: Some(FieldPath("profile".to_owned())),
-                },
-                value: ConstraintValue::PlacementProfile {
-                    value: PlacementProfile::Budgeted,
-                },
-            }],
-        };
-
-        let encoded = serde_json::to_string(&preferences).expect("preferences serializes");
-        let decoded: CompileKnobPreferences =
-            serde_json::from_str(&encoded).expect("preferences deserializes");
-
-        assert_eq!(decoded, preferences);
     }
 }

@@ -45,8 +45,16 @@ mod tests {
             serde_json::from_str(&encoded).expect("requirement deserializes");
 
         assert_eq!(decoded, requirement);
-        assert!(encoded.contains("AtLeast"));
-        assert!(encoded.contains("WithinFamily"));
+        assert_eq!(
+            serde_json::to_value(requirement).expect("requirement serializes"),
+            serde_json::json!({
+                "kind": "AtLeast",
+                "class": {"kind": "WithinFamily"}
+            })
+        );
+        assert!(!requirement.accepts(CalibrationConfidenceClass::Transferred));
+        assert!(requirement.accepts(CalibrationConfidenceClass::WithinFamily));
+        assert!(requirement.accepts(CalibrationConfidenceClass::Onsite));
     }
 
     #[test]
