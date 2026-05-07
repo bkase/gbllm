@@ -196,6 +196,7 @@ string_id!(CalibrationCohortId);
 string_id!(KernelImplId);
 string_id!(RuntimeNucleusId);
 string_id!(KernelSpecId);
+string_id!(FieldPath);
 
 numeric_id!(LayerId);
 numeric_id!(ExpertId);

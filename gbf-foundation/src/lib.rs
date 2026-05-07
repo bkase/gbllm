@@ -10,7 +10,7 @@ pub use blob::{BlobCodec, BlobRef};
 pub use cost::ByteCost;
 pub use hash::{Hash256, Hash256ParseError};
 pub use ids::{
-    BudgetSlotId, CalibrationCohortId, CheckpointId, CompileProfileId, ExpertId,
+    BudgetSlotId, CalibrationCohortId, CheckpointId, CompileProfileId, ExpertId, FieldPath,
     KernelCalibrationId, KernelImplId, KernelSpecId, LayerId, PlatformCalibrationId,
     RuntimeCalibrationId, RuntimeNucleusId, TargetFamilyId, TargetProfileId, WorkloadId,
 };

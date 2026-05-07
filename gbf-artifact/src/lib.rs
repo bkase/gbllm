@@ -20,3 +20,5 @@ pub mod sequence;
 pub mod session;
 pub mod tensor;
 pub mod weight_plan;
+
+pub use manifest::*;
