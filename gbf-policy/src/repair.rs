@@ -130,4 +130,14 @@ mod tests {
             expected
         );
     }
+
+    #[test]
+    fn repair_policy_rejects_unknown_field() {
+        let mut value =
+            serde_json::to_value(RepairPolicy::for_profile(RepairPolicyProfile::Default))
+                .expect("repair policy serializes");
+        value["unexpected"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<RepairPolicy>(value).is_err());
+    }
 }

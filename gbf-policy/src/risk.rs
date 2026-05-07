@@ -33,6 +33,21 @@ impl CalibrationConfidenceRequirement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::RuntimeMode;
+    use crate::objective::RiskPolicy;
+    use gbf_foundation::CompileProfileId;
+
+    fn risk_policy_fixture() -> RiskPolicy {
+        RiskPolicy {
+            cycle_quantile: 95,
+            switch_quantile: 99,
+            calibration_confidence_requirement: CalibrationConfidenceRequirement::AtLeast {
+                class: CalibrationConfidenceClass::WithinFamily,
+            },
+            fallback_profile: Some(CompileProfileId::from("Recovery")),
+            fallback_runtime_mode: Some(RuntimeMode::Safe),
+        }
+    }
 
     #[test]
     fn risk_policy_calibration_confidence_requirement_round_trip() {
@@ -58,6 +73,17 @@ mod tests {
     }
 
     #[test]
+    fn calibration_confidence_requirement_rejects_unknown_field() {
+        let mut value = serde_json::to_value(CalibrationConfidenceRequirement::AtLeast {
+            class: CalibrationConfidenceClass::WithinFamily,
+        })
+        .expect("requirement serializes");
+        value["unexpected"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<CalibrationConfidenceRequirement>(value).is_err());
+    }
+
+    #[test]
     fn no_minimum_confidence_is_distinct_from_none_bundle_confidence() {
         let requirement = CalibrationConfidenceRequirement::NoMinimumConfidence;
 
@@ -66,5 +92,14 @@ mod tests {
             serde_json::to_value(requirement).expect("requirement serializes"),
             serde_json::to_value(CalibrationConfidenceClass::None).expect("class serializes")
         );
+    }
+
+    #[test]
+    fn risk_policy_rejects_unknown_field() {
+        let mut value =
+            serde_json::to_value(risk_policy_fixture()).expect("risk policy serializes");
+        value["unexpected"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<RiskPolicy>(value).is_err());
     }
 }

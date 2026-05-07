@@ -124,13 +124,13 @@ mod tests {
     fn memory_cap_section_preserves_u32_json_widths() {
         let memory_caps = RuntimeMemoryCapSection {
             wram_usable_bytes: 70_000,
-            sram_usable_bytes: 131_072,
+            sram_usable_bytes: u32::MAX,
             hram_usable_bytes: 300,
             source_target_profile_hash: Hash256::from_bytes([3; 32]),
         };
         let expected = serde_json::json!({
             "wram_usable_bytes": 70000,
-            "sram_usable_bytes": 131072,
+            "sram_usable_bytes": 4294967295u64,
             "hram_usable_bytes": 300,
             "source_target_profile_hash": hash_json(3)
         });
