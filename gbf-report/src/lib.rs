@@ -5,6 +5,7 @@ pub mod canonical_json;
 pub mod certificate;
 pub mod failure;
 pub mod realism;
+pub mod report_schemas;
 pub mod run;
 
 pub use canonical_json::{
