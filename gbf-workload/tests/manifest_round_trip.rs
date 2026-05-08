@@ -184,6 +184,14 @@ fn workload_id_is_foundation_type_reexport() {
 }
 
 #[test]
+fn golden_vector_id_is_foundation_type_reexport() {
+    let manifest_id = GoldenVectorId("vec.smoke.001".to_owned());
+    let foundation_id: gbf_foundation::GoldenVectorId = manifest_id;
+
+    assert_eq!(foundation_id.0, "vec.smoke.001");
+}
+
+#[test]
 fn workload_schema_version_round_trip() {
     let version = WorkloadSchemaVersion { epoch: 1, minor: 7 };
 

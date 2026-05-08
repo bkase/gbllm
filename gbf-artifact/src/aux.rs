@@ -1,6 +1,7 @@
 //! Artifact auxiliary sidecar schema.
 
 use gbf_foundation::Hash256;
+pub use gbf_foundation::SidecarKind;
 pub use gbf_workload::manifest::{GoldenVectorId, GoldenVectorRef};
 use serde::{Deserialize, Serialize};
 
@@ -13,49 +14,6 @@ pub struct ArtifactAux {
     pub interaction_bundle: Option<InteractionBundleRef>,
     pub lexical_spec: Option<LexicalSpecRef>,
     pub reference_observation_cache: Option<ReferenceObservationCacheRef>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum SidecarKind {
-    GoldenVector,
-    SemanticCheckpointSchema,
-    ConformanceEnvelope,
-    ReferenceObservationCache,
-    InteractionBundle,
-    LexicalSpec,
-}
-
-impl<'de> Deserialize<'de> for SidecarKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        enum SidecarKindTag {
-            GoldenVector,
-            SemanticCheckpointSchema,
-            ConformanceEnvelope,
-            ReferenceObservationCache,
-            InteractionBundle,
-            LexicalSpec,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct TaggedSidecarKind {
-            kind: SidecarKindTag,
-        }
-
-        Ok(match TaggedSidecarKind::deserialize(deserializer)?.kind {
-            SidecarKindTag::GoldenVector => Self::GoldenVector,
-            SidecarKindTag::SemanticCheckpointSchema => Self::SemanticCheckpointSchema,
-            SidecarKindTag::ConformanceEnvelope => Self::ConformanceEnvelope,
-            SidecarKindTag::ReferenceObservationCache => Self::ReferenceObservationCache,
-            SidecarKindTag::InteractionBundle => Self::InteractionBundle,
-            SidecarKindTag::LexicalSpec => Self::LexicalSpec,
-        })
-    }
 }
 
 macro_rules! sidecar_ref {

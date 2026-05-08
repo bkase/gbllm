@@ -1,6 +1,6 @@
 //! Target-data lowering schema.
 
-pub use gbf_foundation::PackerVersion;
+pub use gbf_foundation::{DataLoweringProfileId, LoweringShardId, LoweringShardRef, PackerVersion};
 use gbf_foundation::{Hash256, TargetProfileId};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -23,14 +23,6 @@ pub struct LoweringShard {
     pub kind: LoweringShardKind,
     pub payload_hash: Hash256,
     pub packed_bytes_hash: Hash256,
-}
-
-/// Lightweight reference to a lowering shard for diagnostic carriers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LoweringShardRef {
-    pub id: LoweringShardId,
-    pub manifest_hash: Hash256,
 }
 
 /// Aggregate manifest of all shards in a `TargetDataLoweringArtifact`.
@@ -90,14 +82,6 @@ impl<'de> Deserialize<'de> for LoweringShardKind {
         )
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DataLoweringProfileId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LoweringShardId(pub String);
 
 /// Round-trip packer trait. Implementations are owned by T-B2.7.
 pub trait Pack {

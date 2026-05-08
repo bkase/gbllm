@@ -1,15 +1,19 @@
 //! Shared validation diagnostic taxonomy.
 
+pub use gbf_foundation::{
+    ArtifactFeature, ArtifactSchemaVersion, ComponentId, DataLoweringProfileId, GoldenVectorId,
+    LineageId, LoweringShardId, LoweringShardRef, ManifestInvariant, SidecarKind,
+};
 use gbf_foundation::{
-    BlobRef, BudgetSlotId, CompileProfileId, ExpertId, FieldPath, Hash256, LayerId, PackerVersion,
-    SemVer, TargetProfileId, WorkloadId,
+    BlobRef, BudgetSlotId, CompileProfileId, EvidenceRef, ExpertId, FieldPath, Hash256, LayerId,
+    PackerVersion, SemVer, TargetProfileId, WorkloadId,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::calibration::CalibrationLayer;
 use crate::compile::{
-    CompileKnobBounds, CompileKnobId, CompilerFeature, ConstraintValue, EvidenceRef,
-    PlacementProfile, RuntimeMode, SelectorPath,
+    CompileKnobBounds, CompileKnobId, CompilerFeature, ConstraintValue, PlacementProfile,
+    RuntimeMode, SelectorPath,
 };
 use crate::risk::CalibrationConfidenceClass;
 
@@ -269,94 +273,9 @@ pub enum ValidationDetail {
 #[serde(transparent)]
 pub struct CompatibilityAdapterId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum ManifestInvariant {
-    FeatureSetEpochInconsistent {
-        epoch: ArtifactSchemaVersion,
-        feature: ArtifactFeature,
-    },
-    RequiredComponentMissing {
-        component: ComponentId,
-    },
-    ComponentDigestMismatch {
-        component: ComponentId,
-        expected: Hash256,
-        observed: Hash256,
-    },
-    LineageContradiction {
-        derived: LineageId,
-        recorded: LineageId,
-    },
-    ManifestSelfHashMismatch {
-        recomputed: Hash256,
-        recorded: Hash256,
-    },
-    ForbiddenBuildIdentityField {
-        field: FieldPath,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactSchemaVersion {
-    pub epoch: u32,
-    pub minor: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum ArtifactFeature {
-    DenseI8,
-    Ternary2Quant,
-    Binary1Quant,
-    SparseTernaryBitplanes,
-    MoeRouting,
-    LinearStateSequence,
-    BoundedKvSequence,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum SidecarKind {
-    GoldenVector,
-    SemanticCheckpointSchema,
-    ConformanceEnvelope,
-    ReferenceObservationCache,
-    InteractionBundle,
-    LexicalSpec,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ComponentId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LineageId(pub Hash256);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DataLoweringProfileId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LoweringShardRef {
-    pub id: LoweringShardId,
-    pub manifest_hash: Hash256,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LoweringShardId(pub String);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TraceProbeId(pub u16);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct GoldenVectorId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -456,6 +375,50 @@ mod tests {
     }
 
     #[test]
+    fn validation_diagnostic_pins_public_json_shape() {
+        let diagnostic = ValidationDiagnostic::hard(
+            ValidationOrigin::Manifest,
+            ValidationCode::ManifestInvariantViolated {
+                invariant: ManifestInvariant::ForbiddenBuildIdentityField {
+                    field: FieldPath::from("manifest.build_identity"),
+                },
+            },
+            ValidationDetail::Field {
+                field: FieldPath::from("manifest.build_identity"),
+            },
+            provenance(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(diagnostic).expect("diagnostic serializes"),
+            serde_json::json!({
+                "severity": { "kind": "Hard" },
+                "origin": { "kind": "Manifest" },
+                "code": {
+                    "kind": "ManifestInvariantViolated",
+                    "fields": {
+                        "invariant": {
+                            "kind": "ForbiddenBuildIdentityField",
+                            "field": "manifest.build_identity"
+                        }
+                    }
+                },
+                "detail": {
+                    "kind": "Field",
+                    "field": "manifest.build_identity"
+                },
+                "provenance": [
+                    {
+                        "kind": "Fixture",
+                        "reference": "diagnostics",
+                        "hash": "sha256:0909090909090909090909090909090909090909090909090909090909090909"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn validation_detail_round_trips_through_serde() {
         for detail in [
             ValidationDetail::None,
@@ -486,6 +449,30 @@ mod tests {
 
             assert_eq!(decoded, detail);
         }
+    }
+
+    #[test]
+    fn validation_detail_pins_selector_and_field_keys() {
+        assert_eq!(
+            serde_json::to_value(ValidationDetail::Selector {
+                selector: SelectorPath("experts[0]".to_owned()),
+            })
+            .expect("selector detail serializes"),
+            serde_json::json!({
+                "kind": "Selector",
+                "selector": "experts[0]"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ValidationDetail::Field {
+                field: FieldPath::from("manifest.lineage"),
+            })
+            .expect("field detail serializes"),
+            serde_json::json!({
+                "kind": "Field",
+                "field": "manifest.lineage"
+            })
+        );
     }
 
     #[test]
@@ -664,6 +651,97 @@ mod tests {
     }
 
     #[test]
+    fn validation_code_pins_unit_and_fielded_json_shapes() {
+        assert_eq!(
+            serde_json::to_value(ValidationCode::BudgetMissingRuntimeChromeBudget)
+                .expect("unit code serializes"),
+            serde_json::json!({
+                "kind": "BudgetMissingRuntimeChromeBudget"
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::ArtifactAuxSidecarDigestMismatch {
+                kind: SidecarKind::SemanticCheckpointSchema,
+                expected: hash(5),
+                observed: hash(6),
+            })
+            .expect("fielded code serializes"),
+            serde_json::json!({
+                "kind": "ArtifactAuxSidecarDigestMismatch",
+                "fields": {
+                    "kind": { "kind": "SemanticCheckpointSchema" },
+                    "expected": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+                    "observed": "sha256:0606060606060606060606060606060606060606060606060606060606060606"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn validation_code_pins_amendment_variant_json_shapes() {
+        let bounds = canonical_default_bounds_fixture();
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::PolicyConstraintUnsatisfiable {
+                knob: CompileKnobId::Placement,
+                left: bounds.clone(),
+                right: bounds,
+            })
+            .expect("policy constraint code serializes")["kind"],
+            serde_json::json!("PolicyConstraintUnsatisfiable")
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::BudgetQuantGraphViewMalformed {
+                field: FieldPath::from("budget_view.per_expert_payload"),
+            })
+            .expect("budget view code serializes"),
+            serde_json::json!({
+                "kind": "BudgetQuantGraphViewMalformed",
+                "fields": {
+                    "field": "budget_view.per_expert_payload"
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::ArtifactForbiddenBuildIdentityField {
+                field: FieldPath::from("aux.build_identity.git_sha"),
+            })
+            .expect("forbidden build identity code serializes"),
+            serde_json::json!({
+                "kind": "ArtifactForbiddenBuildIdentityField",
+                "fields": {
+                    "field": "aux.build_identity.git_sha"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn validation_code_pins_kind_and_fields_keys_for_heavy_variant() {
+        assert_eq!(
+            serde_json::to_value(ValidationCode::BudgetSwitchesPerTokenOverCap {
+                decision_value: 7,
+                upper_bound: 9,
+                cap: 5,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            })
+            .expect("heavy fielded code serializes"),
+            serde_json::json!({
+                "kind": "BudgetSwitchesPerTokenOverCap",
+                "fields": {
+                    "decision_value": 7,
+                    "upper_bound": 9,
+                    "cap": 5,
+                    "source": { "kind": "ConservativeStaticUpperBound" }
+                }
+            })
+        );
+    }
+
+    #[test]
     fn policy_constraint_unsatisfiable_round_trip() {
         assert_code_round_trip(ValidationCode::PolicyConstraintUnsatisfiable {
             knob: CompileKnobId::Placement,
@@ -707,6 +785,20 @@ mod tests {
         })
         .expect("code serializes");
         value["unexpected"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<ValidationCode>(value).is_err());
+    }
+
+    #[test]
+    fn validation_code_rejects_nested_unknown_variant_payload_fields() {
+        let mut value = serde_json::to_value(ValidationCode::BudgetSwitchesPerTokenOverCap {
+            decision_value: 7,
+            upper_bound: 9,
+            cap: 5,
+            source: SwitchProjectionSource::ConservativeStaticUpperBound,
+        })
+        .expect("code serializes");
+        value["fields"]["unexpected"] = serde_json::json!(true);
 
         assert!(serde_json::from_value::<ValidationCode>(value).is_err());
     }

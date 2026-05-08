@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use gbf_foundation::{FieldPath, Hash256};
+use gbf_foundation::Hash256;
+pub use gbf_foundation::{
+    ArtifactFeature, ArtifactSchemaVersion, ComponentId, LineageId, ManifestInvariant,
+};
 use serde::{Deserialize, Serialize};
 
 /// Manifest of record for a frozen artifact.
@@ -32,56 +35,6 @@ pub struct ManifestComponent {
     pub kind: ComponentKind,
 }
 
-/// Manifest invariants Stage 0 class 3 dispatches on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum ManifestInvariant {
-    FeatureSetEpochInconsistent {
-        epoch: ArtifactSchemaVersion,
-        feature: ArtifactFeature,
-    },
-    RequiredComponentMissing {
-        component: ComponentId,
-    },
-    ComponentDigestMismatch {
-        component: ComponentId,
-        expected: Hash256,
-        observed: Hash256,
-    },
-    LineageContradiction {
-        derived: LineageId,
-        recorded: LineageId,
-    },
-    ManifestSelfHashMismatch {
-        recomputed: Hash256,
-        recorded: Hash256,
-    },
-    ForbiddenBuildIdentityField {
-        field: FieldPath,
-    },
-}
-
-/// Schema version of the artifact manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactSchemaVersion {
-    pub epoch: u32,
-    pub minor: u32,
-}
-
-/// Closed feature set the artifact requires from the runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum ArtifactFeature {
-    DenseI8,
-    Ternary2Quant,
-    Binary1Quant,
-    SparseTernaryBitplanes,
-    MoeRouting,
-    LinearStateSequence,
-    BoundedKvSequence,
-}
-
 /// Closed kind of a manifest component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -100,17 +53,7 @@ pub enum ComponentKind {
     HintBundle,
 }
 
-/// Lineage id linking the artifact back to its training/export run.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LineageId(pub Hash256);
-
 /// Wall-clock-free deterministic timestamp in milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ManifestTimestamp(pub u64);
-
-/// Component identity. Stable across re-runs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ComponentId(pub String);

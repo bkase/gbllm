@@ -10,7 +10,7 @@ use crate::budget::RuntimeChromeBudget;
 use crate::objective::{CompileObjective, RiskPolicy};
 use crate::repair::{RepairPolicy, RepairProposalId};
 
-pub use gbf_foundation::FieldPath;
+pub use gbf_foundation::{EvidenceRef, FieldPath};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -24,14 +24,6 @@ pub enum SequenceSemanticsRef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SelectorPath(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EvidenceRef {
-    pub kind: String,
-    pub reference: String,
-    pub hash: Option<Hash256>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

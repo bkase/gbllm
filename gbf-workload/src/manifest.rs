@@ -1,7 +1,7 @@
 //! Workload manifest schema consumed by pipeline-entry validation.
 
-pub use gbf_foundation::WorkloadId;
 use gbf_foundation::{BlobRef, Hash256};
+pub use gbf_foundation::{GoldenVectorId, WorkloadId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,10 +41,6 @@ pub struct WorkloadSchemaVersion {
     pub epoch: u32,
     pub minor: u32,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct GoldenVectorId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
