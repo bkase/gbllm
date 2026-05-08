@@ -8,5 +8,6 @@ publish = false
 [dependencies]
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
+gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true
 serde_json.workspace = true

@@ -2150,6 +2150,7 @@ version = "0.1.0"
 dependencies = [
  "gbf-foundation",
  "gbf-hw",
+ "gbf-workload",
  "serde",
  "serde_json",
 ]
@@ -2464,9 +2465,7 @@ dependencies = [
 name = "gbf-workload"
 version = "0.1.0"
 dependencies = [
- "gbf-artifact",
  "gbf-foundation",
- "gbf-policy",
  "serde",
  "serde_json",
 ]
