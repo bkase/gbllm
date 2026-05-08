@@ -192,6 +192,50 @@ fn lowering_manifest_round_trip() {
 }
 
 #[test]
+fn lowering_manifest_shard_refs_preserve_declaration_order() {
+    let manifest = LoweringManifest {
+        shard_refs: vec![
+            LoweringShardRef {
+                id: LoweringShardId("zeta".to_owned()),
+                manifest_hash: hash(0x17),
+            },
+            LoweringShardRef {
+                id: LoweringShardId("alpha".to_owned()),
+                manifest_hash: hash(0x18),
+            },
+            LoweringShardRef {
+                id: LoweringShardId("middle".to_owned()),
+                manifest_hash: hash(0x19),
+            },
+        ],
+        aggregate_hash: hash(0x1a),
+    };
+
+    let encoded = serde_json::to_string(&manifest).expect("manifest serializes");
+    let decoded: LoweringManifest = serde_json::from_str(&encoded).expect("manifest deserializes");
+    let encoded_value: serde_json::Value =
+        serde_json::from_str(&encoded).expect("encoded manifest is json");
+
+    assert_eq!(
+        decoded
+            .shard_refs
+            .iter()
+            .map(|shard_ref| shard_ref.id.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta", "alpha", "middle"]
+    );
+    assert_eq!(
+        encoded_value["shard_refs"]
+            .as_array()
+            .expect("shard_refs is an array")
+            .iter()
+            .map(|shard_ref| shard_ref["id"].as_str().expect("id is string"))
+            .collect::<Vec<_>>(),
+        vec!["zeta", "alpha", "middle"]
+    );
+}
+
+#[test]
 fn lowering_shard_kind_round_trip_all_variants() {
     let variants = [
         (
@@ -246,6 +290,16 @@ fn packer_version_round_trip_serializes_as_semver_string() {
 }
 
 #[test]
+fn packer_version_rejects_malformed_strings() {
+    for json in [r#""1.two.3""#, r#""1.2""#] {
+        let err =
+            serde_json::from_str::<PackerVersion>(json).expect_err("malformed version rejects");
+
+        assert!(err.to_string().contains("semantic version"));
+    }
+}
+
+#[test]
 fn data_lowering_profile_id_round_trip() {
     let id = DataLoweringProfileId("DMG-MBC5-default".to_owned());
 
@@ -284,6 +338,37 @@ fn lowering_shard_rejects_unknown_field() {
     value["unexpected"] = serde_json::json!(true);
 
     let err = serde_json::from_value::<LoweringShard>(value).expect_err("unknown field rejects");
+
+    assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
+fn lowering_shard_ref_rejects_unknown_field() {
+    let shard_ref = LoweringShardRef {
+        id: LoweringShardId("weight.layer0.expert0".to_owned()),
+        manifest_hash: hash(0x14),
+    };
+    let mut value = serde_json::to_value(shard_ref).expect("shard ref json value");
+    value["unexpected"] = serde_json::json!(true);
+
+    let err = serde_json::from_value::<LoweringShardRef>(value).expect_err("unknown field rejects");
+
+    assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
+fn lowering_manifest_rejects_unknown_field() {
+    let manifest = LoweringManifest {
+        shard_refs: vec![LoweringShardRef {
+            id: LoweringShardId("weight.layer0.expert0".to_owned()),
+            manifest_hash: hash(0x14),
+        }],
+        aggregate_hash: hash(0x16),
+    };
+    let mut value = serde_json::to_value(manifest).expect("manifest json value");
+    value["unexpected"] = serde_json::json!(true);
+
+    let err = serde_json::from_value::<LoweringManifest>(value).expect_err("unknown field rejects");
 
     assert!(err.to_string().contains("unknown field"));
 }

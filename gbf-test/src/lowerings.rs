@@ -116,4 +116,14 @@ mod tests {
 
         assert_eq!(artifact.packer_version, version);
     }
+
+    #[test]
+    fn builder_supports_with_target_chaining() {
+        let target = TargetProfileId::from("CGB-MBC5");
+        let artifact = TargetDataLoweringArtifactBuilder::canonical()
+            .with_target(target.clone())
+            .build();
+
+        assert_eq!(artifact.target, target);
+    }
 }

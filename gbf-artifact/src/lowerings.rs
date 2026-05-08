@@ -58,6 +58,8 @@ impl<'de> Deserialize<'de> for LoweringShardKind {
     where
         D: Deserializer<'de>,
     {
+        // Work around serde's tagged-unit enum caveat: derived deserialization
+        // accepts extra fields on `{ "kind": "..." }` unit-variant objects.
         #[derive(Deserialize)]
         #[allow(clippy::enum_variant_names)]
         enum LoweringShardKindTag {
@@ -89,6 +91,8 @@ impl<'de> Deserialize<'de> for LoweringShardKind {
 }
 
 /// Newtype around `SemVer` for packer compatibility checks.
+/// Serializes as `SemVer::Display` (`"major.minor.patch"`) to match the
+/// canonical lowering JSON, not `SemVer`'s derived object shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackerVersion(pub SemVer);
 
