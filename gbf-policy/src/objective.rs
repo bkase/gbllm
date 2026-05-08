@@ -59,7 +59,7 @@ mod tests {
                 cycle_quantile: 95,
                 switch_quantile: 99,
                 calibration_confidence_requirement: CalibrationConfidenceRequirement::AtLeast {
-                    class: CalibrationConfidenceClass::WithinFamily,
+                    class: CalibrationConfidenceClass::Reasonable,
                 },
                 fallback_profile: Some(CompileProfileId::from("Recovery")),
                 fallback_runtime_mode: Some(RuntimeMode::Safe),
@@ -75,7 +75,7 @@ mod tests {
             "switch_quantile": 99,
             "calibration_confidence_requirement": {
                 "kind": "AtLeast",
-                "class": {"kind": "WithinFamily"}
+                "class": {"kind": "Reasonable"}
             },
             "fallback_profile": "Recovery",
             "fallback_runtime_mode": {"kind": "Safe"}

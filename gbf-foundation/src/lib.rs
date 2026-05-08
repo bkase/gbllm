@@ -14,4 +14,4 @@ pub use ids::{
     KernelCalibrationId, KernelImplId, KernelSpecId, LayerId, PlatformCalibrationId,
     RuntimeCalibrationId, RuntimeNucleusId, TargetFamilyId, TargetProfileId, WorkloadId,
 };
-pub use semver::{SemVer, SemVerParseError};
+pub use semver::{PackerVersion, SemVer, SemVerParseError};

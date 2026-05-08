@@ -1,7 +1,8 @@
 //! Target-data lowering schema.
 
-use gbf_foundation::{Hash256, SemVer, TargetProfileId};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+pub use gbf_foundation::PackerVersion;
+use gbf_foundation::{Hash256, TargetProfileId};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Per-target-profile packed lowering of a frozen artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,38 +88,6 @@ impl<'de> Deserialize<'de> for LoweringShardKind {
                 LoweringShardKindTag::EmbeddingShard => Self::EmbeddingShard,
             },
         )
-    }
-}
-
-/// Newtype around `SemVer` for packer compatibility checks.
-/// Serializes as `SemVer::Display` (`"major.minor.patch"`) to match the
-/// canonical lowering JSON, not `SemVer`'s derived object shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PackerVersion(pub SemVer);
-
-impl PackerVersion {
-    #[must_use]
-    pub const fn new(major: u64, minor: u64, patch: u64) -> Self {
-        Self(SemVer::new(major, minor, patch))
-    }
-}
-
-impl Serialize for PackerVersion {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for PackerVersion {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map(Self).map_err(serde::de::Error::custom)
     }
 }
 

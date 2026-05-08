@@ -687,7 +687,7 @@ mod tests {
                 cycle_quantile: 95,
                 switch_quantile: 99,
                 calibration_confidence_requirement: CalibrationConfidenceRequirement::AtLeast {
-                    class: CalibrationConfidenceClass::Transferred,
+                    class: CalibrationConfidenceClass::Weak,
                 },
                 fallback_profile: None,
                 fallback_runtime_mode: Some(RuntimeMode::Safe),
@@ -850,7 +850,7 @@ mod tests {
             "max_sram_page_switches_per_token": 1,
             "min_ui_headroom_pct": 9,
             "max_rom_bytes": 524288,
-            "risk": risk_policy_json("Transferred")
+            "risk": risk_policy_json("Weak")
         })
     }
 
@@ -1136,7 +1136,7 @@ mod tests {
                     "allow_overlay_promotion": true,
                     "allow_recompute_promotion": true
                 },
-                "risk_policy": risk_policy_json("Transferred"),
+                "risk_policy": risk_policy_json("Weak"),
                 "knob_defaults": empty_partial_values_json(),
                 "knob_bounds": {
                     "placement": {"max_profile": {"kind": "PackedExperts"}},

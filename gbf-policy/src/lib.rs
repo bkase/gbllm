@@ -1,6 +1,7 @@
 //! Compile requests, objectives, deployment envelopes, runtime budgets, and repair policies.
 
 pub mod budget;
+pub mod calibration;
 pub mod compile;
 pub mod envelope;
 pub mod objective;
@@ -8,6 +9,10 @@ pub mod repair;
 pub mod risk;
 
 pub use budget::{BudgetSlotClass, RomBudgetSlot, RuntimeChromeBudget, RuntimeMemoryCapSection};
+pub use calibration::{
+    BootstrapCalibrationBundle, CalibrationBundle, CalibrationBundleSet, CalibrationLayer,
+    CalibrationSetRef, MeasurementBlob, ValidityEnvelope, ValidityEnvelopeFuturePlaceholder,
+};
 pub use compile::{
     CompileKnobBounds, CompileKnobId, CompileKnobOverrides, CompileKnobPartialBounds,
     CompileKnobPartialValues, CompileKnobPath, CompileKnobProvenanceEntry, CompileKnobValues,

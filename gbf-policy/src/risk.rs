@@ -2,15 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Confidence class declared by a calibration bundle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum CalibrationConfidenceClass {
-    None,
-    Transferred,
-    WithinFamily,
-    Onsite,
-}
+pub use gbf_hw::calibration::CalibrationConfidenceClass;
 
 /// Minimum confidence required by a compile profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -25,7 +17,7 @@ impl CalibrationConfidenceRequirement {
     pub const fn accepts(self, observed: CalibrationConfidenceClass) -> bool {
         match self {
             Self::NoMinimumConfidence => true,
-            Self::AtLeast { class } => observed as u8 >= class as u8,
+            Self::AtLeast { class } => observed.rank() >= class.rank(),
         }
     }
 }
@@ -42,7 +34,7 @@ mod tests {
             cycle_quantile: 95,
             switch_quantile: 99,
             calibration_confidence_requirement: CalibrationConfidenceRequirement::AtLeast {
-                class: CalibrationConfidenceClass::WithinFamily,
+                class: CalibrationConfidenceClass::Reasonable,
             },
             fallback_profile: Some(CompileProfileId::from("Recovery")),
             fallback_runtime_mode: Some(RuntimeMode::Safe),
@@ -52,7 +44,7 @@ mod tests {
     #[test]
     fn risk_policy_calibration_confidence_requirement_round_trip() {
         let requirement = CalibrationConfidenceRequirement::AtLeast {
-            class: CalibrationConfidenceClass::WithinFamily,
+            class: CalibrationConfidenceClass::Reasonable,
         };
 
         let encoded = serde_json::to_string(&requirement).expect("requirement serializes");
@@ -64,19 +56,19 @@ mod tests {
             serde_json::to_value(requirement).expect("requirement serializes"),
             serde_json::json!({
                 "kind": "AtLeast",
-                "class": {"kind": "WithinFamily"}
+                "class": {"kind": "Reasonable"}
             })
         );
         assert!(!requirement.accepts(CalibrationConfidenceClass::None));
-        assert!(!requirement.accepts(CalibrationConfidenceClass::Transferred));
-        assert!(requirement.accepts(CalibrationConfidenceClass::WithinFamily));
-        assert!(requirement.accepts(CalibrationConfidenceClass::Onsite));
+        assert!(!requirement.accepts(CalibrationConfidenceClass::Weak));
+        assert!(requirement.accepts(CalibrationConfidenceClass::Reasonable));
+        assert!(requirement.accepts(CalibrationConfidenceClass::Strong));
     }
 
     #[test]
     fn calibration_confidence_requirement_rejects_unknown_field() {
         let mut value = serde_json::to_value(CalibrationConfidenceRequirement::AtLeast {
-            class: CalibrationConfidenceClass::WithinFamily,
+            class: CalibrationConfidenceClass::Reasonable,
         })
         .expect("requirement serializes");
         value["unexpected"] = serde_json::json!(true);
@@ -100,9 +92,9 @@ mod tests {
         assert_eq!(decoded, requirement);
         for observed in [
             CalibrationConfidenceClass::None,
-            CalibrationConfidenceClass::Transferred,
-            CalibrationConfidenceClass::WithinFamily,
-            CalibrationConfidenceClass::Onsite,
+            CalibrationConfidenceClass::Weak,
+            CalibrationConfidenceClass::Reasonable,
+            CalibrationConfidenceClass::Strong,
         ] {
             assert!(requirement.accepts(observed));
         }
