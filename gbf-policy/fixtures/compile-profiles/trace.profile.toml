@@ -1,5 +1,5 @@
-id = "trace"
-defaults_hash = "sha256:6d71178940b537c282e62247ac71260730c43f5be06ba560e0f05c6bb9c692d0"
+id = "Trace"
+defaults_hash = "sha256:401c15e8dce6f8abe5dc82b68b7503d3f2cfb9ae4ddfca4427ee92e2f7b1d802"
 observability = { kind = "Invariant" }
 
 [trace_budget]
@@ -18,7 +18,7 @@ allow_recompute_promotion = false
 cycle_quantile = 99
 switch_quantile = 99
 calibration_confidence_requirement = { kind = "AtLeast", class = { kind = "Reasonable" } }
-fallback_profile = "recovery"
+fallback_profile = "Recovery"
 fallback_runtime_mode = { kind = "Trace" }
 
 [knob_defaults.placement]

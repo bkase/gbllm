@@ -13,10 +13,10 @@ use crate::repair::{RepairPolicy, RepairProposalId};
 
 pub use gbf_foundation::{EvidenceRef, FieldPath};
 
-pub const BRINGUP_COMPILE_PROFILE_ID: &str = "bringup";
-pub const DEFAULT_COMPILE_PROFILE_ID: &str = "default";
-pub const TRACE_COMPILE_PROFILE_ID: &str = "trace";
-pub const RECOVERY_COMPILE_PROFILE_ID: &str = "recovery";
+pub const BRINGUP_COMPILE_PROFILE_ID: &str = "Bringup";
+pub const DEFAULT_COMPILE_PROFILE_ID: &str = "Default";
+pub const TRACE_COMPILE_PROFILE_ID: &str = "Trace";
+pub const RECOVERY_COMPILE_PROFILE_ID: &str = "Recovery";
 
 pub const BRINGUP_COMPILE_PROFILE_TOML: &str =
     include_str!("../fixtures/compile-profiles/bringup.profile.toml");
@@ -1244,6 +1244,10 @@ mod tests {
     #[test]
     fn compile_profile_spec_fixtures_round_trip() {
         let specs = canonical_compile_profile_specs().expect("canonical profiles parse");
+        assert_eq!(BRINGUP_COMPILE_PROFILE_ID, "Bringup");
+        assert_eq!(DEFAULT_COMPILE_PROFILE_ID, "Default");
+        assert_eq!(TRACE_COMPILE_PROFILE_ID, "Trace");
+        assert_eq!(RECOVERY_COMPILE_PROFILE_ID, "Recovery");
         assert_eq!(
             specs
                 .iter()
@@ -1290,6 +1294,15 @@ mod tests {
                     && spec.knob_bounds.rom_window.is_some()
                     && spec.knob_bounds.overlay.is_some()
                     && spec.knob_bounds.schedule.is_some()
+            );
+            assert_eq!(
+                spec.risk_policy
+                    .fallback_profile
+                    .as_ref()
+                    .map(|profile| profile.as_str()),
+                Some(RECOVERY_COMPILE_PROFILE_ID),
+                "{} must fall back to the canonical Recovery profile id",
+                spec.id
             );
         }
 
@@ -1348,7 +1361,7 @@ mod tests {
             std::str::from_utf8(&canonical_bytes).expect("canonical JSON is UTF-8");
 
         assert!(
-            canonical_json.starts_with(r#"{"defaults_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","id":"default""#),
+            canonical_json.starts_with(r#"{"defaults_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","id":"Default""#),
             "top-level canonical JSON keys must be lexicographically ordered"
         );
         assert!(

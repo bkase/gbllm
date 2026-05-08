@@ -1,5 +1,5 @@
-id = "default"
-defaults_hash = "sha256:b49e033f399b42a6503ed26c226a7b1aea7cd915a425412855c5f7cc7932c255"
+id = "Default"
+defaults_hash = "sha256:79037ff3533cf7db007fa589e495099b412ebbe5af49dbab6c0b4d3db9992a47"
 observability = { kind = "Flexible" }
 
 [trace_budget]
@@ -18,7 +18,7 @@ allow_recompute_promotion = true
 cycle_quantile = 95
 switch_quantile = 99
 calibration_confidence_requirement = { kind = "AtLeast", class = { kind = "Transferred" } }
-fallback_profile = "recovery"
+fallback_profile = "Recovery"
 fallback_runtime_mode = { kind = "Safe" }
 
 [knob_defaults.placement]

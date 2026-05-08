@@ -1,5 +1,5 @@
-id = "recovery"
-defaults_hash = "sha256:27856123bfd07ea82ed65d543abacb962b9bacd999becb9678b13d08403db8cf"
+id = "Recovery"
+defaults_hash = "sha256:4d576df695e48ed3d2485a43b6478a6e16aacea6fb30c2d3a776ce5d1bc538b5"
 observability = { kind = "Flexible" }
 
 [trace_budget]
@@ -18,7 +18,7 @@ allow_recompute_promotion = true
 cycle_quantile = 99
 switch_quantile = 99
 calibration_confidence_requirement = { kind = "AtLeast", class = { kind = "Strong" } }
-fallback_profile = "recovery"
+fallback_profile = "Recovery"
 fallback_runtime_mode = { kind = "Safe" }
 
 [knob_defaults.placement]
