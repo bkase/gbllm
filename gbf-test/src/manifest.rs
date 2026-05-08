@@ -77,6 +77,22 @@ fn hash(byte: u8) -> Hash256 {
 }
 
 #[cfg(test)]
+fn hash_json(byte: u8) -> String {
+    format!("sha256:{}", format!("{byte:02x}").repeat(32))
+}
+
+#[cfg(test)]
+fn expected_canonical_fixture_json() -> String {
+    format!(
+        "{{\"components\":[{{\"digest\":\"{}\",\"id\":\"tensor.embed.weight\",\"kind\":{{\"kind\":\"CanonicalTensor\"}}}}],\"created_at\":0,\"lineage\":\"{}\",\"manifest_self_hash\":\"{}\",\"required_features\":[{{\"kind\":\"DenseI8\"}}],\"schema_version\":{{\"epoch\":1,\"minor\":0}},\"semantic_core_hash\":\"{}\"}}",
+        hash_json(1),
+        hash_json(2),
+        hash_json(0),
+        hash_json(3)
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -85,6 +101,22 @@ mod tests {
         assert_eq!(
             ArtifactManifestBuilder::canonical().build(),
             canonical_manifest_fixture()
+        );
+    }
+
+    #[test]
+    fn canonical_fixture_byte_stable_round_trip() {
+        let manifest = canonical_manifest_fixture();
+        let expected = expected_canonical_fixture_json();
+        let encoded = serde_json::to_string(&manifest).expect("manifest serializes");
+        let decoded: ArtifactManifest =
+            serde_json::from_str(&encoded).expect("manifest deserializes");
+
+        assert_eq!(encoded, expected);
+        assert_eq!(decoded, manifest);
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("decoded manifest serializes"),
+            expected
         );
     }
 
@@ -122,5 +154,19 @@ mod tests {
 
         assert_eq!(manifest.components.len(), 2);
         assert_eq!(manifest.components[1], component);
+    }
+
+    #[test]
+    fn builder_supports_with_lineage_and_self_hash_chaining() {
+        let lineage = LineageId(hash(0xab));
+        let self_hash = hash(0xcd);
+
+        let manifest = ArtifactManifestBuilder::canonical()
+            .with_lineage(lineage.clone())
+            .with_self_hash(self_hash)
+            .build();
+
+        assert_eq!(manifest.lineage, lineage);
+        assert_eq!(manifest.manifest_self_hash, self_hash);
     }
 }
