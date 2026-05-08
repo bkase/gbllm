@@ -4,3 +4,5 @@ pub mod manifest;
 pub mod matrix;
 pub mod observation;
 pub mod prompts;
+
+pub use manifest::*;

@@ -15,6 +15,7 @@ gbf-oracle = { path = "../gbf-oracle" }
 gbf-report = { path = "../gbf-report" }
 gbf-train = { path = "../gbf-train", features = ["burn-adapter"] }
 gbf-verify = { path = "../gbf-verify" }
+gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
