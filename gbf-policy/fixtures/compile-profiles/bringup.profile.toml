@@ -1,5 +1,5 @@
 id = "bringup"
-defaults_hash = "sha256:3835c3027c86dfedbd1fe768fb91bc07c5506bf9da335790103cf8055fd7c947"
+defaults_hash = "sha256:7368718cf4a8d1e27c25091a13f7a7d2f39df0aa51a43e8033eb330a61150a84"
 observability = { kind = "Invariant" }
 
 [trace_budget]

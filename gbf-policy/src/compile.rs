@@ -27,13 +27,13 @@ pub const TRACE_COMPILE_PROFILE_TOML: &str =
 pub const RECOVERY_COMPILE_PROFILE_TOML: &str =
     include_str!("../fixtures/compile-profiles/recovery.profile.toml");
 
-/// Domain separator for the canonical `CompileProfileSpec` defaults hash.
+/// RFC-shaped domain separator for the canonical `CompileProfileSpec` defaults hash.
 ///
 /// The preimage is this byte string followed by canonical JSON for the profile
 /// spec with `defaults_hash` zeroed. The NUL suffix prevents accidental
 /// concatenation ambiguity with the first JSON byte.
 pub const COMPILE_PROFILE_DEFAULTS_HASH_DOMAIN: &[u8] =
-    b"gbf-policy/CompileProfileSpec.defaults_hash/v1\0";
+    b"gbf:gbf-policy:CompileProfileSpec:compile_profile_spec:1.0.0\0";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -1337,7 +1337,7 @@ mod tests {
     fn compile_profile_spec_defaults_hash_uses_canonical_domain_preimage() {
         assert_eq!(
             COMPILE_PROFILE_DEFAULTS_HASH_DOMAIN,
-            b"gbf-policy/CompileProfileSpec.defaults_hash/v1\0"
+            b"gbf:gbf-policy:CompileProfileSpec:compile_profile_spec:1.0.0\0"
         );
 
         let spec = load_compile_profile_spec(DEFAULT_COMPILE_PROFILE_TOML)

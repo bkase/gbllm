@@ -1,5 +1,5 @@
 id = "default"
-defaults_hash = "sha256:38ae2a50a430f6d98e85840dd8021cd01164d12957f577e4f09d352a6351eaad"
+defaults_hash = "sha256:b49e033f399b42a6503ed26c226a7b1aea7cd915a425412855c5f7cc7932c255"
 observability = { kind = "Flexible" }
 
 [trace_budget]
