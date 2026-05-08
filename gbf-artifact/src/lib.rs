@@ -23,4 +23,5 @@ pub mod weight_plan;
 
 pub use aux::*;
 pub use gbf_workload::manifest::{GoldenVectorId, GoldenVectorRef};
+pub use lowerings::*;
 pub use manifest::*;
