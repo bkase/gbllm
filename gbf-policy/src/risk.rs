@@ -66,6 +66,28 @@ mod tests {
     }
 
     #[test]
+    fn calibration_confidence_class_json_shapes_are_stable() {
+        for (class, expected_kind) in [
+            (CalibrationConfidenceClass::None, "None"),
+            (CalibrationConfidenceClass::Weak, "Weak"),
+            (CalibrationConfidenceClass::Reasonable, "Reasonable"),
+            (CalibrationConfidenceClass::Strong, "Strong"),
+        ] {
+            let expected_shape = serde_json::json!({ "kind": expected_kind });
+
+            assert_eq!(
+                serde_json::to_value(class).expect("class serializes"),
+                expected_shape
+            );
+            assert_eq!(
+                serde_json::from_value::<CalibrationConfidenceClass>(expected_shape)
+                    .expect("class deserializes"),
+                class
+            );
+        }
+    }
+
+    #[test]
     fn calibration_confidence_requirement_rejects_unknown_field() {
         let mut value = serde_json::to_value(CalibrationConfidenceRequirement::AtLeast {
             class: CalibrationConfidenceClass::Reasonable,

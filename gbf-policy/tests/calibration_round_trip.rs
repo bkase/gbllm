@@ -196,6 +196,28 @@ fn calibration_bundle_set_rejects_unknown_field() {
 }
 
 #[test]
+fn calibration_bundle_set_rejects_unknown_layer_key() {
+    let value = serde_json::json!({
+        "bundles": {
+            "Firmware": expected_bundle_json(CalibrationLayer::Platform)
+        }
+    });
+
+    assert!(serde_json::from_value::<CalibrationBundleSet>(value).is_err());
+}
+
+#[test]
+fn calibration_bundle_set_rejects_mismatched_bundle_layer() {
+    let value = serde_json::json!({
+        "bundles": {
+            "Kernel": expected_bundle_json(CalibrationLayer::Platform)
+        }
+    });
+
+    assert!(serde_json::from_value::<CalibrationBundleSet>(value).is_err());
+}
+
+#[test]
 fn calibration_layer_rejects_unknown_kind() {
     assert!(
         serde_json::from_value::<CalibrationLayer>(serde_json::json!({"kind": "Firmware"}))
@@ -211,6 +233,38 @@ fn validity_envelope_rejects_unknown_field() {
     });
 
     assert!(serde_json::from_value::<ValidityEnvelope>(value).is_err());
+}
+
+#[test]
+fn validity_envelope_rejects_unknown_nested_future_field() {
+    let value = serde_json::json!({
+        "future_fields": {
+            "unexpected": true
+        }
+    });
+
+    assert!(serde_json::from_value::<ValidityEnvelope>(value).is_err());
+}
+
+#[test]
+fn measurement_blob_rejects_unknown_field() {
+    let mut value =
+        serde_json::to_value(measurement_blob_fixture()).expect("measurement blob serializes");
+    value["unexpected"] = serde_json::json!(true);
+
+    assert!(serde_json::from_value::<MeasurementBlob>(value).is_err());
+}
+
+#[test]
+fn calibration_set_ref_rejects_unknown_field() {
+    let mut value = serde_json::to_value(CalibrationSetRef {
+        set_hash: hash(0x55),
+        layers: BTreeSet::from([CalibrationLayer::Kernel]),
+    })
+    .expect("ref serializes");
+    value["unexpected"] = serde_json::json!(true);
+
+    assert!(serde_json::from_value::<CalibrationSetRef>(value).is_err());
 }
 
 #[test]

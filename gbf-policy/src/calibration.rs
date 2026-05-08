@@ -42,7 +42,7 @@ impl CalibrationLayer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CalibrationLayerParseError;
+pub(crate) struct CalibrationLayerParseError;
 
 impl fmt::Display for CalibrationLayerParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -138,9 +138,14 @@ impl<'de> Deserialize<'de> for CalibrationBundleSet {
             .bundles
             .into_iter()
             .map(|(layer, bundle)| {
-                CalibrationLayer::parse(&layer)
-                    .map(|parsed| (parsed, bundle))
-                    .map_err(serde::de::Error::custom)
+                let parsed = CalibrationLayer::parse(&layer).map_err(serde::de::Error::custom)?;
+                if parsed != bundle.layer {
+                    return Err(serde::de::Error::custom(format_args!(
+                        "calibration bundle key {layer} does not match bundle layer {}",
+                        bundle.layer.as_str()
+                    )));
+                }
+                Ok((parsed, bundle))
             })
             .collect::<Result<_, _>>()?;
         Ok(Self { bundles })

@@ -125,6 +125,7 @@ impl<'de> Deserialize<'de> for CalibrationConfidenceClass {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
         enum CalibrationConfidenceClassTag {
             None,
             Weak,
