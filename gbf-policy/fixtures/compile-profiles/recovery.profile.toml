@@ -1,0 +1,85 @@
+id = "recovery"
+defaults_hash = "sha256:25b8bbc9632de53a41537549d5ca92b76d7dac72bfac8f0d5436cd620f0cc6df"
+observability = { kind = "Flexible" }
+
+[trace_budget]
+max_events_per_slice = 128
+max_bytes_per_frame = 2048
+drop_policy = { kind = "DropNewest" }
+
+[repair_policy]
+max_refinement_iters = 6
+allow_placement_profile_fallback = true
+allow_trace_demotion = true
+allow_overlay_promotion = true
+allow_recompute_promotion = true
+
+[risk_policy]
+cycle_quantile = 99
+switch_quantile = 99
+calibration_confidence_requirement = { kind = "AtLeast", class = { kind = "Strong" } }
+fallback_profile = "recovery"
+fallback_runtime_mode = { kind = "Safe" }
+
+[knob_defaults.placement]
+profile = { kind = "StrictOnePerBank" }
+
+[knob_defaults.observation]
+observability = { kind = "Flexible" }
+probe_level = { kind = "Operational" }
+
+[knob_defaults.range]
+reduction_ceiling = { kind = "ExactOnly" }
+
+[knob_defaults.storage]
+materialization = { kind = "RecomputePureValues" }
+
+[knob_defaults.sram]
+page_aggression = { kind = "Preserve" }
+
+[knob_defaults.rom_window]
+kernel_residency_bias = { kind = "PreferCommonBank" }
+kernel_duplication_bias = { kind = "Share" }
+
+[knob_defaults.overlay]
+promotion = { kind = "Disabled" }
+
+[knob_defaults.schedule]
+tile_search = { kind = "Fixed" }
+slice_coarsening = { kind = "Fine" }
+resource_pressure = { kind = "Conservative" }
+
+[knob_bounds.placement]
+max_profile = { kind = "Budgeted" }
+
+[knob_bounds.observation]
+max_probe_level = { kind = "Operational" }
+
+[knob_bounds.range]
+max_reduction_ceiling = { kind = "Conservative" }
+
+[knob_bounds.storage]
+max_materialization = { kind = "RecomputePureValues" }
+
+[knob_bounds.sram]
+max_page_aggression = { kind = "PackCold" }
+
+[knob_bounds.rom_window]
+max_kernel_residency_bias = { kind = "PreferExpertBank" }
+max_kernel_duplication_bias = { kind = "DuplicateHot" }
+
+[knob_bounds.overlay]
+max_promotion = { kind = "TinyLuts" }
+
+[knob_bounds.schedule]
+max_tile_search = { kind = "Local" }
+max_slice_coarsening = { kind = "Balanced" }
+max_resource_pressure = { kind = "Balanced" }
+
+[locks]
+locked = [
+  { kind = "Placement" },
+  { kind = "Sram" },
+  { kind = "RomWindow" },
+  { kind = "Schedule" },
+]

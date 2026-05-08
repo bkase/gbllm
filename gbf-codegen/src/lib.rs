@@ -19,3 +19,73 @@ pub mod stage_cache;
 pub mod storage;
 pub mod validate;
 pub mod window;
+
+#[cfg(test)]
+mod tests {
+    use gbf_policy::{
+        BRINGUP_COMPILE_PROFILE_ID, CalibrationConfidenceClass, CalibrationConfidenceRequirement,
+        DEFAULT_COMPILE_PROFILE_ID, canonical_compile_profile_specs,
+    };
+
+    #[test]
+    fn f_b2_compile_profile_spec_bringup_accepts_none_confidence() {
+        let specs = canonical_compile_profile_specs().expect("canonical profiles parse");
+        let bringup = specs
+            .iter()
+            .find(|spec| spec.id.as_str() == BRINGUP_COMPILE_PROFILE_ID)
+            .expect("bringup profile exists");
+
+        assert_eq!(
+            bringup.risk_policy.calibration_confidence_requirement,
+            CalibrationConfidenceRequirement::NoMinimumConfidence
+        );
+        assert!(
+            bringup
+                .risk_policy
+                .calibration_confidence_requirement
+                .accepts(CalibrationConfidenceClass::None)
+        );
+    }
+
+    #[test]
+    fn f_b2_compile_profile_spec_bringup_no_minimum_confidence_requirement() {
+        let specs = canonical_compile_profile_specs().expect("canonical profiles parse");
+        let bringup = specs
+            .iter()
+            .find(|spec| spec.id.as_str() == BRINGUP_COMPILE_PROFILE_ID)
+            .expect("bringup profile exists");
+
+        assert_eq!(
+            bringup.risk_policy.calibration_confidence_requirement,
+            CalibrationConfidenceRequirement::NoMinimumConfidence
+        );
+    }
+
+    #[test]
+    fn f_b2_compile_profile_spec_default_requires_transferred_confidence() {
+        let specs = canonical_compile_profile_specs().expect("canonical profiles parse");
+        let default = specs
+            .iter()
+            .find(|spec| spec.id.as_str() == DEFAULT_COMPILE_PROFILE_ID)
+            .expect("default profile exists");
+
+        assert_eq!(
+            default.risk_policy.calibration_confidence_requirement,
+            CalibrationConfidenceRequirement::AtLeast {
+                class: CalibrationConfidenceClass::Transferred,
+            }
+        );
+        assert!(
+            !default
+                .risk_policy
+                .calibration_confidence_requirement
+                .accepts(CalibrationConfidenceClass::None)
+        );
+        assert!(
+            default
+                .risk_policy
+                .calibration_confidence_requirement
+                .accepts(CalibrationConfidenceClass::Transferred)
+        );
+    }
+}

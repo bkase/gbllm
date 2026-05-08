@@ -69,6 +69,7 @@ mod tests {
     fn calibration_confidence_class_json_shapes_are_stable() {
         for (class, expected_kind) in [
             (CalibrationConfidenceClass::None, "None"),
+            (CalibrationConfidenceClass::Transferred, "Transferred"),
             (CalibrationConfidenceClass::Weak, "Weak"),
             (CalibrationConfidenceClass::Reasonable, "Reasonable"),
             (CalibrationConfidenceClass::Strong, "Strong"),
@@ -114,6 +115,7 @@ mod tests {
         assert_eq!(decoded, requirement);
         for observed in [
             CalibrationConfidenceClass::None,
+            CalibrationConfidenceClass::Transferred,
             CalibrationConfidenceClass::Weak,
             CalibrationConfidenceClass::Reasonable,
             CalibrationConfidenceClass::Strong,

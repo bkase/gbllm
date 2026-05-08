@@ -10,3 +10,5 @@ gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true

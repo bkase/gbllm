@@ -78,9 +78,10 @@ impl TryFrom<CycleDistributionRepr> for CycleDistribution {
 #[repr(u8)]
 pub enum CalibrationConfidenceClass {
     None = 0,
-    Weak = 1,
-    Reasonable = 2,
-    Strong = 3,
+    Transferred = 1,
+    Weak = 2,
+    Reasonable = 3,
+    Strong = 4,
 }
 
 impl CalibrationConfidenceClass {
@@ -99,6 +100,7 @@ impl Serialize for CalibrationConfidenceClass {
         #[serde(rename_all = "PascalCase")]
         enum CalibrationConfidenceClassTag {
             None,
+            Transferred,
             Weak,
             Reasonable,
             Strong,
@@ -111,6 +113,7 @@ impl Serialize for CalibrationConfidenceClass {
 
         let kind = match self {
             Self::None => CalibrationConfidenceClassTag::None,
+            Self::Transferred => CalibrationConfidenceClassTag::Transferred,
             Self::Weak => CalibrationConfidenceClassTag::Weak,
             Self::Reasonable => CalibrationConfidenceClassTag::Reasonable,
             Self::Strong => CalibrationConfidenceClassTag::Strong,
@@ -128,6 +131,7 @@ impl<'de> Deserialize<'de> for CalibrationConfidenceClass {
         #[serde(rename_all = "PascalCase")]
         enum CalibrationConfidenceClassTag {
             None,
+            Transferred,
             Weak,
             Reasonable,
             Strong,
@@ -142,6 +146,7 @@ impl<'de> Deserialize<'de> for CalibrationConfidenceClass {
         Ok(
             match TaggedCalibrationConfidenceClass::deserialize(deserializer)?.kind {
                 CalibrationConfidenceClassTag::None => Self::None,
+                CalibrationConfidenceClassTag::Transferred => Self::Transferred,
                 CalibrationConfidenceClassTag::Weak => Self::Weak,
                 CalibrationConfidenceClassTag::Reasonable => Self::Reasonable,
                 CalibrationConfidenceClassTag::Strong => Self::Strong,
@@ -962,6 +967,8 @@ mod tests {
     fn confidence_class_ordering() {
         assert!(CalibrationConfidenceClass::Strong > CalibrationConfidenceClass::Reasonable);
         assert!(CalibrationConfidenceClass::Reasonable > CalibrationConfidenceClass::Weak);
+        assert!(CalibrationConfidenceClass::Weak > CalibrationConfidenceClass::Transferred);
+        assert!(CalibrationConfidenceClass::Transferred > CalibrationConfidenceClass::None);
     }
 
     #[test]

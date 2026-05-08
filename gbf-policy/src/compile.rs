@@ -5,12 +5,27 @@ use std::collections::BTreeSet;
 use gbf_foundation::{CompileProfileId, Hash256, TargetProfileId};
 use gbf_hw::calibration::CalibrationSetRef;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::budget::RuntimeChromeBudget;
 use crate::objective::{CompileObjective, RiskPolicy};
 use crate::repair::{RepairPolicy, RepairProposalId};
 
 pub use gbf_foundation::{EvidenceRef, FieldPath};
+
+pub const BRINGUP_COMPILE_PROFILE_ID: &str = "bringup";
+pub const DEFAULT_COMPILE_PROFILE_ID: &str = "default";
+pub const TRACE_COMPILE_PROFILE_ID: &str = "trace";
+pub const RECOVERY_COMPILE_PROFILE_ID: &str = "recovery";
+
+pub const BRINGUP_COMPILE_PROFILE_TOML: &str =
+    include_str!("../fixtures/compile-profiles/bringup.profile.toml");
+pub const DEFAULT_COMPILE_PROFILE_TOML: &str =
+    include_str!("../fixtures/compile-profiles/default.profile.toml");
+pub const TRACE_COMPILE_PROFILE_TOML: &str =
+    include_str!("../fixtures/compile-profiles/trace.profile.toml");
+pub const RECOVERY_COMPILE_PROFILE_TOML: &str =
+    include_str!("../fixtures/compile-profiles/recovery.profile.toml");
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -64,6 +79,29 @@ pub struct CompileProfileSpec {
     pub knob_defaults: CompileKnobPartialValues,
     pub knob_bounds: CompileKnobPartialBounds,
     pub locks: KnobLockSet,
+}
+
+pub fn compile_profile_defaults_hash(
+    spec: &CompileProfileSpec,
+) -> Result<Hash256, serde_json::Error> {
+    let mut hashable = spec.clone();
+    hashable.defaults_hash = Hash256::ZERO;
+    let canonical_bytes = serde_json::to_vec(&hashable)?;
+    let digest = Sha256::digest(canonical_bytes);
+    Ok(Hash256::from_bytes(digest.into()))
+}
+
+pub fn load_compile_profile_spec(toml_source: &str) -> Result<CompileProfileSpec, toml::de::Error> {
+    toml::from_str(toml_source)
+}
+
+pub fn canonical_compile_profile_specs() -> Result<[CompileProfileSpec; 4], toml::de::Error> {
+    Ok([
+        load_compile_profile_spec(BRINGUP_COMPILE_PROFILE_TOML)?,
+        load_compile_profile_spec(DEFAULT_COMPILE_PROFILE_TOML)?,
+        load_compile_profile_spec(TRACE_COMPILE_PROFILE_TOML)?,
+        load_compile_profile_spec(RECOVERY_COMPILE_PROFILE_TOML)?,
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1144,6 +1182,98 @@ mod tests {
         let decoded: CompileProfileSpec =
             serde_json::from_value(value).expect("profile spec deserializes");
         assert_eq!(decoded, spec);
+    }
+
+    #[test]
+    fn compile_profile_spec_fixtures_round_trip() {
+        let specs = canonical_compile_profile_specs().expect("canonical profiles parse");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                BRINGUP_COMPILE_PROFILE_ID,
+                DEFAULT_COMPILE_PROFILE_ID,
+                TRACE_COMPILE_PROFILE_ID,
+                RECOVERY_COMPILE_PROFILE_ID
+            ]
+        );
+
+        for (source, spec) in [
+            (BRINGUP_COMPILE_PROFILE_TOML, &specs[0]),
+            (DEFAULT_COMPILE_PROFILE_TOML, &specs[1]),
+            (TRACE_COMPILE_PROFILE_TOML, &specs[2]),
+            (RECOVERY_COMPILE_PROFILE_TOML, &specs[3]),
+        ] {
+            assert!(
+                !source.contains("relaxations"),
+                "profile fixture must not expose profile-time relaxations"
+            );
+            assert_eq!(
+                toml::from_str::<CompileProfileSpec>(source).expect("profile reparses"),
+                *spec
+            );
+            assert!(
+                spec.knob_defaults.placement.is_some()
+                    && spec.knob_defaults.observation.is_some()
+                    && spec.knob_defaults.range.is_some()
+                    && spec.knob_defaults.storage.is_some()
+                    && spec.knob_defaults.sram.is_some()
+                    && spec.knob_defaults.rom_window.is_some()
+                    && spec.knob_defaults.overlay.is_some()
+                    && spec.knob_defaults.schedule.is_some()
+            );
+            assert!(
+                spec.knob_bounds.placement.is_some()
+                    && spec.knob_bounds.observation.is_some()
+                    && spec.knob_bounds.range.is_some()
+                    && spec.knob_bounds.storage.is_some()
+                    && spec.knob_bounds.sram.is_some()
+                    && spec.knob_bounds.rom_window.is_some()
+                    && spec.knob_bounds.overlay.is_some()
+                    && spec.knob_bounds.schedule.is_some()
+            );
+        }
+
+        assert_eq!(
+            specs[0].risk_policy.calibration_confidence_requirement,
+            CalibrationConfidenceRequirement::NoMinimumConfidence
+        );
+        for spec in &specs[1..] {
+            match spec.risk_policy.calibration_confidence_requirement {
+                CalibrationConfidenceRequirement::NoMinimumConfidence => {
+                    panic!("non-bringup profiles require measured confidence")
+                }
+                CalibrationConfidenceRequirement::AtLeast { class } => {
+                    assert!(
+                        class.rank() >= CalibrationConfidenceClass::Transferred.rank(),
+                        "non-bringup profile {} requires {class:?}",
+                        spec.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compile_profile_spec_defaults_hash_is_deterministic() {
+        let specs = canonical_compile_profile_specs().expect("canonical profiles parse");
+
+        for spec in specs {
+            let hash = compile_profile_defaults_hash(&spec).expect("hashable profile spec");
+            assert_eq!(
+                spec.defaults_hash, hash,
+                "defaults_hash mismatch for {}",
+                spec.id
+            );
+            assert_eq!(
+                hash,
+                compile_profile_defaults_hash(&spec).expect("hashable profile spec"),
+                "defaults_hash is deterministic for {}",
+                spec.id
+            );
+        }
     }
 
     #[test]
