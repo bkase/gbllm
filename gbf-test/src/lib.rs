@@ -7,4 +7,5 @@ pub mod helpers;
 pub mod hint_bundle;
 pub mod lowerings;
 pub mod manifest;
+pub mod runtime_chrome_budget;
 pub mod workload;

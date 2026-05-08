@@ -1,0 +1,44 @@
+{
+  "target": "dmg-mbc5-8mib-128kib",
+  "profile": "Bringup",
+  "runtime_nucleus_hash": "sha256:2a1fc3405e389733a0006c5b1e6a314a7d81fbc671466a3bc02cdbb876cd1ec5",
+  "rom_slots": [
+    {
+      "id": 0,
+      "class": {
+        "kind": "Bank0Free"
+      },
+      "usable_bytes": 1024,
+      "reserved_slack": 64,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 128,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    }
+  ],
+  "memory_caps": {
+    "wram_usable_bytes": 8192,
+    "sram_usable_bytes": 32768,
+    "hram_usable_bytes": 127,
+    "source_target_profile_hash": "sha256:4c7d3f2d7c8d9ddc23d129defe53ed3e6510116784ef7106af86191c484878e8"
+  },
+  "wram_reserved": 128,
+  "sram_reserved": 512
+}

@@ -1,0 +1,52 @@
+{
+  "bundles": {
+    "Kernel": {
+      "layer": {
+        "kind": "Kernel"
+      },
+      "target_profile_hash": "sha256:4c7d3f2d7c8d9ddc23d129defe53ed3e6510116784ef7106af86191c484878e8",
+      "kernel_set_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "packer_version": "1.0.0",
+      "calibration_schema_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "validity_envelope": {
+        "future_fields": {}
+      },
+      "confidence": {
+        "kind": "None"
+      },
+      "measurements": null
+    },
+    "Platform": {
+      "layer": {
+        "kind": "Platform"
+      },
+      "target_profile_hash": "sha256:4c7d3f2d7c8d9ddc23d129defe53ed3e6510116784ef7106af86191c484878e8",
+      "kernel_set_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "packer_version": "1.0.0",
+      "calibration_schema_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "validity_envelope": {
+        "future_fields": {}
+      },
+      "confidence": {
+        "kind": "None"
+      },
+      "measurements": null
+    },
+    "Runtime": {
+      "layer": {
+        "kind": "Runtime"
+      },
+      "target_profile_hash": "sha256:4c7d3f2d7c8d9ddc23d129defe53ed3e6510116784ef7106af86191c484878e8",
+      "kernel_set_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "packer_version": "1.0.0",
+      "calibration_schema_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "validity_envelope": {
+        "future_fields": {}
+      },
+      "confidence": {
+        "kind": "None"
+      },
+      "measurements": null
+    }
+  }
+}
