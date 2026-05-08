@@ -4,6 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use gbf_foundation::{Hash256, SemVer, SemVerParseError};
+pub use gbf_policy::diagnostics::{DiagnosticSeverity, ValidationDiagnostic};
 use serde::de::DeserializeOwned;
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
@@ -69,21 +70,6 @@ impl fmt::Display for ReportSchemaId {
 pub enum ReportOutcome {
     Passed,
     Failed,
-}
-
-/// Diagnostic severity for F-B2/F-B4 semantic validation checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum DiagnosticSeverity {
-    Hard,
-    Soft,
-}
-
-/// Minimal diagnostic carrier used by `ReportBody::validate_semantics`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ValidationDiagnostic {
-    pub severity: DiagnosticSeverity,
 }
 
 /// Logical Rust wrapper for report bodies.
@@ -1355,6 +1341,7 @@ fn emit_canonical_json(value: &Value, bytes: &mut Vec<u8>) -> Result<(), Canonic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gbf_policy::diagnostics::{ValidationCode, ValidationDetail, ValidationOrigin};
 
     fn hash(byte: u8) -> Hash256 {
         Hash256::from_bytes([byte; 32])
@@ -1362,6 +1349,24 @@ mod tests {
 
     fn zero_hash_json() -> &'static str {
         "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+
+    fn diagnostic(severity: DiagnosticSeverity) -> ValidationDiagnostic {
+        ValidationDiagnostic::new(
+            severity,
+            ValidationOrigin::Schema,
+            ValidationCode::SchemaEpochUnsupported,
+            ValidationDetail::None,
+            Vec::new(),
+        )
+    }
+
+    fn hard_diagnostic() -> ValidationDiagnostic {
+        diagnostic(DiagnosticSeverity::Hard)
+    }
+
+    fn soft_diagnostic() -> ValidationDiagnostic {
+        diagnostic(DiagnosticSeverity::Soft)
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1507,9 +1512,7 @@ mod tests {
             outcome: ReportOutcome,
         ) -> Result<(), Vec<ValidationDiagnostic>> {
             if outcome == ReportOutcome::Passed && self.result.is_none() {
-                return Err(vec![ValidationDiagnostic {
-                    severity: DiagnosticSeverity::Hard,
-                }]);
+                return Err(vec![hard_diagnostic()]);
             }
             Ok(())
         }
@@ -1733,6 +1736,23 @@ mod tests {
     }
 
     #[test]
+    fn report_body_validation_uses_shared_policy_diagnostic_type() {
+        let report_diagnostic: ValidationDiagnostic = soft_diagnostic();
+        let policy_diagnostic: gbf_policy::diagnostics::ValidationDiagnostic =
+            report_diagnostic.clone();
+
+        assert_eq!(policy_diagnostic, report_diagnostic);
+        assert_eq!(
+            CanonicalJsonError::SemanticValidation {
+                diagnostics: vec![policy_diagnostic]
+            },
+            CanonicalJsonError::SemanticValidation {
+                diagnostics: vec![soft_diagnostic()]
+            }
+        );
+    }
+
+    #[test]
     fn canonical_json_rejects_float_values_in_f_b2_f_b4_reports() {
         let env = ReportEnvelope::new(
             ReportOutcome::Passed,
@@ -1854,9 +1874,7 @@ mod tests {
     #[test]
     fn f_b2_f_b4_reports_reject_soft_diagnostics() {
         let body = DiagnosticBody {
-            diagnostics: vec![ValidationDiagnostic {
-                severity: DiagnosticSeverity::Soft,
-            }],
+            diagnostics: vec![soft_diagnostic()],
         };
         assert!(body.validate_semantics(ReportOutcome::Passed).is_err());
 
@@ -1875,9 +1893,7 @@ mod tests {
         let env = ReportEnvelope::new(
             ReportOutcome::Passed,
             SoftScanBody {
-                diagnostics: vec![ValidationDiagnostic {
-                    severity: DiagnosticSeverity::Soft,
-                }],
+                diagnostics: vec![soft_diagnostic()],
             },
         )
         .expect("envelope");
