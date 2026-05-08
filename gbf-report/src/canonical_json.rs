@@ -1,11 +1,14 @@
 //! Shared F-B2/F-B4 report envelope, canonical JSON, and self-hash helpers.
 
-use std::any::type_name;
 use std::fmt;
 use std::str::FromStr;
 
 use gbf_foundation::{Hash256, SemVer, SemVerParseError};
 use serde::de::DeserializeOwned;
+use serde::ser::{
+    self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
+    SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -63,7 +66,6 @@ impl fmt::Display for ReportSchemaId {
 
 /// Chunk-level validator report outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
 pub enum ReportOutcome {
     Passed,
     Failed,
@@ -155,6 +157,7 @@ where
 
 /// Trait implemented by each concrete F-B2/F-B4 report body.
 pub trait ReportBody: Sized {
+    const REPORT_TYPE: &'static str;
     const SCHEMA_ID: &'static str;
     const SCHEMA_VERSION: &'static str;
 
@@ -324,6 +327,17 @@ impl fmt::Display for CanonicalJsonError {
 
 impl std::error::Error for CanonicalJsonError {}
 
+impl ser::Error for CanonicalJsonError {
+    fn custom<T>(msg: T) -> Self
+    where
+        T: fmt::Display,
+    {
+        Self::BodySerialization {
+            reason: msg.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportSelfHashError {
     CanonicalJson(CanonicalJsonError),
@@ -391,8 +405,8 @@ where
 
     let schema: ReportSchemaId = take_envelope_field(&mut map, SCHEMA_FIELD)
         .and_then(|value| decode_envelope_field(SCHEMA_FIELD, value))?;
-    let schema_version: SemVer = take_envelope_field(&mut map, SCHEMA_VERSION_FIELD)
-        .and_then(|value| decode_envelope_field(SCHEMA_VERSION_FIELD, value))?;
+    let schema_version = take_envelope_field(&mut map, SCHEMA_VERSION_FIELD)
+        .and_then(decode_schema_version_field)?;
     let outcome: ReportOutcome = take_envelope_field(&mut map, OUTCOME_FIELD)
         .and_then(|value| decode_envelope_field(OUTCOME_FIELD, value))?;
     let report_self_hash: Hash256 = take_envelope_field(&mut map, REPORT_SELF_HASH_FIELD)
@@ -438,6 +452,14 @@ where
 {
     serde_json::from_value(value).map_err(|error| ReportSelfHashError::EnvelopeDecode {
         field,
+        reason: error.to_string(),
+    })
+}
+
+fn decode_schema_version_field(value: Value) -> Result<SemVer, ReportSelfHashError> {
+    let version: String = decode_envelope_field(SCHEMA_VERSION_FIELD, value)?;
+    SemVer::from_str(&version).map_err(|error| ReportSelfHashError::EnvelopeDecode {
+        field: SCHEMA_VERSION_FIELD,
         reason: error.to_string(),
     })
 }
@@ -494,10 +516,7 @@ fn envelope_value_with_hash<R>(
 where
     R: ReportBody + Serialize,
 {
-    let body =
-        serde_json::to_value(&env.body).map_err(|error| CanonicalJsonError::BodySerialization {
-            reason: error.to_string(),
-        })?;
+    let body = to_json_value_rejecting_non_finite(&env.body)?;
     let body = match body {
         Value::Object(body) => body,
         _ => return Err(CanonicalJsonError::BodyMustSerializeAsObject),
@@ -510,11 +529,7 @@ where
     );
     map.insert(
         SCHEMA_VERSION_FIELD.to_owned(),
-        serde_json::to_value(env.schema_version).map_err(|error| {
-            CanonicalJsonError::BodySerialization {
-                reason: error.to_string(),
-            }
-        })?,
+        Value::String(env.schema_version.to_string()),
     );
     map.insert(
         OUTCOME_FIELD.to_owned(),
@@ -543,6 +558,605 @@ where
     Ok(Value::Object(map))
 }
 
+fn to_json_value_rejecting_non_finite<T>(value: &T) -> Result<Value, CanonicalJsonError>
+where
+    T: Serialize + ?Sized,
+{
+    value.serialize(StrictValueSerializer {
+        path: String::new(),
+    })
+}
+
+struct StrictValueSerializer {
+    path: String,
+}
+
+impl StrictValueSerializer {
+    fn child(&self, segment: &str) -> Self {
+        Self {
+            path: join_path(&self.path, segment),
+        }
+    }
+
+    fn number_from_f64(self, value: f64) -> Result<Value, CanonicalJsonError> {
+        if !value.is_finite() {
+            return Err(CanonicalJsonError::FloatingPointValue { path: self.path });
+        }
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or(CanonicalJsonError::FloatingPointValue { path: self.path })
+    }
+}
+
+impl Serializer for StrictValueSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+    type SerializeSeq = StrictSeqSerializer;
+    type SerializeTuple = StrictSeqSerializer;
+    type SerializeTupleStruct = StrictSeqSerializer;
+    type SerializeTupleVariant = StrictTupleVariantSerializer;
+    type SerializeMap = StrictMapSerializer;
+    type SerializeStruct = StrictStructSerializer;
+    type SerializeStructVariant = StrictStructVariantSerializer;
+
+    fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Bool(value))
+    }
+
+    fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
+        self.number_from_f64(f64::from(value))
+    }
+
+    fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
+        self.number_from_f64(value)
+    }
+
+    fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::String(value.to_string()))
+    }
+
+    fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Array(
+            value
+                .iter()
+                .copied()
+                .map(|byte| Value::Number(byte.into()))
+                .collect(),
+        ))
+    }
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Null)
+    }
+
+    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Null)
+    }
+
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Null)
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::String(variant.to_owned()))
+    }
+
+    fn serialize_newtype_struct<T>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        let mut map = Map::new();
+        map.insert(variant.to_owned(), value.serialize(self.child(variant))?);
+        Ok(Value::Object(map))
+    }
+
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        Ok(StrictSeqSerializer::new(self.path, len))
+    }
+
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        Ok(StrictSeqSerializer::new(self.path, Some(len)))
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        Ok(StrictSeqSerializer::new(self.path, Some(len)))
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        Ok(StrictTupleVariantSerializer {
+            variant: variant.to_owned(),
+            seq: StrictSeqSerializer::new(self.path, Some(len)),
+        })
+    }
+
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        Ok(StrictMapSerializer {
+            path: self.path,
+            entries: Map::with_capacity(len.unwrap_or(0)),
+            next_key: None,
+        })
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        Ok(StrictStructSerializer {
+            path: self.path,
+            entries: Map::with_capacity(len),
+        })
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        Ok(StrictStructVariantSerializer {
+            variant: variant.to_owned(),
+            inner: StrictStructSerializer {
+                path: join_path(&self.path, variant),
+                entries: Map::with_capacity(len),
+            },
+        })
+    }
+}
+
+struct StrictSeqSerializer {
+    path: String,
+    values: Vec<Value>,
+}
+
+impl StrictSeqSerializer {
+    fn new(path: String, len: Option<usize>) -> Self {
+        Self {
+            path,
+            values: Vec::with_capacity(len.unwrap_or(0)),
+        }
+    }
+}
+
+impl SerializeSeq for StrictSeqSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        let serializer = StrictValueSerializer {
+            path: format!("{}[{}]", self.path, self.values.len()),
+        };
+        self.values.push(value.serialize(serializer)?);
+        Ok(())
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Array(self.values))
+    }
+}
+
+impl SerializeTuple for StrictSeqSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        SerializeSeq::serialize_element(self, value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        SerializeSeq::end(self)
+    }
+}
+
+impl SerializeTupleStruct for StrictSeqSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        SerializeSeq::serialize_element(self, value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        SerializeSeq::end(self)
+    }
+}
+
+struct StrictTupleVariantSerializer {
+    variant: String,
+    seq: StrictSeqSerializer,
+}
+
+impl SerializeTupleVariant for StrictTupleVariantSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        SerializeSeq::serialize_element(&mut self.seq, value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        let mut map = Map::new();
+        map.insert(self.variant, SerializeSeq::end(self.seq)?);
+        Ok(Value::Object(map))
+    }
+}
+
+struct StrictMapSerializer {
+    path: String,
+    entries: Map<String, Value>,
+    next_key: Option<String>,
+}
+
+impl SerializeMap for StrictMapSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+
+    fn serialize_key<T>(&mut self, key: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        self.next_key = Some(key.serialize(StringKeySerializer)?);
+        Ok(())
+    }
+
+    fn serialize_value<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        let key = self
+            .next_key
+            .take()
+            .ok_or_else(|| serialization_error("map value serialized before key"))?;
+        let child_path = join_path(&self.path, &key);
+        self.entries.insert(
+            key,
+            value.serialize(StrictValueSerializer { path: child_path })?,
+        );
+        Ok(())
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Object(self.entries))
+    }
+}
+
+struct StrictStructSerializer {
+    path: String,
+    entries: Map<String, Value>,
+}
+
+impl SerializeStruct for StrictStructSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        let child_path = join_path(&self.path, key);
+        self.entries.insert(
+            key.to_owned(),
+            value.serialize(StrictValueSerializer { path: child_path })?,
+        );
+        Ok(())
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(Value::Object(self.entries))
+    }
+}
+
+struct StrictStructVariantSerializer {
+    variant: String,
+    inner: StrictStructSerializer,
+}
+
+impl SerializeStructVariant for StrictStructVariantSerializer {
+    type Ok = Value;
+    type Error = CanonicalJsonError;
+
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        SerializeStruct::serialize_field(&mut self.inner, key, value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        let mut map = Map::new();
+        map.insert(self.variant, SerializeStruct::end(self.inner)?);
+        Ok(Value::Object(map))
+    }
+}
+
+struct StringKeySerializer;
+
+impl Serializer for StringKeySerializer {
+    type Ok = String;
+    type Error = CanonicalJsonError;
+    type SerializeSeq = Impossible<String, CanonicalJsonError>;
+    type SerializeTuple = Impossible<String, CanonicalJsonError>;
+    type SerializeTupleStruct = Impossible<String, CanonicalJsonError>;
+    type SerializeTupleVariant = Impossible<String, CanonicalJsonError>;
+    type SerializeMap = Impossible<String, CanonicalJsonError>;
+    type SerializeStruct = Impossible<String, CanonicalJsonError>;
+    type SerializeStructVariant = Impossible<String, CanonicalJsonError>;
+
+    fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
+        if value.is_finite() {
+            Ok(value.to_string())
+        } else {
+            Err(CanonicalJsonError::FloatingPointValue {
+                path: "<map-key>".to_owned(),
+            })
+        }
+    }
+
+    fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
+        if value.is_finite() {
+            Ok(value.to_string())
+        } else {
+            Err(CanonicalJsonError::FloatingPointValue {
+                path: "<map-key>".to_owned(),
+            })
+        }
+    }
+
+    fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_string())
+    }
+
+    fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
+        Ok(value.to_owned())
+    }
+
+    fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
+        Err(serialization_error("byte-array map keys are unsupported"))
+    }
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        Err(serialization_error("null map keys are unsupported"))
+    }
+
+    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        Err(serialization_error("unit map keys are unsupported"))
+    }
+
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+        Err(serialization_error("unit struct map keys are unsupported"))
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        Ok(variant.to_owned())
+    }
+
+    fn serialize_newtype_struct<T>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        Err(serialization_error(
+            "newtype variant map keys are unsupported",
+        ))
+    }
+
+    fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        Err(serialization_error("sequence map keys are unsupported"))
+    }
+
+    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        Err(serialization_error("tuple map keys are unsupported"))
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        Err(serialization_error("tuple struct map keys are unsupported"))
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        Err(serialization_error(
+            "tuple variant map keys are unsupported",
+        ))
+    }
+
+    fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        Err(serialization_error("map map keys are unsupported"))
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        Err(serialization_error("struct map keys are unsupported"))
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        Err(serialization_error(
+            "struct variant map keys are unsupported",
+        ))
+    }
+}
+
+fn join_path(parent: &str, segment: &str) -> String {
+    if parent.is_empty() {
+        segment.to_owned()
+    } else {
+        format!("{parent}.{segment}")
+    }
+}
+
+fn serialization_error(message: impl fmt::Display) -> CanonicalJsonError {
+    <CanonicalJsonError as ser::Error>::custom(message)
+}
+
 fn domain_separator<R>() -> Result<Vec<u8>, ReportSelfHashError>
 where
     R: ReportBody,
@@ -555,18 +1169,11 @@ where
     })?;
     Ok(format!(
         "gbf:gbf-report:{}:{}:{}\0",
-        short_type_name::<R>(),
+        R::REPORT_TYPE,
         R::SCHEMA_ID,
         version
     )
     .into_bytes())
-}
-
-fn short_type_name<R>() -> &'static str {
-    type_name::<R>()
-        .rsplit("::")
-        .next()
-        .unwrap_or(type_name::<R>())
 }
 
 fn validate_json_contract(schema: &str, value: &Value) -> Result<(), CanonicalJsonError> {
@@ -651,7 +1258,11 @@ fn is_hash_string_path(path: &str) -> bool {
         .next()
         .unwrap_or(path);
 
-    field == "digest" || field == "sha256" || field.ends_with("_hash")
+    field == "digest"
+        || field == "sha256"
+        || field == "target_defaults"
+        || field == "profile_defaults"
+        || field.ends_with("_hash")
 }
 
 fn is_canonical_sha256_string(value: &str) -> bool {
@@ -768,6 +1379,7 @@ mod tests {
     }
 
     impl ReportBody for ByteStableBody {
+        const REPORT_TYPE: &'static str = "ByteStableReport";
         const SCHEMA_ID: &'static str = "byte_stable_report.v1";
         const SCHEMA_VERSION: &'static str = "1.0.0";
 
@@ -787,6 +1399,7 @@ mod tests {
     }
 
     impl ReportBody for FloatBody {
+        const REPORT_TYPE: &'static str = "ArtifactValidationReport";
         const SCHEMA_ID: &'static str = ARTIFACT_VALIDATION_SCHEMA;
         const SCHEMA_VERSION: &'static str = "1.0.0";
 
@@ -805,6 +1418,7 @@ mod tests {
     }
 
     impl ReportBody for DiagnosticBody {
+        const REPORT_TYPE: &'static str = "PolicyResolutionReport";
         const SCHEMA_ID: &'static str = POLICY_RESOLUTION_SCHEMA;
         const SCHEMA_VERSION: &'static str = "1.0.0";
 
@@ -845,6 +1459,7 @@ mod tests {
     }
 
     impl ReportBody for ArtifactNullBody {
+        const REPORT_TYPE: &'static str = "ArtifactValidationReport";
         const SCHEMA_ID: &'static str = ARTIFACT_VALIDATION_SCHEMA;
         const SCHEMA_VERSION: &'static str = "1.0.0";
 
@@ -863,6 +1478,7 @@ mod tests {
     }
 
     impl ReportBody for ArtifactValidationFixtureBody {
+        const REPORT_TYPE: &'static str = "ArtifactValidationReport";
         const SCHEMA_ID: &'static str = ARTIFACT_VALIDATION_SCHEMA;
         const SCHEMA_VERSION: &'static str = "1.0.0";
 
@@ -882,6 +1498,7 @@ mod tests {
     }
 
     impl ReportBody for PolicyResolutionFixtureBody {
+        const REPORT_TYPE: &'static str = "PolicyResolutionReport";
         const SCHEMA_ID: &'static str = POLICY_RESOLUTION_SCHEMA;
         const SCHEMA_VERSION: &'static str = "1.0.0";
 
@@ -906,7 +1523,150 @@ mod tests {
     }
 
     impl ReportBody for StaticBudgetFixtureBody {
+        const REPORT_TYPE: &'static str = "StaticBudgetReport";
         const SCHEMA_ID: &'static str = STATIC_BUDGET_SCHEMA;
+        const SCHEMA_VERSION: &'static str = "1.0.0";
+
+        fn validate_semantics(
+            &self,
+            _outcome: ReportOutcome,
+        ) -> Result<(), Vec<ValidationDiagnostic>> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SoftScanBody {
+        diagnostics: Vec<ValidationDiagnostic>,
+    }
+
+    impl ReportBody for SoftScanBody {
+        const REPORT_TYPE: &'static str = "PolicyResolutionReport";
+        const SCHEMA_ID: &'static str = POLICY_RESOLUTION_SCHEMA;
+        const SCHEMA_VERSION: &'static str = "1.0.0";
+
+        fn validate_semantics(
+            &self,
+            _outcome: ReportOutcome,
+        ) -> Result<(), Vec<ValidationDiagnostic>> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NullableFloatBody {
+        result: f64,
+        diagnostics: Vec<ValidationDiagnostic>,
+    }
+
+    impl ReportBody for NullableFloatBody {
+        const REPORT_TYPE: &'static str = "PolicyResolutionReport";
+        const SCHEMA_ID: &'static str = POLICY_RESOLUTION_SCHEMA;
+        const SCHEMA_VERSION: &'static str = "1.0.0";
+
+        fn validate_semantics(
+            &self,
+            _outcome: ReportOutcome,
+        ) -> Result<(), Vec<ValidationDiagnostic>> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PolicyNullBody {
+        result: Option<String>,
+        unexpected_missing_hash: Option<Hash256>,
+        diagnostics: Vec<ValidationDiagnostic>,
+    }
+
+    impl ReportBody for PolicyNullBody {
+        const REPORT_TYPE: &'static str = "PolicyResolutionReport";
+        const SCHEMA_ID: &'static str = POLICY_RESOLUTION_SCHEMA;
+        const SCHEMA_VERSION: &'static str = "1.0.0";
+
+        fn validate_semantics(
+            &self,
+            _outcome: ReportOutcome,
+        ) -> Result<(), Vec<ValidationDiagnostic>> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StaticNullBody {
+        identity: StaticNullIdentity,
+        runtime_chrome_budget: Option<String>,
+        projections: StaticNullProjections,
+        diagnostics: Vec<ValidationDiagnostic>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StaticNullIdentity {
+        runtime_chrome_budget_hash: Option<Hash256>,
+        unexpected_missing_hash: Option<Hash256>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StaticNullProjections {
+        common_bank_footprint: StaticCommonBankFootprint,
+        projected_bank_switches_per_token: StaticSwitchProjection,
+        projected_sram_page_switches_per_token: StaticSwitchProjection,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StaticCommonBankFootprint {
+        shared_dense_ffn_bytes: Option<u32>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StaticSwitchProjection {
+        expected_q16_16: Option<u32>,
+    }
+
+    impl ReportBody for StaticNullBody {
+        const REPORT_TYPE: &'static str = "StaticBudgetReport";
+        const SCHEMA_ID: &'static str = STATIC_BUDGET_SCHEMA;
+        const SCHEMA_VERSION: &'static str = "1.0.0";
+
+        fn validate_semantics(
+            &self,
+            _outcome: ReportOutcome,
+        ) -> Result<(), Vec<ValidationDiagnostic>> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PolicyHashPathsBody {
+        result: Option<PolicyHashPathsResult>,
+        diagnostics: Vec<ValidationDiagnostic>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PolicyHashPathsResult {
+        provenance: PolicyHashPathsProvenance,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PolicyHashPathsProvenance {
+        target_defaults: String,
+        profile_defaults: String,
+    }
+
+    impl ReportBody for PolicyHashPathsBody {
+        const REPORT_TYPE: &'static str = "PolicyResolutionReport";
+        const SCHEMA_ID: &'static str = POLICY_RESOLUTION_SCHEMA;
         const SCHEMA_VERSION: &'static str = "1.0.0";
 
         fn validate_semantics(
@@ -936,9 +1696,39 @@ mod tests {
         assert_eq!(
             json,
             format!(
-                "{{\"alpha\":{{\"a\":1,\"b\":[true,false]}},\"outcome\":{{\"kind\":\"Passed\"}},\"report_self_hash\":\"{}\",\"schema\":\"byte_stable_report.v1\",\"schema_version\":{{\"major\":1,\"minor\":0,\"patch\":0}},\"zeta\":2}}",
+                "{{\"alpha\":{{\"a\":1,\"b\":[true,false]}},\"outcome\":\"Passed\",\"report_self_hash\":\"{}\",\"schema\":\"byte_stable_report.v1\",\"schema_version\":\"1.0.0\",\"zeta\":2}}",
                 zero_hash_json()
             )
+        );
+    }
+
+    #[test]
+    fn report_envelope_public_shape_matches_rfc_examples() {
+        let env = ReportEnvelope::new(
+            ReportOutcome::Failed,
+            ByteStableBody {
+                zeta: 2,
+                alpha: ByteStableNested {
+                    b: vec![true],
+                    a: 1,
+                },
+            },
+        )
+        .expect("envelope");
+
+        assert_eq!(
+            serde_json::to_value(&env).expect("public JSON value"),
+            serde_json::json!({
+                "schema": "byte_stable_report.v1",
+                "schema_version": "1.0.0",
+                "outcome": "Failed",
+                "report_self_hash": zero_hash_json(),
+                "alpha": {
+                    "a": 1,
+                    "b": [true]
+                },
+                "zeta": 2
+            })
         );
     }
 
@@ -958,6 +1748,64 @@ mod tests {
             Err(CanonicalJsonError::FloatingPointValue {
                 path: "score".to_owned()
             })
+        );
+    }
+
+    #[test]
+    fn canonical_json_rejects_non_finite_float_before_nullable_null_scan() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let env = ReportEnvelope::new(
+                ReportOutcome::Failed,
+                NullableFloatBody {
+                    result: value,
+                    diagnostics: Vec::new(),
+                },
+            )
+            .expect("envelope");
+
+            assert_eq!(
+                canonicalize(&env),
+                Err(CanonicalJsonError::FloatingPointValue {
+                    path: "result".to_owned()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn self_hash_golden_pins_domain_and_canonical_bytes() {
+        let env = ReportEnvelope::new(
+            ReportOutcome::Passed,
+            ByteStableBody {
+                zeta: 7,
+                alpha: ByteStableNested {
+                    b: vec![false],
+                    a: 3,
+                },
+            },
+        )
+        .expect("envelope");
+        let canonical = canonicalize(&env).expect("canonical json");
+        let domain = domain_separator::<ByteStableBody>().expect("domain separator");
+
+        assert_eq!(
+            canonical,
+            format!(
+                "{{\"alpha\":{{\"a\":3,\"b\":[false]}},\"outcome\":\"Passed\",\"report_self_hash\":\"{}\",\"schema\":\"byte_stable_report.v1\",\"schema_version\":\"1.0.0\",\"zeta\":7}}",
+                zero_hash_json()
+            )
+            .into_bytes()
+        );
+        assert_eq!(
+            domain,
+            b"gbf:gbf-report:ByteStableReport:byte_stable_report.v1:1.0.0\0"
+        );
+        assert_eq!(
+            compute_self_hash(&env).expect("self hash"),
+            Hash256::from_str(
+                "sha256:c27bf548d583fda2a456d46a7185196c3ffdcf92e01d2a62132596534d49a6ae"
+            )
+            .expect("expected hash")
         );
     }
 
@@ -1023,8 +1871,28 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_f_b4_reports_reject_soft_diagnostics_from_json_scan() {
+        let env = ReportEnvelope::new(
+            ReportOutcome::Passed,
+            SoftScanBody {
+                diagnostics: vec![ValidationDiagnostic {
+                    severity: DiagnosticSeverity::Soft,
+                }],
+            },
+        )
+        .expect("envelope");
+
+        assert_eq!(
+            canonicalize(&env),
+            Err(CanonicalJsonError::SoftDiagnostic {
+                path: "diagnostics[0].severity".to_owned()
+            })
+        );
+    }
+
+    #[test]
     fn f_b2_f_b4_reports_reject_unlisted_null_fields() {
-        let allowed = ReportEnvelope::new(
+        let allowed_artifact = ReportEnvelope::new(
             ReportOutcome::Passed,
             ArtifactNullBody {
                 identity: ArtifactNullIdentity {
@@ -1036,9 +1904,9 @@ mod tests {
             },
         )
         .expect("envelope");
-        canonicalize(&allowed).expect("listed null fields are accepted");
+        canonicalize(&allowed_artifact).expect("artifact_validation listed null fields accepted");
 
-        let unlisted = ReportEnvelope::new(
+        let unlisted_artifact = ReportEnvelope::new(
             ReportOutcome::Passed,
             ArtifactNullBody {
                 identity: ArtifactNullIdentity {
@@ -1052,10 +1920,153 @@ mod tests {
         .expect("envelope");
 
         assert_eq!(
-            canonicalize(&unlisted),
+            canonicalize(&unlisted_artifact),
             Err(CanonicalJsonError::UnlistedNullField {
                 schema: ARTIFACT_VALIDATION_SCHEMA.to_owned(),
                 path: "identity.unexpected_missing_hash".to_owned()
+            })
+        );
+
+        let allowed_policy = ReportEnvelope::new(
+            ReportOutcome::Failed,
+            PolicyNullBody {
+                result: None,
+                unexpected_missing_hash: Some(hash(2)),
+                diagnostics: Vec::new(),
+            },
+        )
+        .expect("envelope");
+        canonicalize(&allowed_policy).expect("policy_resolution listed null fields accepted");
+
+        let unlisted_policy = ReportEnvelope::new(
+            ReportOutcome::Failed,
+            PolicyNullBody {
+                result: None,
+                unexpected_missing_hash: None,
+                diagnostics: Vec::new(),
+            },
+        )
+        .expect("envelope");
+
+        assert_eq!(
+            canonicalize(&unlisted_policy),
+            Err(CanonicalJsonError::UnlistedNullField {
+                schema: POLICY_RESOLUTION_SCHEMA.to_owned(),
+                path: "unexpected_missing_hash".to_owned()
+            })
+        );
+
+        let allowed_static_budget = ReportEnvelope::new(
+            ReportOutcome::Failed,
+            StaticNullBody {
+                identity: StaticNullIdentity {
+                    runtime_chrome_budget_hash: None,
+                    unexpected_missing_hash: Some(hash(3)),
+                },
+                runtime_chrome_budget: None,
+                projections: StaticNullProjections {
+                    common_bank_footprint: StaticCommonBankFootprint {
+                        shared_dense_ffn_bytes: None,
+                    },
+                    projected_bank_switches_per_token: StaticSwitchProjection {
+                        expected_q16_16: None,
+                    },
+                    projected_sram_page_switches_per_token: StaticSwitchProjection {
+                        expected_q16_16: None,
+                    },
+                },
+                diagnostics: Vec::new(),
+            },
+        )
+        .expect("envelope");
+        canonicalize(&allowed_static_budget).expect("static_budget listed null fields accepted");
+
+        let unlisted_static_budget = ReportEnvelope::new(
+            ReportOutcome::Failed,
+            StaticNullBody {
+                identity: StaticNullIdentity {
+                    runtime_chrome_budget_hash: None,
+                    unexpected_missing_hash: None,
+                },
+                runtime_chrome_budget: None,
+                projections: StaticNullProjections {
+                    common_bank_footprint: StaticCommonBankFootprint {
+                        shared_dense_ffn_bytes: None,
+                    },
+                    projected_bank_switches_per_token: StaticSwitchProjection {
+                        expected_q16_16: None,
+                    },
+                    projected_sram_page_switches_per_token: StaticSwitchProjection {
+                        expected_q16_16: None,
+                    },
+                },
+                diagnostics: Vec::new(),
+            },
+        )
+        .expect("envelope");
+
+        assert_eq!(
+            canonicalize(&unlisted_static_budget),
+            Err(CanonicalJsonError::UnlistedNullField {
+                schema: STATIC_BUDGET_SCHEMA.to_owned(),
+                path: "identity.unexpected_missing_hash".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn policy_resolution_known_hash_paths_require_sha256_prefix() {
+        let target_defaults_env = ReportEnvelope::new(
+            ReportOutcome::Passed,
+            PolicyHashPathsBody {
+                result: Some(PolicyHashPathsResult {
+                    provenance: PolicyHashPathsProvenance {
+                        target_defaults:
+                            "0000000000000000000000000000000000000000000000000000000000000000"
+                                .to_owned(),
+                        profile_defaults:
+                            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                                .to_owned(),
+                    },
+                }),
+                diagnostics: Vec::new(),
+            },
+        )
+        .expect("envelope");
+
+        assert_eq!(
+            canonicalize(&target_defaults_env),
+            Err(CanonicalJsonError::NonCanonicalHashString {
+                path: "result.provenance.target_defaults".to_owned(),
+                value: "0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned()
+            })
+        );
+
+        let profile_defaults_env = ReportEnvelope::new(
+            ReportOutcome::Passed,
+            PolicyHashPathsBody {
+                result: Some(PolicyHashPathsResult {
+                    provenance: PolicyHashPathsProvenance {
+                        target_defaults:
+                            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                                .to_owned(),
+                        profile_defaults:
+                            "1111111111111111111111111111111111111111111111111111111111111111"
+                                .to_owned(),
+                    },
+                }),
+                diagnostics: Vec::new(),
+            },
+        )
+        .expect("envelope");
+
+        assert_eq!(
+            canonicalize(&profile_defaults_env),
+            Err(CanonicalJsonError::NonCanonicalHashString {
+                path: "result.provenance.profile_defaults".to_owned(),
+                value: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_owned()
             })
         );
     }
@@ -1064,10 +2075,10 @@ mod tests {
     fn report_envelope_rejects_noncanonical_hash_strings() {
         let json = concat!(
             "{\"alpha\":{\"a\":1,\"b\":[]},",
-            "\"outcome\":{\"kind\":\"Passed\"},",
+            "\"outcome\":\"Passed\",",
             "\"report_self_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",",
             "\"schema\":\"byte_stable_report.v1\",",
-            "\"schema_version\":{\"major\":1,\"minor\":0,\"patch\":0},",
+            "\"schema_version\":\"1.0.0\",",
             "\"zeta\":2}"
         );
 
@@ -1081,7 +2092,7 @@ mod tests {
         R: ReportBody + Serialize + DeserializeOwned + fmt::Debug,
     {
         let json = format!(
-            "{{\"schema\":\"{schema}\",\"schema_version\":{{\"major\":1,\"minor\":0,\"patch\":0}},\"outcome\":{{\"kind\":\"Passed\"}},\"report_self_hash\":\"{}\",{}}}",
+            "{{\"schema\":\"{schema}\",\"schema_version\":\"1.0.0\",\"outcome\":\"Passed\",\"report_self_hash\":\"{}\",{}}}",
             zero_hash_json(),
             body_json.trim_start_matches('{').trim_end_matches('}')
         );
