@@ -2366,6 +2366,8 @@ dependencies = [
  "gbf-hw",
  "serde",
  "serde_json",
+ "sha2",
+ "toml",
 ]
 
 [[package]]
