@@ -681,6 +681,23 @@ mod tests {
     #[test]
     fn validation_code_pins_amendment_variant_json_shapes() {
         let bounds = canonical_default_bounds_fixture();
+        let default_bounds_json = serde_json::json!({
+            "placement": {"max_profile": {"kind": "PackedExperts"}},
+            "observation": {"max_probe_level": {"kind": "Verbose"}},
+            "range": {"max_reduction_ceiling": {"kind": "Adaptive"}},
+            "storage": {"max_materialization": {"kind": "SpillColdValues"}},
+            "sram": {"max_page_aggression": {"kind": "MinimizeResident"}},
+            "rom_window": {
+                "max_kernel_residency_bias": {"kind": "PreferWramOverlay"},
+                "max_kernel_duplication_bias": {"kind": "DuplicateAllFit"}
+            },
+            "overlay": {"max_promotion": {"kind": "EligibleKernels"}},
+            "schedule": {
+                "max_tile_search": {"kind": "ProfileGuided"},
+                "max_slice_coarsening": {"kind": "Coarse"},
+                "max_resource_pressure": {"kind": "FitFirst"}
+            }
+        });
 
         assert_eq!(
             serde_json::to_value(ValidationCode::PolicyConstraintUnsatisfiable {
@@ -688,8 +705,15 @@ mod tests {
                 left: bounds.clone(),
                 right: bounds,
             })
-            .expect("policy constraint code serializes")["kind"],
-            serde_json::json!("PolicyConstraintUnsatisfiable")
+            .expect("policy constraint code serializes"),
+            serde_json::json!({
+                "kind": "PolicyConstraintUnsatisfiable",
+                "fields": {
+                    "knob": { "kind": "Placement" },
+                    "left": default_bounds_json,
+                    "right": default_bounds_json
+                }
+            })
         );
 
         assert_eq!(
