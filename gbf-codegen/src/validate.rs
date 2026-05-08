@@ -6,7 +6,7 @@
 //! ```compile_fail
 //! use std::borrow::Cow;
 //!
-//! use gbf_artifact::{ArtifactAux, HintBundle, TargetDataLoweringArtifact};
+//! use gbf_artifact::{HintBundle, TargetDataLoweringArtifact};
 //! use gbf_codegen::stages::validate::{
 //!     ImportedArtifactView, ValidatedInputHashes, ValidatedInputs,
 //! };
@@ -35,7 +35,7 @@
 //!         compile_profile,
 //!         calibration,
 //!         input_hashes,
-//!         _private: (),
+//!         _private: unreachable!(),
 //!     };
 //! }
 //! ```
@@ -45,25 +45,31 @@ use std::error::Error;
 use std::fmt;
 
 use gbf_artifact::aux::SidecarKind;
-use gbf_artifact::{ArtifactAux, HintBundle, TargetDataLoweringArtifact};
-use gbf_artifact::{core::ArtifactCore, manifest::ArtifactFeature};
+use gbf_artifact::core::ArtifactCore;
+use gbf_artifact::{ArtifactAux, ArtifactManifest, HintBundle, TargetDataLoweringArtifact};
 use gbf_foundation::{BlobRef, Hash256};
 use gbf_hw::target::TargetProfile;
-use gbf_policy::{CalibrationBundleSet, CompileProfileSpec, CompileRequest, EvidenceRef};
-use gbf_report::report_envelope::canonicalize as canonicalize_report;
+use gbf_policy::{
+    CalibrationBundleSet, CalibrationLayer, CompileProfileSpec, CompileRequest, DiagnosticSeverity,
+    EvidenceRef, FieldPath, ValidationCode, ValidationDetail,
+    ValidationDiagnostic as PolicyValidationDiagnostic, ValidationOrigin,
+};
 use gbf_report::report_schemas::artifact_validation_v1::{
     ArtifactCompatibilityDecision, ArtifactCompatibilitySection, ArtifactValidationIdentitySection,
-    ArtifactValidationInputSection, ArtifactValidationReportBody, DiagnosticSeverity,
-    ValidationCode, ValidationDetail, ValidationDiagnosticRecord, ValidationOrigin,
+    ArtifactValidationInputSection, ArtifactValidationReportBody,
 };
-use gbf_report::{ReportEnvelope, ReportOutcome, compute_self_hash};
+use gbf_report::{
+    ReportBody, ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report,
+    compute_self_hash,
+};
 use gbf_workload::{
     GoldenVectorId, GoldenVectorRef, WorkloadId, WorkloadManifest, WorkloadManifestRef,
 };
 use serde::Serialize;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-pub type ValidationDiagnostic = ValidationDiagnosticRecord;
+pub type ValidationDiagnostic = PolicyValidationDiagnostic;
 
 pub struct ValidateInputs<'a> {
     pub artifact: &'a ImportedArtifactView,
@@ -105,6 +111,7 @@ pub trait ArtifactResolver {
 #[serde(deny_unknown_fields)]
 pub struct ImportedArtifactView {
     pub core: ArtifactCore,
+    pub manifest: ArtifactManifest,
     pub aux: ArtifactAux,
     pub hint_bundle: HintBundle,
     pub reference: Option<ReferenceLink>,
@@ -115,6 +122,7 @@ impl ImportedArtifactView {
     #[must_use]
     pub fn new(
         core: ArtifactCore,
+        manifest: ArtifactManifest,
         aux: ArtifactAux,
         hint_bundle: Option<HintBundle>,
         reference: Option<ReferenceLink>,
@@ -122,6 +130,7 @@ impl ImportedArtifactView {
     ) -> Self {
         Self {
             core,
+            manifest,
             aux,
             hint_bundle: hint_bundle.unwrap_or_else(HintBundle::empty),
             reference,
@@ -132,6 +141,11 @@ impl ImportedArtifactView {
     #[must_use]
     pub fn hint_bundle_hash(&self) -> Hash256 {
         self.hint_bundle.compute_canonical_hash()
+    }
+
+    #[must_use]
+    pub fn manifest_hash(&self) -> Hash256 {
+        self.manifest.manifest_self_hash
     }
 }
 
@@ -200,6 +214,8 @@ pub struct ValidationProduct<'a> {
 pub struct ValidationStageFailure {
     pub report: ReportEnvelope<ArtifactValidationReportBody>,
     pub diagnostics: Vec<ValidationDiagnostic>,
+    pub artifact_validation_self_hash: Hash256,
+    pub artifact_validation_canonical_bytes_hash: Hash256,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
@@ -317,14 +333,50 @@ pub fn compute_validated_input_hashes(
     ValidatedInputHashes {
         artifact_source_hash: inputs.artifact.transport.transport_hash,
         artifact_effective_core_hash,
-        artifact_manifest_hash: input_hash("artifact_manifest", &artifact_effective_core_hash),
-        artifact_aux_hash: input_hash("artifact_aux", &inputs.artifact.aux),
-        lowering_manifest_hash: input_hash("lowering_manifest", inputs.lowerings),
+        artifact_manifest_hash: inputs.artifact.manifest_hash(),
+        artifact_aux_hash: input_hash(
+            "gbf-artifact",
+            "ArtifactAux",
+            "artifact_aux",
+            "1.0.0",
+            &inputs.artifact.aux,
+        ),
+        lowering_manifest_hash: input_hash(
+            "gbf-artifact",
+            "TargetDataLoweringArtifactList",
+            "lowering_manifest",
+            "1.0.0",
+            inputs.lowerings,
+        ),
         hint_bundle_hash: inputs.artifact.hint_bundle_hash(),
-        compile_request_hash: input_hash("compile_request", inputs.compile_request),
-        target_profile_hash: input_hash("target_profile", inputs.target_profile),
-        compile_profile_hash: input_hash("compile_profile", inputs.compile_profile),
-        calibration_hash: input_hash("calibration", calibration),
+        compile_request_hash: input_hash(
+            "gbf-policy",
+            "CompileRequest",
+            "compile_request",
+            "1.0.0",
+            inputs.compile_request,
+        ),
+        target_profile_hash: input_hash(
+            "gbf-hw",
+            "TargetProfile",
+            "target_profile",
+            "1.0.0",
+            inputs.target_profile,
+        ),
+        compile_profile_hash: input_hash(
+            "gbf-policy",
+            "CompileProfileSpec",
+            "compile_profile",
+            "1.0.0",
+            inputs.compile_profile,
+        ),
+        calibration_hash: input_hash(
+            "gbf-policy",
+            "CalibrationBundleSet",
+            "calibration",
+            "1.0.0",
+            calibration,
+        ),
         compatibility_adapter_hash: None,
     }
 }
@@ -380,39 +432,69 @@ fn success_report(
             diagnostics: Vec::new(),
         },
     )
+    .expect("artifact_validation.v1 schema constants are valid")
 }
 
 fn missing_calibration_failure(inputs: &ValidateInputs<'_>) -> ValidationStageFailure {
-    let diagnostic = ValidationDiagnosticRecord {
-        severity: DiagnosticSeverity::Hard,
-        origin: ValidationOrigin::Calibration,
-        code: ValidationCode::ArtifactValidationInvariant {
-            name: "MissingCalibration".to_owned(),
-        },
-        detail: ValidationDetail::Field {
-            field: "calibration".to_owned(),
-        },
-        provenance: vec![EvidenceRef {
-            kind: "compile_request".to_owned(),
-            reference: "calibration_set_ref".to_owned(),
-            hash: None,
-        }],
-    };
+    let compile_request_hash = input_hash(
+        "gbf-policy",
+        "CompileRequest",
+        "compile_request",
+        "1.0.0",
+        inputs.compile_request,
+    );
+    let diagnostics = CalibrationLayer::all()
+        .into_iter()
+        .map(|class| ValidationDiagnostic {
+            severity: DiagnosticSeverity::Hard,
+            origin: ValidationOrigin::Calibration,
+            code: ValidationCode::CalibrationMissing { class },
+            detail: ValidationDetail::Field {
+                field: FieldPath::from(format!("calibration.{class:?}")),
+            },
+            provenance: vec![EvidenceRef {
+                kind: "compile_request".to_owned(),
+                reference: "calibration_set_ref".to_owned(),
+                hash: Some(compile_request_hash),
+            }],
+        })
+        .collect::<Vec<_>>();
     let body = ArtifactValidationReportBody {
         identity: ArtifactValidationIdentitySection {
             artifact_source_hash: Some(inputs.artifact.transport.transport_hash),
             artifact_effective_core_hash: Some(inputs.artifact.core.semantic_hash()),
-            artifact_manifest_hash: Some(input_hash(
-                "artifact_manifest",
-                &inputs.artifact.core.semantic_hash(),
-            )),
+            artifact_manifest_hash: Some(inputs.artifact.manifest_hash()),
             semantic_core_hash: Some(inputs.artifact.core.semantic_hash()),
-            artifact_aux_hash: Some(input_hash("artifact_aux", &inputs.artifact.aux)),
-            lowering_manifest_hash: Some(input_hash("lowering_manifest", inputs.lowerings)),
+            artifact_aux_hash: Some(input_hash(
+                "gbf-artifact",
+                "ArtifactAux",
+                "artifact_aux",
+                "1.0.0",
+                &inputs.artifact.aux,
+            )),
+            lowering_manifest_hash: Some(input_hash(
+                "gbf-artifact",
+                "TargetDataLoweringArtifactList",
+                "lowering_manifest",
+                "1.0.0",
+                inputs.lowerings,
+            )),
             hint_bundle_hash: inputs.artifact.hint_bundle_hash(),
-            compile_request_hash: input_hash("compile_request", inputs.compile_request),
-            target_profile_hash: input_hash("target_profile", inputs.target_profile),
-            compile_profile_hash: input_hash("compile_profile", inputs.compile_profile),
+            compile_request_hash,
+            target_profile_hash: input_hash(
+                "gbf-hw",
+                "TargetProfile",
+                "target_profile",
+                "1.0.0",
+                inputs.target_profile,
+            ),
+            compile_profile_hash: input_hash(
+                "gbf-policy",
+                "CompileProfileSpec",
+                "compile_profile",
+                "1.0.0",
+                inputs.compile_profile,
+            ),
             calibration_hash: None,
             compatibility_adapter_hash: None,
         },
@@ -421,14 +503,18 @@ fn missing_calibration_failure(inputs: &ValidateInputs<'_>) -> ValidationStageFa
             failures: Vec::new(),
         },
         checked_inputs: checked_inputs(inputs),
-        diagnostics: vec![diagnostic.clone()],
+        diagnostics: diagnostics.clone(),
     };
-    let report = ReportEnvelope::new(ReportOutcome::Failed, body);
-    let (report, _, _) = finalize_report(report);
+    let report = ReportEnvelope::new(ReportOutcome::Failed, body)
+        .expect("artifact_validation.v1 schema constants are valid");
+    let (report, artifact_validation_self_hash, artifact_validation_canonical_bytes_hash) =
+        finalize_report(report);
 
     ValidationStageFailure {
         report,
-        diagnostics: vec![diagnostic],
+        diagnostics,
+        artifact_validation_self_hash,
+        artifact_validation_canonical_bytes_hash,
     }
 }
 
@@ -450,7 +536,7 @@ fn checked_inputs(inputs: &ValidateInputs<'_>) -> ArtifactValidationInputSection
     ArtifactValidationInputSection {
         workload_refs,
         golden_vector_refs,
-        required_artifact_features: std::collections::BTreeSet::<ArtifactFeature>::new(),
+        required_artifact_features: inputs.artifact.manifest.required_features.clone(),
         required_compiler_features: inputs.compile_request.required_features.clone(),
         requested_runtime_modes: inputs.compile_request.requested_runtime_modes.clone(),
     }
@@ -466,7 +552,8 @@ fn finalize_report(
     report.report_self_hash =
         compute_self_hash(&report).expect("artifact validation report self-hash is computable");
     report
-        .validate_semantics()
+        .body
+        .validate_semantics(report.outcome)
         .expect("artifact validation report semantics are valid");
     let canonical_bytes =
         canonicalize_report(&report).expect("artifact validation report canonicalizes");
@@ -479,15 +566,73 @@ fn finalize_report(
     )
 }
 
-fn input_hash<T: Serialize + ?Sized>(domain: &str, value: &T) -> Hash256 {
-    let encoded = serde_json::to_vec(value).expect("Stage 0 input identity serializes");
+fn input_hash<T: Serialize + ?Sized>(
+    crate_name: &str,
+    type_name: &str,
+    schema_id: &str,
+    schema_version: &str,
+    value: &T,
+) -> Hash256 {
+    let encoded = canonical_input_json_bytes(value);
     let mut hasher = Sha256::new();
-    hasher.update(b"gbf-codegen/stage0/input-hash/v1\0");
-    hasher.update(domain.as_bytes());
-    hasher.update([0]);
-    hasher.update((encoded.len() as u64).to_le_bytes());
+    hasher.update(format!(
+        "gbf:{crate_name}:{type_name}:{schema_id}:{schema_version}\0"
+    ));
     hasher.update(encoded);
     Hash256::from_bytes(hasher.finalize().into())
+}
+
+fn canonical_input_json_bytes<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
+    let value = serde_json::to_value(value).expect("Stage 0 input identity serializes");
+    let canonical = canonical_json_value(value);
+    let mut bytes = Vec::new();
+    emit_canonical_input_json(&canonical, &mut bytes);
+    bytes
+}
+
+fn canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json_value).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, canonical_json_value(value)))
+                .collect::<Map<_, _>>(),
+        ),
+        scalar => scalar,
+    }
+}
+
+fn emit_canonical_input_json(value: &Value, bytes: &mut Vec<u8>) {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            serde_json::to_writer(bytes, value).expect("canonical scalar serializes");
+        }
+        Value::Array(items) => {
+            bytes.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    bytes.push(b',');
+                }
+                emit_canonical_input_json(item, bytes);
+            }
+            bytes.push(b']');
+        }
+        Value::Object(fields) => {
+            bytes.push(b'{');
+            let mut fields = fields.iter().collect::<Vec<_>>();
+            fields.sort_by_key(|(key, _)| *key);
+            for (index, (key, value)) in fields.into_iter().enumerate() {
+                if index > 0 {
+                    bytes.push(b',');
+                }
+                serde_json::to_writer(&mut *bytes, key).expect("canonical key serializes");
+                bytes.push(b':');
+                emit_canonical_input_json(value, bytes);
+            }
+            bytes.push(b'}');
+        }
+    }
 }
 
 fn sha256_hash(bytes: &[u8]) -> Hash256 {
@@ -502,6 +647,9 @@ mod tests {
     use gbf_artifact::core::ArtifactCore;
     use gbf_artifact::lowerings::{
         DataLoweringProfileId, LoweringShard, LoweringShardId, LoweringShardKind,
+    };
+    use gbf_artifact::manifest::{
+        ArtifactFeature, ArtifactSchemaVersion, LineageId, ManifestTimestamp,
     };
     use gbf_artifact::quant::QuantSpec;
     use gbf_artifact::sequence::SequenceSemanticsSpec;
@@ -576,6 +724,7 @@ mod tests {
     fn f_b2_validate_imported_artifact_view_normalizes_missing_hints() {
         let view = ImportedArtifactView::new(
             artifact_core(),
+            artifact_manifest(),
             artifact_aux(),
             None,
             None,
@@ -654,6 +803,7 @@ mod tests {
             Self {
                 artifact: ImportedArtifactView::new(
                     artifact_core(),
+                    artifact_manifest(),
                     artifact_aux(),
                     hint_bundle,
                     None,
@@ -758,6 +908,18 @@ mod tests {
             interaction_bundle: None,
             lexical_spec: None,
             reference_observation_cache: None,
+        }
+    }
+
+    fn artifact_manifest() -> ArtifactManifest {
+        ArtifactManifest {
+            components: Vec::new(),
+            created_at: ManifestTimestamp(0),
+            lineage: LineageId(hash(0x08)),
+            manifest_self_hash: hash(0x09),
+            required_features: BTreeSet::from([ArtifactFeature::DenseI8]),
+            schema_version: ArtifactSchemaVersion { epoch: 1, minor: 0 },
+            semantic_core_hash: artifact_core().semantic_hash(),
         }
     }
 
