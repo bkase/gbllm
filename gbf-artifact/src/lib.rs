@@ -6,6 +6,7 @@ pub mod core;
 pub mod decode;
 pub mod export_facts;
 pub mod golden;
+pub mod hint_bundle;
 pub mod ids;
 pub mod interaction;
 pub mod lexical;
@@ -23,5 +24,6 @@ pub mod weight_plan;
 
 pub use aux::*;
 pub use gbf_workload::manifest::{GoldenVectorId, GoldenVectorRef};
+pub use hint_bundle::*;
 pub use lowerings::*;
 pub use manifest::*;

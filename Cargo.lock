@@ -2150,9 +2150,11 @@ version = "0.1.0"
 dependencies = [
  "gbf-foundation",
  "gbf-hw",
+ "gbf-policy",
  "gbf-workload",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2360,7 +2362,6 @@ dependencies = [
 name = "gbf-policy"
 version = "0.1.0"
 dependencies = [
- "gbf-artifact",
  "gbf-foundation",
  "gbf-hw",
  "serde",
@@ -2422,6 +2423,7 @@ dependencies = [
  "gbf-foundation",
  "gbf-model",
  "gbf-oracle",
+ "gbf-policy",
  "gbf-report",
  "gbf-runtime",
  "gbf-train",

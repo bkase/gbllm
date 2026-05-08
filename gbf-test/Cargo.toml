@@ -12,6 +12,7 @@ gbf-codegen = { path = "../gbf-codegen" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-model = { path = "../gbf-model" }
 gbf-oracle = { path = "../gbf-oracle" }
+gbf-policy = { path = "../gbf-policy" }
 gbf-report = { path = "../gbf-report" }
 gbf-train = { path = "../gbf-train", features = ["burn-adapter"] }
 gbf-verify = { path = "../gbf-verify" }
