@@ -1,6 +1,5 @@
 use gbf_artifact::hint_bundle::{
-    BuildConstraintEntry, BuildConstraints, EvidenceScope, HINT_BUNDLE_HASH_DOMAIN_SEPARATOR,
-    HintBundle,
+    BuildConstraintEntry, BuildConstraints, EvidenceScope, HintBundle,
 };
 use gbf_artifact::lowerings::LoweringShardId;
 use gbf_foundation::{Hash256, LayerId, TargetFamilyId, WorkloadId};
@@ -8,7 +7,6 @@ use gbf_policy::compile::{
     CompileKnobId, CompileKnobPath, ConstraintValue, EvidenceRef, FieldPath, ObservabilityMode,
     PlacementProfile, SelectorPath,
 };
-use sha2::{Digest, Sha256};
 
 fn assert_round_trip<T>(value: &T)
 where
@@ -68,6 +66,59 @@ fn hint_bundle_round_trip_with_constraint() {
 
     assert_round_trip(&bundle);
     assert_eq!(bundle.constraints.entries.len(), 1);
+}
+
+#[test]
+fn hint_bundle_non_empty_public_json_shape_is_pinned() {
+    let bundle = HintBundle {
+        constraints: BuildConstraints {
+            entries: vec![build_constraint_entry_fixture()],
+        },
+        ..HintBundle::empty()
+    };
+
+    assert_eq!(
+        serde_json::to_value(&bundle).expect("bundle json value"),
+        serde_json::json!({
+            "facts": {
+                "activation_ranges": [],
+                "sequence": {
+                    "spec": {
+                        "LinearState": {
+                            "state_bytes_per_layer": 1
+                        }
+                    },
+                    "measured_state_size": {
+                        "bytes_per_layer": 1,
+                        "bytes_per_token": 0,
+                        "fixed_overhead": 0
+                    },
+                    "canonical_tensor_handles": []
+                }
+            },
+            "preferences": {},
+            "constraints": {
+                "entries": [
+                    {
+                        "knob": {
+                            "kind": "Placement"
+                        },
+                        "path": null,
+                        "value": {
+                            "kind": "PlacementProfile",
+                            "value": {
+                                "kind": "Budgeted"
+                            }
+                        },
+                        "evidence": [],
+                        "scope": {
+                            "kind": "WholeArtifact"
+                        }
+                    }
+                ]
+            }
+        })
+    );
 }
 
 #[test]
@@ -179,6 +230,17 @@ fn evidence_scope_rejects_unknown_kind() {
 }
 
 #[test]
+fn whole_artifact_evidence_scope_rejects_extra_fields() {
+    let err = serde_json::from_value::<EvidenceScope>(serde_json::json!({
+        "kind": "WholeArtifact",
+        "unexpected": true
+    }))
+    .expect_err("extra field rejects");
+
+    assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
 fn constraint_value_rejects_unknown_kind() {
     let err = serde_json::from_value::<ConstraintValue>(serde_json::json!({
         "kind": "BoundedQ8_8",
@@ -187,21 +249,6 @@ fn constraint_value_rejects_unknown_kind() {
     .expect_err("unknown kind rejects");
 
     assert!(err.to_string().contains("unknown variant"));
-}
-
-#[test]
-fn canonical_hash_uses_domain_separator() {
-    let bundle = empty_hint_bundle_fixture();
-    let mut hasher = Sha256::new();
-    hasher.update(HINT_BUNDLE_HASH_DOMAIN_SEPARATOR);
-    hasher.update(bundle.canonical_json_bytes());
-    let expected = Hash256::from_bytes(hasher.finalize().into());
-
-    assert_eq!(bundle.compute_canonical_hash(), expected);
-    assert_eq!(
-        HINT_BUNDLE_HASH_DOMAIN_SEPARATOR,
-        b"gbf:gbf-artifact:HintBundle:hint_bundle:1.0.0\0"
-    );
 }
 
 #[test]

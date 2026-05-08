@@ -1,4 +1,7 @@
 //! Artifact hint-bundle schema.
+//!
+//! HintBundle leaf-value JSON is owned by `gbf_policy::compile::ConstraintValue`;
+//! this module re-exports that policy type instead of defining a shadow schema.
 
 use std::collections::BTreeMap;
 
@@ -32,6 +35,9 @@ impl HintBundle {
         Self {
             facts: ExportFacts::new(
                 Vec::new(),
+                // The canonical empty bundle intentionally commits to the
+                // smallest legal LinearState sequence fact. Changing this
+                // choice changes the empty-bundle hash contract.
                 SequenceExportFacts::for_spec(
                     SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
                 ),
@@ -51,7 +57,7 @@ impl HintBundle {
     }
 
     #[must_use]
-    pub fn canonical_json_bytes(&self) -> Vec<u8> {
+    fn canonical_json_bytes(&self) -> Vec<u8> {
         let value = serde_json::to_value(self).expect("hint bundle serializes to JSON value");
         let canonical = canonicalize_json_value(value);
         serde_json::to_vec(&canonical).expect("canonical hint bundle JSON serializes")
@@ -83,7 +89,7 @@ pub struct BuildConstraintEntry {
 }
 
 /// Closed enum scoping a hint's applicability.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum EvidenceScope {
     WholeArtifact,
@@ -91,6 +97,31 @@ pub enum EvidenceScope {
     TargetFamily { family: TargetFamilyId },
     WorkloadScoped { workload: WorkloadId },
     LoweringScoped { shard: LoweringShardId },
+}
+
+impl<'de> Deserialize<'de> for EvidenceScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", deny_unknown_fields)]
+        enum EvidenceScopeSerde {
+            WholeArtifact {},
+            LayerScoped { layer: LayerId },
+            TargetFamily { family: TargetFamilyId },
+            WorkloadScoped { workload: WorkloadId },
+            LoweringScoped { shard: LoweringShardId },
+        }
+
+        Ok(match EvidenceScopeSerde::deserialize(deserializer)? {
+            EvidenceScopeSerde::WholeArtifact {} => Self::WholeArtifact,
+            EvidenceScopeSerde::LayerScoped { layer } => Self::LayerScoped { layer },
+            EvidenceScopeSerde::TargetFamily { family } => Self::TargetFamily { family },
+            EvidenceScopeSerde::WorkloadScoped { workload } => Self::WorkloadScoped { workload },
+            EvidenceScopeSerde::LoweringScoped { shard } => Self::LoweringScoped { shard },
+        })
+    }
 }
 
 fn canonicalize_json_value(value: Value) -> Value {
@@ -106,5 +137,25 @@ fn canonicalize_json_value(value: Value) -> Value {
             Value::Object(sorted.into_iter().collect::<Map<_, _>>())
         }
         scalar => scalar,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_hash_uses_domain_separator() {
+        let bundle = HintBundle::empty();
+        let mut hasher = Sha256::new();
+        hasher.update(HINT_BUNDLE_HASH_DOMAIN_SEPARATOR);
+        hasher.update(bundle.canonical_json_bytes());
+        let expected = Hash256::from_bytes(hasher.finalize().into());
+
+        assert_eq!(bundle.compute_canonical_hash(), expected);
+        assert_eq!(
+            HINT_BUNDLE_HASH_DOMAIN_SEPARATOR,
+            b"gbf:gbf-artifact:HintBundle:hint_bundle:1.0.0\0"
+        );
     }
 }
