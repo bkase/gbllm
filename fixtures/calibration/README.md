@@ -4,6 +4,10 @@
 fixture for the current canonical target profile:
 `gbf_hw::target::dmg_mbc5_8mib_128kib()`.
 
+The pinned bootstrap target profile hash is a synthetic fixture identifier for
+`gbf_hw::target::dmg_mbc5_8mib_128kib()` until a canonical `TargetProfile`
+content-hash helper exists.
+
 The bundle intentionally declares `CalibrationConfidenceClass::None` and
 contains no measurements. Bringup accepts this only because its
 `RiskPolicy::calibration_confidence_requirement` is `NoMinimumConfidence`;

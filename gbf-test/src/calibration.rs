@@ -8,7 +8,8 @@ use gbf_policy::calibration::{
     BootstrapCalibrationBundle, CalibrationBundle, CalibrationBundleSet, CalibrationLayer,
     MeasurementBlob,
 };
-use sha2::{Digest, Sha256};
+
+use crate::helpers::assert_fixture_hash;
 
 pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_JSON: &str =
     include_str!("../../fixtures/calibration/bootstrap-dmg-mbc5.calibration.json");
@@ -114,6 +115,7 @@ pub fn bootstrap_dmg_mbc5_calibration_fixture() -> CalibrationBundleSet {
     assert_fixture_hash(
         BOOTSTRAP_DMG_MBC5_CALIBRATION_JSON.as_bytes(),
         BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256,
+        "calibration",
     );
     assert_eq!(
         BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256_SIDECAR
@@ -135,21 +137,6 @@ pub fn bootstrap_dmg_mbc5_target_profile_hash() -> Hash256 {
 
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
-}
-
-fn assert_fixture_hash(bytes: &[u8], expected_hex: &str) {
-    let actual = hex_sha256(bytes);
-    assert_eq!(actual, expected_hex, "calibration fixture hash");
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut out, "{byte:02x}").expect("hex write to string cannot fail");
-    }
-    out
 }
 
 #[cfg(test)]

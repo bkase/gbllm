@@ -8,5 +8,8 @@ Its reduced `reserved_slack` values are fixture inputs, not profile-time
 relaxations. F-B4 consumers must hash and consume the selected budget artifact
 as supplied.
 
+The `runtime_nucleus_hash` is a fixture-only synthetic identifier, not derived
+from F-A5's pinned runtime nucleus.
+
 CGB/MBC5 bringup budget fixtures are deferred until `gbf-hw` exposes a
 canonical CGB/MBC5 `TargetProfile`.
