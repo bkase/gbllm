@@ -3,6 +3,7 @@
 pub mod budget;
 pub mod calibration;
 pub mod compile;
+pub mod diagnostics;
 pub mod envelope;
 pub mod objective;
 pub mod repair;
@@ -27,6 +28,14 @@ pub use compile::{
     SelectorPath, SequenceSemanticsRef, SramKnob, SramKnobBounds, SramPageAggression, StorageKnob,
     StorageKnobBounds, StorageMaterialization, TraceBudget, TraceDropPolicy,
     canonical_default_bounds_fixture,
+};
+pub use diagnostics::{
+    ArtifactFeature, ArtifactSchemaVersion, CompatibilityAdapterId, ComponentId,
+    DataLoweringProfileId, DiagnosticSeverity, GoldenVectorId, KnobValueDescriptor, LineageId,
+    LoweringShardId, LoweringShardRef, ManifestInvariant, ObjectiveRejection,
+    PlacementInfeasibilityReason, ReductionSiteId, SidecarKind, SwitchProjectionSource,
+    TargetIncompatibilityReason, TraceProbeId, ValidationCode, ValidationDetail,
+    ValidationDiagnostic, ValidationOrigin,
 };
 pub use objective::{CompileObjective, RiskPolicy, ServiceLevelObjective};
 pub use repair::{RepairPolicy, RepairPolicyProfile, RepairProposalId};
