@@ -2212,6 +2212,7 @@ dependencies = [
  "gbf-report",
  "gbf-runtime",
  "gbf-verify",
+ "gbf-workload",
  "serde",
  "serde_json",
  "sha2",
