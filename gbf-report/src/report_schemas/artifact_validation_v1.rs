@@ -67,8 +67,6 @@ pub enum ArtifactCompatibilityDecision {
         to_schema: SemVer,
         adapter: CompatibilityAdapterId,
         adapter_hash: Hash256,
-        before_semantic_core_hash: Hash256,
-        after_semantic_core_hash: Hash256,
     },
 }
 
@@ -131,16 +129,24 @@ impl ReportBody for ArtifactValidationReportBody {
         }
 
         if let Some(ArtifactCompatibilityDecision::LosslessInMemoryUpgrade {
-            before_semantic_core_hash,
-            after_semantic_core_hash,
+            from_schema,
+            to_schema,
+            adapter_hash,
             ..
-        }) = self.compatibility.decision
-            && before_semantic_core_hash != after_semantic_core_hash
+        }) = &self.compatibility.decision
         {
-            errors.push(semantic_error(
-                "lossless_upgrade_semantic_hash_changed",
-                "LosslessInMemoryUpgrade requires identical before/after semantic core hashes",
-            ));
+            if from_schema.major != to_schema.major {
+                errors.push(schema_epoch_error(
+                    "lossless_upgrade_cross_major",
+                    "LosslessInMemoryUpgrade requires matching schema major versions",
+                ));
+            }
+            if self.identity.compatibility_adapter_hash.as_ref() != Some(adapter_hash) {
+                errors.push(semantic_error(
+                    "compatibility_adapter_hash",
+                    "LosslessInMemoryUpgrade adapter_hash must match identity.compatibility_adapter_hash",
+                ));
+            }
         }
 
         if !is_sorted(&self.checked_inputs.workload_refs) {
@@ -205,6 +211,25 @@ fn semantic_error(name: &'static str, _value: impl Into<String>) -> ValidationDi
     ValidationDiagnostic {
         severity: DiagnosticSeverity::Hard,
         origin: ValidationOrigin::Schema,
+        code: ValidationCode::ReportSemanticInvariantViolated {
+            field: field.clone(),
+        },
+        detail: ValidationDetail::Field {
+            field: field.clone(),
+        },
+        provenance: vec![EvidenceRef {
+            kind: "semantic_validator".to_owned(),
+            reference: name.to_owned(),
+            hash: None,
+        }],
+    }
+}
+
+fn schema_epoch_error(name: &'static str, _value: impl Into<String>) -> ValidationDiagnostic {
+    let field = FieldPath::from(name);
+    ValidationDiagnostic {
+        severity: DiagnosticSeverity::Hard,
+        origin: ValidationOrigin::Schema,
         code: ValidationCode::SchemaEpochUnsupported,
         detail: ValidationDetail::Field {
             field: field.clone(),
@@ -258,6 +283,155 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_artifact_validation_v1_public_json_shape_passed_envelope() {
+        let env = ReportEnvelope::new(ReportOutcome::Passed, lossless_upgrade_body())
+            .expect("envelope")
+            .with_computed_self_hash()
+            .expect("self hash");
+        let value = serde_json::to_value(&env).expect("json");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema": "artifact_validation.v1",
+                "schema_version": "1.0.0",
+                "outcome": "Passed",
+                "report_self_hash": hash_value(env.report_self_hash),
+                "identity": {
+                    "artifact_source_hash": hash_json(0x01),
+                    "artifact_effective_core_hash": hash_json(0x02),
+                    "artifact_manifest_hash": hash_json(0x03),
+                    "semantic_core_hash": hash_json(0x04),
+                    "artifact_aux_hash": hash_json(0x05),
+                    "lowering_manifest_hash": hash_json(0x06),
+                    "hint_bundle_hash": hash_value(HintBundle::empty().compute_canonical_hash()),
+                    "compile_request_hash": hash_json(0x08),
+                    "target_profile_hash": hash_json(0x09),
+                    "compile_profile_hash": hash_json(0x0a),
+                    "calibration_hash": hash_json(0x0b),
+                    "compatibility_adapter_hash": hash_json(0x40)
+                },
+                "compatibility": {
+                    "decision": {
+                        "kind": "LosslessInMemoryUpgrade",
+                        "from_schema": {
+                            "major": 1,
+                            "minor": 0,
+                            "patch": 0
+                        },
+                        "to_schema": {
+                            "major": 1,
+                            "minor": 1,
+                            "patch": 0
+                        },
+                        "adapter": "adapter.lossless",
+                        "adapter_hash": hash_json(0x40)
+                    },
+                    "failures": []
+                },
+                "checked_inputs": {
+                    "workload_refs": ["workload.a"],
+                    "golden_vector_refs": ["golden.a"],
+                    "required_artifact_features": [{ "kind": "DenseI8" }],
+                    "required_compiler_features": [{ "kind": "ArtifactValidation" }],
+                    "requested_runtime_modes": [{ "kind": "Safe" }]
+                },
+                "diagnostics": []
+            })
+        );
+        assert!(value["identity"].get("hint_bundle_hash").is_some());
+        assert!(value["checked_inputs"].get("hint_bundle_hash").is_none());
+        assert!(
+            value["compatibility"]["decision"]
+                .get("before_semantic_core_hash")
+                .is_none()
+        );
+        assert!(
+            value["compatibility"]["decision"]
+                .get("after_semantic_core_hash")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn f_b2_artifact_validation_v1_public_json_shape_failed_envelope() {
+        let env = ReportEnvelope::new(ReportOutcome::Failed, failed_body())
+            .expect("envelope")
+            .with_computed_self_hash()
+            .expect("self hash");
+        let value = serde_json::to_value(&env).expect("json");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema": "artifact_validation.v1",
+                "schema_version": "1.0.0",
+                "outcome": "Failed",
+                "report_self_hash": hash_value(env.report_self_hash),
+                "identity": {
+                    "artifact_source_hash": hash_json(0x01),
+                    "artifact_effective_core_hash": null,
+                    "artifact_manifest_hash": null,
+                    "semantic_core_hash": null,
+                    "artifact_aux_hash": null,
+                    "lowering_manifest_hash": null,
+                    "hint_bundle_hash": hash_value(HintBundle::empty().compute_canonical_hash()),
+                    "compile_request_hash": hash_json(0x08),
+                    "target_profile_hash": hash_json(0x09),
+                    "compile_profile_hash": hash_json(0x0a),
+                    "calibration_hash": null,
+                    "compatibility_adapter_hash": null
+                },
+                "compatibility": {
+                    "decision": null,
+                    "failures": [
+                        {
+                            "kind": "UnsupportedEpoch",
+                            "observed": {
+                                "major": 2,
+                                "minor": 0,
+                                "patch": 0
+                            },
+                            "supported": {
+                                "major": 1,
+                                "minor": 0,
+                                "patch": 0
+                            }
+                        }
+                    ]
+                },
+                "checked_inputs": {
+                    "workload_refs": [],
+                    "golden_vector_refs": [],
+                    "required_artifact_features": [],
+                    "required_compiler_features": [],
+                    "requested_runtime_modes": []
+                },
+                "diagnostics": [
+                    {
+                        "severity": { "kind": "Hard" },
+                        "origin": { "kind": "Schema" },
+                        "code": { "kind": "SchemaEpochUnsupported" },
+                        "detail": {
+                            "kind": "Field",
+                            "field": "schema.epoch"
+                        },
+                        "provenance": [
+                            {
+                                "kind": "fixture",
+                                "reference": "artifact",
+                                "hash": hash_json(0xaa)
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+        assert!(round_trip_self_hash(&env).is_ok());
+        assert!(env.body.validate_semantics(env.outcome).is_ok());
+    }
+
+    #[test]
     fn f_b2_artifact_validation_v1_outcome_hard_diagnostic_invariant() {
         let mut failed_without_hard = passing_body();
         failed_without_hard.diagnostics.clear();
@@ -277,19 +451,66 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_artifact_validation_v1_lossless_upgrade_preserves_semantic_hash() {
-        let mut body = passing_body();
+    fn f_b2_artifact_validation_v1_lossless_upgrade_valid_semantics() {
+        let body = lossless_upgrade_body();
+
+        assert!(body.validate_semantics(ReportOutcome::Passed).is_ok());
+    }
+
+    #[test]
+    fn f_b2_artifact_validation_v1_lossless_upgrade_rejects_cross_major() {
+        let mut body = lossless_upgrade_body();
         body.compatibility.decision =
             Some(ArtifactCompatibilityDecision::LosslessInMemoryUpgrade {
+                from_schema: SemVer::new(1, 0, 0),
+                to_schema: SemVer::new(2, 0, 0),
+                adapter: CompatibilityAdapterId("adapter.lossless".to_owned()),
+                adapter_hash: hash(0x40),
+            });
+        let errors = body
+            .validate_semantics(ReportOutcome::Passed)
+            .expect_err("cross-major upgrade must reject");
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.code == ValidationCode::SchemaEpochUnsupported)
+        );
+    }
+
+    #[test]
+    fn f_b2_artifact_validation_v1_lossless_upgrade_requires_identity_adapter_hash() {
+        let mut body = lossless_upgrade_body();
+        body.identity.compatibility_adapter_hash = Some(hash(0x41));
+        let errors = body
+            .validate_semantics(ReportOutcome::Passed)
+            .expect_err("adapter hash mismatch must reject");
+
+        assert!(errors.iter().any(|error| {
+            matches!(
+                &error.code,
+                ValidationCode::ReportSemanticInvariantViolated { field }
+                    if field == &FieldPath::from("compatibility_adapter_hash")
+            )
+        }));
+    }
+
+    #[test]
+    fn f_b2_artifact_validation_v1_rejects_legacy_lossless_hash_fields() {
+        let mut decision =
+            serde_json::to_value(ArtifactCompatibilityDecision::LosslessInMemoryUpgrade {
                 from_schema: SemVer::new(1, 0, 0),
                 to_schema: SemVer::new(1, 1, 0),
                 adapter: CompatibilityAdapterId("adapter.lossless".to_owned()),
                 adapter_hash: hash(0x40),
-                before_semantic_core_hash: hash(0x41),
-                after_semantic_core_hash: hash(0x42),
-            });
+            })
+            .expect("decision json");
+        decision
+            .as_object_mut()
+            .expect("decision object")
+            .insert("before_semantic_core_hash".to_owned(), hash_json(0x41));
 
-        assert!(body.validate_semantics(ReportOutcome::Passed).is_err());
+        assert!(serde_json::from_value::<ArtifactCompatibilityDecision>(decision).is_err());
     }
 
     #[test]
@@ -331,6 +552,30 @@ mod tests {
         assert!(body.validate_semantics(ReportOutcome::Passed).is_err());
     }
 
+    #[test]
+    fn f_b2_artifact_validation_v1_report_invariants_use_scoped_diagnostic_code() {
+        let mut body = passing_body();
+        body.checked_inputs.workload_refs = vec![
+            WorkloadId::from("workload.b"),
+            WorkloadId::from("workload.a"),
+        ];
+        let errors = body
+            .validate_semantics(ReportOutcome::Passed)
+            .expect_err("unsorted refs must reject");
+
+        assert!(errors.iter().all(|error| {
+            matches!(
+                error.code,
+                ValidationCode::ReportSemanticInvariantViolated { .. }
+            )
+        }));
+        assert!(
+            !errors
+                .iter()
+                .any(|error| error.code == ValidationCode::SchemaEpochUnsupported)
+        );
+    }
+
     fn passing_body() -> ArtifactValidationReportBody {
         ArtifactValidationReportBody {
             identity: ArtifactValidationIdentitySection {
@@ -362,12 +607,61 @@ mod tests {
         }
     }
 
+    fn lossless_upgrade_body() -> ArtifactValidationReportBody {
+        let mut body = passing_body();
+        body.identity.compatibility_adapter_hash = Some(hash(0x40));
+        body.compatibility.decision =
+            Some(ArtifactCompatibilityDecision::LosslessInMemoryUpgrade {
+                from_schema: SemVer::new(1, 0, 0),
+                to_schema: SemVer::new(1, 1, 0),
+                adapter: CompatibilityAdapterId("adapter.lossless".to_owned()),
+                adapter_hash: hash(0x40),
+            });
+        body
+    }
+
+    fn failed_body() -> ArtifactValidationReportBody {
+        ArtifactValidationReportBody {
+            identity: ArtifactValidationIdentitySection {
+                artifact_source_hash: Some(hash(0x01)),
+                artifact_effective_core_hash: None,
+                artifact_manifest_hash: None,
+                semantic_core_hash: None,
+                artifact_aux_hash: None,
+                lowering_manifest_hash: None,
+                hint_bundle_hash: HintBundle::empty().compute_canonical_hash(),
+                compile_request_hash: hash(0x08),
+                target_profile_hash: hash(0x09),
+                compile_profile_hash: hash(0x0a),
+                calibration_hash: None,
+                compatibility_adapter_hash: None,
+            },
+            compatibility: ArtifactCompatibilitySection {
+                decision: None,
+                failures: vec![ArtifactCompatibilityFailure::UnsupportedEpoch {
+                    observed: SemVer::new(2, 0, 0),
+                    supported: SemVer::new(1, 0, 0),
+                }],
+            },
+            checked_inputs: ArtifactValidationInputSection {
+                workload_refs: Vec::new(),
+                golden_vector_refs: Vec::new(),
+                required_artifact_features: BTreeSet::new(),
+                required_compiler_features: BTreeSet::new(),
+                requested_runtime_modes: BTreeSet::new(),
+            },
+            diagnostics: vec![hard_diagnostic()],
+        }
+    }
+
     fn hard_diagnostic() -> ValidationDiagnosticRecord {
         ValidationDiagnosticRecord {
             severity: DiagnosticSeverity::Hard,
             origin: ValidationOrigin::Schema,
             code: ValidationCode::SchemaEpochUnsupported,
-            detail: ValidationDetail::None,
+            detail: ValidationDetail::Field {
+                field: FieldPath::from("schema.epoch"),
+            },
             provenance: vec![EvidenceRef {
                 kind: "fixture".to_owned(),
                 reference: "artifact".to_owned(),
@@ -378,5 +672,13 @@ mod tests {
 
     fn hash(byte: u8) -> Hash256 {
         Hash256::from_bytes([byte; 32])
+    }
+
+    fn hash_json(byte: u8) -> serde_json::Value {
+        hash_value(hash(byte))
+    }
+
+    fn hash_value(hash: Hash256) -> serde_json::Value {
+        serde_json::to_value(hash).expect("hash serializes")
     }
 }

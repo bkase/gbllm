@@ -100,6 +100,9 @@ pub enum ValidationCode {
     SchemaCompatibilityAdapterNotLossless {
         adapter: CompatibilityAdapterId,
     },
+    ReportSemanticInvariantViolated {
+        field: FieldPath,
+    },
     SemanticCoreHashMismatch,
     ArtifactTransportManifestMismatch,
     ManifestInvariantViolated {
@@ -498,6 +501,9 @@ mod tests {
             ValidationCode::SchemaCompatibilityAdapterNotLossless {
                 adapter: CompatibilityAdapterId("adapter.v1".to_owned()),
             },
+            ValidationCode::ReportSemanticInvariantViolated {
+                field: FieldPath::from("artifact_validation.v1.outcome"),
+            },
             ValidationCode::SemanticCoreHashMismatch,
             ValidationCode::ArtifactTransportManifestMismatch,
             ValidationCode::ManifestInvariantViolated {
@@ -673,6 +679,19 @@ mod tests {
                     "kind": { "kind": "SemanticCheckpointSchema" },
                     "expected": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
                     "observed": "sha256:0606060606060606060606060606060606060606060606060606060606060606"
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::ReportSemanticInvariantViolated {
+                field: FieldPath::from("artifact_validation.v1.compatibility.decision"),
+            })
+            .expect("report semantic invariant code serializes"),
+            serde_json::json!({
+                "kind": "ReportSemanticInvariantViolated",
+                "fields": {
+                    "field": "artifact_validation.v1.compatibility.decision"
                 }
             })
         );
