@@ -15,7 +15,7 @@ pub struct ArtifactAux {
     pub reference_observation_cache: Option<ReferenceObservationCacheRef>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum SidecarKind {
     GoldenVector,
@@ -24,6 +24,38 @@ pub enum SidecarKind {
     ReferenceObservationCache,
     InteractionBundle,
     LexicalSpec,
+}
+
+impl<'de> Deserialize<'de> for SidecarKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum SidecarKindTag {
+            GoldenVector,
+            SemanticCheckpointSchema,
+            ConformanceEnvelope,
+            ReferenceObservationCache,
+            InteractionBundle,
+            LexicalSpec,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TaggedSidecarKind {
+            kind: SidecarKindTag,
+        }
+
+        Ok(match TaggedSidecarKind::deserialize(deserializer)?.kind {
+            SidecarKindTag::GoldenVector => Self::GoldenVector,
+            SidecarKindTag::SemanticCheckpointSchema => Self::SemanticCheckpointSchema,
+            SidecarKindTag::ConformanceEnvelope => Self::ConformanceEnvelope,
+            SidecarKindTag::ReferenceObservationCache => Self::ReferenceObservationCache,
+            SidecarKindTag::InteractionBundle => Self::InteractionBundle,
+            SidecarKindTag::LexicalSpec => Self::LexicalSpec,
+        })
+    }
 }
 
 macro_rules! sidecar_ref {

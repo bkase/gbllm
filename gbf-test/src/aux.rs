@@ -86,9 +86,41 @@ mod tests {
 
     #[test]
     fn builder_canonical_matches_fixture_constant() {
+        let expected = ArtifactAux {
+            checkpoint_schema: None,
+            conformance_envelope: None,
+            golden_vectors: vec![GoldenVectorRef {
+                id: GoldenVectorId("vec.smoke.001".to_owned()),
+                manifest_hash: Hash256::from_bytes([0x04; 32]),
+            }],
+            interaction_bundle: None,
+            lexical_spec: None,
+            reference_observation_cache: None,
+        };
+
+        assert_eq!(canonical_aux_fixture(), expected);
+        assert_eq!(ArtifactAuxBuilder::canonical().build(), expected);
+    }
+
+    #[test]
+    fn builder_appends_golden_vector_to_canonical_fixture() {
+        let extra = GoldenVectorRef {
+            id: GoldenVectorId("vec.smoke.extra".to_owned()),
+            manifest_hash: fixture_hash(0x20),
+        };
+        let aux = ArtifactAuxBuilder::canonical()
+            .with_golden_vector(extra.clone())
+            .build();
+
         assert_eq!(
-            ArtifactAuxBuilder::canonical().build(),
-            canonical_aux_fixture()
+            aux.golden_vectors,
+            vec![
+                GoldenVectorRef {
+                    id: GoldenVectorId("vec.smoke.001".to_owned()),
+                    manifest_hash: fixture_hash(0x04),
+                },
+                extra,
+            ]
         );
     }
 
@@ -103,6 +135,45 @@ mod tests {
             .build();
 
         assert_eq!(aux.checkpoint_schema, Some(checkpoint));
+    }
+
+    #[test]
+    fn builder_supports_with_conformance_envelope_chaining() {
+        let conformance = ConformanceEnvelopeRef {
+            id: ConformanceEnvelopeId("conformance.envelope.smoke".to_owned()),
+            hash: fixture_hash(0x11),
+        };
+        let aux = ArtifactAuxBuilder::canonical()
+            .with_conformance_envelope(conformance.clone())
+            .build();
+
+        assert_eq!(aux.conformance_envelope, Some(conformance));
+    }
+
+    #[test]
+    fn builder_supports_with_reference_observation_cache_chaining() {
+        let reference_cache = ReferenceObservationCacheRef {
+            id: ReferenceObservationCacheId("reference.cache.smoke".to_owned()),
+            hash: fixture_hash(0x12),
+        };
+        let aux = ArtifactAuxBuilder::canonical()
+            .with_reference_observation_cache(reference_cache.clone())
+            .build();
+
+        assert_eq!(aux.reference_observation_cache, Some(reference_cache));
+    }
+
+    #[test]
+    fn builder_supports_with_interaction_bundle_chaining() {
+        let interaction = InteractionBundleRef {
+            id: InteractionBundleId("interaction.bundle.smoke".to_owned()),
+            hash: fixture_hash(0x13),
+        };
+        let aux = ArtifactAuxBuilder::canonical()
+            .with_interaction_bundle(interaction.clone())
+            .build();
+
+        assert_eq!(aux.interaction_bundle, Some(interaction));
     }
 
     #[test]

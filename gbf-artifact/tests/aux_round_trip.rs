@@ -136,16 +136,43 @@ fn aux_round_trip_with_all_optional_sidecars_present() {
 #[test]
 fn sidecar_kind_round_trip_all_variants() {
     let variants = [
-        SidecarKind::GoldenVector,
-        SidecarKind::SemanticCheckpointSchema,
-        SidecarKind::ConformanceEnvelope,
-        SidecarKind::ReferenceObservationCache,
-        SidecarKind::InteractionBundle,
-        SidecarKind::LexicalSpec,
+        (
+            SidecarKind::GoldenVector,
+            serde_json::json!({ "kind": "GoldenVector" }),
+        ),
+        (
+            SidecarKind::SemanticCheckpointSchema,
+            serde_json::json!({ "kind": "SemanticCheckpointSchema" }),
+        ),
+        (
+            SidecarKind::ConformanceEnvelope,
+            serde_json::json!({ "kind": "ConformanceEnvelope" }),
+        ),
+        (
+            SidecarKind::ReferenceObservationCache,
+            serde_json::json!({ "kind": "ReferenceObservationCache" }),
+        ),
+        (
+            SidecarKind::InteractionBundle,
+            serde_json::json!({ "kind": "InteractionBundle" }),
+        ),
+        (
+            SidecarKind::LexicalSpec,
+            serde_json::json!({ "kind": "LexicalSpec" }),
+        ),
     ];
 
-    for kind in variants {
+    for (kind, expected_json) in variants {
         assert_round_trip(&kind);
+        assert_eq!(
+            serde_json::to_value(kind).expect("sidecar kind json value"),
+            expected_json
+        );
+        assert_eq!(
+            serde_json::from_value::<SidecarKind>(expected_json)
+                .expect("sidecar kind deserializes"),
+            kind
+        );
     }
 }
 
@@ -166,6 +193,13 @@ fn aux_rejects_unknown_sidecar_kind() {
     let err = serde_json::from_str::<SidecarKind>(json).expect_err("unknown kind rejects");
 
     assert!(err.to_string().contains("unknown variant"));
+}
+
+#[test]
+fn aux_rejects_extra_sidecar_kind_field() {
+    let json = r#"{"kind":"GoldenVector","unexpected":true}"#;
+
+    serde_json::from_str::<SidecarKind>(json).expect_err("extra field rejects");
 }
 
 #[test]
