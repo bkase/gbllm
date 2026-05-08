@@ -16,6 +16,7 @@ gbf-kernel = { path = "../gbf-kernel" }
 gbf-policy = { path = "../gbf-policy" }
 gbf-report = { path = "../gbf-report" }
 gbf-runtime = { path = "../gbf-runtime" }
+gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

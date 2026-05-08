@@ -20,6 +20,12 @@ pub mod storage;
 pub mod validate;
 pub mod window;
 
+pub mod stages {
+    pub mod validate {
+        pub use crate::validate::*;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gbf_policy::{
