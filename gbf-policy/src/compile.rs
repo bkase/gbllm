@@ -27,6 +27,14 @@ pub const TRACE_COMPILE_PROFILE_TOML: &str =
 pub const RECOVERY_COMPILE_PROFILE_TOML: &str =
     include_str!("../fixtures/compile-profiles/recovery.profile.toml");
 
+/// Domain separator for the canonical `CompileProfileSpec` defaults hash.
+///
+/// The preimage is this byte string followed by canonical JSON for the profile
+/// spec with `defaults_hash` zeroed. The NUL suffix prevents accidental
+/// concatenation ambiguity with the first JSON byte.
+pub const COMPILE_PROFILE_DEFAULTS_HASH_DOMAIN: &[u8] =
+    b"gbf-policy/CompileProfileSpec.defaults_hash/v1\0";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum SequenceSemanticsRef {
@@ -84,11 +92,60 @@ pub struct CompileProfileSpec {
 pub fn compile_profile_defaults_hash(
     spec: &CompileProfileSpec,
 ) -> Result<Hash256, serde_json::Error> {
+    let canonical_bytes = compile_profile_defaults_hash_canonical_json_bytes(spec)?;
+    let mut hasher = Sha256::new();
+    hasher.update(COMPILE_PROFILE_DEFAULTS_HASH_DOMAIN);
+    hasher.update(canonical_bytes);
+    let digest = hasher.finalize();
+    Ok(Hash256::from_bytes(digest.into()))
+}
+
+fn compile_profile_defaults_hash_canonical_json_bytes(
+    spec: &CompileProfileSpec,
+) -> Result<Vec<u8>, serde_json::Error> {
     let mut hashable = spec.clone();
     hashable.defaults_hash = Hash256::ZERO;
-    let canonical_bytes = serde_json::to_vec(&hashable)?;
-    let digest = Sha256::digest(canonical_bytes);
-    Ok(Hash256::from_bytes(digest.into()))
+    let value = serde_json::to_value(&hashable)?;
+    let mut canonical_bytes = Vec::new();
+    write_canonical_json_value(&value, &mut canonical_bytes)?;
+    Ok(canonical_bytes)
+}
+
+fn write_canonical_json_value(
+    value: &serde_json::Value,
+    out: &mut Vec<u8>,
+) -> Result<(), serde_json::Error> {
+    match value {
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => serde_json::to_writer(out, value)?,
+        serde_json::Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    out.push(b',');
+                }
+                write_canonical_json_value(item, out)?;
+            }
+            out.push(b']');
+        }
+        serde_json::Value::Object(entries) => {
+            out.push(b'{');
+            let mut keys = entries.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key)?;
+                out.push(b':');
+                write_canonical_json_value(&entries[key], out)?;
+            }
+            out.push(b'}');
+        }
+    }
+    Ok(())
 }
 
 pub fn load_compile_profile_spec(toml_source: &str) -> Result<CompileProfileSpec, toml::de::Error> {
@@ -1274,6 +1331,47 @@ mod tests {
                 spec.id
             );
         }
+    }
+
+    #[test]
+    fn compile_profile_spec_defaults_hash_uses_canonical_domain_preimage() {
+        assert_eq!(
+            COMPILE_PROFILE_DEFAULTS_HASH_DOMAIN,
+            b"gbf-policy/CompileProfileSpec.defaults_hash/v1\0"
+        );
+
+        let spec = load_compile_profile_spec(DEFAULT_COMPILE_PROFILE_TOML)
+            .expect("default profile parses");
+        let canonical_bytes = compile_profile_defaults_hash_canonical_json_bytes(&spec)
+            .expect("profile has canonical JSON bytes");
+        let canonical_json =
+            std::str::from_utf8(&canonical_bytes).expect("canonical JSON is UTF-8");
+
+        assert!(
+            canonical_json.starts_with(r#"{"defaults_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","id":"default""#),
+            "top-level canonical JSON keys must be lexicographically ordered"
+        );
+        assert!(
+            canonical_json.contains(r#""risk_policy":{"calibration_confidence_requirement":"#),
+            "nested object keys must be lexicographically ordered"
+        );
+
+        let mut struct_order = spec.clone();
+        struct_order.defaults_hash = Hash256::ZERO;
+        let plain_serde_bytes =
+            serde_json::to_vec(&struct_order).expect("plain profile spec serializes");
+        assert_ne!(
+            canonical_bytes, plain_serde_bytes,
+            "canonical JSON preimage must not be serde_json's struct field order"
+        );
+
+        let hash = compile_profile_defaults_hash(&spec).expect("profile hash computes");
+        let no_domain_digest = Sha256::digest(&canonical_bytes);
+        assert_ne!(
+            hash,
+            Hash256::from_bytes(no_domain_digest.into()),
+            "defaults_hash must include the explicit CompileProfileSpec domain separator"
+        );
     }
 
     #[test]

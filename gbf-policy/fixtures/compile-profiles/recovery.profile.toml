@@ -1,5 +1,5 @@
 id = "recovery"
-defaults_hash = "sha256:25b8bbc9632de53a41537549d5ca92b76d7dac72bfac8f0d5436cd620f0cc6df"
+defaults_hash = "sha256:bf79c88796b3489be50c53d93813e917f5eb14c5d6424dc312bb198eebc73e0c"
 observability = { kind = "Flexible" }
 
 [trace_budget]

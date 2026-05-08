@@ -1,5 +1,5 @@
 id = "trace"
-defaults_hash = "sha256:13b4fcb2d9acc8a7cddf669937604d84783f4e18be82a7913c52be57ae7cbe05"
+defaults_hash = "sha256:0be45e060635bbbda00ec570146e89ccf7ee89fa8c80b2f7b5f99f84144df89c"
 observability = { kind = "Invariant" }
 
 [trace_budget]
