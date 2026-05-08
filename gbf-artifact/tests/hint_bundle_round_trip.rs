@@ -136,7 +136,7 @@ fn build_constraint_entry_round_trip() {
         path: Some(CompileKnobPath {
             knob: CompileKnobId::Placement,
             selector: Some(SelectorPath("bank[0]".to_owned())),
-            field: Some(FieldPath("profile".to_owned())),
+            field: Some(FieldPath::from("profile")),
         }),
         evidence: vec![EvidenceRef {
             kind: "fixture".to_owned(),

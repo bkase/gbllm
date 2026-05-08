@@ -4,7 +4,8 @@ use gbf_artifact::{
     ArtifactFeature, ArtifactManifest, ArtifactSchemaVersion, ComponentId, ComponentKind,
     LineageId, ManifestComponent, ManifestInvariant, ManifestTimestamp,
 };
-use gbf_foundation::{FieldPath, Hash256};
+use gbf_foundation::{FieldPath as FoundationFieldPath, Hash256};
+use gbf_policy::compile::FieldPath as PolicyFieldPath;
 
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
@@ -118,13 +119,31 @@ fn manifest_invariant_round_trip_all_variants() {
             recorded: hash(6),
         },
         ManifestInvariant::ForbiddenBuildIdentityField {
-            field: FieldPath::from("/build_identity"),
+            field: FoundationFieldPath::from("/build_identity"),
         },
     ];
 
     for invariant in variants {
         assert_round_trip(&invariant);
     }
+}
+
+#[test]
+fn policy_field_path_reexport_feeds_manifest_invariant_with_same_json_shape() {
+    fn accepts_foundation_field_path(_: FoundationFieldPath) {}
+
+    let field = PolicyFieldPath::from("/build_identity");
+    accepts_foundation_field_path(field.clone());
+
+    let invariant = ManifestInvariant::ForbiddenBuildIdentityField { field };
+
+    assert_eq!(
+        serde_json::to_value(invariant).expect("invariant serializes"),
+        serde_json::json!({
+            "kind": "ForbiddenBuildIdentityField",
+            "field": "/build_identity"
+        })
+    );
 }
 
 #[test]

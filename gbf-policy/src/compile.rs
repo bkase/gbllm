@@ -10,6 +10,8 @@ use crate::budget::RuntimeChromeBudget;
 use crate::objective::{CompileObjective, RiskPolicy};
 use crate::repair::{RepairPolicy, RepairProposalId};
 
+pub use gbf_foundation::FieldPath;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum SequenceSemanticsRef {
@@ -18,10 +20,6 @@ pub enum SequenceSemanticsRef {
     LinearState,
     BoundedKv,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct FieldPath(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -748,7 +746,7 @@ mod tests {
                 path: CompileKnobPath {
                     knob: CompileKnobId::Placement,
                     selector: None,
-                    field: Some(FieldPath("profile".to_owned())),
+                    field: Some(FieldPath::from("profile")),
                 },
                 chain: vec![ConstraintProvenance {
                     source: PolicySource::ProfileDefault,
@@ -1405,12 +1403,35 @@ mod tests {
             CompileKnobPath {
                 knob: CompileKnobId::Placement,
                 selector: Some(SelectorPath("expert.1".to_owned())),
-                field: Some(FieldPath("profile".to_owned())),
+                field: Some(FieldPath::from("profile")),
             },
         ]);
 
         let first = paths.into_iter().next().expect("path exists");
         assert_eq!(first.knob, CompileKnobId::Placement);
+    }
+
+    #[test]
+    fn field_path_reexports_foundation_type_and_serializes_as_string() {
+        fn accepts_foundation_field_path(_: gbf_foundation::FieldPath) {}
+
+        let field = FieldPath::from("profile");
+        accepts_foundation_field_path(field.clone());
+
+        let path = CompileKnobPath {
+            knob: CompileKnobId::Placement,
+            selector: None,
+            field: Some(field),
+        };
+
+        assert_eq!(
+            serde_json::to_value(path).expect("path serializes"),
+            serde_json::json!({
+                "knob": {"kind": "Placement"},
+                "selector": null,
+                "field": "profile"
+            })
+        );
     }
 
     #[test]
