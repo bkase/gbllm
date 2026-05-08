@@ -15,7 +15,7 @@ pub struct WorkloadManifestBuilder {
 impl WorkloadManifestBuilder {
     pub fn canonical() -> Self {
         Self {
-            id: WorkloadId("smoke-tinystory-001".to_owned()),
+            id: WorkloadId::from("smoke-tinystory-001"),
             schema_version: WorkloadSchemaVersion { epoch: 1, minor: 0 },
             self_hash: fixture_hash(8),
             golden_vectors: Vec::new(),
@@ -50,7 +50,7 @@ pub fn canonical_workload_manifest_fixture() -> WorkloadManifest {
 
 pub fn workload_manifest_ref_fixture() -> WorkloadManifestRef {
     WorkloadManifestRef {
-        id: WorkloadId("smoke-tinystory-001".to_owned()),
+        id: WorkloadId::from("smoke-tinystory-001"),
         manifest_hash: fixture_hash(8),
         locator: WorkloadLocator::RegistryEntry {
             registry: RegistryId("fixture-registry".to_owned()),
@@ -73,6 +73,9 @@ fn fixture_hash(byte: u8) -> Hash256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HASH_04: &str = "sha256:0404040404040404040404040404040404040404040404040404040404040404";
+    const HASH_08: &str = "sha256:0808080808080808080808080808080808080808080808080808080808080808";
 
     #[test]
     fn builder_canonical_matches_fixture_constant() {
@@ -98,6 +101,47 @@ mod tests {
     }
 
     #[test]
+    fn builder_supports_with_non_default_workload_id() {
+        let id = WorkloadId::from("smoke-tinystory-alt");
+        let manifest = WorkloadManifestBuilder::canonical()
+            .with_id(id.clone())
+            .build();
+
+        assert_eq!(manifest.id, id);
+        assert_eq!(
+            serde_json::to_value(&manifest).expect("manifest json value")["id"],
+            serde_json::json!("smoke-tinystory-alt")
+        );
+    }
+
+    #[test]
+    fn canonical_workload_manifest_fixture_shape_and_bytes_are_pinned() {
+        let manifest = canonical_workload_manifest_fixture();
+        let expected_value = serde_json::json!({
+            "id": "smoke-tinystory-001",
+            "schema_version": { "epoch": 1, "minor": 0 },
+            "self_hash": HASH_08,
+            "golden_vectors": [],
+            "future_fields": {}
+        });
+        let expected_bytes = format!(
+            r#"{{"id":"smoke-tinystory-001","schema_version":{{"epoch":1,"minor":0}},"self_hash":"{HASH_08}","golden_vectors":[],"future_fields":{{}}}}"#
+        );
+
+        let encoded = serde_json::to_string(&manifest).expect("manifest serializes");
+
+        assert_eq!(
+            serde_json::to_value(&manifest).expect("manifest json value"),
+            expected_value
+        );
+        assert_eq!(encoded, expected_bytes);
+        assert_eq!(
+            serde_json::from_str::<WorkloadManifest>(&encoded).expect("manifest deserializes"),
+            manifest
+        );
+    }
+
+    #[test]
     fn workload_manifest_ref_fixture_round_trips() {
         let manifest_ref = workload_manifest_ref_fixture();
 
@@ -109,6 +153,36 @@ mod tests {
     }
 
     #[test]
+    fn workload_manifest_ref_fixture_shape_and_bytes_are_pinned() {
+        let manifest_ref = workload_manifest_ref_fixture();
+        let expected_value = serde_json::json!({
+            "id": "smoke-tinystory-001",
+            "manifest_hash": HASH_08,
+            "locator": {
+                "kind": "RegistryEntry",
+                "registry": "fixture-registry",
+                "key": "smoke-tinystory-001"
+            }
+        });
+        let expected_bytes = format!(
+            r#"{{"id":"smoke-tinystory-001","manifest_hash":"{HASH_08}","locator":{{"kind":"RegistryEntry","registry":"fixture-registry","key":"smoke-tinystory-001"}}}}"#
+        );
+
+        let encoded = serde_json::to_string(&manifest_ref).expect("manifest ref serializes");
+
+        assert_eq!(
+            serde_json::to_value(&manifest_ref).expect("manifest ref json value"),
+            expected_value
+        );
+        assert_eq!(encoded, expected_bytes);
+        assert_eq!(
+            serde_json::from_str::<WorkloadManifestRef>(&encoded)
+                .expect("manifest ref deserializes"),
+            manifest_ref
+        );
+    }
+
+    #[test]
     fn golden_vector_ref_fixture_round_trips() {
         let vector = golden_vector_ref_fixture();
 
@@ -117,5 +191,28 @@ mod tests {
             serde_json::from_str(&encoded).expect("golden vector ref deserializes");
 
         assert_eq!(decoded, vector);
+    }
+
+    #[test]
+    fn golden_vector_ref_fixture_shape_and_bytes_are_pinned() {
+        let vector = golden_vector_ref_fixture();
+        let expected_value = serde_json::json!({
+            "id": "vec.smoke.001",
+            "manifest_hash": HASH_04
+        });
+        let expected_bytes = format!(r#"{{"id":"vec.smoke.001","manifest_hash":"{HASH_04}"}}"#);
+
+        let encoded = serde_json::to_string(&vector).expect("golden vector ref serializes");
+
+        assert_eq!(
+            serde_json::to_value(&vector).expect("golden vector ref json value"),
+            expected_value
+        );
+        assert_eq!(encoded, expected_bytes);
+        assert_eq!(
+            serde_json::from_str::<GoldenVectorRef>(&encoded)
+                .expect("golden vector ref deserializes"),
+            vector
+        );
     }
 }

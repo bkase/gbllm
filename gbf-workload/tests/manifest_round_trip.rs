@@ -4,6 +4,10 @@ use gbf_workload::manifest::{
     WorkloadLocator, WorkloadManifest, WorkloadManifestRef, WorkloadSchemaVersion,
 };
 
+const HASH_04: &str = "sha256:0404040404040404040404040404040404040404040404040404040404040404";
+const HASH_08: &str = "sha256:0808080808080808080808080808080808080808080808080808080808080808";
+const BLOB_HASH_0B: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
 }
@@ -17,7 +21,7 @@ fn golden_vector_ref(id: &str, manifest_hash: Hash256) -> GoldenVectorRef {
 
 fn workload_manifest(golden_vectors: Vec<GoldenVectorRef>) -> WorkloadManifest {
     WorkloadManifest {
-        id: WorkloadId("smoke-tinystory-001".to_owned()),
+        id: WorkloadId::from("smoke-tinystory-001"),
         schema_version: WorkloadSchemaVersion { epoch: 1, minor: 0 },
         self_hash: hash(8),
         golden_vectors,
@@ -39,6 +43,22 @@ fn workload_manifest_round_trip_canonical_fixture() {
 fn workload_manifest_round_trip_with_golden_vectors() {
     let manifest = workload_manifest(vec![golden_vector_ref("vec.smoke.001", hash(4))]);
 
+    assert_eq!(
+        serde_json::to_value(&manifest).expect("manifest json value"),
+        serde_json::json!({
+            "id": "smoke-tinystory-001",
+            "schema_version": { "epoch": 1, "minor": 0 },
+            "self_hash": HASH_08,
+            "golden_vectors": [
+                {
+                    "id": "vec.smoke.001",
+                    "manifest_hash": HASH_04
+                }
+            ],
+            "future_fields": {}
+        })
+    );
+
     let encoded = serde_json::to_string(&manifest).expect("manifest serializes");
     let decoded: WorkloadManifest = serde_json::from_str(&encoded).expect("manifest deserializes");
 
@@ -48,12 +68,24 @@ fn workload_manifest_round_trip_with_golden_vectors() {
 #[test]
 fn workload_manifest_ref_round_trip() {
     let manifest_ref = WorkloadManifestRef {
-        id: WorkloadId("smoke-tinystory-001".to_owned()),
+        id: WorkloadId::from("smoke-tinystory-001"),
         manifest_hash: hash(8),
         locator: WorkloadLocator::Path {
             path: "fixtures/workloads/smoke-tinystory-001.workload.json".to_owned(),
         },
     };
+
+    assert_eq!(
+        serde_json::to_value(&manifest_ref).expect("manifest ref json value"),
+        serde_json::json!({
+            "id": "smoke-tinystory-001",
+            "manifest_hash": HASH_08,
+            "locator": {
+                "kind": "Path",
+                "path": "fixtures/workloads/smoke-tinystory-001.workload.json"
+            }
+        })
+    );
 
     let encoded = serde_json::to_string(&manifest_ref).expect("manifest ref serializes");
     let decoded: WorkloadManifestRef =
@@ -67,6 +99,14 @@ fn workload_locator_round_trip_path_variant() {
     let locator = WorkloadLocator::Path {
         path: "fixtures/workloads/smoke-tinystory-001.workload.json".to_owned(),
     };
+
+    assert_eq!(
+        serde_json::to_value(&locator).expect("path locator json value"),
+        serde_json::json!({
+            "kind": "Path",
+            "path": "fixtures/workloads/smoke-tinystory-001.workload.json"
+        })
+    );
 
     let encoded = serde_json::to_string(&locator).expect("locator serializes");
     let decoded: WorkloadLocator = serde_json::from_str(&encoded).expect("locator deserializes");
@@ -84,6 +124,18 @@ fn workload_locator_round_trip_inline_variant() {
         },
     };
 
+    assert_eq!(
+        serde_json::to_value(&locator).expect("inline locator json value"),
+        serde_json::json!({
+            "kind": "Inline",
+            "blob": {
+                "hash": BLOB_HASH_0B,
+                "len": 128,
+                "codec": "raw"
+            }
+        })
+    );
+
     let encoded = serde_json::to_string(&locator).expect("locator serializes");
     let decoded: WorkloadLocator = serde_json::from_str(&encoded).expect("locator deserializes");
 
@@ -97,6 +149,15 @@ fn workload_locator_round_trip_registry_variant() {
         key: "smoke-tinystory-001".to_owned(),
     };
 
+    assert_eq!(
+        serde_json::to_value(&locator).expect("registry locator json value"),
+        serde_json::json!({
+            "kind": "RegistryEntry",
+            "registry": "fixture-registry",
+            "key": "smoke-tinystory-001"
+        })
+    );
+
     let encoded = serde_json::to_string(&locator).expect("locator serializes");
     let decoded: WorkloadLocator = serde_json::from_str(&encoded).expect("locator deserializes");
 
@@ -105,7 +166,7 @@ fn workload_locator_round_trip_registry_variant() {
 
 #[test]
 fn workload_id_round_trip() {
-    let id = WorkloadId("smoke-tinystory-001".to_owned());
+    let id = WorkloadId::from("smoke-tinystory-001");
 
     let encoded = serde_json::to_string(&id).expect("workload id serializes");
     let decoded: WorkloadId = serde_json::from_str(&encoded).expect("workload id deserializes");
@@ -115,8 +176,24 @@ fn workload_id_round_trip() {
 }
 
 #[test]
+fn workload_id_is_foundation_type_reexport() {
+    let manifest_id = WorkloadId::from("smoke-tinystory-001");
+    let foundation_id: gbf_foundation::WorkloadId = manifest_id;
+
+    assert_eq!(foundation_id.as_str(), "smoke-tinystory-001");
+}
+
+#[test]
 fn workload_schema_version_round_trip() {
     let version = WorkloadSchemaVersion { epoch: 1, minor: 7 };
+
+    assert_eq!(
+        serde_json::to_value(version).expect("schema version json value"),
+        serde_json::json!({
+            "epoch": 1,
+            "minor": 7
+        })
+    );
 
     let encoded = serde_json::to_string(&version).expect("schema version serializes");
     let decoded: WorkloadSchemaVersion =
@@ -141,6 +218,14 @@ fn golden_vector_id_round_trip() {
 fn golden_vector_ref_round_trip() {
     let vector = golden_vector_ref("vec.smoke.001", hash(4));
 
+    assert_eq!(
+        serde_json::to_value(&vector).expect("golden vector ref json value"),
+        serde_json::json!({
+            "id": "vec.smoke.001",
+            "manifest_hash": HASH_04
+        })
+    );
+
     let encoded = serde_json::to_string(&vector).expect("golden vector ref serializes");
     let decoded: GoldenVectorRef =
         serde_json::from_str(&encoded).expect("golden vector ref deserializes");
@@ -161,7 +246,7 @@ fn workload_manifest_rejects_unknown_top_level_field() {
 #[test]
 fn workload_manifest_ref_rejects_unknown_field() {
     let mut value = serde_json::to_value(WorkloadManifestRef {
-        id: WorkloadId("smoke-tinystory-001".to_owned()),
+        id: WorkloadId::from("smoke-tinystory-001"),
         manifest_hash: hash(8),
         locator: WorkloadLocator::Path {
             path: "fixtures/workloads/smoke-tinystory-001.workload.json".to_owned(),

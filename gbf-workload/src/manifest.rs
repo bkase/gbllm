@@ -1,11 +1,8 @@
 //! Workload manifest schema consumed by pipeline-entry validation.
 
+pub use gbf_foundation::WorkloadId;
 use gbf_foundation::{BlobRef, Hash256};
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct WorkloadId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +53,7 @@ pub struct GoldenVectorRef {
     pub manifest_hash: Hash256,
 }
 
+/// Identifier scoped to workload registry namespaces.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RegistryId(pub String);
