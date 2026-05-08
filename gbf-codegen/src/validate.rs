@@ -60,13 +60,12 @@ use gbf_report::report_schemas::artifact_validation_v1::{
 };
 use gbf_report::{
     ReportBody, ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report,
-    compute_self_hash,
+    canonicalize_value, compute_self_hash,
 };
 use gbf_workload::{
     GoldenVectorId, GoldenVectorRef, WorkloadId, WorkloadManifest, WorkloadManifestRef,
 };
 use serde::Serialize;
-use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub type ValidationDiagnostic = PolicyValidationDiagnostic;
@@ -450,7 +449,7 @@ fn missing_calibration_failure(inputs: &ValidateInputs<'_>) -> ValidationStageFa
             origin: ValidationOrigin::Calibration,
             code: ValidationCode::CalibrationMissing { class },
             detail: ValidationDetail::Field {
-                field: FieldPath::from(format!("calibration.{class:?}")),
+                field: FieldPath::from(format!("calibration.{}", class.as_str())),
             },
             provenance: vec![EvidenceRef {
                 kind: "compile_request".to_owned(),
@@ -584,55 +583,7 @@ fn input_hash<T: Serialize + ?Sized>(
 
 fn canonical_input_json_bytes<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
     let value = serde_json::to_value(value).expect("Stage 0 input identity serializes");
-    let canonical = canonical_json_value(value);
-    let mut bytes = Vec::new();
-    emit_canonical_input_json(&canonical, &mut bytes);
-    bytes
-}
-
-fn canonical_json_value(value: Value) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json_value).collect()),
-        Value::Object(fields) => Value::Object(
-            fields
-                .into_iter()
-                .map(|(key, value)| (key, canonical_json_value(value)))
-                .collect::<Map<_, _>>(),
-        ),
-        scalar => scalar,
-    }
-}
-
-fn emit_canonical_input_json(value: &Value, bytes: &mut Vec<u8>) {
-    match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
-            serde_json::to_writer(bytes, value).expect("canonical scalar serializes");
-        }
-        Value::Array(items) => {
-            bytes.push(b'[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    bytes.push(b',');
-                }
-                emit_canonical_input_json(item, bytes);
-            }
-            bytes.push(b']');
-        }
-        Value::Object(fields) => {
-            bytes.push(b'{');
-            let mut fields = fields.iter().collect::<Vec<_>>();
-            fields.sort_by_key(|(key, _)| *key);
-            for (index, (key, value)) in fields.into_iter().enumerate() {
-                if index > 0 {
-                    bytes.push(b',');
-                }
-                serde_json::to_writer(&mut *bytes, key).expect("canonical key serializes");
-                bytes.push(b':');
-                emit_canonical_input_json(value, bytes);
-            }
-            bytes.push(b'}');
-        }
-    }
+    canonicalize_value(&value).expect("Stage 0 input identity canonicalizes")
 }
 
 fn sha256_hash(bytes: &[u8]) -> Hash256 {
@@ -688,7 +639,8 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_validate_validated_inputs_cannot_be_constructed_outside_module() {
+    fn f_b2_validate_validated_inputs_privacy_proof_lives_in_compile_fail_doctest() {
+        // The module-level compile_fail doctest is the outside-module privacy proof.
         assert!(
             std::any::type_name::<ValidatedInputs<'static>>()
                 .starts_with("gbf_codegen::validate::ValidatedInputs")
@@ -717,6 +669,32 @@ mod tests {
         assert_eq!(
             product.report.body.identity.compatibility_adapter_hash,
             expected.compatibility_adapter_hash
+        );
+    }
+
+    #[test]
+    fn f_b2_validate_canonical_input_hash_has_known_byte_fixture() {
+        let value = serde_json::json!({
+            "zeta": 2,
+            "alpha": {
+                "b": 2,
+                "a": 1,
+            },
+        });
+
+        let canonical = canonical_input_json_bytes(&value);
+
+        assert_eq!(canonical.as_slice(), br#"{"alpha":{"a":1,"b":2},"zeta":2}"#);
+        assert_eq!(
+            input_hash(
+                "fixture-crate",
+                "FixtureInput",
+                "fixture_input",
+                "1.0.0",
+                &value,
+            )
+            .to_string(),
+            "4dac1a04bf8464cc8239fa0a1feb1fa1dfa7b112599272d999ebc8634fcf6962"
         );
     }
 

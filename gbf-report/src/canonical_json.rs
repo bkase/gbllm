@@ -164,6 +164,13 @@ where
     Ok(bytes)
 }
 
+/// Serialize an already materialized JSON value to canonical JSON bytes.
+pub fn canonicalize_value(value: &Value) -> Result<Vec<u8>, CanonicalJsonError> {
+    let mut bytes = Vec::new();
+    emit_canonical_json(value, &mut bytes)?;
+    Ok(bytes)
+}
+
 /// Compute the domain-separated self-hash for `env`.
 pub fn compute_self_hash<R>(env: &ReportEnvelope<R>) -> Result<Hash256, ReportSelfHashError>
 where

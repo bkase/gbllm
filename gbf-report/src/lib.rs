@@ -11,5 +11,5 @@ pub mod run;
 pub use canonical_json::{
     CanonicalJsonError, DiagnosticSeverity, ReportBody, ReportEnvelope, ReportEnvelopeError,
     ReportOutcome, ReportSchemaId, ReportSelfHashError, ValidationDiagnostic, canonicalize,
-    compute_self_hash, round_trip_self_hash,
+    canonicalize_value, compute_self_hash, round_trip_self_hash,
 };
