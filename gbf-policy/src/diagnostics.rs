@@ -194,6 +194,15 @@ pub enum ValidationCode {
         left: CompileKnobBounds,
         right: CompileKnobBounds,
     },
+    PolicyConstraintLoosened {
+        knob: CompileKnobId,
+        previous: CompileKnobBounds,
+        requested: CompileKnobBounds,
+    },
+    PolicyHintConstraintUnsupported {
+        knob: CompileKnobId,
+        value: ConstraintValue,
+    },
     PolicyKnobLockedAndOverridden {
         knob: CompileKnobId,
     },
@@ -899,6 +908,15 @@ mod tests {
                 left: bounds.clone(),
                 right: bounds.clone(),
             },
+            ValidationCode::PolicyConstraintLoosened {
+                knob: CompileKnobId::Placement,
+                previous: bounds.clone(),
+                requested: bounds.clone(),
+            },
+            ValidationCode::PolicyHintConstraintUnsupported {
+                knob: CompileKnobId::Schedule,
+                value: ConstraintValue::U32 { value: 17 },
+            },
             ValidationCode::PolicyKnobLockedAndOverridden {
                 knob: CompileKnobId::RomWindow,
             },
@@ -1020,7 +1038,7 @@ mod tests {
             serde_json::to_value(ValidationCode::PolicyConstraintUnsatisfiable {
                 knob: CompileKnobId::Placement,
                 left: bounds.clone(),
-                right: bounds,
+                right: bounds.clone(),
             })
             .expect("policy constraint code serializes"),
             serde_json::json!({
@@ -1042,6 +1060,41 @@ mod tests {
                 "kind": "BudgetQuantGraphViewMalformed",
                 "fields": {
                     "field": "budget_view.per_expert_payload"
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::PolicyConstraintLoosened {
+                knob: CompileKnobId::Placement,
+                previous: bounds.clone(),
+                requested: bounds.clone(),
+            })
+            .expect("policy constraint loosened code serializes"),
+            serde_json::json!({
+                "kind": "PolicyConstraintLoosened",
+                "fields": {
+                    "knob": { "kind": "Placement" },
+                    "previous": default_bounds_json,
+                    "requested": default_bounds_json
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::PolicyHintConstraintUnsupported {
+                knob: CompileKnobId::Schedule,
+                value: ConstraintValue::U32 { value: 17 },
+            })
+            .expect("unsupported policy hint constraint code serializes"),
+            serde_json::json!({
+                "kind": "PolicyHintConstraintUnsupported",
+                "fields": {
+                    "knob": { "kind": "Schedule" },
+                    "value": {
+                        "kind": "U32",
+                        "value": 17
+                    }
                 }
             })
         );

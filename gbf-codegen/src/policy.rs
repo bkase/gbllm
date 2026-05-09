@@ -284,20 +284,19 @@ fn apply_bounds(
             if let Some(next) = frame.hard_bounds.$field {
                 if compile_request_override && !next.is_monotone_successor_of(&state.bounds.$field)
                 {
-                    return Err(unsatisfiable_diagnostic(
+                    return Err(loosened_bound_diagnostic(
                         $knob,
                         state.bounds.clone(),
                         with_bound(state.bounds.clone(), $knob, next),
                         frame.evidence.clone(),
                     ));
                 }
-                let previous = state.bounds.clone();
                 state.bounds.$field = meet_bound(state.bounds.$field, next);
                 if !value_within_knob_bounds($knob, &state.values, &state.bounds) {
-                    return Err(unsatisfiable_diagnostic(
+                    return Err(out_of_bounds_diagnostic(
                         $knob,
-                        previous,
-                        with_bound(state.bounds.clone(), $knob, next),
+                        value_descriptor($knob, &state.values),
+                        state.bounds.clone(),
                         frame.evidence.clone(),
                     ));
                 }
@@ -694,16 +693,20 @@ fn locked_diagnostic(knob: CompileKnobId, provenance: Vec<EvidenceRef>) -> Valid
     }
 }
 
-fn unsatisfiable_diagnostic(
+fn loosened_bound_diagnostic(
     knob: CompileKnobId,
-    left: CompileKnobBounds,
-    right: CompileKnobBounds,
+    previous: CompileKnobBounds,
+    requested: CompileKnobBounds,
     provenance: Vec<EvidenceRef>,
 ) -> ValidationDiagnostic {
     ValidationDiagnostic {
         severity: DiagnosticSeverity::Hard,
         origin: ValidationOrigin::PolicyResolution,
-        code: ValidationCode::PolicyConstraintUnsatisfiable { knob, left, right },
+        code: ValidationCode::PolicyConstraintLoosened {
+            knob,
+            previous,
+            requested,
+        },
         detail: ValidationDetail::Field {
             field: FieldPath::from(format!("compile_knobs.bounds.{knob:?}")),
         },
@@ -1195,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_resolve_policy_rejects_unsatisfiable_bound_meet() {
+    fn f_b2_resolve_policy_bound_meet_value_violation_reports_out_of_bounds() {
         let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
         fixture.compile_request.constraint_overrides = Some(CompileKnobOverrides {
             bounds: CompileKnobPartialBounds {
@@ -1207,9 +1210,41 @@ mod tests {
             ..CompileKnobOverrides::default()
         });
 
-        let failure = resolve_policy(&fixture.validation()).expect_err("unsatisfiable rejects");
+        let failure =
+            resolve_policy(&fixture.validation()).expect_err("value outside bound rejects");
         assert_policy_failure(&failure, |code| {
-            matches!(code, ValidationCode::PolicyConstraintUnsatisfiable { .. })
+            matches!(
+                code,
+                ValidationCode::PolicyKnobOutOfBounds {
+                    knob: CompileKnobId::Placement,
+                    ..
+                }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_compile_request_bound_override_cannot_loosen() {
+        let mut fixture = Fixture::new("Trace");
+        fixture.compile_request.constraint_overrides = Some(CompileKnobOverrides {
+            bounds: CompileKnobPartialBounds {
+                placement: Some(PlacementKnobBounds {
+                    max_profile: PlacementProfile::PackedExperts,
+                }),
+                ..CompileKnobPartialBounds::default()
+            },
+            ..CompileKnobOverrides::default()
+        });
+
+        let failure = resolve_policy(&fixture.validation()).expect_err("bound relaxation rejects");
+        assert_policy_failure(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::PolicyConstraintLoosened {
+                    knob: CompileKnobId::Placement,
+                    ..
+                }
+            )
         });
     }
 
