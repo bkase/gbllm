@@ -1941,6 +1941,7 @@ fn validate_hint_provenance(
     let hint_bundle_hash = artifact.hint_bundle_hash();
     let active_layers = active_layer_ids(artifact);
     let active_lowering = active_lowering(inputs);
+    validate_hint_provenance_ids_unique(artifact, hint_bundle_hash, diagnostics);
 
     for entry in &artifact.hint_bundle.facts.scope_provenance {
         validate_scoped_hint_entry(
@@ -1986,6 +1987,70 @@ fn validate_hint_provenance(
             hint_bundle_hash,
         ));
     }
+}
+
+fn validate_hint_provenance_ids_unique(
+    artifact: &ImportedArtifactView,
+    hint_bundle_hash: Hash256,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let mut seen = BTreeSet::new();
+
+    for entry in &artifact.hint_bundle.facts.scope_provenance {
+        validate_hint_provenance_id_unique(
+            &mut seen,
+            entry.provenance_id,
+            FieldPath::from(format!("hint_bundle.facts.{}", entry.field)),
+            &entry.scope,
+            hint_bundle_hash,
+            diagnostics,
+        );
+    }
+
+    for entry in artifact.hint_bundle.preferences.scope_provenance() {
+        validate_hint_provenance_id_unique(
+            &mut seen,
+            entry.provenance_id,
+            FieldPath::from(format!("hint_bundle.preferences.{}", entry.field)),
+            &entry.scope,
+            hint_bundle_hash,
+            diagnostics,
+        );
+    }
+
+    for entry in &artifact.hint_bundle.constraints.entries {
+        validate_hint_provenance_id_unique(
+            &mut seen,
+            entry.provenance_id,
+            FieldPath::from(format!(
+                "hint_bundle.constraints.entries[provenance_id={}].scope",
+                entry.provenance_id.0
+            )),
+            &entry.scope,
+            hint_bundle_hash,
+            diagnostics,
+        );
+    }
+}
+
+fn validate_hint_provenance_id_unique(
+    seen: &mut BTreeSet<TraceProbeId>,
+    provenance_id: TraceProbeId,
+    field: FieldPath,
+    scope: &EvidenceScope,
+    hint_bundle_hash: Hash256,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if seen.insert(provenance_id) {
+        return;
+    }
+
+    diagnostics.push(hint_provenance_inconsistent_diagnostic(
+        provenance_id,
+        field,
+        scope,
+        hint_bundle_hash,
+    ));
 }
 
 fn validate_scoped_hint_entry(
@@ -3679,6 +3744,83 @@ mod tests {
         fixture.set_single_layer_tensor(0);
 
         validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_duplicate_scope_provenance_id_across_facts_and_preferences() {
+        let duplicate_id = TraceProbeId(812);
+        let mut hint_bundle = HintBundle::empty();
+        hint_bundle
+            .facts
+            .scope_provenance
+            .push(HintScopeProvenance {
+                provenance_id: duplicate_id,
+                field: FieldPath::from("activation_ranges.0"),
+                scope: EvidenceScope::WholeArtifact,
+            });
+        hint_bundle.preferences =
+            hint_bundle
+                .preferences
+                .with_scope_provenance(vec![HintScopeProvenance {
+                    provenance_id: duplicate_id,
+                    field: FieldPath::from("expert_slot_affinity.0"),
+                    scope: EvidenceScope::WholeArtifact,
+                }]);
+        let fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::HintProvenanceInconsistent {
+                    fact
+                } if *fact == duplicate_id
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_duplicate_scope_provenance_id_across_preferences_and_constraints() {
+        let duplicate_id = TraceProbeId(813);
+        let mut hint_bundle = HintBundle::empty();
+        hint_bundle
+            .facts
+            .scope_provenance
+            .push(HintScopeProvenance {
+                provenance_id: TraceProbeId(814),
+                field: FieldPath::from("activation_ranges.0"),
+                scope: EvidenceScope::WholeArtifact,
+            });
+        hint_bundle.preferences =
+            hint_bundle
+                .preferences
+                .with_scope_provenance(vec![HintScopeProvenance {
+                    provenance_id: duplicate_id,
+                    field: FieldPath::from("expert_slot_affinity.0"),
+                    scope: EvidenceScope::WholeArtifact,
+                }]);
+        hint_bundle
+            .constraints
+            .entries
+            .push(build_constraint_with_scope(
+                duplicate_id,
+                EvidenceScope::WholeArtifact,
+            ));
+        let fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::HintProvenanceInconsistent {
+                    fact
+                } if *fact == duplicate_id
+            )
+        });
     }
 
     #[test]
