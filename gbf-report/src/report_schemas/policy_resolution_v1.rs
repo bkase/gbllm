@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use gbf_foundation::{
-    CompileProfileId, GoldenVectorId, Hash256, LineageId, TargetProfileId, WorkloadId,
+    CompileProfileId, FieldPath, GoldenVectorId, Hash256, LineageId, TargetProfileId, WorkloadId,
 };
 use gbf_hw::calibration::CalibrationSetRef;
 use gbf_policy::{
@@ -145,12 +145,14 @@ pub struct HintConsumptionSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactUse {
-    pub reference: String,
+    pub fact: FieldPath,
+    pub provenance: Vec<ConstraintProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreferenceUse {
+    pub preference: FieldPath,
     pub knob: CompileKnobId,
     pub provenance: Vec<ConstraintProvenance>,
 }
@@ -158,14 +160,23 @@ pub struct PreferenceUse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IgnoredPreference {
+    pub preference: FieldPath,
     pub knob: CompileKnobId,
-    pub reason: String,
+    pub reason: IgnoredPreferenceReason,
     pub provenance: Vec<ConstraintProvenance>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum IgnoredPreferenceReason {
+    OutsideBounds,
+    Locked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConstraintEnforcement {
+    pub constraint: FieldPath,
     pub knob: CompileKnobId,
     pub provenance: Vec<ConstraintProvenance>,
 }
@@ -295,6 +306,35 @@ mod tests {
         assert!(
             serde_json::from_value::<ReportEnvelope<PolicyResolutionReportBody>>(value).is_err()
         );
+    }
+
+    #[test]
+    fn f_b2_policy_resolution_v1_hint_consumption_invariant() {
+        let report = report_fixture();
+        let value = serde_json::to_value(&report).expect("report serializes");
+        let hint_consumption = &value["hint_consumption"];
+
+        assert_eq!(hint_consumption["facts_used"], serde_json::json!([]));
+        assert_eq!(
+            hint_consumption["preferences_honored"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            hint_consumption["preferences_ignored"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            hint_consumption["constraints_enforced"],
+            serde_json::json!([])
+        );
+
+        serde_json::from_value::<IgnoredPreference>(serde_json::json!({
+            "preference": "hint_bundle.preferences.expert_slot_affinity.0",
+            "knob": {"kind": "Placement"},
+            "reason": {"kind": "OutsideBounds"},
+            "provenance": []
+        }))
+        .expect("typed ignored preference reason is accepted");
     }
 
     fn report_fixture() -> ReportEnvelope<PolicyResolutionReportBody> {

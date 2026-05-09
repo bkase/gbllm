@@ -16,8 +16,8 @@ use gbf_policy::{
 };
 use gbf_report::report_schemas::policy_resolution_v1::{
     ArtifactIdentitySection, CompileKnobsSection, CompileRequestSection, ConstraintEnforcement,
-    HintConsumptionSection, IgnoredPreference, PolicyProvenanceSection, PolicyResolutionReportBody,
-    PolicyResolutionSuccessSection, PreferenceUse, ResolvedSection,
+    HintConsumptionSection, IgnoredPreference, IgnoredPreferenceReason, PolicyProvenanceSection,
+    PolicyResolutionReportBody, PolicyResolutionSuccessSection, PreferenceUse, ResolvedSection,
 };
 use gbf_report::{
     ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report, compute_self_hash,
@@ -36,7 +36,16 @@ pub struct ConstraintFrame {
     pub defaults: CompileKnobPartialValues,
     pub hard_bounds: CompileKnobPartialBounds,
     pub preferences: CompileKnobPreferences,
+    hint_preferences: Vec<HintPreferenceCandidate>,
+    hint_constraints: Vec<ConstraintEnforcement>,
     pub locks: KnobLockSet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HintPreferenceCandidate {
+    preference: FieldPath,
+    values: CompileKnobPartialValues,
+    provenance: Vec<ConstraintProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,13 +137,15 @@ pub fn resolve_policy(
 fn initial_constraint_frames(
     validation: &ValidationProduct<'_>,
 ) -> Result<Vec<ConstraintFrame>, ValidationDiagnostic> {
-    Ok(vec![
+    let mut frames = vec![
         ConstraintFrame {
             source: PolicySource::TargetDefault,
             evidence: vec![target_evidence(validation)],
             defaults: CompileKnobPartialValues::default(),
             hard_bounds: partial_bounds_from_full(canonical_default_bounds_fixture()),
             preferences: CompileKnobPartialValues::default(),
+            hint_preferences: Vec::new(),
+            hint_constraints: Vec::new(),
             locks: KnobLockSet::default(),
         },
         ConstraintFrame {
@@ -143,11 +154,14 @@ fn initial_constraint_frames(
             defaults: validation.validated.compile_profile.knob_defaults.clone(),
             hard_bounds: validation.validated.compile_profile.knob_bounds.clone(),
             preferences: CompileKnobPartialValues::default(),
+            hint_preferences: Vec::new(),
+            hint_constraints: Vec::new(),
             locks: validation.validated.compile_profile.locks.clone(),
         },
         hint_preference_frame(validation),
-        hint_constraint_frame(validation)?,
-    ])
+    ];
+    frames.extend(hint_constraint_frames(validation)?);
+    Ok(frames)
 }
 
 fn profile_frame_index(frames: &[ConstraintFrame]) -> usize {
@@ -158,42 +172,60 @@ fn profile_frame_index(frames: &[ConstraintFrame]) -> usize {
 }
 
 fn hint_preference_frame(validation: &ValidationProduct<'_>) -> ConstraintFrame {
-    let mut preferences = CompileKnobPartialValues::default();
-    if !validation
+    let provenance =
+        preference_provenance(PolicySource::HintBundle, vec![hint_evidence(validation)]);
+    let hint_preferences = validation
         .validated
         .artifact
         .hint_bundle
         .preferences
         .expert_slot_affinity()
-        .is_empty()
-    {
-        preferences.placement = Some(PlacementKnob {
-            profile: gbf_policy::PlacementProfile::PackedExperts,
-        });
-    }
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let values = CompileKnobPartialValues {
+                placement: Some(PlacementKnob {
+                    profile: gbf_policy::PlacementProfile::PackedExperts,
+                }),
+                ..CompileKnobPartialValues::default()
+            };
+            HintPreferenceCandidate {
+                preference: FieldPath::from(format!(
+                    "hint_bundle.preferences.expert_slot_affinity.{index}"
+                )),
+                values,
+                provenance: provenance.clone(),
+            }
+        })
+        .collect();
 
     ConstraintFrame {
         source: PolicySource::HintBundle,
         evidence: vec![hint_evidence(validation)],
         defaults: CompileKnobPartialValues::default(),
         hard_bounds: CompileKnobPartialBounds::default(),
-        preferences,
+        preferences: CompileKnobPartialValues::default(),
+        hint_preferences,
+        hint_constraints: Vec::new(),
         locks: KnobLockSet::default(),
     }
 }
 
 #[allow(clippy::result_large_err)]
-fn hint_constraint_frame(
+fn hint_constraint_frames(
     validation: &ValidationProduct<'_>,
-) -> Result<ConstraintFrame, ValidationDiagnostic> {
-    let mut defaults = CompileKnobPartialValues::default();
-    for entry in &validation
+) -> Result<Vec<ConstraintFrame>, ValidationDiagnostic> {
+    let mut frames = Vec::new();
+    for (index, entry) in validation
         .validated
         .artifact
         .hint_bundle
         .constraints
         .entries
+        .iter()
+        .enumerate()
     {
+        let mut defaults = CompileKnobPartialValues::default();
         set_partial_value_from_constraint(&mut defaults, entry.knob, &entry.value).map_err(
             |()| {
                 let mut evidence = vec![hint_evidence(validation)];
@@ -201,16 +233,28 @@ fn hint_constraint_frame(
                 unsupported_hint_constraint_diagnostic(entry.knob, entry.value.clone(), evidence)
             },
         )?;
+        let mut evidence = vec![hint_evidence(validation)];
+        evidence.extend(entry.evidence.clone());
+        frames.push(ConstraintFrame {
+            source: PolicySource::HintBundle,
+            evidence: evidence.clone(),
+            defaults,
+            hard_bounds: CompileKnobPartialBounds::default(),
+            preferences: CompileKnobPartialValues::default(),
+            hint_preferences: Vec::new(),
+            hint_constraints: vec![ConstraintEnforcement {
+                constraint: FieldPath::from(format!("hint_bundle.constraints.entries.{index}")),
+                knob: entry.knob,
+                provenance: vec![ConstraintProvenance {
+                    source: PolicySource::HintBundle,
+                    operation: ConstraintOperation::ApplyHardConstraint,
+                    evidence,
+                }],
+            }],
+            locks: KnobLockSet::default(),
+        });
     }
-
-    Ok(ConstraintFrame {
-        source: PolicySource::HintBundle,
-        evidence: vec![hint_evidence(validation)],
-        defaults,
-        hard_bounds: CompileKnobPartialBounds::default(),
-        preferences: CompileKnobPartialValues::default(),
-        locks: KnobLockSet::default(),
-    })
+    Ok(frames)
 }
 
 fn compile_request_frame(validation: &ValidationProduct<'_>) -> ConstraintFrame {
@@ -226,6 +270,8 @@ fn compile_request_frame(validation: &ValidationProduct<'_>) -> ConstraintFrame 
         defaults: overrides.values,
         hard_bounds: overrides.bounds,
         preferences: CompileKnobPartialValues::default(),
+        hint_preferences: Vec::new(),
+        hint_constraints: Vec::new(),
         locks: KnobLockSet::default(),
     }
 }
@@ -254,6 +300,8 @@ fn calibration_frame(
         defaults,
         hard_bounds: CompileKnobPartialBounds::default(),
         preferences: CompileKnobPartialValues::default(),
+        hint_preferences: Vec::new(),
+        hint_constraints: Vec::new(),
         locks: KnobLockSet::default(),
     }
 }
@@ -281,6 +329,7 @@ fn apply_frame(
         operation_for_value_source(&frame.source),
     )?;
     apply_preferences(state, &frame.preferences, frame, locks_active)?;
+    apply_hint_preferences(state, &frame.hint_preferences, frame, locks_active);
 
     for knob in &frame.locks.locked {
         state.locks.locked.insert(*knob);
@@ -297,11 +346,10 @@ fn apply_frame(
         );
     }
 
-    if matches!(frame.source, PolicySource::HintBundle) {
-        for entry in state_hint_constraints(frame) {
-            state.hint_consumption.constraints_enforced.push(entry);
-        }
-    }
+    state
+        .hint_consumption
+        .constraints_enforced
+        .extend(frame.hint_constraints.clone());
 
     Ok(())
 }
@@ -461,7 +509,8 @@ fn apply_preferences(
     macro_rules! apply_one {
         ($field:ident, $knob:expr) => {
             if let Some(next) = values.$field {
-                let provenance = preference_provenance(frame);
+                let provenance =
+                    preference_provenance(frame.source.clone(), frame.evidence.clone());
                 let mut candidate = state.values.clone();
                 candidate.$field = next;
                 if !value_within_knob_bounds($knob, &candidate, &state.bounds) {
@@ -469,8 +518,9 @@ fn apply_preferences(
                         .hint_consumption
                         .preferences_ignored
                         .push(IgnoredPreference {
+                            preference: FieldPath::from(format!("compile_knobs.{:?}", $knob)),
                             knob: $knob,
-                            reason: "outside_bounds".to_owned(),
+                            reason: IgnoredPreferenceReason::OutsideBounds,
                             provenance,
                         });
                 } else {
@@ -487,6 +537,7 @@ fn apply_preferences(
                         .hint_consumption
                         .preferences_honored
                         .push(PreferenceUse {
+                            preference: FieldPath::from(format!("compile_knobs.{:?}", $knob)),
                             knob: $knob,
                             provenance: provenance.clone(),
                         });
@@ -517,6 +568,89 @@ fn apply_preferences(
     apply_one!(schedule, CompileKnobId::Schedule);
 
     Ok(())
+}
+
+fn apply_hint_preferences(
+    state: &mut ResolutionState,
+    preferences: &[HintPreferenceCandidate],
+    frame: &ConstraintFrame,
+    locks_active: bool,
+) {
+    for preference in preferences {
+        apply_hint_preference_values(state, preference, frame, locks_active);
+    }
+}
+
+fn apply_hint_preference_values(
+    state: &mut ResolutionState,
+    preference: &HintPreferenceCandidate,
+    frame: &ConstraintFrame,
+    locks_active: bool,
+) {
+    macro_rules! apply_one {
+        ($field:ident, $knob:expr) => {
+            if let Some(next) = preference.values.$field {
+                let mut candidate = state.values.clone();
+                candidate.$field = next;
+                if !value_within_knob_bounds($knob, &candidate, &state.bounds) {
+                    state
+                        .hint_consumption
+                        .preferences_ignored
+                        .push(IgnoredPreference {
+                            preference: preference.preference.clone(),
+                            knob: $knob,
+                            reason: IgnoredPreferenceReason::OutsideBounds,
+                            provenance: preference.provenance.clone(),
+                        });
+                } else if locks_active
+                    && state.locks.locked.contains(&$knob)
+                    && state.values.$field != next
+                {
+                    state
+                        .hint_consumption
+                        .preferences_ignored
+                        .push(IgnoredPreference {
+                            preference: preference.preference.clone(),
+                            knob: $knob,
+                            reason: IgnoredPreferenceReason::Locked,
+                            provenance: preference.provenance.clone(),
+                        });
+                } else {
+                    let before = state.values.$field;
+                    state.values.$field = next;
+                    state
+                        .hint_consumption
+                        .preferences_honored
+                        .push(PreferenceUse {
+                            preference: preference.preference.clone(),
+                            knob: $knob,
+                            provenance: preference.provenance.clone(),
+                        });
+                    push_value_provenance(
+                        &mut state.provenance,
+                        $knob,
+                        before,
+                        next,
+                        true,
+                        ConstraintProvenance {
+                            source: frame.source.clone(),
+                            operation: ConstraintOperation::ApplyPreference,
+                            evidence: frame.evidence.clone(),
+                        },
+                    );
+                }
+            }
+        };
+    }
+
+    apply_one!(placement, CompileKnobId::Placement);
+    apply_one!(observation, CompileKnobId::Observation);
+    apply_one!(range, CompileKnobId::Range);
+    apply_one!(storage, CompileKnobId::Storage);
+    apply_one!(sram, CompileKnobId::Sram);
+    apply_one!(rom_window, CompileKnobId::RomWindow);
+    apply_one!(overlay, CompileKnobId::Overlay);
+    apply_one!(schedule, CompileKnobId::Schedule);
 }
 
 fn build_policy(
@@ -1456,6 +1590,7 @@ fn lock_path(knob: CompileKnobId) -> CompileKnobPath {
     field_path(knob, "locks.locked")
 }
 
+#[cfg(test)]
 fn all_knobs() -> [CompileKnobId; 8] {
     [
         CompileKnobId::Placement,
@@ -1502,40 +1637,15 @@ fn all_required_leaf_paths() -> Vec<CompileKnobPath> {
     paths
 }
 
-fn state_hint_constraints(frame: &ConstraintFrame) -> Vec<ConstraintEnforcement> {
-    all_knobs()
-        .into_iter()
-        .filter(|knob| partial_has_value(&frame.defaults, *knob))
-        .map(|knob| ConstraintEnforcement {
-            knob,
-            provenance: vec![ConstraintProvenance {
-                source: frame.source.clone(),
-                operation: ConstraintOperation::ApplyHardConstraint,
-                evidence: frame.evidence.clone(),
-            }],
-        })
-        .collect()
-}
-
-fn preference_provenance(frame: &ConstraintFrame) -> Vec<ConstraintProvenance> {
+fn preference_provenance(
+    source: PolicySource,
+    evidence: Vec<EvidenceRef>,
+) -> Vec<ConstraintProvenance> {
     vec![ConstraintProvenance {
-        source: frame.source.clone(),
+        source,
         operation: ConstraintOperation::ApplyPreference,
-        evidence: frame.evidence.clone(),
+        evidence,
     }]
-}
-
-fn partial_has_value(values: &CompileKnobPartialValues, knob: CompileKnobId) -> bool {
-    match knob {
-        CompileKnobId::Placement => values.placement.is_some(),
-        CompileKnobId::Observation => values.observation.is_some(),
-        CompileKnobId::Range => values.range.is_some(),
-        CompileKnobId::Storage => values.storage.is_some(),
-        CompileKnobId::Sram => values.sram.is_some(),
-        CompileKnobId::RomWindow => values.rom_window.is_some(),
-        CompileKnobId::Overlay => values.overlay.is_some(),
-        CompileKnobId::Schedule => values.schedule.is_some(),
-    }
 }
 
 fn meet_bound<T: BoundMeet>(left: T, right: T) -> Option<T> {
@@ -1721,9 +1831,10 @@ mod tests {
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationBundleSet,
         CalibrationConfidenceClass, CalibrationLayer, CompileObjective, CompileProfileSpec,
-        CompileRequest, DEFAULT_COMPILE_PROFILE_ID, MeasurementBlob, PlacementKnobBounds,
-        PlacementProfile, RepairProposalId, RomKernelResidencyBias, RomWindowKnob, RuntimeMode,
-        ServiceLevelObjective, ValidationCode, canonical_compile_profile_specs,
+        CompileRequest, DEFAULT_COMPILE_PROFILE_ID, MeasurementBlob, ObservabilityMode,
+        PlacementKnobBounds, PlacementProfile, RepairProposalId, RomKernelResidencyBias,
+        RomWindowKnob, RuntimeMode, ServiceLevelObjective, ValidationCode,
+        canonical_compile_profile_specs,
     };
     use gbf_report::{ReportOutcome, round_trip_self_hash};
     use gbf_workload::{GoldenVectorRef, WorkloadLocator, WorkloadManifest, WorkloadManifestRef};
@@ -2178,15 +2289,33 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_resolve_policy_records_honored_hint_preference() {
+    fn f_b2_resolve_policy_records_hint_consumption() {
         let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
         fixture.artifact.hint_bundle.preferences = slot_affinity_preferences();
+        fixture
+            .artifact
+            .hint_bundle
+            .constraints
+            .entries
+            .push(BuildConstraintEntry {
+                knob: CompileKnobId::Observation,
+                path: None,
+                value: ConstraintValue::ObservabilityMode {
+                    value: ObservabilityMode::Invariant,
+                },
+                evidence: Vec::new(),
+                scope: EvidenceScope::WholeArtifact,
+            });
         fixture.refresh_transport_hash();
 
         let product = resolve_policy(&fixture.validation()).expect("preference resolves");
         assert_eq!(
             product.policy.knobs.global.placement.profile,
             PlacementProfile::PackedExperts
+        );
+        assert_eq!(
+            product.policy.knobs.global.observation.observability,
+            ObservabilityMode::Invariant
         );
         assert_eq!(
             product
@@ -2196,6 +2325,27 @@ mod tests {
                 .preferences_honored
                 .len(),
             1
+        );
+        assert_eq!(
+            product
+                .report
+                .body
+                .hint_consumption
+                .constraints_enforced
+                .len(),
+            1
+        );
+        assert_eq!(
+            product.report.body.hint_consumption.preferences_honored[0]
+                .preference
+                .as_str(),
+            "hint_bundle.preferences.expert_slot_affinity.0"
+        );
+        assert_eq!(
+            product.report.body.hint_consumption.constraints_enforced[0]
+                .constraint
+                .as_str(),
+            "hint_bundle.constraints.entries.0"
         );
         assert!(
             product
@@ -2208,7 +2358,7 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_resolve_policy_ignores_out_of_bounds_hint_preference() {
+    fn f_b2_resolve_policy_ignores_out_of_bounds_preferences_with_record() {
         let mut fixture = Fixture::new(BRINGUP_COMPILE_PROFILE_ID);
         fixture.artifact.hint_bundle.preferences = slot_affinity_preferences();
         fixture.refresh_transport_hash();
@@ -2232,7 +2382,7 @@ mod tests {
         );
         assert_eq!(
             product.report.body.hint_consumption.preferences_ignored[0].reason,
-            "outside_bounds"
+            IgnoredPreferenceReason::OutsideBounds
         );
     }
 
@@ -2340,6 +2490,8 @@ mod tests {
             defaults: CompileKnobPartialValues::default(),
             hard_bounds: CompileKnobPartialBounds::default(),
             preferences: CompileKnobPartialValues::default(),
+            hint_preferences: Vec::new(),
+            hint_constraints: Vec::new(),
             locks: KnobLockSet::default(),
         };
 
