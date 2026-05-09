@@ -1308,9 +1308,14 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
                     | "runtime_chrome_budget"
                     | "projections.common_bank_footprint.shared_dense_ffn_bytes"
             ) || is_projected_switches_expected_path(path)
+                || is_per_expert_assigned_slot_path(path)
         }
         _ => false,
     }
+}
+
+fn is_per_expert_assigned_slot_path(path: &str) -> bool {
+    path.starts_with("projections.per_expert_payload[") && path.ends_with("].assigned_slot")
 }
 
 fn is_projected_switches_expected_path(path: &str) -> bool {
