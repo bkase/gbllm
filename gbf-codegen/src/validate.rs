@@ -63,7 +63,7 @@ use gbf_artifact::{
     TargetDataLoweringArtifact,
 };
 use gbf_foundation::{BlobCodec, BlobRef, Hash256, LayerId, PackerVersion, SemVer};
-use gbf_hw::target::TargetProfile;
+use gbf_hw::target::{TargetProfile, target_profile_content_hash};
 use gbf_policy::{
     CalibrationBundle, CalibrationBundleSet, CalibrationConfidenceRequirement, CalibrationLayer,
     CompatibilityAdapterId, CompileProfileSpec, CompileRequest, CompilerFeature,
@@ -456,13 +456,7 @@ fn compute_validated_input_hashes_for_artifact(
             "1.0.0",
             inputs.compile_request,
         ),
-        target_profile_hash: input_hash(
-            "gbf-hw",
-            "TargetProfile",
-            "target_profile",
-            "1.0.0",
-            inputs.target_profile,
-        ),
+        target_profile_hash: canonical_target_profile_hash(inputs.target_profile),
         compile_profile_hash: input_hash(
             "gbf-policy",
             "CompileProfileSpec",
@@ -1962,13 +1956,7 @@ fn active_calibration_binding(
     calibration: &CalibrationBundleSet,
 ) -> ActiveCalibrationBinding {
     ActiveCalibrationBinding {
-        target_profile_hash: input_hash(
-            "gbf-hw",
-            "TargetProfile",
-            "target_profile",
-            "1.0.0",
-            inputs.target_profile,
-        ),
+        target_profile_hash: canonical_target_profile_hash(inputs.target_profile),
         // TODO(bd-2fj): replace this chunk-local sentinel when Stage 0 has a
         // resolved kernel-set identity input.
         kernel_set_hash: Hash256::ZERO,
@@ -2948,13 +2936,7 @@ fn failure_identity(
         "1.0.0",
         inputs.compile_request,
     );
-    let target_profile_hash = input_hash(
-        "gbf-hw",
-        "TargetProfile",
-        "target_profile",
-        "1.0.0",
-        inputs.target_profile,
-    );
+    let target_profile_hash = canonical_target_profile_hash(inputs.target_profile);
     let compile_profile_hash = input_hash(
         "gbf-policy",
         "CompileProfileSpec",
@@ -3277,6 +3259,10 @@ fn input_hash<T: Serialize + ?Sized>(
     ));
     hasher.update(encoded);
     Hash256::from_bytes(hasher.finalize().into())
+}
+
+fn canonical_target_profile_hash(profile: &TargetProfile) -> Hash256 {
+    target_profile_content_hash(profile).expect("TargetProfile content hash computes")
 }
 
 fn canonical_input_json_bytes<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
@@ -6444,13 +6430,7 @@ mod tests {
     }
 
     fn active_target_profile_hash() -> Hash256 {
-        input_hash(
-            "gbf-hw",
-            "TargetProfile",
-            "target_profile",
-            "1.0.0",
-            &dmg_mbc5_8mib_128kib(),
-        )
+        canonical_target_profile_hash(&dmg_mbc5_8mib_128kib())
     }
 
     fn objective_rejection_reasons(failure: &ValidationStageFailure) -> Vec<ObjectiveRejection> {

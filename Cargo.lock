@@ -2284,6 +2284,7 @@ dependencies = [
  "gbf-foundation",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2426,6 +2427,7 @@ dependencies = [
  "gbf-codegen",
  "gbf-debug",
  "gbf-foundation",
+ "gbf-hw",
  "gbf-model",
  "gbf-oracle",
  "gbf-policy",

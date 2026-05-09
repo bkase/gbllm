@@ -209,7 +209,7 @@ impl BootstrapCalibrationBundle {
 
     #[allow(clippy::new_ret_no_self)]
     #[must_use]
-    pub fn new(synthetic_target_profile_hash: Hash256) -> CalibrationBundleSet {
+    pub fn new(target_profile_hash: Hash256) -> CalibrationBundleSet {
         let bundles = CalibrationLayer::all()
             .into_iter()
             .map(|layer| {
@@ -217,7 +217,7 @@ impl BootstrapCalibrationBundle {
                     layer,
                     CalibrationBundle {
                         layer,
-                        target_profile_hash: synthetic_target_profile_hash,
+                        target_profile_hash,
                         kernel_set_hash: Hash256::ZERO,
                         packer_version: PackerVersion::new(1, 0, 0),
                         calibration_schema_hash: Hash256::ZERO,

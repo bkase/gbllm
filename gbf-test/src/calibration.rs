@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use gbf_foundation::{Hash256, PackerVersion};
+use gbf_hw::target::dmg_mbc5_8mib_128kib;
 use gbf_policy::calibration::{
     BootstrapCalibrationBundle, CalibrationBundle, CalibrationBundleSet, CalibrationLayer,
     MeasurementBlob,
@@ -16,9 +17,9 @@ pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_JSON: &str =
 pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256_SIDECAR: &str =
     include_str!("../../fixtures/calibration/bootstrap-dmg-mbc5.calibration.sha256");
 pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256: &str =
-    "f9a041aef8e42a5cfbdbb017d1da5c542bb89f3f5199339ef860569a239a8da5";
+    "5cabef1b909adb46207dff9f1aa24a3a6a06e8a0866c703e4d78e1807efed9dd";
 pub const BOOTSTRAP_DMG_MBC5_TARGET_PROFILE_HASH: &str =
-    "sha256:4f471a6c2e0c76b9cc7c708c0b2e41b434619fbcb55416d027ce2ded39f9f96b";
+    "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7";
 
 pub struct CalibrationBundleBuilder {
     bundle: CalibrationBundle,
@@ -132,8 +133,16 @@ pub fn bootstrap_dmg_mbc5_calibration_fixture() -> CalibrationBundleSet {
 
 #[must_use]
 pub fn bootstrap_dmg_mbc5_target_profile_hash() -> Hash256 {
-    Hash256::from_str(BOOTSTRAP_DMG_MBC5_TARGET_PROFILE_HASH)
-        .expect("bootstrap DMG/MBC5 target profile hash is valid")
+    let pinned = Hash256::from_str(BOOTSTRAP_DMG_MBC5_TARGET_PROFILE_HASH)
+        .expect("bootstrap DMG/MBC5 target profile hash is valid");
+    let derived = dmg_mbc5_8mib_128kib()
+        .content_hash()
+        .expect("canonical DMG/MBC5 target profile hash computes");
+    assert_eq!(
+        derived, pinned,
+        "bootstrap DMG/MBC5 target profile hash must match gbf_hw::target::TargetProfile::content_hash",
+    );
+    derived
 }
 
 fn hash(byte: u8) -> Hash256 {

@@ -2658,13 +2658,9 @@ mod tests {
     impl Fixture {
         fn new(profile: &str) -> Self {
             let target_profile = dmg_mbc5_8mib_128kib();
-            let target_profile_hash = input_hash(
-                "gbf-hw",
-                "TargetProfile",
-                "target_profile",
-                "1.0.0",
-                &target_profile,
-            );
+            let target_profile_hash = target_profile
+                .content_hash()
+                .expect("target profile content hash computes");
             let mut artifact = ImportedArtifactView::new(
                 artifact_core(),
                 artifact_manifest(),
