@@ -3,7 +3,7 @@
 //! This module wires the failure taxonomy, Stage 2 invocation input, and the
 //! static budget report path used by F-B4.
 
-use gbf_artifact::weight_plan::TernaryWeightPlan;
+use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, TernaryWeightPlan, WeightEncoding};
 use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, KernelSpecId, LayerId};
 use gbf_hw::target::TargetProfile;
 use gbf_policy::{
@@ -155,6 +155,13 @@ impl Default for RoutingProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuantGraphBudgetViewError {
     Malformed { field: FieldPath },
+}
+
+pub type ByteBudget = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetMathError {
+    Overflow,
 }
 
 impl QuantGraphBudgetViewError {
@@ -728,8 +735,14 @@ fn project_budget(
     let mut per_expert_payload = Vec::with_capacity(view.experts.len());
     let mut failures = Vec::new();
 
-    for expert in &view.experts {
-        let payload_bytes = expert_payload_bytes(expert).unwrap_or(u32::MAX);
+    for (expert_index, expert) in view.experts.iter().enumerate() {
+        let payload_bytes = match expert_payload_bytes(expert).and_then(u32_byte_budget) {
+            Ok(payload_bytes) => payload_bytes,
+            Err(error) => {
+                failures.push(budget_math_error_failure(error, expert_index));
+                continue;
+            }
+        };
         let slot_index = per_bank_occupancy.iter().position(|entry| {
             entry.class == BudgetSlotClass::ExpertBank
                 && runtime_chrome_budget
@@ -822,13 +835,89 @@ fn project_budget(
     )
 }
 
-fn expert_payload_bytes(expert: &ExpertProjection) -> Option<u32> {
-    let weight_bytes = expert
-        .plan
-        .compute_byte_cost(expert.rows, expert.cols)
-        .as_u64();
-    let total = weight_bytes.checked_add(u64::from(expert.metadata_bytes))?;
-    u32::try_from(total).ok()
+pub fn expert_payload_bytes(expert: &ExpertProjection) -> Result<ByteBudget, BudgetMathError> {
+    checked_add_byte_budget(
+        checked_add_byte_budget(
+            weight_bytes(expert.rows, expert.cols, expert.plan.encoding)?,
+            scale_bytes(
+                expert.rows,
+                expert.plan.scale_granularity,
+                expert.plan.scale_format,
+            )?,
+        )?,
+        ByteBudget::from(expert.metadata_bytes),
+    )
+}
+
+fn weight_bytes(
+    rows: u32,
+    cols: u32,
+    encoding: WeightEncoding,
+) -> Result<ByteBudget, BudgetMathError> {
+    let weight_count = ByteBudget::from(rows)
+        .checked_mul(ByteBudget::from(cols))
+        .ok_or(BudgetMathError::Overflow)?;
+    match encoding {
+        WeightEncoding::Ternary2 => ceil_div_byte_budget(weight_count, 4),
+        WeightEncoding::Binary1 => ceil_div_byte_budget(weight_count, 8),
+        WeightEncoding::SparseTernaryBitplanes => {
+            let bitplane_bytes = ceil_div_byte_budget(weight_count, 8)?;
+            checked_add_byte_budget(bitplane_bytes, bitplane_bytes)
+        }
+    }
+}
+
+fn scale_bytes(
+    rows: u32,
+    granularity: ScaleGranularity,
+    format: ScaleFormat,
+) -> Result<ByteBudget, BudgetMathError> {
+    let scale_count = match granularity {
+        ScaleGranularity::PerTensor => 1,
+        ScaleGranularity::PerOutputRow => ByteBudget::from(rows),
+        ScaleGranularity::PerGroup(group_size) => {
+            ceil_div_byte_budget(ByteBudget::from(rows), ByteBudget::from(group_size.get()))?
+        }
+    };
+    scale_count
+        .checked_mul(ByteBudget::from(scale_format_bytes(format)))
+        .ok_or(BudgetMathError::Overflow)
+}
+
+const fn scale_format_bytes(format: ScaleFormat) -> u8 {
+    match format {
+        ScaleFormat::Q8_8 => 2,
+        ScaleFormat::Q4_4 | ScaleFormat::Pow2 => 1,
+    }
+}
+
+fn ceil_div_byte_budget(
+    numerator: ByteBudget,
+    denominator: ByteBudget,
+) -> Result<ByteBudget, BudgetMathError> {
+    numerator
+        .checked_add(denominator.saturating_sub(1))
+        .ok_or(BudgetMathError::Overflow)
+        .map(|adjusted| adjusted / denominator)
+}
+
+fn checked_add_byte_budget(
+    left: ByteBudget,
+    right: ByteBudget,
+) -> Result<ByteBudget, BudgetMathError> {
+    left.checked_add(right).ok_or(BudgetMathError::Overflow)
+}
+
+fn u32_byte_budget(value: ByteBudget) -> Result<u32, BudgetMathError> {
+    u32::try_from(value).map_err(|_| BudgetMathError::Overflow)
+}
+
+fn budget_math_error_failure(error: BudgetMathError, expert_index: usize) -> BudgetFailure {
+    match error {
+        BudgetMathError::Overflow => BudgetFailure::QuantGraphBudgetViewMalformed {
+            field: FieldPath::from(format!("budget_view.experts[{expert_index}].payload_bytes")),
+        },
+    }
 }
 
 fn checked_sum_u32(values: impl Iterator<Item = u32>) -> u32 {
@@ -1138,6 +1227,35 @@ mod tests {
         )
     }
 
+    fn plan_with(
+        encoding: WeightEncoding,
+        scale_granularity: ScaleGranularity,
+        scale_format: ScaleFormat,
+    ) -> TernaryWeightPlan {
+        TernaryWeightPlan::new(
+            encoding,
+            scale_granularity,
+            scale_format,
+            ThresholdPlan::FixedQ8_8,
+        )
+    }
+
+    fn expert_with_plan(
+        rows: u32,
+        cols: u32,
+        metadata_bytes: u32,
+        plan: TernaryWeightPlan,
+    ) -> ExpertProjection {
+        ExpertProjection {
+            layer: LayerId::new(0),
+            expert: ExpertId::new(0),
+            rows,
+            cols,
+            metadata_bytes,
+            plan,
+        }
+    }
+
     fn budget_view_fixture(rows: u32, cols: u32, metadata_bytes: u32) -> QuantGraphBudgetView {
         QuantGraphBudgetView {
             semantic_core_hash: hash(0x02),
@@ -1157,6 +1275,106 @@ mod tests {
             sequence_state: SequenceStateProjection::default(),
             routing: RoutingProjection::default(),
         }
+    }
+
+    #[test]
+    fn f_b4_budget_computes_ternary2_payload_bytes_from_shape() {
+        let expert = expert_with_plan(
+            3,
+            5,
+            7,
+            plan_with(
+                WeightEncoding::Ternary2,
+                ScaleGranularity::PerTensor,
+                ScaleFormat::Q8_8,
+            ),
+        );
+
+        assert_eq!(expert_payload_bytes(&expert), Ok(13));
+    }
+
+    #[test]
+    fn f_b4_budget_computes_scale_bytes_by_granularity() {
+        let per_tensor = expert_with_plan(
+            10,
+            7,
+            0,
+            plan_with(
+                WeightEncoding::Binary1,
+                ScaleGranularity::PerTensor,
+                ScaleFormat::Q8_8,
+            ),
+        );
+        let per_output_row = expert_with_plan(
+            10,
+            7,
+            0,
+            plan_with(
+                WeightEncoding::Binary1,
+                ScaleGranularity::PerOutputRow,
+                ScaleFormat::Q4_4,
+            ),
+        );
+        let per_group = expert_with_plan(
+            10,
+            7,
+            0,
+            plan_with(
+                WeightEncoding::Binary1,
+                ScaleGranularity::per_group(4).unwrap(),
+                ScaleFormat::Pow2,
+            ),
+        );
+
+        assert_eq!(expert_payload_bytes(&per_tensor), Ok(11));
+        assert_eq!(expert_payload_bytes(&per_output_row), Ok(19));
+        assert_eq!(expert_payload_bytes(&per_group), Ok(12));
+    }
+
+    #[test]
+    fn f_b4_budget_computes_sparse_bitplane_payload_without_plan_metadata_layout() {
+        let expert = expert_with_plan(
+            3,
+            5,
+            3,
+            plan_with(
+                WeightEncoding::SparseTernaryBitplanes,
+                ScaleGranularity::PerTensor,
+                ScaleFormat::Q4_4,
+            ),
+        );
+
+        // Current TernaryWeightPlan has no sparse metadata layout field; bd-nyen
+        // owns richer non-Ternary2 artifact/export layout support.
+        assert_eq!(expert_payload_bytes(&expert), Ok(8));
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_overflow_in_byte_math() {
+        assert_eq!(
+            checked_add_byte_budget(ByteBudget::MAX, 1),
+            Err(BudgetMathError::Overflow)
+        );
+
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(u32::MAX, u32::MAX, u32::MAX);
+        view.experts[0].plan = plan_with(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::PerTensor,
+            ScaleFormat::Q8_8,
+        );
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("budget_view.experts[0].payload_bytes")
+            }]
+        );
+        assert!(report.report.body.projections.per_expert_payload.is_empty());
     }
 
     #[test]
