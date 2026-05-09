@@ -213,6 +213,7 @@ pub enum CodegenStageCacheError {
     Store(StageCacheError),
     Json(serde_json::Error),
     CachedValidationProduct(CachedValidationProductRehydrateError),
+    CachedReportBytes(CachedReportBytesError),
     CachedPolicyProduct(CachedPolicyProductError),
     UnexpectedCell {
         expected: &'static str,
@@ -226,6 +227,7 @@ impl fmt::Display for CodegenStageCacheError {
             Self::Store(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "stage cache payload JSON error: {err}"),
             Self::CachedValidationProduct(err) => write!(f, "{err}"),
+            Self::CachedReportBytes(err) => write!(f, "{err}"),
             Self::CachedPolicyProduct(err) => write!(f, "{err}"),
             Self::UnexpectedCell { expected, observed } => {
                 write!(f, "expected {expected} cache cell, observed {observed}")
@@ -240,6 +242,7 @@ impl std::error::Error for CodegenStageCacheError {
             Self::Store(err) => Some(err),
             Self::Json(err) => Some(err),
             Self::CachedValidationProduct(err) => Some(err),
+            Self::CachedReportBytes(err) => Some(err),
             Self::CachedPolicyProduct(err) => Some(err),
             Self::UnexpectedCell { .. } => None,
         }
@@ -264,11 +267,41 @@ impl From<CachedValidationProductRehydrateError> for CodegenStageCacheError {
     }
 }
 
+impl From<CachedReportBytesError> for CodegenStageCacheError {
+    fn from(value: CachedReportBytesError) -> Self {
+        Self::CachedReportBytes(value)
+    }
+}
+
 impl From<CachedPolicyProductError> for CodegenStageCacheError {
     fn from(value: CachedPolicyProductError) -> Self {
         Self::CachedPolicyProduct(value)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CachedReportBytesError {
+    CanonicalBytesHashMismatch {
+        canonical_bytes_hash: Hash256,
+        expected_canonical_bytes_hash: Hash256,
+    },
+}
+
+impl fmt::Display for CachedReportBytesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CanonicalBytesHashMismatch {
+                canonical_bytes_hash,
+                expected_canonical_bytes_hash,
+            } => write!(
+                f,
+                "cached report canonical bytes hash mismatch: report bytes have {canonical_bytes_hash}, product has {expected_canonical_bytes_hash}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CachedReportBytesError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CachedPolicyProductError {
@@ -439,8 +472,12 @@ pub fn get_stage0_success(
     };
     let cell: Stage0CacheCell = serde_json::from_slice(&bytes)?;
     match &cell {
-        Stage0CacheCell::ValidationSuccess { product, .. } => {
+        Stage0CacheCell::ValidationSuccess { product, report } => {
             product.rehydrate_checked()?;
+            validate_cached_report_bytes(
+                report,
+                product.artifact_validation_canonical_bytes_hash(),
+            )?;
         }
         Stage0CacheCell::FailureMemo { .. } => {
             return Err(unexpected_stage0_cell("Stage 0 validation success", &cell));
@@ -895,9 +932,25 @@ fn validate_cached_policy_product(
             policy_resolution_canonical_bytes_hash: product.policy_resolution_canonical_bytes_hash,
         });
     }
+    validate_cached_report_bytes(
+        cached_report,
+        product.policy_resolution_canonical_bytes_hash,
+    )
+    .map_err(|err| match err {
+        CachedReportBytesError::CanonicalBytesHashMismatch {
+            canonical_bytes_hash,
+            expected_canonical_bytes_hash,
+        } => CachedPolicyProductError::CanonicalBytesHashMismatch {
+            canonical_bytes_hash,
+            policy_resolution_canonical_bytes_hash: expected_canonical_bytes_hash,
+        },
+    })?;
 
     if product.artifact_validation_self_hash != material.artifact_validation_self_hash
         || product.input_hashes != material.input_hashes
+        || product.policy.provenance.target_defaults != material.target_defaults_hash
+        || product.input_hashes.compile_profile_hash != material.compile_profile_hash
+        || product.policy.provenance.profile_defaults != material.profile_defaults_hash
     {
         return Err(CachedPolicyProductError::KeyMaterialMismatch);
     }
@@ -908,30 +961,57 @@ fn validate_cached_policy_product(
     Ok(())
 }
 
+fn validate_cached_report_bytes(
+    cached_report: &CachedReportBytes,
+    expected_canonical_bytes_hash: Hash256,
+) -> Result<(), CachedReportBytesError> {
+    let canonical_bytes_hash =
+        Hash256::from_bytes(Sha256::digest(&cached_report.canonical_bytes).into());
+    if canonical_bytes_hash != expected_canonical_bytes_hash {
+        return Err(CachedReportBytesError::CanonicalBytesHashMismatch {
+            canonical_bytes_hash,
+            expected_canonical_bytes_hash,
+        });
+    }
+    Ok(())
+}
+
 fn cached_policy_report_identity_matches_product(product: &ResolvedPolicyProduct) -> bool {
     let input_hashes = product.input_hashes;
     let report = &product.report.body;
     let Some(result) = &report.result else {
         return false;
     };
+    let expected_resolved = policy_resolution_v1::ResolvedSection::from(&product.policy);
+    let expected_compile_knobs =
+        policy_resolution_v1::CompileKnobsSection::from(&product.policy.knobs);
+    let provenance = &product.policy.provenance;
 
     report.artifact_identity.artifact_core_hash == input_hashes.artifact_effective_core_hash
         && report.artifact_identity.artifact_manifest_hash == input_hashes.artifact_manifest_hash
         && report.artifact_identity.lowering_manifest_hash == input_hashes.lowering_manifest_hash
         && report.artifact_identity.hint_bundle_hash == input_hashes.hint_bundle_hash
         && report.compile_request.compile_request_hash == input_hashes.compile_request_hash
+        && report.compile_request.target == product.policy.target
         && report.compile_request.target_profile_hash == input_hashes.target_profile_hash
+        && report.compile_request.profile == product.policy.profile
+        && report.compile_request.objective == product.policy.objective
+        && report.compile_request.required_features
+            == product.policy.effective_constraints.required_features
+        && report.compile_request.requested_runtime_modes == product.policy.requested_runtime_modes
+        && report.compile_request.requested_runtime_modes
+            == product.policy.effective_constraints.requested_runtime_modes
         && report.compile_request.calibration_hash == input_hashes.calibration_hash
         && result.provenance.hint_bundle_hash == input_hashes.hint_bundle_hash
         && result.provenance.compile_request_hash == input_hashes.compile_request_hash
         && result.provenance.calibration_hash == input_hashes.calibration_hash
-        && result.provenance.target_defaults == product.policy.provenance.target_defaults
-        && result.provenance.profile_defaults == product.policy.provenance.profile_defaults
-        && result.compile_knobs.global == product.policy.knobs.global
-        && result.compile_knobs.bounds == product.policy.knobs.bounds
-        && result.compile_knobs.locks == product.policy.knobs.locks
-        && result.compile_knobs.overrides == product.policy.knobs.overrides
-        && result.compile_knobs.provenance == product.policy.knobs.provenance
+        && result.provenance.target_defaults == provenance.target_defaults
+        && result.provenance.profile_defaults == provenance.profile_defaults
+        && provenance.hint_bundle_hash == Some(result.provenance.hint_bundle_hash)
+        && provenance.compile_request_hash == result.provenance.compile_request_hash
+        && provenance.calibration_hash == Some(result.provenance.calibration_hash)
+        && result.resolved == expected_resolved
+        && result.compile_knobs == expected_compile_knobs
 }
 
 fn unexpected_stage0_cell(
@@ -977,7 +1057,7 @@ fn unexpected_stage2_cell(
 mod tests {
     use gbf_hw::target::dmg_mbc5_8mib_128kib;
     use gbf_policy::{
-        BudgetFailure, BudgetSlotClass, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile,
+        BudgetFailure, BudgetSlotClass, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile, RuntimeMode,
         budget_failure_diagnostic,
     };
     use gbf_report::ReportEnvelope;
@@ -1243,10 +1323,9 @@ mod tests {
         let (_dir, store) = store();
         let cache = StageCache::new(&store);
         let material = stage0_material();
-        let report_bytes =
-            br#"{"cached":["bytes",17],"nested":{"order":"preserved"},"z":true}"#.to_vec();
         let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
         let validation = fixture.validation();
+        let report_bytes = canonical_report_bytes(&validation.report);
 
         put_stage0_success(&cache, &material, &validation, report_bytes.clone())
             .expect("put success cell");
@@ -1291,7 +1370,7 @@ mod tests {
         let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
         let validation = fixture.validation();
         let material = Stage0CacheKeyMaterial::success(validation.validated.input_hashes, hash(11));
-        let report_bytes = b"cached artifact validation report".to_vec();
+        let report_bytes = canonical_report_bytes(&validation.report);
 
         put_stage0_success(&cache, &material, &validation, report_bytes)
             .expect("put Stage 0 success product");
@@ -1333,7 +1412,7 @@ mod tests {
             product: Box::new(CachedValidationProduct::from(&validation)),
             report: CachedReportBytes {
                 report_self_hash: validation.artifact_validation_self_hash,
-                canonical_bytes: b"cached artifact validation report".to_vec(),
+                canonical_bytes: canonical_report_bytes(&validation.report),
             },
         };
         let mut value = serde_json::to_value(cell).expect("cache cell serializes");
@@ -1356,6 +1435,35 @@ mod tests {
     }
 
     #[test]
+    fn stage_cache_rejects_stage0_success_with_tampered_cached_report_bytes() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let material = Stage0CacheKeyMaterial::success(validation.validated.input_hashes, hash(11));
+        let cell = Stage0CacheCell::ValidationSuccess {
+            product: Box::new(CachedValidationProduct::from(&validation)),
+            report: CachedReportBytes {
+                report_self_hash: validation.artifact_validation_self_hash,
+                canonical_bytes: b"tampered artifact validation report".to_vec(),
+            },
+        };
+        put_cell(
+            &cache,
+            &stage0_validation_store_key(&material, Stage0CellKind::Success),
+            &cell,
+        )
+        .expect("put tampered Stage 0 report bytes");
+
+        assert!(matches!(
+            get_stage0_success(&cache, &material),
+            Err(CodegenStageCacheError::CachedReportBytes(
+                CachedReportBytesError::CanonicalBytesHashMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
     fn stage_cache_hit_replays_stage05_policy_product_for_budget_resume() {
         let (_dir, store) = store();
         let cache = StageCache::new(&store);
@@ -1363,7 +1471,7 @@ mod tests {
         let validation = fixture.validation();
         let policy = resolve_policy(&validation).expect("policy resolves");
         let material = stage05_material_for(&policy);
-        let report_bytes = b"cached policy resolution report".to_vec();
+        let report_bytes = canonical_report_bytes(&policy.report);
 
         put_stage05_success(&cache, &material, &policy, report_bytes)
             .expect("put Stage 0.5 success product");
@@ -1418,7 +1526,7 @@ mod tests {
             product: Box::new(policy.clone()),
             report: CachedReportBytes {
                 report_self_hash: policy.policy_resolution_self_hash,
-                canonical_bytes: b"cached policy resolution report".to_vec(),
+                canonical_bytes: canonical_report_bytes(&policy.report),
             },
         };
         let mut value = serde_json::to_value(cell).expect("cache cell serializes");
@@ -1436,6 +1544,107 @@ mod tests {
             get_stage05_success(&cache, &material),
             Err(CodegenStageCacheError::CachedPolicyProduct(
                 CachedPolicyProductError::ReportSelfHashMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn stage_cache_rejects_stage05_product_with_tampered_policy_field() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let policy = resolve_policy(&validation).expect("policy resolves");
+        let material = stage05_material_for(&policy);
+        let mut tampered = policy.clone();
+        tampered.policy.objective.min_ui_headroom_pct = tampered
+            .policy
+            .objective
+            .min_ui_headroom_pct
+            .wrapping_add(1);
+        let cell = Stage05CacheCell::ResolvePolicySuccess {
+            product: Box::new(tampered),
+            report: CachedReportBytes {
+                report_self_hash: policy.policy_resolution_self_hash,
+                canonical_bytes: canonical_report_bytes(&policy.report),
+            },
+        };
+        put_cell(
+            &cache,
+            &stage05_resolve_policy_store_key(&material, Stage05CellKind::Success),
+            &cell,
+        )
+        .expect("put tampered Stage 0.5 policy product");
+
+        assert!(matches!(
+            get_stage05_success(&cache, &material),
+            Err(CodegenStageCacheError::CachedPolicyProduct(
+                CachedPolicyProductError::ReportIdentityMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn stage_cache_rejects_stage05_product_with_tampered_runtime_modes() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let policy = resolve_policy(&validation).expect("policy resolves");
+        let material = stage05_material_for(&policy);
+        let mut tampered = policy.clone();
+        tampered
+            .policy
+            .requested_runtime_modes
+            .insert(RuntimeMode::Trace);
+        let cell = Stage05CacheCell::ResolvePolicySuccess {
+            product: Box::new(tampered),
+            report: CachedReportBytes {
+                report_self_hash: policy.policy_resolution_self_hash,
+                canonical_bytes: canonical_report_bytes(&policy.report),
+            },
+        };
+        put_cell(
+            &cache,
+            &stage05_resolve_policy_store_key(&material, Stage05CellKind::Success),
+            &cell,
+        )
+        .expect("put tampered Stage 0.5 runtime modes");
+
+        assert!(matches!(
+            get_stage05_success(&cache, &material),
+            Err(CodegenStageCacheError::CachedPolicyProduct(
+                CachedPolicyProductError::ReportIdentityMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn stage_cache_rejects_stage05_success_with_tampered_cached_report_bytes() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let policy = resolve_policy(&validation).expect("policy resolves");
+        let material = stage05_material_for(&policy);
+        let cell = Stage05CacheCell::ResolvePolicySuccess {
+            product: Box::new(policy.clone()),
+            report: CachedReportBytes {
+                report_self_hash: policy.policy_resolution_self_hash,
+                canonical_bytes: b"tampered policy resolution report".to_vec(),
+            },
+        };
+        put_cell(
+            &cache,
+            &stage05_resolve_policy_store_key(&material, Stage05CellKind::Success),
+            &cell,
+        )
+        .expect("put tampered Stage 0.5 report bytes");
+
+        assert!(matches!(
+            get_stage05_success(&cache, &material),
+            Err(CodegenStageCacheError::CachedPolicyProduct(
+                CachedPolicyProductError::CanonicalBytesHashMismatch { .. }
             ))
         ));
     }
@@ -1483,6 +1692,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = BlobStore::open(dir.path().to_path_buf()).expect("blob store");
         (dir, store)
+    }
+
+    fn canonical_report_bytes<B: ReportBody + Serialize>(report: &ReportEnvelope<B>) -> Vec<u8> {
+        canonicalize_report(report).expect("report canonicalizes")
     }
 
     fn stage0_material() -> Stage0CacheKeyMaterial {
