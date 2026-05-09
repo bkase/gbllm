@@ -188,36 +188,54 @@ impl ReportBody for StaticBudgetReportBody {
     const SCHEMA_VERSION: &'static str = "1.0.0";
 
     fn validate_semantics(&self, outcome: ReportOutcome) -> Result<(), Vec<ValidationDiagnostic>> {
-        let missing_budget_diagnostics = self
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| {
-                matches!(
-                    diagnostic.code,
-                    ValidationCode::BudgetMissingRuntimeChromeBudget
-                )
-            })
-            .count();
-        let missing_budget_failures = self
+        let missing_runtime_chrome_budget_failure = BudgetFailure::MissingRuntimeChromeBudget;
+        let has_exact_missing_budget_diagnostic = self.diagnostics.len() == 1
+            && budget_failure_matches_diagnostic(
+                &missing_runtime_chrome_budget_failure,
+                &self.diagnostics[0],
+            );
+        let has_any_missing_budget_diagnostic = self.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                ValidationCode::BudgetMissingRuntimeChromeBudget
+            )
+        });
+        let has_exact_missing_budget_failure =
+            self.decision.failures.as_slice() == [BudgetFailure::MissingRuntimeChromeBudget];
+        let has_any_missing_budget_failure = self
             .decision
             .failures
             .iter()
-            .filter(|failure| matches!(failure, BudgetFailure::MissingRuntimeChromeBudget))
-            .count();
+            .any(|failure| matches!(failure, BudgetFailure::MissingRuntimeChromeBudget));
         let is_missing_budget_shape = self.identity.runtime_chrome_budget_hash.is_none()
             && self.runtime_chrome_budget.is_none();
 
         if is_missing_budget_shape {
             if outcome != ReportOutcome::Failed
-                || missing_budget_diagnostics != 1
-                || missing_budget_failures != 1
+                || !has_exact_missing_budget_diagnostic
+                || !has_exact_missing_budget_failure
             {
                 return Err(self.diagnostics.clone());
             }
-        } else if self.identity.runtime_chrome_budget_hash.is_none()
+        } else if has_any_missing_budget_diagnostic
+            || has_any_missing_budget_failure
+            || self.identity.runtime_chrome_budget_hash.is_none()
             || self.runtime_chrome_budget.is_none()
         {
             return Err(self.diagnostics.clone());
+        }
+
+        if let (Some(runtime_chrome_budget), Some(expected_runtime_chrome_budget_hash)) = (
+            self.runtime_chrome_budget.as_ref(),
+            self.identity.runtime_chrome_budget_hash,
+        ) {
+            let observed_hash = match runtime_chrome_budget_hash(runtime_chrome_budget) {
+                Ok(hash) => hash,
+                Err(_) => return Err(self.diagnostics.clone()),
+            };
+            if observed_hash != expected_runtime_chrome_budget_hash {
+                return Err(self.diagnostics.clone());
+            }
         }
 
         if self.decision.fits != self.decision.failures.is_empty() {
@@ -376,18 +394,15 @@ pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
     match inputs.runtime_chrome_budget {
         None => missing_runtime_chrome_budget_report(inputs),
         Some(runtime_chrome_budget) => match inputs.quant_graph.to_budget_view() {
-            Ok(view) => match validate_budget_view(&view) {
+            Ok(view) => match validate_budget_view(&inputs, &view) {
                 Ok(()) => evaluated_budget_report(inputs, runtime_chrome_budget, view),
-                Err(failure) => {
-                    let quant_graph_hash = inputs.quant_graph.quant_graph_hash();
-                    budget_failure_report(
-                        inputs,
-                        runtime_chrome_budget,
-                        quant_graph_hash,
-                        vec![failure],
-                        BudgetProjectionSection::default(),
-                    )
-                }
+                Err(failure) => budget_failure_report(
+                    inputs,
+                    runtime_chrome_budget,
+                    view.quant_graph_hash,
+                    vec![failure],
+                    BudgetProjectionSection::default(),
+                ),
             },
             Err(error) => {
                 let quant_graph_hash = inputs.quant_graph.quant_graph_hash();
@@ -447,12 +462,7 @@ fn missing_runtime_chrome_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
     let mut projections = BudgetProjectionSection::default();
     projections.routing_model.kind = "not_evaluated_missing_runtime_chrome_budget".to_owned();
     let body = StaticBudgetReportBody {
-        identity: identity_section(
-            inputs.policy,
-            inputs.quant_graph.semantic_core_hash(),
-            inputs.quant_graph.quant_graph_hash(),
-            None,
-        ),
+        identity: identity_section(inputs.policy, inputs.quant_graph.quant_graph_hash(), None),
         policy: policy_section(inputs.policy),
         runtime_chrome_budget: None,
         projections,
@@ -480,7 +490,6 @@ fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
         let body = StaticBudgetReportBody {
             identity: identity_section(
                 inputs.policy,
-                view.semantic_core_hash,
                 view.quant_graph_hash,
                 Some(runtime_chrome_budget_hash(runtime_chrome_budget).expect("budget hashes")),
             ),
@@ -516,7 +525,6 @@ fn budget_failure_report<Q: QuantGraphBudgetSource + ?Sized>(
     let body = StaticBudgetReportBody {
         identity: identity_section(
             inputs.policy,
-            inputs.quant_graph.semantic_core_hash(),
             quant_graph_hash,
             Some(runtime_chrome_budget_hash(runtime_chrome_budget).expect("budget hashes")),
         ),
@@ -535,12 +543,11 @@ fn budget_failure_report<Q: QuantGraphBudgetSource + ?Sized>(
 
 fn identity_section(
     policy: &ResolvedPolicyProduct,
-    artifact_core_hash: Hash256,
     quant_graph_hash: Hash256,
     runtime_chrome_budget_hash: Option<Hash256>,
 ) -> BudgetIdentitySection {
     BudgetIdentitySection {
-        artifact_core_hash,
+        artifact_core_hash: policy.input_hashes.artifact_effective_core_hash,
         quant_graph_hash,
         policy_resolution_self_hash: policy.policy_resolution_self_hash,
         runtime_chrome_budget_hash,
@@ -590,7 +597,22 @@ fn finalize_static_budget_report(
     }
 }
 
-fn validate_budget_view(view: &QuantGraphBudgetView) -> Result<(), BudgetFailure> {
+fn validate_budget_view<Q: QuantGraphBudgetSource + ?Sized>(
+    inputs: &BudgetInputs<'_, Q>,
+    view: &QuantGraphBudgetView,
+) -> Result<(), BudgetFailure> {
+    let expected_semantic_core_hash = inputs.policy.input_hashes.artifact_effective_core_hash;
+    if inputs.quant_graph.semantic_core_hash() != expected_semantic_core_hash {
+        return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
+            field: FieldPath::from("quant_graph.semantic_core_hash"),
+        });
+    }
+    if view.semantic_core_hash != expected_semantic_core_hash {
+        return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
+            field: FieldPath::from("budget_view.semantic_core_hash"),
+        });
+    }
+
     for (index, expert) in view.experts.iter().enumerate() {
         if expert.rows == 0 {
             return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
@@ -777,6 +799,7 @@ mod tests {
     use gbf_foundation::{LineageId, TargetProfileId};
     use gbf_hw::calibration::CalibrationSetRef;
     use gbf_hw::target::dmg_mbc5_8mib_128kib;
+    use gbf_policy::DiagnosticSeverity;
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_TOML, CompileKnobOverrides, CompileKnobPartialBounds,
         CompileKnobPartialValues, CompileKnobProvenanceEntry, CompileKnobValues, CompilerFeature,
@@ -1049,7 +1072,7 @@ mod tests {
 
     fn budget_view_fixture(rows: u32, cols: u32, metadata_bytes: u32) -> QuantGraphBudgetView {
         QuantGraphBudgetView {
-            semantic_core_hash: hash(0x22),
+            semantic_core_hash: hash(0x02),
             quant_graph_hash: hash(0x23),
             experts: vec![ExpertProjection {
                 layer: LayerId::new(0),
@@ -1161,6 +1184,53 @@ mod tests {
     }
 
     #[test]
+    fn f_b4_budget_missing_runtime_chrome_budget_semantics_reject_extra_shape() {
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+        let report = run_budget_with(None, &quant_graph);
+
+        let mut extra_diagnostic = report.report.body.clone();
+        extra_diagnostic.diagnostics.push(budget_failure_diagnostic(
+            &BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("budget_view.experts"),
+            },
+        ));
+        assert!(
+            extra_diagnostic
+                .validate_semantics(ReportOutcome::Failed)
+                .is_err()
+        );
+
+        let mut extra_failure = report.report.body.clone();
+        extra_failure
+            .decision
+            .failures
+            .push(BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("budget_view.experts"),
+            });
+        assert!(
+            extra_failure
+                .validate_semantics(ReportOutcome::Failed)
+                .is_err()
+        );
+
+        let mut soft_diagnostic = report.report.body.clone();
+        soft_diagnostic.diagnostics[0].severity = DiagnosticSeverity::Soft;
+        assert!(
+            soft_diagnostic
+                .validate_semantics(ReportOutcome::Failed)
+                .is_err()
+        );
+
+        let mut wrong_origin = report.report.body.clone();
+        wrong_origin.diagnostics[0].origin = ValidationOrigin::SemanticCore;
+        assert!(
+            wrong_origin
+                .validate_semantics(ReportOutcome::Failed)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn f_b4_budget_missing_runtime_chrome_budget_does_not_call_to_budget_view() {
         let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
 
@@ -1186,7 +1256,74 @@ mod tests {
             report.report.body.identity.runtime_chrome_budget_hash,
             Some(runtime_chrome_budget_hash(&budget).expect("budget hashes"))
         );
+        assert_eq!(report.report.body.identity.artifact_core_hash, hash(0x02));
         assert_eq!(budget.rom_slots[0].reserved_slack, 128);
+    }
+
+    #[test]
+    fn f_b4_budget_runtime_chrome_budget_excerpt_hash_mismatch_rejected() {
+        let budget = runtime_budget_fixture();
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+        let mut body = report.report.body.clone();
+        body.identity.runtime_chrome_budget_hash = Some(hash(0xee));
+
+        assert!(body.validate_semantics(report.report.outcome).is_err());
+    }
+
+    #[test]
+    fn f_b4_budget_missing_runtime_chrome_budget_markers_rejected_with_populated_budget() {
+        let budget = runtime_budget_fixture();
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        let mut missing_diagnostic = report.report.body.clone();
+        missing_diagnostic.diagnostics = vec![budget_failure_diagnostic(
+            &BudgetFailure::MissingRuntimeChromeBudget,
+        )];
+        assert!(
+            missing_diagnostic
+                .validate_semantics(ReportOutcome::Passed)
+                .is_err()
+        );
+
+        let mut missing_failure = report.report.body.clone();
+        missing_failure.decision.fits = false;
+        missing_failure.decision.interpretation =
+            StaticFitInterpretation::FailsNecessaryStaticChecks;
+        missing_failure.decision.failures = vec![BudgetFailure::MissingRuntimeChromeBudget];
+        assert!(
+            missing_failure
+                .validate_semantics(ReportOutcome::Failed)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_quant_graph_semantic_hash_mismatch() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.semantic_core_hash = hash(0xee);
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(quant_graph.calls.get(), 1);
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(report.report.body.identity.artifact_core_hash, hash(0x02));
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("quant_graph.semantic_core_hash")
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetQuantGraphViewMalformed {
+                field: FieldPath::from("quant_graph.semantic_core_hash")
+            }
+        );
     }
 
     #[test]
