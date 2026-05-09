@@ -63,8 +63,9 @@ use gbf_foundation::{BlobCodec, BlobRef, Hash256, LayerId, PackerVersion, SemVer
 use gbf_hw::target::TargetProfile;
 use gbf_policy::{
     CalibrationBundle, CalibrationBundleSet, CalibrationConfidenceRequirement, CalibrationLayer,
-    CompatibilityAdapterId, CompileProfileSpec, CompileRequest, DiagnosticSeverity, EvidenceRef,
-    FieldPath, TraceProbeId, ValidationCode, ValidationDetail,
+    CompatibilityAdapterId, CompileProfileSpec, CompileRequest, CompilerFeature,
+    DiagnosticSeverity, EvidenceRef, FieldPath, ObjectiveRejection, RuntimeMode,
+    TargetIncompatibilityReason, TraceProbeId, ValidationCode, ValidationDetail,
     ValidationDiagnostic as PolicyValidationDiagnostic, ValidationOrigin,
 };
 use gbf_report::report_schemas::artifact_validation_v1::{
@@ -2077,6 +2078,264 @@ fn validate_workload_and_golden_refs(
     }
 }
 
+fn validate_compile_request_admissibility(
+    inputs: &ValidateInputs<'_>,
+    artifact: &ImportedArtifactView,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    for feature in &artifact.manifest.required_features {
+        if !target_supports_artifact_feature(inputs.target_profile, *feature) {
+            diagnostics.push(artifact_required_feature_unsupported_diagnostic(
+                inputs, artifact, *feature,
+            ));
+        }
+    }
+
+    for feature in &inputs.compile_request.required_features {
+        if !compiler_build_supports_feature(*feature) {
+            diagnostics.push(compile_request_unsupported_feature_diagnostic(
+                inputs, *feature,
+            ));
+        }
+    }
+
+    if let Some(reason) =
+        profile_objective_rejection(inputs.compile_profile, inputs.compile_request)
+    {
+        diagnostics.push(compile_request_profile_forbids_objective_diagnostic(
+            inputs, reason,
+        ));
+    }
+
+    for mode in &inputs.compile_request.requested_runtime_modes {
+        if !target_supports_runtime_mode(inputs.target_profile, *mode) {
+            diagnostics.push(compile_request_runtime_mode_unsupported_diagnostic(
+                inputs, *mode,
+            ));
+        }
+    }
+
+    if inputs.compile_request.target.as_str() != inputs.target_profile.id().as_str() {
+        diagnostics.push(compile_request_target_incompatible_diagnostic(
+            inputs,
+            TargetIncompatibilityReason::TargetFamilyMismatch,
+        ));
+    }
+}
+
+fn target_supports_artifact_feature(
+    target_profile: &TargetProfile,
+    feature: ArtifactFeature,
+) -> bool {
+    match feature {
+        ArtifactFeature::DenseI8
+        | ArtifactFeature::Ternary2Quant
+        | ArtifactFeature::Binary1Quant
+        | ArtifactFeature::SparseTernaryBitplanes
+        | ArtifactFeature::LinearStateSequence
+        | ArtifactFeature::BoundedKvSequence => true,
+        ArtifactFeature::MoeRouting => {
+            let capabilities = target_profile.capabilities();
+            capabilities.double_speed_mode && capabilities.vram_dma
+        }
+    }
+}
+
+fn compiler_build_supports_feature(feature: CompilerFeature) -> bool {
+    matches!(
+        feature,
+        CompilerFeature::ArtifactValidation | CompilerFeature::PolicyResolution
+    )
+}
+
+fn profile_objective_rejection(
+    profile: &CompileProfileSpec,
+    request: &CompileRequest,
+) -> Option<ObjectiveRejection> {
+    let objective = &request.objective;
+
+    if let Some(service) = &objective.service
+        && (service.max_first_token_cycles_p95 == Some(0)
+            || service.max_checkpoint_gap_cycles_p95 == Some(0)
+            || service.max_resume_latency_cycles_p95 == Some(0)
+            || service.max_ui_jitter_frames_p99 == Some(0))
+    {
+        return Some(ObjectiveRejection::ServiceLevelTooStrict);
+    }
+
+    if objective.max_rom_bytes == Some(0) {
+        return Some(ObjectiveRejection::RomBudgetTooStrict);
+    }
+
+    if objective.max_bank_switches_per_token == Some(0)
+        || objective.max_sram_page_switches_per_token == Some(0)
+    {
+        return Some(ObjectiveRejection::RuntimeSwitchBudgetTooStrict);
+    }
+
+    let risk = &objective.risk;
+    if !(1..=100).contains(&risk.cycle_quantile) || !(1..=100).contains(&risk.switch_quantile) {
+        return Some(ObjectiveRejection::RiskPolicyNotSupported);
+    }
+
+    if risk.fallback_profile.is_some() && !profile.repair_policy.allow_placement_profile_fallback {
+        return Some(ObjectiveRejection::RiskPolicyNotSupported);
+    }
+
+    if matches!(risk.fallback_runtime_mode, Some(RuntimeMode::Trace))
+        && !profile.repair_policy.allow_trace_demotion
+    {
+        return Some(ObjectiveRejection::RiskPolicyNotSupported);
+    }
+
+    None
+}
+
+fn target_supports_runtime_mode(target_profile: &TargetProfile, mode: RuntimeMode) -> bool {
+    match mode {
+        RuntimeMode::Interactive | RuntimeMode::Steady | RuntimeMode::Safe => true,
+        RuntimeMode::Trace => {
+            let capabilities = target_profile.capabilities();
+            capabilities.double_speed_mode && capabilities.vram_dma
+        }
+    }
+}
+
+fn artifact_required_feature_unsupported_diagnostic(
+    inputs: &ValidateInputs<'_>,
+    artifact: &ImportedArtifactView,
+    feature: ArtifactFeature,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::CompileRequest,
+        ValidationCode::ArtifactRequiredFeatureUnsupported { feature },
+        ValidationDetail::Field {
+            field: FieldPath::from("manifest.required_features"),
+        },
+        vec![
+            EvidenceRef {
+                kind: "artifact_manifest".to_owned(),
+                reference: format!("required_features.{feature:?}"),
+                hash: Some(artifact.manifest.manifest_self_hash),
+            },
+            target_profile_evidence(inputs),
+        ],
+    )
+}
+
+fn compile_request_unsupported_feature_diagnostic(
+    inputs: &ValidateInputs<'_>,
+    feature: CompilerFeature,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::CompileRequest,
+        ValidationCode::CompileRequestUnsupportedFeature { feature },
+        ValidationDetail::Field {
+            field: FieldPath::from("compile_request.required_features"),
+        },
+        vec![compile_request_evidence(inputs, "required_features")],
+    )
+}
+
+fn compile_request_profile_forbids_objective_diagnostic(
+    inputs: &ValidateInputs<'_>,
+    reason: ObjectiveRejection,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::CompileRequest,
+        ValidationCode::CompileRequestProfileForbidsObjective {
+            profile: inputs.compile_profile.id.clone(),
+            reason,
+        },
+        ValidationDetail::Field {
+            field: FieldPath::from("compile_request.objective"),
+        },
+        vec![
+            compile_request_evidence(inputs, "objective"),
+            compile_profile_evidence(inputs),
+        ],
+    )
+}
+
+fn compile_request_runtime_mode_unsupported_diagnostic(
+    inputs: &ValidateInputs<'_>,
+    mode: RuntimeMode,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::CompileRequest,
+        ValidationCode::CompileRequestRuntimeModeUnsupported { mode },
+        ValidationDetail::Field {
+            field: FieldPath::from("compile_request.requested_runtime_modes"),
+        },
+        vec![
+            compile_request_evidence(inputs, "requested_runtime_modes"),
+            target_profile_evidence(inputs),
+        ],
+    )
+}
+
+fn compile_request_target_incompatible_diagnostic(
+    inputs: &ValidateInputs<'_>,
+    reason: TargetIncompatibilityReason,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::CompileRequest,
+        ValidationCode::CompileRequestTargetIncompatible {
+            target: inputs.compile_request.target.clone(),
+            reason,
+        },
+        ValidationDetail::Field {
+            field: FieldPath::from("compile_request.target"),
+        },
+        vec![
+            compile_request_evidence(inputs, "target"),
+            target_profile_evidence(inputs),
+        ],
+    )
+}
+
+fn compile_request_evidence(inputs: &ValidateInputs<'_>, reference: &'static str) -> EvidenceRef {
+    EvidenceRef {
+        kind: "compile_request".to_owned(),
+        reference: reference.to_owned(),
+        hash: Some(input_hash(
+            "gbf-policy",
+            "CompileRequest",
+            "compile_request",
+            "1.0.0",
+            inputs.compile_request,
+        )),
+    }
+}
+
+fn target_profile_evidence(inputs: &ValidateInputs<'_>) -> EvidenceRef {
+    EvidenceRef {
+        kind: "target_profile".to_owned(),
+        reference: inputs.target_profile.id().to_string(),
+        hash: Some(input_hash(
+            "gbf-hw",
+            "TargetProfile",
+            "target_profile",
+            "1.0.0",
+            inputs.target_profile,
+        )),
+    }
+}
+
+fn compile_profile_evidence(inputs: &ValidateInputs<'_>) -> EvidenceRef {
+    EvidenceRef {
+        kind: "compile_profile".to_owned(),
+        reference: inputs.compile_profile.id.to_string(),
+        hash: Some(input_hash(
+            "gbf-policy",
+            "CompileProfileSpec",
+            "compile_profile",
+            "1.0.0",
+            inputs.compile_profile,
+        )),
+    }
+}
+
 #[derive(Default)]
 struct ActiveGoldenVectorRefs {
     seen: BTreeSet<(GoldenVectorId, Hash256)>,
@@ -2503,6 +2762,17 @@ pub fn validate_artifact_and_request<'a>(
         ));
     }
 
+    validate_compile_request_admissibility(&inputs, effective_artifact, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(stage0_failure(
+            &inputs,
+            Some(effective_artifact),
+            Some(calibration),
+            diagnostics,
+            compatibility.compatibility_section(),
+        ));
+    }
+
     let input_hashes = compute_validated_input_hashes_for_artifact(
         &inputs,
         effective_artifact,
@@ -2729,9 +2999,9 @@ mod tests {
 
     use gbf_artifact::BuildConstraintEntry;
     use gbf_artifact::aux::{
-        ArtifactAux, ConformanceEnvelopeId, ConformanceEnvelopeRef, LexicalSpecId, LexicalSpecRef,
-        ReferenceObservationCacheId, ReferenceObservationCacheRef, SemanticCheckpointSchemaId,
-        SemanticCheckpointSchemaRef,
+        ArtifactAux, ConformanceEnvelopeId, ConformanceEnvelopeRef, InteractionBundleId,
+        InteractionBundleRef, LexicalSpecId, LexicalSpecRef, ReferenceObservationCacheId,
+        ReferenceObservationCacheRef, SemanticCheckpointSchemaId, SemanticCheckpointSchemaRef,
     };
     use gbf_artifact::core::ArtifactCore;
     use gbf_artifact::lowerings::{
@@ -2756,8 +3026,9 @@ mod tests {
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationConfidenceClass,
         CalibrationConfidenceRequirement, CompileKnobId, CompileObjective, CompilerFeature,
-        ConstraintValue, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile, RiskPolicy, RuntimeMode,
-        ServiceLevelObjective, canonical_compile_profile_specs,
+        ConstraintValue, DEFAULT_COMPILE_PROFILE_ID, ObjectiveRejection, PlacementProfile,
+        RiskPolicy, RuntimeMode, ServiceLevelObjective, TargetIncompatibilityReason,
+        canonical_compile_profile_specs,
     };
     use gbf_workload::{GoldenVectorId, WorkloadLocator};
 
@@ -3381,6 +3652,127 @@ mod tests {
                 } if vector == &GoldenVectorId("golden.fixture".to_owned())
                     && actual_expected == &expected
                     && actual_observed == &observed
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_artifact_required_feature_unsupported_by_target() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .artifact
+            .manifest
+            .required_features
+            .insert(ArtifactFeature::MoeRouting);
+        fixture.artifact.aux.interaction_bundle = Some(InteractionBundleRef {
+            id: InteractionBundleId("interaction.fixture".to_owned()),
+            hash: sha256_hash(&[]),
+        });
+        fixture.refresh_manifest_self_hash();
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactRequiredFeatureUnsupported {
+                    feature: ArtifactFeature::MoeRouting
+                }
+            )
+        });
+        assert_no_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestUnsupportedFeature { .. }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_compile_request_compiler_feature_unsupported() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .compile_request
+            .required_features
+            .insert(CompilerFeature::StaticBudgetReport);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestUnsupportedFeature {
+                    feature: CompilerFeature::StaticBudgetReport
+                }
+            )
+        });
+        assert_no_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactRequiredFeatureUnsupported { .. }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_compile_request_profile_forbids_objective() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.objective.risk.fallback_profile =
+            Some(CompileProfileId::from(DEFAULT_COMPILE_PROFILE_ID));
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestProfileForbidsObjective {
+                    profile,
+                    reason: ObjectiveRejection::RiskPolicyNotSupported,
+                } if profile == &CompileProfileId::from(BRINGUP_COMPILE_PROFILE_ID)
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_compile_request_runtime_mode_unsupported() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .compile_request
+            .requested_runtime_modes
+            .insert(RuntimeMode::Trace);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestRuntimeModeUnsupported {
+                    mode: RuntimeMode::Trace
+                }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_compile_request_target_incompatible() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.target = TargetProfileId::from("cgb-mbc5-8mib-128kib");
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestTargetIncompatible {
+                    target,
+                    reason: TargetIncompatibilityReason::TargetFamilyMismatch,
+                } if target == &TargetProfileId::from("cgb-mbc5-8mib-128kib")
             )
         });
     }
