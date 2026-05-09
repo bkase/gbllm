@@ -2099,9 +2099,7 @@ fn validate_compile_request_admissibility(
         }
     }
 
-    if let Some(reason) =
-        profile_objective_rejection(inputs.compile_profile, inputs.compile_request)
-    {
+    for reason in profile_objective_rejections(inputs.compile_request) {
         diagnostics.push(compile_request_profile_forbids_objective_diagnostic(
             inputs, reason,
         ));
@@ -2148,47 +2146,71 @@ fn compiler_build_supports_feature(feature: CompilerFeature) -> bool {
     )
 }
 
-fn profile_objective_rejection(
-    profile: &CompileProfileSpec,
-    request: &CompileRequest,
-) -> Option<ObjectiveRejection> {
+fn profile_objective_rejections(request: &CompileRequest) -> Vec<ObjectiveRejection> {
     let objective = &request.objective;
+    let mut rejections = Vec::new();
 
-    if let Some(service) = &objective.service
-        && (service.max_first_token_cycles_p95 == Some(0)
-            || service.max_checkpoint_gap_cycles_p95 == Some(0)
-            || service.max_resume_latency_cycles_p95 == Some(0)
-            || service.max_ui_jitter_frames_p99 == Some(0))
-    {
-        return Some(ObjectiveRejection::ServiceLevelTooStrict);
+    if let Some(service) = &objective.service {
+        for (field, value) in [
+            (
+                "max_first_token_cycles_p95",
+                service.max_first_token_cycles_p95,
+            ),
+            (
+                "max_checkpoint_gap_cycles_p95",
+                service.max_checkpoint_gap_cycles_p95,
+            ),
+            (
+                "max_resume_latency_cycles_p95",
+                service.max_resume_latency_cycles_p95,
+            ),
+        ] {
+            if value == Some(0) {
+                rejections.push(ObjectiveRejection::ServiceLevelZero {
+                    field: field.to_owned(),
+                });
+            }
+        }
+
+        if service.max_ui_jitter_frames_p99 == Some(0) {
+            rejections.push(ObjectiveRejection::ServiceLevelZero {
+                field: "max_ui_jitter_frames_p99".to_owned(),
+            });
+        }
+    }
+
+    if objective.max_cycles_per_token == Some(0) {
+        rejections.push(ObjectiveRejection::MaxCyclesPerTokenZero);
     }
 
     if objective.max_rom_bytes == Some(0) {
-        return Some(ObjectiveRejection::RomBudgetTooStrict);
+        rejections.push(ObjectiveRejection::MaxRomBytesZero);
     }
 
-    if objective.max_bank_switches_per_token == Some(0)
-        || objective.max_sram_page_switches_per_token == Some(0)
-    {
-        return Some(ObjectiveRejection::RuntimeSwitchBudgetTooStrict);
+    if objective.max_bank_switches_per_token == Some(0) {
+        rejections.push(ObjectiveRejection::MaxBankSwitchesPerTokenZero);
+    }
+
+    if objective.max_sram_page_switches_per_token == Some(0) {
+        rejections.push(ObjectiveRejection::MaxSramPageSwitchesPerTokenZero);
     }
 
     let risk = &objective.risk;
-    if !(1..=100).contains(&risk.cycle_quantile) || !(1..=100).contains(&risk.switch_quantile) {
-        return Some(ObjectiveRejection::RiskPolicyNotSupported);
+    if !(1..=100).contains(&risk.cycle_quantile) {
+        rejections.push(ObjectiveRejection::RiskQuantileInvalid {
+            field: "cycle_quantile".to_owned(),
+            value: risk.cycle_quantile,
+        });
     }
 
-    if risk.fallback_profile.is_some() && !profile.repair_policy.allow_placement_profile_fallback {
-        return Some(ObjectiveRejection::RiskPolicyNotSupported);
+    if !(1..=100).contains(&risk.switch_quantile) {
+        rejections.push(ObjectiveRejection::RiskQuantileInvalid {
+            field: "switch_quantile".to_owned(),
+            value: risk.switch_quantile,
+        });
     }
 
-    if matches!(risk.fallback_runtime_mode, Some(RuntimeMode::Trace))
-        && !profile.repair_policy.allow_trace_demotion
-    {
-        return Some(ObjectiveRejection::RiskPolicyNotSupported);
-    }
-
-    None
+    rejections
 }
 
 fn target_supports_runtime_mode(target_profile: &TargetProfile, mode: RuntimeMode) -> bool {
@@ -3720,8 +3742,7 @@ mod tests {
     #[test]
     fn f_b2_validate_rejects_compile_request_profile_forbids_objective() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
-        fixture.compile_request.objective.risk.fallback_profile =
-            Some(CompileProfileId::from(DEFAULT_COMPILE_PROFILE_ID));
+        fixture.compile_request.objective.risk.cycle_quantile = 0;
 
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
@@ -3731,10 +3752,170 @@ mod tests {
                 code,
                 ValidationCode::CompileRequestProfileForbidsObjective {
                     profile,
-                    reason: ObjectiveRejection::RiskPolicyNotSupported,
+                    reason: ObjectiveRejection::RiskQuantileInvalid {
+                        field,
+                        value: 0,
+                    },
                 } if profile == &CompileProfileId::from(BRINGUP_COMPILE_PROFILE_ID)
+                    && field == "cycle_quantile"
             )
         });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_all_independent_objective_violations() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let service = fixture
+            .compile_request
+            .objective
+            .service
+            .as_mut()
+            .expect("fixture has service objective");
+        service.max_first_token_cycles_p95 = Some(0);
+        service.max_resume_latency_cycles_p95 = Some(0);
+        fixture.compile_request.objective.max_cycles_per_token = Some(0);
+        fixture.compile_request.objective.max_rom_bytes = Some(0);
+        fixture.compile_request.objective.risk.cycle_quantile = 0;
+        fixture.compile_request.objective.risk.switch_quantile = 101;
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+        let reasons = objective_rejection_reasons(&failure);
+
+        assert_eq!(reasons.len(), 6);
+        assert!(reasons.contains(&ObjectiveRejection::ServiceLevelZero {
+            field: "max_first_token_cycles_p95".to_owned()
+        }));
+        assert!(reasons.contains(&ObjectiveRejection::ServiceLevelZero {
+            field: "max_resume_latency_cycles_p95".to_owned()
+        }));
+        assert!(reasons.contains(&ObjectiveRejection::MaxCyclesPerTokenZero));
+        assert!(reasons.contains(&ObjectiveRejection::MaxRomBytesZero));
+        assert!(reasons.contains(&ObjectiveRejection::RiskQuantileInvalid {
+            field: "cycle_quantile".to_owned(),
+            value: 0,
+        }));
+        assert!(reasons.contains(&ObjectiveRejection::RiskQuantileInvalid {
+            field: "switch_quantile".to_owned(),
+            value: 101,
+        }));
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_compile_request_objective_rules_table() {
+        let cases: Vec<(&str, fn(&mut CompileObjective), ObjectiveRejection)> = vec![
+            (
+                "service_first_token_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_first_token_cycles_p95 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_first_token_cycles_p95".to_owned(),
+                },
+            ),
+            (
+                "service_checkpoint_gap_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_checkpoint_gap_cycles_p95 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_checkpoint_gap_cycles_p95".to_owned(),
+                },
+            ),
+            (
+                "service_resume_latency_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_resume_latency_cycles_p95 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_resume_latency_cycles_p95".to_owned(),
+                },
+            ),
+            (
+                "service_ui_jitter_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_ui_jitter_frames_p99 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_ui_jitter_frames_p99".to_owned(),
+                },
+            ),
+            (
+                "rom_zero",
+                |objective| objective.max_rom_bytes = Some(0),
+                ObjectiveRejection::MaxRomBytesZero,
+            ),
+            (
+                "max_cycles_per_token_zero",
+                |objective| objective.max_cycles_per_token = Some(0),
+                ObjectiveRejection::MaxCyclesPerTokenZero,
+            ),
+            (
+                "bank_switch_zero",
+                |objective| objective.max_bank_switches_per_token = Some(0),
+                ObjectiveRejection::MaxBankSwitchesPerTokenZero,
+            ),
+            (
+                "sram_page_switch_zero",
+                |objective| objective.max_sram_page_switches_per_token = Some(0),
+                ObjectiveRejection::MaxSramPageSwitchesPerTokenZero,
+            ),
+            (
+                "cycle_quantile_zero",
+                |objective| objective.risk.cycle_quantile = 0,
+                ObjectiveRejection::RiskQuantileInvalid {
+                    field: "cycle_quantile".to_owned(),
+                    value: 0,
+                },
+            ),
+            (
+                "switch_quantile_above_100",
+                |objective| objective.risk.switch_quantile = 101,
+                ObjectiveRejection::RiskQuantileInvalid {
+                    field: "switch_quantile".to_owned(),
+                    value: 101,
+                },
+            ),
+        ];
+
+        for (case, mutate, expected) in cases {
+            let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+            mutate(&mut fixture.compile_request.objective);
+
+            let failure = validate_artifact_and_request(fixture.inputs()).expect_err(case);
+
+            assert_eq!(
+                objective_rejection_reasons(&failure),
+                vec![expected],
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn f_b2_validate_fallback_objective_fields_are_not_stage0_gates() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.objective.risk.fallback_profile =
+            Some(CompileProfileId::from(DEFAULT_COMPILE_PROFILE_ID));
+        fixture.compile_request.objective.risk.fallback_runtime_mode = Some(RuntimeMode::Trace);
+
+        validate_artifact_and_request(fixture.inputs()).expect("fallback fields are accepted");
     }
 
     #[test]
@@ -5215,6 +5396,19 @@ mod tests {
             "1.0.0",
             &dmg_mbc5_8mib_128kib(),
         )
+    }
+
+    fn objective_rejection_reasons(failure: &ValidationStageFailure) -> Vec<ObjectiveRejection> {
+        failure
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| match &diagnostic.code {
+                ValidationCode::CompileRequestProfileForbidsObjective { reason, .. } => {
+                    Some(reason.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn hash(byte: u8) -> Hash256 {

@@ -560,9 +560,15 @@ pub struct TraceProbeId(pub u16);
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ObjectiveRejection {
     ServiceLevelTooStrict,
+    ServiceLevelZero { field: String },
+    MaxCyclesPerTokenZero,
     RomBudgetTooStrict,
+    MaxRomBytesZero,
     RuntimeSwitchBudgetTooStrict,
+    MaxBankSwitchesPerTokenZero,
+    MaxSramPageSwitchesPerTokenZero,
     RiskPolicyNotSupported,
+    RiskQuantileInvalid { field: String, value: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
