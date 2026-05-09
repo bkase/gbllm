@@ -1464,6 +1464,42 @@ mod tests {
     }
 
     #[test]
+    fn stage_cache_rejects_stage0_success_with_consistently_tampered_canonical_bytes() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let material = Stage0CacheKeyMaterial::success(validation.validated.input_hashes, hash(11));
+        let tampered_report_bytes = b"tampered artifact validation report".to_vec();
+        let tampered_report_bytes_hash =
+            Hash256::from_bytes(Sha256::digest(&tampered_report_bytes).into());
+        let cell = Stage0CacheCell::ValidationSuccess {
+            product: Box::new(CachedValidationProduct::from(&validation)),
+            report: CachedReportBytes {
+                report_self_hash: validation.artifact_validation_self_hash,
+                canonical_bytes: tampered_report_bytes,
+            },
+        };
+        let mut value = serde_json::to_value(cell).expect("cache cell serializes");
+        value["product"]["artifact_validation_canonical_bytes_hash"] =
+            serde_json::to_value(tampered_report_bytes_hash).expect("hash serializes");
+        let payload = serde_json::to_vec(&value).expect("tampered cache cell serializes");
+        cache
+            .put(
+                &stage0_validation_store_key(&material, Stage0CellKind::Success),
+                &payload,
+            )
+            .expect("put consistently tampered Stage 0 product");
+
+        assert!(matches!(
+            get_stage0_success(&cache, &material),
+            Err(CodegenStageCacheError::CachedValidationProduct(
+                CachedValidationProductRehydrateError::CanonicalBytesHashMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
     fn stage_cache_hit_replays_stage05_policy_product_for_budget_resume() {
         let (_dir, store) = store();
         let cache = StageCache::new(&store);

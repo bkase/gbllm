@@ -412,6 +412,21 @@ impl CachedValidationProduct {
                 },
             );
         }
+        let canonical_bytes = canonicalize_report(&self.report).map_err(|err| {
+            CachedValidationProductRehydrateError::CanonicalBytesUncomputable {
+                message: err.to_string(),
+            }
+        })?;
+        let canonical_bytes_hash = Hash256::from_bytes(Sha256::digest(&canonical_bytes).into());
+        if canonical_bytes_hash != self.artifact_validation_canonical_bytes_hash {
+            return Err(
+                CachedValidationProductRehydrateError::CanonicalBytesHashMismatch {
+                    canonical_bytes_hash,
+                    artifact_validation_canonical_bytes_hash: self
+                        .artifact_validation_canonical_bytes_hash,
+                },
+            );
+        }
         if !cached_report_identity_matches_hashes(&self.report, self.validated.input_hashes) {
             return Err(CachedValidationProductRehydrateError::InputHashMismatch);
         }
@@ -459,6 +474,13 @@ pub enum CachedValidationProductRehydrateError {
     UnexpectedReportOutcome {
         outcome: ReportOutcome,
     },
+    CanonicalBytesUncomputable {
+        message: String,
+    },
+    CanonicalBytesHashMismatch {
+        canonical_bytes_hash: Hash256,
+        artifact_validation_canonical_bytes_hash: Hash256,
+    },
     InputHashMismatch,
 }
 
@@ -490,6 +512,19 @@ impl fmt::Display for CachedValidationProductRehydrateError {
                     "cached validation success report has outcome {outcome:?}"
                 )
             }
+            Self::CanonicalBytesUncomputable { message } => {
+                write!(
+                    f,
+                    "cached validation report canonical bytes are not computable: {message}"
+                )
+            }
+            Self::CanonicalBytesHashMismatch {
+                canonical_bytes_hash,
+                artifact_validation_canonical_bytes_hash,
+            } => write!(
+                f,
+                "cached validation report canonical bytes hash mismatch: report has {canonical_bytes_hash}, product has {artifact_validation_canonical_bytes_hash}"
+            ),
             Self::InputHashMismatch => {
                 f.write_str("cached validation report identity does not match cached inputs")
             }
