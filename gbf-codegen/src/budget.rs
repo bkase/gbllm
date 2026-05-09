@@ -130,8 +130,11 @@ pub enum AccumulatorDomain {
 #[serde(deny_unknown_fields)]
 pub struct SequenceStateProjection {
     pub projected_wram_bytes: u32,
+    pub projected_wram_source: ProjectedSizeSource,
     pub projected_sram_bytes: u32,
+    pub projected_sram_source: ProjectedSizeSource,
     pub projected_hram_bytes: u32,
+    pub projected_hram_source: ProjectedSizeSource,
     pub projected_sram_page_switches_per_token: u16,
 }
 
@@ -484,8 +487,20 @@ pub struct AccumulatorBound {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProjectedSizeSection {
-    pub bytes: u32,
+pub struct ProjectedSize {
+    pub peak_bytes: u32,
+    pub source: ProjectedSizeSource,
+}
+
+pub type ProjectedSizeSection = ProjectedSize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ProjectedSizeSource {
+    #[default]
+    StaticGraphProjection,
+    HintBundleConstraint,
+    CalibrationSamplingClosedForm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -854,6 +869,25 @@ fn project_budget(
         accumulator_maxima(&view.reduction_sites, single_i16_only_locked(policy));
     failures.append(&mut accumulator_failures);
 
+    let projected_wram = ProjectedSize {
+        peak_bytes: view.sequence_state.projected_wram_bytes,
+        source: view.sequence_state.projected_wram_source,
+    };
+    let projected_sram = ProjectedSize {
+        peak_bytes: view.sequence_state.projected_sram_bytes,
+        source: view.sequence_state.projected_sram_source,
+    };
+    let projected_hram = ProjectedSize {
+        peak_bytes: view.sequence_state.projected_hram_bytes,
+        source: view.sequence_state.projected_hram_source,
+    };
+    failures.append(&mut memory_peak_failures(
+        &projected_wram,
+        &projected_sram,
+        &projected_hram,
+        runtime_chrome_budget,
+    ));
+
     (
         BudgetProjectionSection {
             per_expert_payload,
@@ -865,15 +899,9 @@ fn project_budget(
                 total_bytes: common_total,
             },
             accumulator_maxima,
-            projected_wram: ProjectedSizeSection {
-                bytes: view.sequence_state.projected_wram_bytes,
-            },
-            projected_sram: ProjectedSizeSection {
-                bytes: view.sequence_state.projected_sram_bytes,
-            },
-            projected_hram: ProjectedSizeSection {
-                bytes: view.sequence_state.projected_hram_bytes,
-            },
+            projected_wram,
+            projected_sram,
+            projected_hram,
             projected_bank_switches_per_token: ProjectedSwitchCountSection {
                 upper_bound: view.routing.projected_bank_switches_per_token,
                 expected_q16_16: view.routing.expected_bank_switches_q16_16,
@@ -1002,6 +1030,37 @@ fn budget_math_error_failure(error: BudgetMathError, expert_index: usize) -> Bud
 
 fn checked_sum_u32(values: impl Iterator<Item = u32>) -> u32 {
     values.fold(0u32, u32::saturating_add)
+}
+
+fn memory_peak_failures(
+    projected_wram: &ProjectedSize,
+    projected_sram: &ProjectedSize,
+    projected_hram: &ProjectedSize,
+    runtime_chrome_budget: &RuntimeChromeBudget,
+) -> Vec<BudgetFailure> {
+    let mut failures = Vec::new();
+    let memory_caps = runtime_chrome_budget.memory_caps;
+
+    if projected_wram.peak_bytes > memory_caps.wram_usable_bytes {
+        failures.push(BudgetFailure::WramPeakExceedsCap {
+            peak: projected_wram.peak_bytes,
+            cap: memory_caps.wram_usable_bytes,
+        });
+    }
+    if projected_sram.peak_bytes > memory_caps.sram_usable_bytes {
+        failures.push(BudgetFailure::SramPeakExceedsCap {
+            peak: projected_sram.peak_bytes,
+            cap: memory_caps.sram_usable_bytes,
+        });
+    }
+    if projected_hram.peak_bytes > memory_caps.hram_usable_bytes {
+        failures.push(BudgetFailure::HramPeakExceedsCap {
+            peak: projected_hram.peak_bytes,
+            cap: memory_caps.hram_usable_bytes,
+        });
+    }
+
+    failures
 }
 
 fn single_i16_only_locked(policy: &ResolvedPolicyProduct) -> bool {
@@ -1992,6 +2051,144 @@ mod tests {
         assert_eq!(
             report.report.body.projections.per_expert_payload[0].expert,
             ExpertId::new(0)
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_wram_peak_exceeds_cap() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.sequence_state.projected_wram_bytes = budget.memory_caps.wram_usable_bytes + 1;
+        view.sequence_state.projected_wram_source = ProjectedSizeSource::StaticGraphProjection;
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.projected_wram,
+            ProjectedSize {
+                peak_bytes: 8193,
+                source: ProjectedSizeSource::StaticGraphProjection,
+            }
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::WramPeakExceedsCap {
+                peak: 8193,
+                cap: 8192,
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetWramPeakExceeds {
+                peak: 8193,
+                cap: 8192,
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_sram_peak_exceeds_cap() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.sequence_state.projected_sram_bytes = budget.memory_caps.sram_usable_bytes + 1;
+        view.sequence_state.projected_sram_source = ProjectedSizeSource::HintBundleConstraint;
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.projected_sram,
+            ProjectedSize {
+                peak_bytes: 32_769,
+                source: ProjectedSizeSource::HintBundleConstraint,
+            }
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::SramPeakExceedsCap {
+                peak: 32_769,
+                cap: 32_768,
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetSramPeakExceeds {
+                peak: 32_769,
+                cap: 32_768,
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_hram_peak_exceeds_cap() {
+        let mut budget = runtime_budget_fixture();
+        budget.memory_caps.hram_usable_bytes = 64;
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.sequence_state.projected_hram_bytes = 65;
+        view.sequence_state.projected_hram_source =
+            ProjectedSizeSource::CalibrationSamplingClosedForm;
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.projected_hram,
+            ProjectedSize {
+                peak_bytes: 65,
+                source: ProjectedSizeSource::CalibrationSamplingClosedForm,
+            }
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::HramPeakExceedsCap { peak: 65, cap: 64 }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetHramPeakExceeds { peak: 65, cap: 64 }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_records_projected_size_source() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.sequence_state.projected_wram_bytes = 128;
+        view.sequence_state.projected_wram_source = ProjectedSizeSource::HintBundleConstraint;
+        view.sequence_state.projected_sram_bytes = 0;
+        view.sequence_state.projected_sram_source =
+            ProjectedSizeSource::CalibrationSamplingClosedForm;
+        view.sequence_state.projected_hram_bytes = 16;
+        view.sequence_state.projected_hram_source = ProjectedSizeSource::StaticGraphProjection;
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert_eq!(
+            report.report.body.projections.projected_wram,
+            ProjectedSize {
+                peak_bytes: 128,
+                source: ProjectedSizeSource::HintBundleConstraint,
+            }
+        );
+        assert_eq!(
+            report.report.body.projections.projected_sram,
+            ProjectedSize {
+                peak_bytes: 0,
+                source: ProjectedSizeSource::CalibrationSamplingClosedForm,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&report.report.body.projections.projected_hram)
+                .expect("projected size serializes"),
+            serde_json::json!({
+                "peak_bytes": 16,
+                "source": { "kind": "StaticGraphProjection" }
+            })
         );
     }
 
