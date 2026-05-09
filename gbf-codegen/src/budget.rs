@@ -469,6 +469,7 @@ pub struct PerExpertEntry {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ExpertPlacementStatus {
     Assigned,
+    AssignedOverCap,
     UnassignedNoEligibleSlots,
     UnassignedStrictDistinctSlotsExhausted,
 }
@@ -996,7 +997,7 @@ fn place_experts_by_static_model(
                 let slot = &mut per_bank_occupancy[slot_index];
                 per_expert_payload[payload.payload_index].assigned_slot = Some(slot.slot);
                 per_expert_payload[payload.payload_index].placement_status =
-                    ExpertPlacementStatus::Assigned;
+                    ExpertPlacementStatus::AssignedOverCap;
                 assign_component_to_slot(
                     slot,
                     payload.payload_bytes,
@@ -1079,7 +1080,9 @@ const fn expert_unassigned_status(failure: ExpertPlacementFailure) -> ExpertPlac
         ExpertPlacementFailure::StrictDistinctSlotsExhausted => {
             ExpertPlacementStatus::UnassignedStrictDistinctSlotsExhausted
         }
-        ExpertPlacementFailure::ExceedsEligibleSlotCap { .. } => ExpertPlacementStatus::Assigned,
+        ExpertPlacementFailure::ExceedsEligibleSlotCap { .. } => {
+            ExpertPlacementStatus::AssignedOverCap
+        }
     }
 }
 
@@ -1108,7 +1111,7 @@ fn expert_placement_failure(
                 layer: payload.layer,
                 expert: payload.expert,
                 slot: slot.slot,
-                payload_bytes: assigned_if_placed,
+                payload_bytes: payload.payload_bytes,
                 cap_bytes,
                 excess_bytes: assigned_if_placed.saturating_sub(cap_bytes),
             }
@@ -3111,6 +3114,21 @@ mod tests {
             -4
         );
         assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].assigned_components,
+            vec![BudgetComponentRef::Expert {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(0),
+            }]
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[0].assigned_slot,
+            Some(BudgetSlotId::new(7))
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[0].placement_status,
+            ExpertPlacementStatus::AssignedOverCap
+        );
+        assert_eq!(
             report.report.body.decision.failures,
             vec![BudgetFailure::ExpertExceedsSlot {
                 layer: LayerId::new(0),
@@ -3146,6 +3164,83 @@ mod tests {
                     "excess_bytes": 4
                 }
             })
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_expert_exceeds_slot_reports_expert_payload_for_cumulative_bust() {
+        let policy = policy_with_placement(PlacementProfile::Budgeted);
+        let budget =
+            runtime_budget_with_slots(vec![expert_slot(7, 25, 0, [PlacementProfile::Budgeted])]);
+        let view = budget_view_with_experts(vec![
+            expert_with_payload(0, 0, 20),
+            expert_with_payload(0, 1, 10),
+        ]);
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[0].placement_status,
+            ExpertPlacementStatus::Assigned
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[1].assigned_slot,
+            Some(BudgetSlotId::new(7))
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[1].placement_status,
+            ExpertPlacementStatus::AssignedOverCap
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].assigned_bytes,
+            30
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].residual_bytes,
+            -5
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].assigned_components,
+            vec![
+                BudgetComponentRef::Expert {
+                    layer: LayerId::new(0),
+                    expert: ExpertId::new(0),
+                },
+                BudgetComponentRef::Expert {
+                    layer: LayerId::new(0),
+                    expert: ExpertId::new(1),
+                },
+            ]
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::ExpertExceedsSlot {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(1),
+                slot: BudgetSlotId::new(7),
+                payload_bytes: 10,
+                cap_bytes: 25,
+                excess_bytes: 5,
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetExpertExceedsSlot {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(1),
+                slot: BudgetSlotId::new(7),
+                payload_bytes: 10,
+                cap_bytes: 25,
+                excess_bytes: 5,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(
+                report.report.body.projections.per_expert_payload[1].placement_status
+            )
+            .expect("placement status serializes"),
+            serde_json::json!({"kind": "AssignedOverCap"})
         );
     }
 
