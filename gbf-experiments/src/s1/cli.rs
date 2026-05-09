@@ -1615,6 +1615,10 @@ impl ResetContextScorer for UniformScorer {
 const PRODUCTION_STATE_SLOTS: usize = 4;
 const PRODUCTION_STATE_DECAY: f64 = 0.5;
 const PRODUCTION_VOCAB_SIZE: usize = 256;
+const PREREGISTERED_BPC_3GRAM_BASELINE_MIN: f64 = 1.7;
+const PREREGISTERED_BPC_3GRAM_BASELINE_MAX: f64 = 2.0;
+const PREREGISTERED_MEDIAN_VAL_BPC_MIN: f64 = 1.4;
+const PREREGISTERED_MEDIAN_VAL_BPC_MAX: f64 = 1.8;
 
 #[derive(Debug, Clone)]
 struct ProductionCheckpointScorer {
@@ -2248,16 +2252,14 @@ fn production_report_input(
             metadata,
             run_logs,
             scores,
-            dispatch_input,
+            dispatch_input.clone(),
         ),
-        falsification_analysis:
-            "Production S1 CLI report collected canonical TinyStories artifacts from disk."
-                .to_owned(),
-        surprises: if suspicious_low_bpc {
-            "Suspicious-low-bpc sentinel fired.".to_owned()
-        } else {
-            "None.".to_owned()
-        },
+        falsification_analysis: production_falsification_analysis(
+            &dispatch_input,
+            baseline,
+            scores,
+        ),
+        surprises: production_surprises(baseline, scores, suspicious_low_bpc),
         decision_justification: "Decision follows RFC section 8 dispatch.".to_owned(),
         replay_command:
             "gbf s1 replay --manifest fixtures/corpora/tinystories.toml --seed-list 0,1,2,3,4"
@@ -2575,6 +2577,75 @@ fn production_hypotheses(
         observation,
     })
     .collect()
+}
+
+fn production_falsification_analysis(
+    input: &OutcomeDispatchInput,
+    baseline: &BaselineReport,
+    scores: &[Option<ScoreReport>],
+) -> String {
+    let mut lines = vec![
+        "Production S1 CLI report collected canonical TinyStories artifacts from disk.".to_owned(),
+    ];
+    if input.h2 == HypothesisStatus::Refuted {
+        lines.push(format!(
+            "H2 falsification: {}",
+            production_h2_observation(baseline, scores)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn production_surprises(
+    baseline: &BaselineReport,
+    scores: &[Option<ScoreReport>],
+    suspicious_low_bpc: bool,
+) -> String {
+    let mut surprises = Vec::new();
+    if outside_inclusive(
+        baseline.bpc_3gram,
+        PREREGISTERED_BPC_3GRAM_BASELINE_MIN,
+        PREREGISTERED_BPC_3GRAM_BASELINE_MAX,
+    ) {
+        surprises.push(format!(
+            "bpc_3gram_baseline {:.6} was outside preregistered sanity range [{:.1}, {:.1}]; this range miss is reported as a Surprise, not a verdict change.",
+            baseline.bpc_3gram,
+            PREREGISTERED_BPC_3GRAM_BASELINE_MIN,
+            PREREGISTERED_BPC_3GRAM_BASELINE_MAX
+        ));
+    }
+    if let Some(bpcs) = production_score_bpcs(scores) {
+        let (_, median, _) = bpc_summary(&bpcs).expect("non-empty bpcs");
+        if outside_inclusive(
+            median,
+            PREREGISTERED_MEDIAN_VAL_BPC_MIN,
+            PREREGISTERED_MEDIAN_VAL_BPC_MAX,
+        ) && !suspicious_low_bpc
+        {
+            surprises.push(format!(
+                "median(val_bpc) {:.6} was outside preregistered sanity range [{:.1}, {:.1}]; this range miss is reported as a Surprise, not a verdict change.",
+                median,
+                PREREGISTERED_MEDIAN_VAL_BPC_MIN,
+                PREREGISTERED_MEDIAN_VAL_BPC_MAX
+            ));
+        }
+    }
+    if suspicious_low_bpc {
+        surprises.push("Suspicious-low-bpc sentinel fired.".to_owned());
+    }
+    if surprises.is_empty() {
+        "None.".to_owned()
+    } else {
+        surprises
+            .into_iter()
+            .map(|surprise| format!("- {surprise}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn outside_inclusive(value: f64, min: f64, max: f64) -> bool {
+    !value.is_finite() || value < min || value > max
 }
 
 fn production_h1_observation(
@@ -3855,6 +3926,73 @@ mod tests {
         assert!(observation.contains("best=2.100000"));
         assert!(observation.contains("median=2.240000"));
         assert!(observation.contains("worst=2.300000"));
+    }
+
+    #[test]
+    fn production_report_names_h2_falsification_and_sanity_range_surprises() {
+        let mut baseline = baseline_report(2.620544);
+        baseline.bpc_unigram = 4.450948;
+        let scores = score_set([3.111780, 3.081588, 3.115104, 3.148044, 3.120000]);
+        let dispatch_input = production_dispatch_input_from_artifacts(
+            &baseline,
+            &oracle_report(true),
+            &negative_report(true),
+            &ablation_report(true),
+            &completed_metadata_set(),
+            &h1_passing_run_logs(),
+            &scores,
+        )
+        .expect("production dispatch input");
+
+        assert_eq!(dispatch_input.h2, HypothesisStatus::Refuted);
+        assert_eq!(dispatch_input.h3, HypothesisStatus::Confirmed);
+
+        let report = production_report_input(ProductionReportArtifacts {
+            baseline: &baseline,
+            oracle: &oracle_report(true),
+            negative: &negative_report(true),
+            ablation: &ablation_report(true),
+            metadata: &completed_metadata_set(),
+            run_logs: &h1_passing_run_logs(),
+            scores: &scores,
+            dispatch_input,
+            decision: S1Decision::Investigate {
+                reason: "propose-Toy1".to_owned(),
+            },
+            generated_at: "2026-05-09T23:10:50Z".to_owned(),
+            rfc_revision: RfcRevisionRef::GitCommitId(fixture_commit('a').expect("commit")),
+            predictions_markdown: fixture_predictions().to_owned(),
+            predictions_commit: fixture_commit('b').expect("commit"),
+            first_result_commit: fixture_commit('c').expect("commit"),
+        })
+        .expect("production report input");
+
+        assert!(report.falsification_analysis.contains("H2 falsification:"));
+        assert!(
+            report
+                .falsification_analysis
+                .contains("failed H2 threshold 2.570544"),
+            "{}",
+            report.falsification_analysis
+        );
+        assert!(
+            report.surprises.contains(
+                "bpc_3gram_baseline 2.620544 was outside preregistered sanity range [1.7, 2.0]"
+            ),
+            "{}",
+            report.surprises
+        );
+        assert!(
+            report.surprises.contains(
+                "median(val_bpc) 3.115104 was outside preregistered sanity range [1.4, 1.8]"
+            ),
+            "{}",
+            report.surprises
+        );
+        assert_eq!(
+            report.front_matter.s1_outcome,
+            crate::s1::schema::S1Outcome::FailCapacity
+        );
     }
 
     #[test]
