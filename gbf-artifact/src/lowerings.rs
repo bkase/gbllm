@@ -3,6 +3,7 @@
 pub use gbf_foundation::{DataLoweringProfileId, LoweringShardId, LoweringShardRef, PackerVersion};
 use gbf_foundation::{Hash256, TargetProfileId};
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Per-target-profile packed lowering of a frozen artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,4 +96,82 @@ pub trait Unpack: Sized {
     type Error: std::error::Error + Send + Sync + 'static;
 
     fn unpack(bytes: &[u8]) -> Result<Self, Self::Error>;
+}
+
+#[derive(Serialize)]
+struct LoweringShardPackRepr<'a> {
+    id: &'a LoweringShardId,
+    kind: LoweringShardKind,
+    payload_hash: Hash256,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoweringShardUnpackRepr {
+    id: LoweringShardId,
+    kind: LoweringShardKind,
+    payload_hash: Hash256,
+}
+
+impl Pack for LoweringShard {
+    type Error = serde_json::Error;
+
+    fn pack(&self) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(&LoweringShardPackRepr {
+            id: &self.id,
+            kind: self.kind,
+            payload_hash: self.payload_hash,
+        })
+    }
+}
+
+impl Unpack for LoweringShard {
+    type Error = serde_json::Error;
+
+    fn unpack(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let repr: LoweringShardUnpackRepr = serde_json::from_slice(bytes)?;
+        Ok(Self {
+            id: repr.id,
+            kind: repr.kind,
+            payload_hash: repr.payload_hash,
+            packed_bytes_hash: sha256_hash(bytes),
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct LoweringManifestPackRepr<'a> {
+    shard_refs: &'a [LoweringShardRef],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoweringManifestUnpackRepr {
+    shard_refs: Vec<LoweringShardRef>,
+}
+
+impl Pack for LoweringManifest {
+    type Error = serde_json::Error;
+
+    fn pack(&self) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(&LoweringManifestPackRepr {
+            shard_refs: &self.shard_refs,
+        })
+    }
+}
+
+impl Unpack for LoweringManifest {
+    type Error = serde_json::Error;
+
+    fn unpack(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let repr: LoweringManifestUnpackRepr = serde_json::from_slice(bytes)?;
+        Ok(Self {
+            shard_refs: repr.shard_refs,
+            aggregate_hash: sha256_hash(bytes),
+        })
+    }
+}
+
+fn sha256_hash(bytes: &[u8]) -> Hash256 {
+    Hash256::from_bytes(Sha256::digest(bytes).into())
 }

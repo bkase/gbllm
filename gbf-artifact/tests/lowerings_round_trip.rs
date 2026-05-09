@@ -3,6 +3,7 @@ use gbf_artifact::lowerings::{
     LoweringShardRef, Pack, PackerVersion, TargetDataLoweringArtifact, Unpack,
 };
 use gbf_foundation::{Hash256, SemVer, TargetProfileId};
+use sha2::{Digest, Sha256};
 
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
@@ -10,6 +11,10 @@ fn hash(byte: u8) -> Hash256 {
 
 fn hash_json(byte: u8) -> String {
     format!("sha256:{}", format!("{byte:02x}").repeat(32))
+}
+
+fn sha256_hash(bytes: &[u8]) -> Hash256 {
+    Hash256::from_bytes(Sha256::digest(bytes).into())
 }
 
 fn canonical_shard() -> LoweringShard {
@@ -232,6 +237,54 @@ fn lowering_manifest_shard_refs_preserve_declaration_order() {
             .map(|shard_ref| shard_ref["id"].as_str().expect("id is string"))
             .collect::<Vec<_>>(),
         vec!["zeta", "alpha", "middle"]
+    );
+}
+
+#[test]
+fn lowering_shard_pack_unpack_computes_packed_bytes_hash() {
+    let mut shard = canonical_shard();
+    shard.packed_bytes_hash = Hash256::ZERO;
+
+    let packed = shard.pack().expect("shard packs");
+    let unpacked = LoweringShard::unpack(&packed).expect("packed shard unpacks");
+    let mut expected = shard;
+    expected.packed_bytes_hash = sha256_hash(&packed);
+
+    assert_eq!(unpacked, expected);
+    assert_eq!(unpacked.pack().expect("unpacked shard repacks"), packed);
+    assert!(
+        !std::str::from_utf8(&packed)
+            .expect("packed shard is json")
+            .contains("packed_bytes_hash")
+    );
+}
+
+#[test]
+fn lowering_manifest_pack_unpack_computes_aggregate_hash() {
+    let manifest = LoweringManifest {
+        shard_refs: vec![
+            LoweringShardRef {
+                id: LoweringShardId("weight.layer0.expert0".to_owned()),
+                manifest_hash: hash(0x14),
+            },
+            LoweringShardRef {
+                id: LoweringShardId("scale.layer0.expert0".to_owned()),
+                manifest_hash: hash(0x15),
+            },
+        ],
+        aggregate_hash: Hash256::ZERO,
+    };
+
+    let packed = manifest.pack().expect("manifest packs");
+    let unpacked = LoweringManifest::unpack(&packed).expect("packed manifest unpacks");
+
+    assert_eq!(unpacked.shard_refs, manifest.shard_refs);
+    assert_eq!(unpacked.aggregate_hash, sha256_hash(&packed));
+    assert_eq!(unpacked.pack().expect("unpacked manifest repacks"), packed);
+    assert!(
+        !std::str::from_utf8(&packed)
+            .expect("packed manifest is json")
+            .contains("aggregate_hash")
     );
 }
 

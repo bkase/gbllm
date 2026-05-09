@@ -47,6 +47,10 @@ use std::fmt;
 
 use gbf_artifact::aux::SidecarKind;
 use gbf_artifact::core::{ArtifactCore, ArtifactCoreError};
+use gbf_artifact::lowerings::{
+    DataLoweringProfileId, LoweringManifest, LoweringShard, LoweringShardId, LoweringShardRef,
+    Pack, Unpack,
+};
 use gbf_artifact::manifest::{
     ArtifactFeature, ArtifactSchemaVersion, ComponentKind, ManifestComponent, ManifestInvariant,
 };
@@ -1418,6 +1422,249 @@ fn artifact_aux_malformed_diagnostic(
     )
 }
 
+fn validate_target_data_lowering(
+    inputs: &ValidateInputs<'_>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let target = inputs.target_profile.id();
+    let Some(lowering) = inputs
+        .lowerings
+        .iter()
+        .find(|lowering| lowering.target.as_str() == target.as_str())
+    else {
+        diagnostics.push(ValidationDiagnostic::hard(
+            ValidationOrigin::Lowering,
+            ValidationCode::LoweringMissingForTarget {
+                target: target.clone(),
+                lowering_profile: expected_lowering_profile(inputs),
+            },
+            ValidationDetail::Field {
+                field: FieldPath::from("lowerings"),
+            },
+            vec![EvidenceRef {
+                kind: "target_profile".to_owned(),
+                reference: target.to_string(),
+                hash: Some(input_hash(
+                    "gbf-hw",
+                    "TargetProfile",
+                    "target_profile",
+                    "1.0.0",
+                    inputs.target_profile,
+                )),
+            }],
+        ));
+        return;
+    };
+
+    let runtime_version = gbf_runtime::RUNTIME_PACKER_VERSION;
+    if lowering.packer_version != runtime_version {
+        diagnostics.push(ValidationDiagnostic::hard(
+            ValidationOrigin::Lowering,
+            ValidationCode::LoweringPackerVersionMismatch {
+                artifact_version: lowering.packer_version,
+                runtime_version,
+            },
+            ValidationDetail::Field {
+                field: FieldPath::from("lowerings.packer_version"),
+            },
+            vec![lowering_evidence(lowering, "packer_version")],
+        ));
+    }
+
+    if lowering.shards.is_empty() {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            lowering_manifest_diagnostic_ref(lowering),
+            ValidationDetail::Field {
+                field: FieldPath::from("lowerings.shards"),
+            },
+            lowering_evidence(lowering, "shards"),
+        ));
+        return;
+    }
+
+    for shard in &lowering.shards {
+        validate_lowering_shard_round_trip(lowering, shard, diagnostics);
+    }
+    validate_lowering_manifest_round_trip(lowering, diagnostics);
+}
+
+fn expected_lowering_profile(inputs: &ValidateInputs<'_>) -> DataLoweringProfileId {
+    DataLoweringProfileId(format!(
+        "{}-default",
+        inputs.target_profile.family().as_str()
+    ))
+}
+
+fn validate_lowering_shard_round_trip(
+    lowering: &TargetDataLoweringArtifact,
+    shard: &LoweringShard,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let shard_ref = lowering_shard_ref(shard);
+    let Ok(packed) = shard.pack() else {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            shard_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from(format!("lowerings.shards.{}", shard.id.0)),
+            },
+            lowering_evidence(lowering, shard.id.0.as_str()),
+        ));
+        return;
+    };
+
+    let observed_packed_hash = sha256_hash(&packed);
+    if observed_packed_hash != shard.packed_bytes_hash {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            shard_ref,
+            ValidationDetail::HashMismatch {
+                expected: shard.packed_bytes_hash,
+                observed: observed_packed_hash,
+            },
+            lowering_evidence(lowering, shard.id.0.as_str()),
+        ));
+        return;
+    }
+
+    let Ok(unpacked) = LoweringShard::unpack(&packed) else {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            shard_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from(format!("lowerings.shards.{}", shard.id.0)),
+            },
+            lowering_evidence(lowering, shard.id.0.as_str()),
+        ));
+        return;
+    };
+    let Ok(repacked) = unpacked.pack() else {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            shard_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from(format!("lowerings.shards.{}", shard.id.0)),
+            },
+            lowering_evidence(lowering, shard.id.0.as_str()),
+        ));
+        return;
+    };
+
+    if repacked != packed || unpacked != *shard {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            shard_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from(format!("lowerings.shards.{}", shard.id.0)),
+            },
+            lowering_evidence(lowering, shard.id.0.as_str()),
+        ));
+    }
+}
+
+fn validate_lowering_manifest_round_trip(
+    lowering: &TargetDataLoweringArtifact,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let manifest = assembled_lowering_manifest(lowering);
+    let manifest_ref = lowering_manifest_diagnostic_ref(lowering);
+    let Ok(packed) = manifest.pack() else {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            manifest_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from("lowerings.manifest"),
+            },
+            lowering_evidence(lowering, "manifest"),
+        ));
+        return;
+    };
+
+    let observed_manifest_hash = sha256_hash(&packed);
+    if observed_manifest_hash != lowering.manifest_hash {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            manifest_ref,
+            ValidationDetail::HashMismatch {
+                expected: lowering.manifest_hash,
+                observed: observed_manifest_hash,
+            },
+            lowering_evidence(lowering, "manifest_hash"),
+        ));
+        return;
+    }
+
+    let Ok(unpacked) = LoweringManifest::unpack(&packed) else {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            manifest_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from("lowerings.manifest"),
+            },
+            lowering_evidence(lowering, "manifest"),
+        ));
+        return;
+    };
+    let Ok(repacked) = unpacked.pack() else {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            manifest_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from("lowerings.manifest"),
+            },
+            lowering_evidence(lowering, "manifest"),
+        ));
+        return;
+    };
+
+    if repacked != packed || unpacked != manifest {
+        diagnostics.push(lowering_round_trip_failed_diagnostic(
+            manifest_ref,
+            ValidationDetail::Field {
+                field: FieldPath::from("lowerings.manifest"),
+            },
+            lowering_evidence(lowering, "manifest"),
+        ));
+    }
+}
+
+fn assembled_lowering_manifest(lowering: &TargetDataLoweringArtifact) -> LoweringManifest {
+    LoweringManifest {
+        shard_refs: lowering.shards.iter().map(lowering_shard_ref).collect(),
+        aggregate_hash: lowering.manifest_hash,
+    }
+}
+
+fn lowering_shard_ref(shard: &LoweringShard) -> LoweringShardRef {
+    LoweringShardRef {
+        id: shard.id.clone(),
+        manifest_hash: shard.packed_bytes_hash,
+    }
+}
+
+fn lowering_manifest_diagnostic_ref(lowering: &TargetDataLoweringArtifact) -> LoweringShardRef {
+    lowering
+        .shards
+        .first()
+        .map(lowering_shard_ref)
+        .unwrap_or_else(|| LoweringShardRef {
+            id: LoweringShardId("lowering_manifest".to_owned()),
+            manifest_hash: lowering.manifest_hash,
+        })
+}
+
+fn lowering_round_trip_failed_diagnostic(
+    shard: LoweringShardRef,
+    detail: ValidationDetail,
+    evidence: EvidenceRef,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Lowering,
+        ValidationCode::LoweringRoundTripFailed { shard },
+        detail,
+        vec![evidence],
+    )
+}
+
+fn lowering_evidence(lowering: &TargetDataLoweringArtifact, reference: &str) -> EvidenceRef {
+    EvidenceRef {
+        kind: "target_data_lowering".to_owned(),
+        reference: format!("{}:{}:{reference}", lowering.target, lowering.profile.0),
+        hash: Some(lowering.manifest_hash),
+    }
+}
+
 fn stage0_failure(
     inputs: &ValidateInputs<'_>,
     artifact: Option<&ImportedArtifactView>,
@@ -1601,6 +1848,7 @@ pub fn validate_artifact_and_request<'a>(
     );
     validate_artifact_payload(effective_artifact, &mut diagnostics);
     validate_artifact_aux_sidecars(effective_artifact, inputs.resolver, &mut diagnostics);
+    validate_target_data_lowering(&inputs, &mut diagnostics);
 
     if !diagnostics.is_empty() {
         return Err(stage0_failure(
@@ -2801,6 +3049,75 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_rejects_lowering_round_trip_failure() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.lowerings[0].shards[0].packed_bytes_hash = hash(0xfa);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::LoweringRoundTripFailed { .. })
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_lowering_missing_for_target() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.lowerings.clear();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::LoweringMissingForTarget {
+                    target,
+                    lowering_profile,
+                } if target == fixture.target_profile.id()
+                    && lowering_profile == &DataLoweringProfileId("dmg-default".to_owned())
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_lowering_packer_version_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.lowerings[0].packer_version = PackerVersion::new(2, 0, 0);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::LoweringPackerVersionMismatch {
+                    artifact_version,
+                    runtime_version,
+                } if artifact_version == &PackerVersion::new(2, 0, 0)
+                    && runtime_version == &gbf_runtime::RUNTIME_PACKER_VERSION
+            )
+        });
+        assert_no_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::LoweringRoundTripFailed { .. })
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_lowering_manifest_hash_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.lowerings[0].manifest_hash = hash(0xfb);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::LoweringRoundTripFailed { .. })
+        });
+    }
+
+    #[test]
     fn f_b2_validate_builtin_schema_adapters_excludes_test_only_proof_adapters() {
         let adapters = builtin_schema_adapters();
 
@@ -3045,18 +3362,37 @@ mod tests {
     }
 
     fn lowering() -> TargetDataLoweringArtifact {
+        let shards = vec![lowering_shard(
+            "weight.layer0",
+            LoweringShardKind::WeightShard,
+            hash(0x04),
+        )];
         TargetDataLoweringArtifact {
             profile: DataLoweringProfileId("fixture.dmg".to_owned()),
             target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
             packer_version: PackerVersion::new(1, 0, 0),
-            manifest_hash: hash(0x03),
-            shards: vec![LoweringShard {
-                id: LoweringShardId("weight.layer0".to_owned()),
-                kind: LoweringShardKind::WeightShard,
-                payload_hash: hash(0x04),
-                packed_bytes_hash: hash(0x05),
-            }],
+            manifest_hash: lowering_manifest_hash(&shards),
+            shards,
         }
+    }
+
+    fn lowering_shard(id: &str, kind: LoweringShardKind, payload_hash: Hash256) -> LoweringShard {
+        let mut shard = LoweringShard {
+            id: LoweringShardId(id.to_owned()),
+            kind,
+            payload_hash,
+            packed_bytes_hash: Hash256::ZERO,
+        };
+        shard.packed_bytes_hash = sha256_hash(&shard.pack().expect("fixture lowering shard packs"));
+        shard
+    }
+
+    fn lowering_manifest_hash(shards: &[LoweringShard]) -> Hash256 {
+        let manifest = LoweringManifest {
+            shard_refs: shards.iter().map(lowering_shard_ref).collect(),
+            aggregate_hash: Hash256::ZERO,
+        };
+        sha256_hash(&manifest.pack().expect("fixture lowering manifest packs"))
     }
 
     fn workload() -> WorkloadManifestRef {
