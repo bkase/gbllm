@@ -46,10 +46,12 @@ use std::error::Error;
 use std::fmt;
 
 use gbf_artifact::aux::SidecarKind;
-use gbf_artifact::core::ArtifactCore;
+use gbf_artifact::core::{ArtifactCore, ArtifactCoreError};
 use gbf_artifact::manifest::{
     ArtifactFeature, ArtifactSchemaVersion, ComponentKind, ManifestComponent, ManifestInvariant,
 };
+use gbf_artifact::sequence::SequenceSemanticsSpec;
+use gbf_artifact::tensor::{CanonicalTensor, CanonicalTensorPayload};
 use gbf_artifact::{ArtifactAux, ArtifactManifest, HintBundle, TargetDataLoweringArtifact};
 use gbf_foundation::{BlobCodec, BlobRef, Hash256, SemVer};
 use gbf_hw::target::TargetProfile;
@@ -970,6 +972,8 @@ fn validate_artifact_payload(
     artifact: &ImportedArtifactView,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
+    let mut rebuilt_tensors = Vec::with_capacity(artifact.core.tensors().len());
+    let mut tensors_valid = true;
     for tensor in artifact.core.tensors() {
         let field = FieldPath::from(format!("core.tensors.{}.payload", tensor.id.as_str()));
         let rebuilt = gbf_artifact::tensor::CanonicalTensor::new(
@@ -980,6 +984,7 @@ fn validate_artifact_payload(
         );
 
         let Ok(rebuilt) = rebuilt else {
+            tensors_valid = false;
             diagnostics.push(artifact_payload_malformed_diagnostic(
                 field,
                 artifact.manifest.manifest_self_hash,
@@ -988,13 +993,12 @@ fn validate_artifact_payload(
         };
 
         if rebuilt.content_hash != tensor.content_hash {
-            let len = u32::try_from(tensor.payload.len()).unwrap_or(u32::MAX);
             diagnostics.push(ValidationDiagnostic::hard(
                 ValidationOrigin::SemanticCore,
                 ValidationCode::ArtifactBlobDigestMismatch {
                     blob: BlobRef {
                         hash: tensor.content_hash,
-                        len,
+                        len: canonical_tensor_digest_material_len(tensor),
                         codec: BlobCodec::Raw,
                     },
                     expected: tensor.content_hash,
@@ -1011,6 +1015,135 @@ fn validate_artifact_payload(
                 }],
             ));
         }
+        rebuilt_tensors.push(rebuilt);
+    }
+
+    if tensors_valid {
+        match ArtifactCore::new(
+            rebuilt_tensors,
+            artifact.core.quant().clone(),
+            artifact.core.sequence_semantics(),
+        ) {
+            Ok(rebuilt_core) => {
+                if rebuilt_core.semantic_hash() != artifact.core.semantic_hash() {
+                    diagnostics.push(artifact_payload_malformed_diagnostic(
+                        FieldPath::from("core"),
+                        artifact.manifest.manifest_self_hash,
+                    ));
+                }
+            }
+            Err(error) => diagnostics.push(artifact_payload_malformed_diagnostic(
+                artifact_core_error_field(&error),
+                artifact.manifest.manifest_self_hash,
+            )),
+        }
+    }
+
+    validate_sequence_semantics_consistency(artifact, diagnostics);
+}
+
+fn canonical_tensor_digest_material_len(tensor: &CanonicalTensor) -> u32 {
+    let element_bytes = match &tensor.payload {
+        CanonicalTensorPayload::F32(_) => 4_u128,
+        CanonicalTensorPayload::I8(_) => 1_u128,
+        CanonicalTensorPayload::U16(_) => 2_u128,
+    };
+    let len = 1_u128
+        + 8
+        + (tensor.layout.shape.dims().len() as u128 * 4)
+        + 8
+        + (tensor.payload.len() as u128 * element_bytes);
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
+fn artifact_core_error_field(error: &ArtifactCoreError) -> FieldPath {
+    match error {
+        ArtifactCoreError::DuplicateTensor { id } => {
+            FieldPath::from(format!("core.tensors.{}", id.as_str()))
+        }
+        ArtifactCoreError::DuplicateQuantEntry { kind, path } => FieldPath::from(format!(
+            "core.quant.{}.{}",
+            kind.replace(' ', "_"),
+            path.as_str()
+        )),
+        ArtifactCoreError::MissingTensor { role, id } => FieldPath::from(format!(
+            "core.quant.{}.{}",
+            role.replace(' ', "_"),
+            id.as_str()
+        )),
+        ArtifactCoreError::TensorKindMismatch { id, .. }
+        | ArtifactCoreError::TensorElementTypeMismatch { id, .. }
+        | ArtifactCoreError::TensorRankMismatch { id, .. }
+        | ArtifactCoreError::TensorShapeMismatch { id, .. } => {
+            FieldPath::from(format!("core.tensors.{}", id.as_str()))
+        }
+        ArtifactCoreError::InvalidActivationRange { activation } => FieldPath::from(format!(
+            "core.quant.activation_quant.{}.range",
+            activation.as_str()
+        )),
+        ArtifactCoreError::InvalidNormPlan { norm, .. } => {
+            FieldPath::from(format!("core.quant.norm_plans.{}", norm.as_str()))
+        }
+        ArtifactCoreError::MissingNormLut { norm } => {
+            FieldPath::from(format!("core.quant.norm_plans.{}.lut", norm.as_str()))
+        }
+        ArtifactCoreError::UnexpectedNormLut { norm, lut } => FieldPath::from(format!(
+            "core.quant.norm_plans.{}.lut.{}",
+            norm.as_str(),
+            lut.as_str()
+        )),
+        ArtifactCoreError::MissingWeightQuantEntry { weight } => {
+            FieldPath::from(format!("core.quant.weight_quant.{}", weight.as_str()))
+        }
+        ArtifactCoreError::MissingTernaryQuantEntry { weight } => FieldPath::from(format!(
+            "core.quant.ternary_weight_plans.{}",
+            weight.as_str()
+        )),
+        ArtifactCoreError::WeightQuantPlanMismatch { projection }
+        | ArtifactCoreError::InvalidQuantPlan {
+            path: projection, ..
+        } => FieldPath::from(format!(
+            "core.quant.ternary_weight_plans.{}",
+            projection.as_str()
+        )),
+    }
+}
+
+fn validate_sequence_semantics_consistency(
+    artifact: &ImportedArtifactView,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let requires_linear = artifact
+        .manifest
+        .required_features
+        .contains(&ArtifactFeature::LinearStateSequence);
+    let requires_bounded = artifact
+        .manifest
+        .required_features
+        .contains(&ArtifactFeature::BoundedKvSequence);
+
+    if requires_linear && requires_bounded {
+        diagnostics.push(artifact_payload_malformed_diagnostic(
+            FieldPath::from("manifest.required_features.sequence_semantics"),
+            artifact.manifest.manifest_self_hash,
+        ));
+        return;
+    }
+
+    let inconsistent = matches!(
+        (
+            artifact.core.sequence_semantics(),
+            requires_linear,
+            requires_bounded
+        ),
+        (SequenceSemanticsSpec::LinearState(_), false, true)
+            | (SequenceSemanticsSpec::BoundedKv(_), true, false)
+    );
+    if inconsistent {
+        diagnostics.push(artifact_payload_malformed_diagnostic(
+            FieldPath::from("core.sequence_semantics"),
+            artifact.manifest.manifest_self_hash,
+        ));
     }
 }
 
@@ -1039,7 +1172,12 @@ fn validate_artifact_aux_sidecars(
     resolver: &dyn ArtifactResolver,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    validate_golden_vector_sidecars(&artifact.aux, resolver, diagnostics);
+    validate_golden_vector_sidecars(
+        &artifact.aux,
+        artifact.manifest.manifest_self_hash,
+        resolver,
+        diagnostics,
+    );
 
     if requires_checkpoint_schema(&artifact.manifest) && artifact.aux.checkpoint_schema.is_none() {
         diagnostics.push(artifact_aux_sidecar_missing_diagnostic(
@@ -1063,6 +1201,7 @@ fn validate_artifact_aux_sidecars(
                 id: sidecar.id.0.clone(),
                 hash: sidecar.hash,
             },
+            artifact.manifest.manifest_self_hash,
             resolver,
             diagnostics,
         );
@@ -1074,6 +1213,7 @@ fn validate_artifact_aux_sidecars(
                 id: sidecar.id.0.clone(),
                 hash: sidecar.hash,
             },
+            artifact.manifest.manifest_self_hash,
             resolver,
             diagnostics,
         );
@@ -1085,6 +1225,7 @@ fn validate_artifact_aux_sidecars(
                 id: sidecar.id.0.clone(),
                 hash: sidecar.hash,
             },
+            artifact.manifest.manifest_self_hash,
             resolver,
             diagnostics,
         );
@@ -1096,6 +1237,19 @@ fn validate_artifact_aux_sidecars(
                 id: sidecar.id.0.clone(),
                 hash: sidecar.hash,
             },
+            artifact.manifest.manifest_self_hash,
+            resolver,
+            diagnostics,
+        );
+    }
+    if let Some(sidecar) = &artifact.aux.lexical_spec {
+        validate_resolved_sidecar(
+            SidecarRef {
+                kind: SidecarKind::LexicalSpec,
+                id: sidecar.id.0.clone(),
+                hash: sidecar.hash,
+            },
+            artifact.manifest.manifest_self_hash,
             resolver,
             diagnostics,
         );
@@ -1104,30 +1258,26 @@ fn validate_artifact_aux_sidecars(
 
 fn validate_golden_vector_sidecars(
     aux: &ArtifactAux,
+    manifest_self_hash: Hash256,
     resolver: &dyn ArtifactResolver,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     let mut seen = BTreeSet::new();
     for vector in &aux.golden_vectors {
         if !seen.insert(vector.id.clone()) {
-            diagnostics.push(artifact_aux_malformed_diagnostic(FieldPath::from(
-                "aux.golden_vectors",
-            )));
+            diagnostics.push(artifact_aux_malformed_diagnostic(
+                golden_vector_aux_field(&vector.id),
+                manifest_self_hash,
+            ));
+            continue;
         }
-        validate_resolved_sidecar(
-            SidecarRef {
-                kind: SidecarKind::GoldenVector,
-                id: vector.id.0.clone(),
-                hash: vector.manifest_hash,
-            },
-            resolver,
-            diagnostics,
-        );
+        validate_golden_vector_presence(vector, manifest_self_hash, resolver, diagnostics);
     }
 }
 
 fn validate_resolved_sidecar(
     sidecar: SidecarRef,
+    manifest_self_hash: Hash256,
     resolver: &dyn ArtifactResolver,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
@@ -1157,7 +1307,7 @@ fn validate_resolved_sidecar(
         Err(ArtifactResolveError::NotFound { .. }) => {
             diagnostics.push(artifact_aux_sidecar_missing_diagnostic(
                 sidecar.kind,
-                sidecar.hash,
+                manifest_self_hash,
             ));
         }
         Err(ArtifactResolveError::HashMismatch {
@@ -1177,15 +1327,38 @@ fn validate_resolved_sidecar(
             }],
         )),
         Err(ArtifactResolveError::Unsupported { .. }) => {
-            diagnostics.push(artifact_aux_malformed_diagnostic(FieldPath::from(format!(
-                "aux.sidecars.{}",
-                sidecar.id
-            ))));
+            diagnostics.push(artifact_aux_malformed_diagnostic(
+                FieldPath::from(format!("aux.sidecars.{}", sidecar.id)),
+                manifest_self_hash,
+            ));
+        }
+    }
+}
+
+fn validate_golden_vector_presence(
+    vector: &GoldenVectorRef,
+    manifest_self_hash: Hash256,
+    resolver: &dyn ArtifactResolver,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match resolver.resolve_golden_vector(vector) {
+        Ok(_) => {}
+        Err(ArtifactResolveError::NotFound { .. }) => diagnostics.push(
+            artifact_aux_sidecar_missing_diagnostic(SidecarKind::GoldenVector, manifest_self_hash),
+        ),
+        Err(ArtifactResolveError::HashMismatch { .. })
+        | Err(ArtifactResolveError::Unsupported { .. }) => {
+            diagnostics.push(artifact_aux_malformed_diagnostic(
+                golden_vector_aux_field(&vector.id),
+                manifest_self_hash,
+            ))
         }
     }
 }
 
 fn requires_checkpoint_schema(manifest: &ArtifactManifest) -> bool {
+    // These sequence features persist resumable state, so Stage 0 requires the
+    // aux checkpoint schema sidecar before later stages can rely on the state shape.
     manifest
         .required_features
         .contains(&ArtifactFeature::LinearStateSequence)
@@ -1195,9 +1368,15 @@ fn requires_checkpoint_schema(manifest: &ArtifactManifest) -> bool {
 }
 
 fn requires_interaction_bundle(manifest: &ArtifactManifest) -> bool {
+    // MoE routing depends on interaction metadata that is carried out-of-band
+    // from the semantic core, so its aux sidecar is required when the feature is active.
     manifest
         .required_features
         .contains(&ArtifactFeature::MoeRouting)
+}
+
+fn golden_vector_aux_field(id: &GoldenVectorId) -> FieldPath {
+    FieldPath::from(format!("aux.golden_vectors.{}", id.0))
 }
 
 fn artifact_aux_sidecar_missing_diagnostic(
@@ -1218,7 +1397,10 @@ fn artifact_aux_sidecar_missing_diagnostic(
     )
 }
 
-fn artifact_aux_malformed_diagnostic(field: FieldPath) -> ValidationDiagnostic {
+fn artifact_aux_malformed_diagnostic(
+    field: FieldPath,
+    provenance_hash: Hash256,
+) -> ValidationDiagnostic {
     ValidationDiagnostic::hard(
         ValidationOrigin::Manifest,
         ValidationCode::ArtifactAuxMalformed {
@@ -1230,7 +1412,7 @@ fn artifact_aux_malformed_diagnostic(field: FieldPath) -> ValidationDiagnostic {
         vec![EvidenceRef {
             kind: "artifact_aux".to_owned(),
             reference: field.to_string(),
-            hash: None,
+            hash: Some(provenance_hash),
         }],
     )
 }
@@ -1662,7 +1844,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use gbf_artifact::aux::{
-        ArtifactAux, ConformanceEnvelopeId, ConformanceEnvelopeRef, SemanticCheckpointSchemaId,
+        ArtifactAux, ConformanceEnvelopeId, ConformanceEnvelopeRef, LexicalSpecId, LexicalSpecRef,
+        ReferenceObservationCacheId, ReferenceObservationCacheRef, SemanticCheckpointSchemaId,
         SemanticCheckpointSchemaRef,
     };
     use gbf_artifact::core::ArtifactCore;
@@ -2180,7 +2363,74 @@ mod tests {
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
 
         assert_failure_code(&failure, |code| {
-            matches!(code, ValidationCode::ArtifactBlobDigestMismatch { .. })
+            matches!(
+                code,
+                ValidationCode::ArtifactBlobDigestMismatch { blob, .. } if blob.len == 29
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_artifact_payload_malformed_quant_spec() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let tensor = CanonicalTensor::new(
+            CanonicalTensorId::new("tensor.dense").expect("tensor id"),
+            CanonicalTensorKind::DenseWeight,
+            CanonicalTensorLayout::new(
+                CanonicalTensorShape::from_usize_dims(&[1, 1]).expect("shape"),
+                TensorElementType::Float32,
+            ),
+            CanonicalTensorPayload::F32(vec![1.0]),
+        )
+        .expect("valid dense tensor");
+        fixture.artifact.core = unchecked_artifact_core(
+            vec![tensor.clone()],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
+        );
+        fixture.artifact.manifest.components = vec![ManifestComponent {
+            digest: tensor.content_hash,
+            id: ComponentId("tensor.dense".to_owned()),
+            kind: ComponentKind::CanonicalTensor,
+        }];
+        fixture.refresh_core_identity();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactPayloadMalformed { field }
+                    if field == &FieldPath::from("core.quant.weight_quant.tensor.dense")
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_sequence_feature_semantics_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .artifact
+            .manifest
+            .required_features
+            .insert(ArtifactFeature::BoundedKvSequence);
+        fixture.artifact.aux.checkpoint_schema = Some(SemanticCheckpointSchemaRef {
+            id: SemanticCheckpointSchemaId("checkpoint.fixture".to_owned()),
+            hash: sha256_hash(&[]),
+        });
+        fixture.refresh_manifest_self_hash();
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactPayloadMalformed { field }
+                    if field == &FieldPath::from("core.sequence_semantics")
+            )
         });
     }
 
@@ -2209,6 +2459,25 @@ mod tests {
                 }
             )
         });
+        let diagnostic = failure
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::ArtifactAuxSidecarMissing {
+                        kind: SidecarKind::SemanticCheckpointSchema
+                    }
+                )
+            })
+            .expect("missing sidecar diagnostic");
+        assert_eq!(
+            diagnostic
+                .provenance
+                .first()
+                .and_then(|evidence| evidence.hash),
+            Some(fixture.artifact.manifest.manifest_self_hash)
+        );
     }
 
     #[test]
@@ -2239,6 +2508,153 @@ mod tests {
                     expected,
                     observed,
                 } if expected == &hash(0x41) && observed == &sha256_hash(b"conformance sidecar")
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_resolver_reported_aux_sidecar_hash_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let sidecar = SidecarRef {
+            kind: SidecarKind::ReferenceObservationCache,
+            id: "reference-cache.fixture".to_owned(),
+            hash: hash(0x42),
+        };
+        fixture.artifact.aux.reference_observation_cache = Some(ReferenceObservationCacheRef {
+            id: ReferenceObservationCacheId(sidecar.id.clone()),
+            hash: sidecar.hash,
+        });
+        fixture
+            .resolver
+            .sidecar_hash_mismatches
+            .insert(sidecar, (hash(0x42), hash(0x43)));
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxSidecarDigestMismatch {
+                    kind: SidecarKind::ReferenceObservationCache,
+                    expected,
+                    observed,
+                } if expected == &hash(0x42) && observed == &hash(0x43)
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_lexical_spec_sidecar_digest_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.lexical_spec = Some(LexicalSpecRef {
+            id: LexicalSpecId("lexical.fixture".to_owned()),
+            hash: hash(0x51),
+        });
+        fixture.resolver.sidecar_bytes.insert(
+            SidecarRef {
+                kind: SidecarKind::LexicalSpec,
+                id: "lexical.fixture".to_owned(),
+                hash: hash(0x51),
+            },
+            b"lexical spec sidecar".to_vec(),
+        );
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxSidecarDigestMismatch {
+                    kind: SidecarKind::LexicalSpec,
+                    expected,
+                    observed,
+                } if expected == &hash(0x51)
+                    && observed == &sha256_hash(b"lexical spec sidecar")
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_feature_gated_sidecar_mapping_is_pinned() {
+        let cases = [
+            (
+                ArtifactFeature::LinearStateSequence,
+                SidecarKind::SemanticCheckpointSchema,
+            ),
+            (
+                ArtifactFeature::BoundedKvSequence,
+                SidecarKind::SemanticCheckpointSchema,
+            ),
+            (ArtifactFeature::MoeRouting, SidecarKind::InteractionBundle),
+        ];
+
+        for (feature, expected_kind) in cases {
+            let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+            fixture.artifact.manifest.required_features.insert(feature);
+            fixture.refresh_manifest_self_hash();
+            fixture.refresh_transport_hash();
+
+            let failure =
+                validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+            assert_failure_code(&failure, |code| {
+                matches!(
+                    code,
+                    ValidationCode::ArtifactAuxSidecarMissing { kind } if kind == &expected_kind
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn f_b2_validate_golden_vector_sidecar_presence_does_not_hash_manifest_ref() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.golden_vectors = vec![golden_vector()];
+        fixture.refresh_transport_hash();
+
+        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_duplicate_golden_vector_sidecar_refs() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.golden_vectors = vec![golden_vector(), golden_vector()];
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxMalformed { field }
+                    if field == &FieldPath::from("aux.golden_vectors.golden.fixture")
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_unsupported_golden_vector_sidecar_ref() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.golden_vectors = vec![golden_vector()];
+        fixture
+            .resolver
+            .unsupported_golden_vectors
+            .insert(GoldenVectorId("golden.fixture".to_owned()));
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxMalformed { field }
+                    if field == &FieldPath::from("aux.golden_vectors.golden.fixture")
             )
         });
     }
@@ -2302,6 +2718,12 @@ mod tests {
                 compute_artifact_manifest_self_hash(&self.artifact.manifest);
         }
 
+        fn refresh_core_identity(&mut self) {
+            self.artifact.manifest.semantic_core_hash = self.artifact.core.semantic_hash();
+            self.refresh_manifest_self_hash();
+            self.refresh_transport_hash();
+        }
+
         fn refresh_transport_hash(&mut self) {
             self.artifact.transport.transport_hash =
                 compute_imported_artifact_source_hash(&self.artifact);
@@ -2326,6 +2748,9 @@ mod tests {
     struct RecordingResolver {
         missing_sidecars: BTreeSet<SidecarRef>,
         sidecar_bytes: BTreeMap<SidecarRef, Vec<u8>>,
+        sidecar_hash_mismatches: BTreeMap<SidecarRef, (Hash256, Hash256)>,
+        missing_golden_vectors: BTreeSet<GoldenVectorId>,
+        unsupported_golden_vectors: BTreeSet<GoldenVectorId>,
     }
 
     impl ArtifactResolver for RecordingResolver {
@@ -2340,6 +2765,13 @@ mod tests {
             &self,
             sidecar: &SidecarRef,
         ) -> Result<ResolvedSidecar, ArtifactResolveError> {
+            if let Some((expected, observed)) = self.sidecar_hash_mismatches.get(sidecar) {
+                return Err(ArtifactResolveError::HashMismatch {
+                    reference: format!("{:?}:{}", sidecar.kind, sidecar.id),
+                    expected: *expected,
+                    observed: *observed,
+                });
+            }
             if self.missing_sidecars.contains(sidecar) {
                 return Err(ArtifactResolveError::not_found(format!(
                     "{:?}:{}",
@@ -2383,6 +2815,18 @@ mod tests {
             &self,
             vector: &GoldenVectorRef,
         ) -> Result<ResolvedGoldenVector, ArtifactResolveError> {
+            if self.missing_golden_vectors.contains(&vector.id) {
+                return Err(ArtifactResolveError::not_found(format!(
+                    "golden_vector:{}",
+                    vector.id.0
+                )));
+            }
+            if self.unsupported_golden_vectors.contains(&vector.id) {
+                return Err(ArtifactResolveError::unsupported(format!(
+                    "unsupported golden vector {}",
+                    vector.id.0
+                )));
+            }
             Ok(ResolvedGoldenVector {
                 bytes: Vec::new(),
                 manifest_hash: vector.manifest_hash,
@@ -2397,6 +2841,19 @@ mod tests {
             SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
         )
         .expect("empty core with linear state is valid")
+    }
+
+    fn unchecked_artifact_core(
+        tensors: Vec<CanonicalTensor>,
+        quant: QuantSpec,
+        sequence_semantics: SequenceSemanticsSpec,
+    ) -> ArtifactCore {
+        serde_json::from_value(serde_json::json!({
+            "sequence_semantics": sequence_semantics,
+            "tensors": tensors,
+            "quant": quant,
+        }))
+        .expect("unchecked ArtifactCore fixture deserializes")
     }
 
     fn artifact_aux() -> ArtifactAux {
