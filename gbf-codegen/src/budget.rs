@@ -1,18 +1,30 @@
 //! Static budget taxonomy facade for Stage 2.
 //!
-//! This bead only wires the failure taxonomy, placement model identity, and
-//! diagnostic one-to-one helpers. The Stage 2 producers live in dependent
-//! beads.
+//! This module wires the failure taxonomy, Stage 2 invocation input, and the
+//! static budget report path used by F-B4.
 
-use gbf_policy::{PlacementProfile, ValidationDiagnostic};
+use gbf_artifact::weight_plan::TernaryWeightPlan;
+use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, LayerId};
+use gbf_hw::target::TargetProfile;
+use gbf_policy::{
+    BudgetSlotClass, PlacementProfile, ReductionSiteId, RomBudgetSlot, RuntimeChromeBudget,
+    SwitchProjectionSource, ValidationDiagnostic,
+};
+use gbf_report::{
+    ReportBody, ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report,
+    canonicalize_value, compute_self_hash,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub use gbf_policy::{
-    BudgetFailure, PlacementInfeasibilityReason, SwitchProjectionSource, ValidationCode,
-    budget_failure_diagnostic, budget_failure_diagnostic_with_provenance,
-    budget_failure_diagnostics, budget_failure_diagnostics_with_provenance,
-    budget_failure_matches_diagnostic, budget_failure_validation_code,
+    BudgetFailure, PlacementInfeasibilityReason, ValidationCode, budget_failure_diagnostic,
+    budget_failure_diagnostic_with_provenance, budget_failure_diagnostics,
+    budget_failure_diagnostics_with_provenance, budget_failure_matches_diagnostic,
+    budget_failure_validation_code,
 };
+
+use crate::policy::ResolvedPolicyProduct;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -38,6 +50,384 @@ pub fn placement_model_for_profile(profile: PlacementProfile) -> StaticPlacement
     StaticPlacementModel::for_profile(profile)
 }
 
+pub struct BudgetInputs<'a, Q: QuantGraphBudgetSource + ?Sized> {
+    pub policy: &'a ResolvedPolicyProduct,
+    pub quant_graph: &'a Q,
+    pub runtime_chrome_budget: Option<&'a RuntimeChromeBudget>,
+    pub target_profile: &'a TargetProfile,
+}
+
+pub trait QuantGraphBudgetSource {
+    fn quant_graph_hash(&self) -> Hash256;
+    fn semantic_core_hash(&self) -> Hash256;
+    fn to_budget_view(&self) -> Result<QuantGraphBudgetView, QuantGraphBudgetViewError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuantGraphBudgetView {
+    pub semantic_core_hash: Hash256,
+    pub quant_graph_hash: Hash256,
+    pub experts: Vec<ExpertProjection>,
+    pub shared_kernels: Vec<SharedKernelProjection>,
+    pub shared_luts: Vec<SharedLutProjection>,
+    pub reduction_sites: Vec<ReductionSiteProjection>,
+    pub sequence_state: SequenceStateProjection,
+    pub routing: RoutingProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpertProjection {
+    pub layer: LayerId,
+    pub expert: ExpertId,
+    pub rows: u32,
+    pub cols: u32,
+    pub metadata_bytes: u32,
+    pub plan: TernaryWeightPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedKernelProjection {
+    pub id: String,
+    pub bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedLutProjection {
+    pub id: String,
+    pub bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReductionSiteProjection {
+    pub site: ReductionSiteId,
+    pub layer: Option<LayerId>,
+    pub expert: Option<ExpertId>,
+    pub term_count: u32,
+    pub input_max_abs_q: u32,
+    pub weight_max_abs_q: u32,
+    pub bias_max_abs_q: Option<u32>,
+    pub accumulator_domain: AccumulatorDomain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum AccumulatorDomain {
+    RawIntegerProducts,
+    PostScaleQ8_8,
+    PostScaleQ16_16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceStateProjection {
+    pub projected_wram_bytes: u32,
+    pub projected_sram_bytes: u32,
+    pub projected_hram_bytes: u32,
+    pub projected_sram_page_switches_per_token: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingProjection {
+    pub model: RoutingModelSection,
+    pub projected_bank_switches_per_token: u16,
+    pub expected_bank_switches_q16_16: Option<u32>,
+}
+
+impl Default for RoutingProjection {
+    fn default() -> Self {
+        Self {
+            model: RoutingModelSection {
+                kind: "synthetic-top1".to_owned(),
+            },
+            projected_bank_switches_per_token: 0,
+            expected_bank_switches_q16_16: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuantGraphBudgetViewError {
+    Malformed { field: FieldPath },
+}
+
+impl QuantGraphBudgetViewError {
+    fn into_failure(self) -> BudgetFailure {
+        match self {
+            Self::Malformed { field } => BudgetFailure::QuantGraphBudgetViewMalformed { field },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticBudgetReport {
+    pub report: ReportEnvelope<StaticBudgetReportBody>,
+    pub static_budget_self_hash: Hash256,
+    pub static_budget_canonical_bytes_hash: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticBudgetReportBody {
+    pub identity: BudgetIdentitySection,
+    pub policy: BudgetPolicySection,
+    pub runtime_chrome_budget: Option<RuntimeChromeBudget>,
+    pub projections: BudgetProjectionSection,
+    pub decision: BudgetDecisionSection,
+    pub diagnostics: Vec<ValidationDiagnostic>,
+}
+
+impl ReportBody for StaticBudgetReportBody {
+    const REPORT_TYPE: &'static str = "StaticBudgetReport";
+    const SCHEMA_ID: &'static str = "static_budget.v1";
+    const SCHEMA_VERSION: &'static str = "1.0.0";
+
+    fn validate_semantics(&self, outcome: ReportOutcome) -> Result<(), Vec<ValidationDiagnostic>> {
+        let missing_budget_diagnostics = self
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::BudgetMissingRuntimeChromeBudget
+                )
+            })
+            .count();
+        let missing_budget_failures = self
+            .decision
+            .failures
+            .iter()
+            .filter(|failure| matches!(failure, BudgetFailure::MissingRuntimeChromeBudget))
+            .count();
+        let is_missing_budget_shape = self.identity.runtime_chrome_budget_hash.is_none()
+            && self.runtime_chrome_budget.is_none();
+
+        if is_missing_budget_shape {
+            if outcome != ReportOutcome::Failed
+                || missing_budget_diagnostics != 1
+                || missing_budget_failures != 1
+            {
+                return Err(self.diagnostics.clone());
+            }
+        } else if self.identity.runtime_chrome_budget_hash.is_none()
+            || self.runtime_chrome_budget.is_none()
+        {
+            return Err(self.diagnostics.clone());
+        }
+
+        if self.decision.fits != self.decision.failures.is_empty() {
+            return Err(self.diagnostics.clone());
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetIdentitySection {
+    pub artifact_core_hash: Hash256,
+    pub quant_graph_hash: Hash256,
+    pub policy_resolution_self_hash: Hash256,
+    pub runtime_chrome_budget_hash: Option<Hash256>,
+    pub target_profile_hash: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetPolicySection {
+    pub placement_profile: PlacementProfile,
+    pub objective_hash: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetProjectionSection {
+    pub per_expert_payload: Vec<PerExpertEntry>,
+    pub per_bank_occupancy: Vec<PerBankEntry>,
+    pub common_bank_footprint: CommonBankFootprintSection,
+    pub accumulator_maxima: Vec<AccumulatorEntry>,
+    pub projected_wram: ProjectedSizeSection,
+    pub projected_sram: ProjectedSizeSection,
+    pub projected_hram: ProjectedSizeSection,
+    pub projected_bank_switches_per_token: ProjectedSwitchCountSection,
+    pub projected_sram_page_switches_per_token: ProjectedSwitchCountSection,
+    pub routing_model: RoutingModelSection,
+}
+
+impl Default for BudgetProjectionSection {
+    fn default() -> Self {
+        Self {
+            per_expert_payload: Vec::new(),
+            per_bank_occupancy: Vec::new(),
+            common_bank_footprint: CommonBankFootprintSection::default(),
+            accumulator_maxima: Vec::new(),
+            projected_wram: ProjectedSizeSection::default(),
+            projected_sram: ProjectedSizeSection::default(),
+            projected_hram: ProjectedSizeSection::default(),
+            projected_bank_switches_per_token: ProjectedSwitchCountSection::default(),
+            projected_sram_page_switches_per_token: ProjectedSwitchCountSection::default(),
+            routing_model: RoutingModelSection {
+                kind: "not_evaluated_missing_runtime_chrome_budget".to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerExpertEntry {
+    pub layer: LayerId,
+    pub expert: ExpertId,
+    pub payload_bytes: u32,
+    pub assigned_slot: Option<BudgetSlotId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerBankEntry {
+    pub slot: BudgetSlotId,
+    pub class: BudgetSlotClass,
+    pub usable_bytes: u32,
+    pub reserved_slack: u16,
+    pub effective_cap_bytes: i64,
+    pub assigned_bytes: u32,
+    pub assigned_components: Vec<BudgetComponentRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum BudgetComponentRef {
+    Expert { layer: LayerId, expert: ExpertId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommonBankFootprintSection {
+    pub shared_kernel_bytes: u32,
+    pub shared_lut_bytes: u32,
+    pub shared_dense_ffn_bytes: Option<u32>,
+    pub total_bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccumulatorEntry {
+    pub site: ReductionSiteId,
+    pub projected_max_abs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedSizeSection {
+    pub bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedSwitchCountSection {
+    pub upper_bound: u16,
+    pub expected_q16_16: Option<u32>,
+    pub decision_value: u16,
+    pub source: SwitchProjectionSource,
+}
+
+impl Default for ProjectedSwitchCountSection {
+    fn default() -> Self {
+        Self {
+            upper_bound: 0,
+            expected_q16_16: None,
+            decision_value: 0,
+            source: SwitchProjectionSource::ConservativeStaticUpperBound,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingModelSection {
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetDecisionSection {
+    pub fits: bool,
+    pub interpretation: StaticFitInterpretation,
+    pub placement_model: StaticPlacementModel,
+    pub failures: Vec<BudgetFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum StaticFitInterpretation {
+    PassesNecessaryStaticChecks,
+    FailsNecessaryStaticChecks,
+}
+
+pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
+    inputs: BudgetInputs<'_, Q>,
+) -> StaticBudgetReport {
+    match inputs.runtime_chrome_budget {
+        None => missing_runtime_chrome_budget_report(inputs),
+        Some(runtime_chrome_budget) => match inputs.quant_graph.to_budget_view() {
+            Ok(view) => match validate_budget_view(&view) {
+                Ok(()) => evaluated_budget_report(inputs, runtime_chrome_budget, view),
+                Err(failure) => {
+                    let quant_graph_hash = inputs.quant_graph.quant_graph_hash();
+                    budget_failure_report(
+                        inputs,
+                        runtime_chrome_budget,
+                        quant_graph_hash,
+                        vec![failure],
+                        BudgetProjectionSection::default(),
+                    )
+                }
+            },
+            Err(error) => {
+                let quant_graph_hash = inputs.quant_graph.quant_graph_hash();
+                budget_failure_report(
+                    inputs,
+                    runtime_chrome_budget,
+                    quant_graph_hash,
+                    vec![error.into_failure()],
+                    BudgetProjectionSection::default(),
+                )
+            }
+        },
+    }
+}
+
+pub fn static_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
+    inputs: BudgetInputs<'_, Q>,
+) -> StaticBudgetReport {
+    run_static_budget(inputs)
+}
+
+pub fn produce_static_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
+    inputs: BudgetInputs<'_, Q>,
+) -> StaticBudgetReport {
+    run_static_budget(inputs)
+}
+
+pub fn runtime_chrome_budget_hash(
+    budget: &RuntimeChromeBudget,
+) -> Result<Hash256, serde_json::Error> {
+    let value = serde_json::to_value(budget)?;
+    let canonical = canonicalize_value(&value).expect("runtime chrome budget canonicalizes");
+    Ok(Hash256::from_bytes(Sha256::digest(canonical).into()))
+}
+
+#[must_use]
+pub fn rom_slot_effective_cap_bytes(slot: &RomBudgetSlot) -> i64 {
+    i64::from(slot.usable_bytes) - i64::from(slot.reserved_slack)
+}
+
 #[must_use]
 pub fn validation_diagnostic_for_budget_failure(failure: &BudgetFailure) -> ValidationDiagnostic {
     budget_failure_diagnostic(failure)
@@ -50,11 +440,361 @@ pub fn validation_diagnostics_for_budget_failures(
     budget_failure_diagnostics(failures)
 }
 
+fn missing_runtime_chrome_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
+    inputs: BudgetInputs<'_, Q>,
+) -> StaticBudgetReport {
+    let failures = vec![BudgetFailure::MissingRuntimeChromeBudget];
+    let mut projections = BudgetProjectionSection::default();
+    projections.routing_model.kind = "not_evaluated_missing_runtime_chrome_budget".to_owned();
+    let body = StaticBudgetReportBody {
+        identity: identity_section(
+            inputs.policy,
+            inputs.quant_graph.semantic_core_hash(),
+            inputs.quant_graph.quant_graph_hash(),
+            None,
+        ),
+        policy: policy_section(inputs.policy),
+        runtime_chrome_budget: None,
+        projections,
+        decision: decision_section(
+            false,
+            inputs.policy.policy.knobs.global.placement.profile,
+            failures.clone(),
+        ),
+        diagnostics: validation_diagnostics_for_budget_failures(&failures),
+    };
+    finalize_static_budget_report(ReportOutcome::Failed, body)
+}
+
+fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
+    inputs: BudgetInputs<'_, Q>,
+    runtime_chrome_budget: &RuntimeChromeBudget,
+    view: QuantGraphBudgetView,
+) -> StaticBudgetReport {
+    let (projections, failures) = project_budget(
+        inputs.policy.policy.knobs.global.placement.profile,
+        runtime_chrome_budget,
+        &view,
+    );
+    if failures.is_empty() {
+        let body = StaticBudgetReportBody {
+            identity: identity_section(
+                inputs.policy,
+                view.semantic_core_hash,
+                view.quant_graph_hash,
+                Some(runtime_chrome_budget_hash(runtime_chrome_budget).expect("budget hashes")),
+            ),
+            policy: policy_section(inputs.policy),
+            runtime_chrome_budget: Some(runtime_chrome_budget.clone()),
+            projections,
+            decision: decision_section(
+                true,
+                inputs.policy.policy.knobs.global.placement.profile,
+                Vec::new(),
+            ),
+            diagnostics: Vec::new(),
+        };
+        finalize_static_budget_report(ReportOutcome::Passed, body)
+    } else {
+        budget_failure_report(
+            inputs,
+            runtime_chrome_budget,
+            view.quant_graph_hash,
+            failures,
+            projections,
+        )
+    }
+}
+
+fn budget_failure_report<Q: QuantGraphBudgetSource + ?Sized>(
+    inputs: BudgetInputs<'_, Q>,
+    runtime_chrome_budget: &RuntimeChromeBudget,
+    quant_graph_hash: Hash256,
+    failures: Vec<BudgetFailure>,
+    projections: BudgetProjectionSection,
+) -> StaticBudgetReport {
+    let body = StaticBudgetReportBody {
+        identity: identity_section(
+            inputs.policy,
+            inputs.quant_graph.semantic_core_hash(),
+            quant_graph_hash,
+            Some(runtime_chrome_budget_hash(runtime_chrome_budget).expect("budget hashes")),
+        ),
+        policy: policy_section(inputs.policy),
+        runtime_chrome_budget: Some(runtime_chrome_budget.clone()),
+        projections,
+        decision: decision_section(
+            false,
+            inputs.policy.policy.knobs.global.placement.profile,
+            failures.clone(),
+        ),
+        diagnostics: validation_diagnostics_for_budget_failures(&failures),
+    };
+    finalize_static_budget_report(ReportOutcome::Failed, body)
+}
+
+fn identity_section(
+    policy: &ResolvedPolicyProduct,
+    artifact_core_hash: Hash256,
+    quant_graph_hash: Hash256,
+    runtime_chrome_budget_hash: Option<Hash256>,
+) -> BudgetIdentitySection {
+    BudgetIdentitySection {
+        artifact_core_hash,
+        quant_graph_hash,
+        policy_resolution_self_hash: policy.policy_resolution_self_hash,
+        runtime_chrome_budget_hash,
+        target_profile_hash: policy.input_hashes.target_profile_hash,
+    }
+}
+
+fn policy_section(policy: &ResolvedPolicyProduct) -> BudgetPolicySection {
+    BudgetPolicySection {
+        placement_profile: policy.policy.knobs.global.placement.profile,
+        objective_hash: hash_json_value(&policy.policy.objective).expect("objective hashes"),
+    }
+}
+
+fn decision_section(
+    fits: bool,
+    profile: PlacementProfile,
+    failures: Vec<BudgetFailure>,
+) -> BudgetDecisionSection {
+    BudgetDecisionSection {
+        fits,
+        interpretation: if fits {
+            StaticFitInterpretation::PassesNecessaryStaticChecks
+        } else {
+            StaticFitInterpretation::FailsNecessaryStaticChecks
+        },
+        placement_model: placement_model_for_profile(profile),
+        failures,
+    }
+}
+
+fn finalize_static_budget_report(
+    outcome: ReportOutcome,
+    body: StaticBudgetReportBody,
+) -> StaticBudgetReport {
+    let mut report =
+        ReportEnvelope::new(outcome, body).expect("static_budget.v1 schema constants are valid");
+    report.report_self_hash =
+        compute_self_hash(&report).expect("static budget report self-hash is computable");
+    let canonical_bytes = canonicalize_report(&report).expect("static budget report canonicalizes");
+    let static_budget_canonical_bytes_hash =
+        Hash256::from_bytes(Sha256::digest(&canonical_bytes).into());
+    StaticBudgetReport {
+        static_budget_self_hash: report.report_self_hash,
+        static_budget_canonical_bytes_hash,
+        report,
+    }
+}
+
+fn validate_budget_view(view: &QuantGraphBudgetView) -> Result<(), BudgetFailure> {
+    for (index, expert) in view.experts.iter().enumerate() {
+        if expert.rows == 0 {
+            return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from(format!("budget_view.experts[{index}].rows")),
+            });
+        }
+        if expert.cols == 0 {
+            return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from(format!("budget_view.experts[{index}].cols")),
+            });
+        }
+    }
+    if !view
+        .experts
+        .windows(2)
+        .all(|pair| (pair[0].layer, pair[0].expert) <= (pair[1].layer, pair[1].expert))
+    {
+        return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
+            field: FieldPath::from("budget_view.experts"),
+        });
+    }
+    Ok(())
+}
+
+fn project_budget(
+    profile: PlacementProfile,
+    runtime_chrome_budget: &RuntimeChromeBudget,
+    view: &QuantGraphBudgetView,
+) -> (BudgetProjectionSection, Vec<BudgetFailure>) {
+    let mut per_bank_occupancy = runtime_chrome_budget
+        .rom_slots
+        .iter()
+        .map(|slot| PerBankEntry {
+            slot: slot.id,
+            class: slot.class,
+            usable_bytes: slot.usable_bytes,
+            reserved_slack: slot.reserved_slack,
+            effective_cap_bytes: rom_slot_effective_cap_bytes(slot),
+            assigned_bytes: 0,
+            assigned_components: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    per_bank_occupancy.sort_by_key(|entry| entry.slot);
+
+    let mut per_expert_payload = Vec::with_capacity(view.experts.len());
+    let mut failures = Vec::new();
+
+    for expert in &view.experts {
+        let payload_bytes = expert_payload_bytes(expert).unwrap_or(u32::MAX);
+        let slot_index = per_bank_occupancy.iter().position(|entry| {
+            entry.class == BudgetSlotClass::ExpertBank
+                && runtime_chrome_budget
+                    .rom_slots
+                    .iter()
+                    .find(|slot| slot.id == entry.slot)
+                    .is_some_and(|slot| slot.placement_caps.contains(&profile))
+                && (profile != PlacementProfile::StrictOnePerBank
+                    || entry.assigned_components.is_empty())
+        });
+
+        if let Some(slot_index) = slot_index {
+            let slot = &mut per_bank_occupancy[slot_index];
+            per_expert_payload.push(PerExpertEntry {
+                layer: expert.layer,
+                expert: expert.expert,
+                payload_bytes,
+                assigned_slot: Some(slot.slot),
+            });
+            slot.assigned_bytes = slot.assigned_bytes.saturating_add(payload_bytes);
+            slot.assigned_components.push(BudgetComponentRef::Expert {
+                layer: expert.layer,
+                expert: expert.expert,
+            });
+            if i64::from(slot.assigned_bytes) > slot.effective_cap_bytes {
+                let cap_bytes = u32::try_from(slot.effective_cap_bytes.max(0)).unwrap_or(u32::MAX);
+                failures.push(BudgetFailure::ExpertExceedsSlot {
+                    layer: expert.layer,
+                    expert: expert.expert,
+                    slot: slot.slot,
+                    payload_bytes: slot.assigned_bytes,
+                    cap_bytes,
+                    excess_bytes: slot.assigned_bytes.saturating_sub(cap_bytes),
+                });
+            }
+        } else {
+            per_expert_payload.push(PerExpertEntry {
+                layer: expert.layer,
+                expert: expert.expert,
+                payload_bytes,
+                assigned_slot: None,
+            });
+            failures.push(BudgetFailure::PlacementProfileInfeasible {
+                profile,
+                reason: PlacementInfeasibilityReason::NoSlotsForClass,
+            });
+        }
+    }
+
+    let shared_kernel_bytes =
+        checked_sum_u32(view.shared_kernels.iter().map(|kernel| kernel.bytes));
+    let shared_lut_bytes = checked_sum_u32(view.shared_luts.iter().map(|lut| lut.bytes));
+    let common_total = shared_kernel_bytes.saturating_add(shared_lut_bytes);
+
+    (
+        BudgetProjectionSection {
+            per_expert_payload,
+            per_bank_occupancy,
+            common_bank_footprint: CommonBankFootprintSection {
+                shared_kernel_bytes,
+                shared_lut_bytes,
+                shared_dense_ffn_bytes: None,
+                total_bytes: common_total,
+            },
+            accumulator_maxima: accumulator_maxima(&view.reduction_sites),
+            projected_wram: ProjectedSizeSection {
+                bytes: view.sequence_state.projected_wram_bytes,
+            },
+            projected_sram: ProjectedSizeSection {
+                bytes: view.sequence_state.projected_sram_bytes,
+            },
+            projected_hram: ProjectedSizeSection {
+                bytes: view.sequence_state.projected_hram_bytes,
+            },
+            projected_bank_switches_per_token: ProjectedSwitchCountSection {
+                upper_bound: view.routing.projected_bank_switches_per_token,
+                expected_q16_16: view.routing.expected_bank_switches_q16_16,
+                decision_value: view.routing.projected_bank_switches_per_token,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            },
+            projected_sram_page_switches_per_token: ProjectedSwitchCountSection {
+                upper_bound: view.sequence_state.projected_sram_page_switches_per_token,
+                expected_q16_16: None,
+                decision_value: view.sequence_state.projected_sram_page_switches_per_token,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            },
+            routing_model: view.routing.model.clone(),
+        },
+        failures,
+    )
+}
+
+fn expert_payload_bytes(expert: &ExpertProjection) -> Option<u32> {
+    let weight_bytes = expert
+        .plan
+        .compute_byte_cost(expert.rows, expert.cols)
+        .as_u64();
+    let total = weight_bytes.checked_add(u64::from(expert.metadata_bytes))?;
+    u32::try_from(total).ok()
+}
+
+fn checked_sum_u32(values: impl Iterator<Item = u32>) -> u32 {
+    values.fold(0u32, u32::saturating_add)
+}
+
+fn accumulator_maxima(reduction_sites: &[ReductionSiteProjection]) -> Vec<AccumulatorEntry> {
+    reduction_sites
+        .iter()
+        .map(|site| {
+            let bias = u64::from(site.bias_max_abs_q.unwrap_or(0));
+            let product = u64::from(site.term_count)
+                .saturating_mul(u64::from(site.input_max_abs_q))
+                .saturating_mul(u64::from(site.weight_max_abs_q));
+            AccumulatorEntry {
+                site: site.site.clone(),
+                projected_max_abs: product.saturating_add(bias),
+            }
+        })
+        .collect()
+}
+
+fn hash_json_value<T: Serialize + ?Sized>(value: &T) -> Result<Hash256, serde_json::Error> {
+    let value = serde_json::to_value(value)?;
+    let canonical = canonicalize_value(&value).expect("value canonicalizes");
+    Ok(Hash256::from_bytes(Sha256::digest(canonical).into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, LayerId};
-    use gbf_policy::{EvidenceRef, ReductionSiteId, ValidationDetail, ValidationOrigin};
+    use std::cell::Cell;
+    use std::collections::BTreeSet;
+
+    use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, ThresholdPlan, WeightEncoding};
+    use gbf_foundation::{LineageId, TargetProfileId};
+    use gbf_hw::calibration::CalibrationSetRef;
+    use gbf_hw::target::dmg_mbc5_8mib_128kib;
+    use gbf_policy::{
+        BRINGUP_COMPILE_PROFILE_TOML, CompileKnobOverrides, CompileKnobPartialBounds,
+        CompileKnobPartialValues, CompileKnobProvenanceEntry, CompileKnobValues, CompilerFeature,
+        ConstraintOperation, ConstraintProvenance, EffectiveConstraints, EvidenceRef, KnobLockSet,
+        ObservabilityMode, PolicyProvenance, PolicySource, RepairPolicy, RepairPolicyProfile,
+        RiskPolicy, RuntimeMemoryCapSection, RuntimeMode, TraceBudget, TraceDropPolicy,
+        ValidationDetail, ValidationOrigin, canonical_default_bounds_fixture,
+        load_compile_profile_spec,
+    };
+    use gbf_policy::{CalibrationConfidenceRequirement, CompileObjective, ServiceLevelObjective};
+    use gbf_report::ReportOutcome;
+    use gbf_report::report_schemas::policy_resolution_v1::{
+        ArtifactIdentitySection, CompileRequestSection, HintConsumptionSection,
+        PolicyResolutionReportBody,
+    };
+
+    use crate::policy::ResolvedPolicyProduct;
+    use crate::validate::ValidatedInputHashes;
 
     fn round_trip_failure(failure: BudgetFailure) {
         let encoded = serde_json::to_string(&failure).expect("budget failure serializes");
@@ -116,6 +856,359 @@ mod tests {
                 reason: PlacementInfeasibilityReason::NoSlotsForClass,
             },
         ]
+    }
+
+    fn hash(byte: u8) -> Hash256 {
+        Hash256::from_bytes([byte; 32])
+    }
+
+    fn objective_fixture() -> CompileObjective {
+        CompileObjective {
+            service: Some(ServiceLevelObjective {
+                max_first_token_cycles_p95: Some(21_000),
+                max_checkpoint_gap_cycles_p95: Some(13_000),
+                max_resume_latency_cycles_p95: Some(8_000),
+                max_ui_jitter_frames_p99: Some(2),
+            }),
+            max_cycles_per_token: Some(24_000),
+            max_bank_switches_per_token: Some(17),
+            max_sram_page_switches_per_token: Some(3),
+            min_ui_headroom_pct: 11,
+            max_rom_bytes: Some(2 * 1024 * 1024),
+            risk: RiskPolicy {
+                cycle_quantile: 90,
+                switch_quantile: 95,
+                calibration_confidence_requirement:
+                    CalibrationConfidenceRequirement::NoMinimumConfidence,
+                fallback_profile: None,
+                fallback_runtime_mode: None,
+            },
+        }
+    }
+
+    fn compile_values_from_bringup_profile() -> CompileKnobValues {
+        let profile = load_compile_profile_spec(BRINGUP_COMPILE_PROFILE_TOML)
+            .expect("bringup profile parses");
+        CompileKnobValues {
+            placement: profile.knob_defaults.placement.expect("placement default"),
+            observation: profile
+                .knob_defaults
+                .observation
+                .expect("observation default"),
+            range: profile.knob_defaults.range.expect("range default"),
+            storage: profile.knob_defaults.storage.expect("storage default"),
+            sram: profile.knob_defaults.sram.expect("sram default"),
+            rom_window: profile
+                .knob_defaults
+                .rom_window
+                .expect("rom window default"),
+            overlay: profile.knob_defaults.overlay.expect("overlay default"),
+            schedule: profile.knob_defaults.schedule.expect("schedule default"),
+        }
+    }
+
+    fn policy_fixture() -> ResolvedPolicyProduct {
+        let objective = objective_fixture();
+        let values = compile_values_from_bringup_profile();
+        let input_hashes = ValidatedInputHashes {
+            artifact_source_hash: hash(0x01),
+            artifact_effective_core_hash: hash(0x02),
+            artifact_manifest_hash: hash(0x03),
+            artifact_aux_hash: hash(0x04),
+            lowering_manifest_hash: hash(0x05),
+            hint_bundle_hash: hash(0x06),
+            compile_request_hash: hash(0x07),
+            target_profile_hash: hash(0x08),
+            compile_profile_hash: hash(0x09),
+            calibration_hash: hash(0x0a),
+            compatibility_adapter_hash: None,
+        };
+        let policy = gbf_policy::ResolvedCompilePolicy {
+            target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
+            profile: gbf_foundation::CompileProfileId::from("Bringup"),
+            objective: objective.clone(),
+            effective_constraints: EffectiveConstraints {
+                target_caps: canonical_default_bounds_fixture(),
+                required_features: BTreeSet::from([CompilerFeature::StaticBudgetReport]),
+                requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
+                runtime_chrome_budget: None,
+            },
+            observability: ObservabilityMode::Invariant,
+            trace_budget: TraceBudget {
+                max_events_per_slice: 64,
+                max_bytes_per_frame: 2048,
+                drop_policy: TraceDropPolicy::DropOldest,
+            },
+            requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
+            knobs: gbf_policy::CompileKnobs {
+                global: values,
+                bounds: canonical_default_bounds_fixture(),
+                locks: KnobLockSet::default(),
+                overrides: CompileKnobOverrides {
+                    values: CompileKnobPartialValues::default(),
+                    bounds: CompileKnobPartialBounds::default(),
+                },
+                provenance: vec![CompileKnobProvenanceEntry {
+                    path: gbf_policy::CompileKnobPath {
+                        knob: gbf_policy::CompileKnobId::Placement,
+                        selector: None,
+                        field: Some(FieldPath::from("profile")),
+                    },
+                    chain: vec![ConstraintProvenance {
+                        source: PolicySource::ProfileDefault,
+                        operation: ConstraintOperation::SeedDefault,
+                        evidence: Vec::new(),
+                    }],
+                }],
+            },
+            repair: RepairPolicy::for_profile(RepairPolicyProfile::Bringup),
+            provenance: PolicyProvenance {
+                target_defaults: input_hashes.target_profile_hash,
+                profile_defaults: input_hashes.compile_profile_hash,
+                hint_bundle_hash: Some(input_hashes.hint_bundle_hash),
+                compile_request_hash: input_hashes.compile_request_hash,
+                calibration_hash: Some(input_hashes.calibration_hash),
+            },
+        };
+        let report = ReportEnvelope::new(
+            ReportOutcome::Failed,
+            PolicyResolutionReportBody {
+                artifact_identity: ArtifactIdentitySection {
+                    artifact_core_hash: input_hashes.artifact_effective_core_hash,
+                    artifact_manifest_hash: input_hashes.artifact_manifest_hash,
+                    semantic_lineage: LineageId(hash(0x30)),
+                    lowering_manifest_hash: input_hashes.lowering_manifest_hash,
+                    hint_bundle_hash: input_hashes.hint_bundle_hash,
+                    workload_refs: Vec::new(),
+                    golden_vector_refs: Vec::new(),
+                },
+                compile_request: CompileRequestSection {
+                    compile_request_hash: input_hashes.compile_request_hash,
+                    target: policy.target.clone(),
+                    target_profile_hash: input_hashes.target_profile_hash,
+                    profile: policy.profile.clone(),
+                    objective,
+                    required_features: BTreeSet::from([CompilerFeature::StaticBudgetReport]),
+                    requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
+                    calibration_set_ref: CalibrationSetRef {
+                        platform: None,
+                        kernel: None,
+                        runtime: None,
+                    },
+                    calibration_hash: input_hashes.calibration_hash,
+                },
+                result: None,
+                hint_consumption: HintConsumptionSection::default(),
+                diagnostics: vec![budget_failure_diagnostic(
+                    &BudgetFailure::MissingRuntimeChromeBudget,
+                )],
+            },
+        )
+        .expect("policy report envelope");
+        ResolvedPolicyProduct {
+            policy,
+            input_hashes,
+            artifact_validation_self_hash: hash(0x0b),
+            report,
+            policy_resolution_self_hash: hash(0x0c),
+            policy_resolution_canonical_bytes_hash: hash(0x0d),
+        }
+    }
+
+    fn runtime_budget_fixture() -> RuntimeChromeBudget {
+        RuntimeChromeBudget {
+            target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
+            profile: gbf_foundation::CompileProfileId::from("Bringup"),
+            runtime_nucleus_hash: hash(0x40),
+            rom_slots: vec![RomBudgetSlot {
+                id: BudgetSlotId::new(1),
+                class: BudgetSlotClass::ExpertBank,
+                usable_bytes: 1024,
+                reserved_slack: 128,
+                placement_caps: BTreeSet::from([PlacementProfile::StrictOnePerBank]),
+            }],
+            memory_caps: RuntimeMemoryCapSection {
+                wram_usable_bytes: 8192,
+                sram_usable_bytes: 32768,
+                hram_usable_bytes: 127,
+                source_target_profile_hash: hash(0x08),
+            },
+            wram_reserved: 0,
+            sram_reserved: 0,
+        }
+    }
+
+    fn ternary_plan() -> TernaryWeightPlan {
+        TernaryWeightPlan::new(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::PerTensor,
+            ScaleFormat::Q8_8,
+            ThresholdPlan::FixedQ8_8,
+        )
+    }
+
+    fn budget_view_fixture(rows: u32, cols: u32, metadata_bytes: u32) -> QuantGraphBudgetView {
+        QuantGraphBudgetView {
+            semantic_core_hash: hash(0x22),
+            quant_graph_hash: hash(0x23),
+            experts: vec![ExpertProjection {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(0),
+                rows,
+                cols,
+                metadata_bytes,
+                plan: ternary_plan(),
+            }],
+            shared_kernels: Vec::new(),
+            shared_luts: Vec::new(),
+            reduction_sites: Vec::new(),
+            sequence_state: SequenceStateProjection::default(),
+            routing: RoutingProjection::default(),
+        }
+    }
+
+    struct TrackingQuantGraph {
+        view: QuantGraphBudgetView,
+        calls: Cell<u32>,
+    }
+
+    impl TrackingQuantGraph {
+        fn new(view: QuantGraphBudgetView) -> Self {
+            Self {
+                view,
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl QuantGraphBudgetSource for TrackingQuantGraph {
+        fn quant_graph_hash(&self) -> Hash256 {
+            self.view.quant_graph_hash
+        }
+
+        fn semantic_core_hash(&self) -> Hash256 {
+            self.view.semantic_core_hash
+        }
+
+        fn to_budget_view(&self) -> Result<QuantGraphBudgetView, QuantGraphBudgetViewError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.view.clone())
+        }
+    }
+
+    fn run_budget_with(
+        runtime_chrome_budget: Option<&RuntimeChromeBudget>,
+        quant_graph: &TrackingQuantGraph,
+    ) -> StaticBudgetReport {
+        let policy = policy_fixture();
+        run_static_budget(BudgetInputs {
+            policy: &policy,
+            quant_graph,
+            runtime_chrome_budget,
+            target_profile: &dmg_mbc5_8mib_128kib(),
+        })
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_missing_runtime_chrome_budget() {
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let report = run_budget_with(None, &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert!(!report.report.body.decision.fits);
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetMissingRuntimeChromeBudget
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_missing_runtime_chrome_budget_records_budget_failure() {
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let report = run_budget_with(None, &quant_graph);
+
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::MissingRuntimeChromeBudget]
+        );
+        assert_eq!(
+            report.report.body.decision.fits,
+            report.report.body.decision.failures.is_empty()
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_missing_runtime_chrome_budget_emits_failure_report_without_budget_hash() {
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let report = run_budget_with(None, &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(report.report.body.identity.runtime_chrome_budget_hash, None);
+        assert_eq!(report.report.body.runtime_chrome_budget, None);
+        assert!(report.report.body.projections.per_bank_occupancy.is_empty());
+        assert_eq!(report.report.body.diagnostics.len(), 1);
+        assert_eq!(report.report.body.decision.failures.len(), 1);
+        assert!(
+            report
+                .report
+                .body
+                .validate_semantics(report.report.outcome)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_missing_runtime_chrome_budget_does_not_call_to_budget_view() {
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let _report = run_budget_with(None, &quant_graph);
+
+        assert_eq!(quant_graph.calls.get(), 0);
+    }
+
+    #[test]
+    fn f_b4_budget_runtime_chrome_budget_excerpt_hash_matches_input() {
+        let budget = runtime_budget_fixture();
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(quant_graph.calls.get(), 1);
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert_eq!(
+            report.report.body.runtime_chrome_budget,
+            Some(budget.clone())
+        );
+        assert_eq!(
+            report.report.body.identity.runtime_chrome_budget_hash,
+            Some(runtime_chrome_budget_hash(&budget).expect("budget hashes"))
+        );
+        assert_eq!(budget.rom_slots[0].reserved_slack, 128);
+    }
+
+    #[test]
+    fn f_b4_budget_uses_reserved_slack_in_effective_cap() {
+        let mut budget = runtime_budget_fixture();
+        budget.rom_slots[0].usable_bytes = 8;
+        budget.rom_slots[0].reserved_slack = 16;
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].effective_cap_bytes,
+            -8
+        );
+        assert!(matches!(
+            report.report.body.decision.failures[0],
+            BudgetFailure::ExpertExceedsSlot { .. }
+        ));
+        assert_eq!(budget.rom_slots[0].usable_bytes, 8);
+        assert_eq!(budget.rom_slots[0].reserved_slack, 16);
     }
 
     #[test]

@@ -2,8 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use gbf_foundation::{CompileProfileId, Hash256, TargetProfileId};
+use gbf_foundation::{BlobRef, CompileProfileId, Hash256, TargetProfileId};
 use gbf_hw::calibration::CalibrationSetRef;
+use gbf_hw::target::TargetProfile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -58,6 +59,17 @@ pub struct CompileRequest {
     pub required_features: BTreeSet<CompilerFeature>,
     pub constraint_overrides: Option<CompileKnobOverrides>,
     pub requested_runtime_modes: BTreeSet<RuntimeMode>,
+}
+
+pub type ArtifactRef = BlobRef;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompileInvocationInputs {
+    pub artifact_ref: ArtifactRef,
+    pub compile_request: CompileRequest,
+    pub target_profile: TargetProfile,
+    pub runtime_chrome_budget: Option<RuntimeChromeBudget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
