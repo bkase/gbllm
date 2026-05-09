@@ -1,0 +1,23 @@
+# F-B2 Stage 0.5 review fixture.
+#
+# The success case proves compile_knobs provenance is populated without
+# RepairProposal sources. The failure case preserves artifact identity but sets
+# result = null, matching RFC §7.5.
+
+[success]
+profile = "Bringup"
+target = "dmg-mbc5-8mib-128kib"
+allowed_policy_sources = [
+  "TargetDefault",
+  "ProfileDefault",
+  "CompileRequestOverride",
+  "HintBundle",
+  "Calibration",
+]
+forbidden_policy_source = "RepairProposal"
+
+[failure]
+case = "locked_knob_override"
+expected_outcome = "Failed"
+expected_result = "null"
+expected_hard_diagnostic = "PolicyKnobLockedAndOverridden"
