@@ -781,7 +781,8 @@ fn validate_semantic_core_hash(
 fn validate_transport_manifest(
     source: &ImportedArtifactView,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) {
+) -> bool {
+    let start_len = diagnostics.len();
     let recomputed_source_hash = compute_imported_artifact_source_hash(source);
     if source.transport.transport_hash != recomputed_source_hash {
         diagnostics.push(ValidationDiagnostic::hard(
@@ -806,6 +807,8 @@ fn validate_transport_manifest(
             diagnostics,
         );
     }
+
+    diagnostics.len() == start_len
 }
 
 fn validate_transport_manifest_metadata(
@@ -938,7 +941,8 @@ fn validate_manifest_invariants(
     effective: &ImportedArtifactView,
     lowerings: &[TargetDataLoweringArtifact],
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) {
+) -> bool {
+    let start_len = diagnostics.len();
     validate_manifest_self_hash(&source.manifest, diagnostics);
     if source.manifest != effective.manifest {
         validate_manifest_self_hash(&effective.manifest, diagnostics);
@@ -946,6 +950,18 @@ fn validate_manifest_invariants(
     validate_feature_epoch_invariants(&effective.manifest, diagnostics);
     validate_component_digests(&effective.core, &effective.manifest, diagnostics);
     validate_forbidden_build_identity_fields(effective, lowerings, diagnostics);
+    !diagnostics[start_len..]
+        .iter()
+        .any(is_manifest_self_hash_mismatch)
+}
+
+fn is_manifest_self_hash_mismatch(diagnostic: &ValidationDiagnostic) -> bool {
+    matches!(
+        &diagnostic.code,
+        ValidationCode::ManifestInvariantViolated {
+            invariant: ManifestInvariant::ManifestSelfHashMismatch { .. },
+        }
+    )
 }
 
 fn validate_manifest_self_hash(
@@ -3057,8 +3073,8 @@ pub fn validate_artifact_and_request<'a>(
     let mut diagnostics = Vec::new();
     let semantic_core_hash_matches =
         validate_semantic_core_hash(effective_artifact, &mut diagnostics);
-    validate_transport_manifest(inputs.artifact, &mut diagnostics);
-    if !semantic_core_hash_matches {
+    let transport_manifest_matches = validate_transport_manifest(inputs.artifact, &mut diagnostics);
+    if !semantic_core_hash_matches || !transport_manifest_matches {
         return Err(stage0_failure(
             &inputs,
             Some(effective_artifact),
@@ -3067,16 +3083,34 @@ pub fn validate_artifact_and_request<'a>(
             compatibility.compatibility_section(),
         ));
     }
-    validate_manifest_invariants(
+    let manifest_identity_verified = validate_manifest_invariants(
         inputs.artifact,
         effective_artifact,
         inputs.lowerings,
         &mut diagnostics,
     );
+    if !manifest_identity_verified {
+        return Err(stage0_failure(
+            &inputs,
+            Some(effective_artifact),
+            inputs.calibration,
+            diagnostics,
+            compatibility.compatibility_section(),
+        ));
+    }
     validate_artifact_payload(effective_artifact, &mut diagnostics);
     validate_artifact_aux_sidecars(effective_artifact, inputs.resolver, &mut diagnostics);
     validate_target_data_lowering(&inputs, &mut diagnostics);
 
+    if let Some(calibration) = inputs.calibration {
+        validate_calibration_binding(&inputs, calibration, &mut diagnostics);
+    } else {
+        push_missing_calibration_diagnostics(&inputs, &mut diagnostics);
+    }
+
+    validate_hint_provenance(&inputs, effective_artifact, &mut diagnostics);
+    validate_workload_and_golden_refs(&inputs, effective_artifact, &mut diagnostics);
+    validate_compile_request_admissibility(&inputs, effective_artifact, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(stage0_failure(
             &inputs,
@@ -3087,50 +3121,9 @@ pub fn validate_artifact_and_request<'a>(
         ));
     }
 
-    let Some(calibration) = inputs.calibration else {
-        return Err(missing_calibration_failure(
-            &inputs,
-            effective_artifact,
-            compatibility.compatibility_section(),
-            compatibility.adapter_hash,
-        ));
-    };
-    validate_calibration_binding(&inputs, calibration, &mut diagnostics);
-    if !diagnostics.is_empty() {
-        // TODO(bd-26zc): keep collecting classes 8-10 after class 7 once the
-        // full Stage 0 diagnostic collector replaces these fail-fast slices.
-        return Err(stage0_failure(
-            &inputs,
-            Some(effective_artifact),
-            Some(calibration),
-            diagnostics,
-            compatibility.compatibility_section(),
-        ));
-    }
-
-    validate_hint_provenance(&inputs, effective_artifact, &mut diagnostics);
-    validate_workload_and_golden_refs(&inputs, effective_artifact, &mut diagnostics);
-    if !diagnostics.is_empty() {
-        return Err(stage0_failure(
-            &inputs,
-            Some(effective_artifact),
-            Some(calibration),
-            diagnostics,
-            compatibility.compatibility_section(),
-        ));
-    }
-
-    validate_compile_request_admissibility(&inputs, effective_artifact, &mut diagnostics);
-    if !diagnostics.is_empty() {
-        return Err(stage0_failure(
-            &inputs,
-            Some(effective_artifact),
-            Some(calibration),
-            diagnostics,
-            compatibility.compatibility_section(),
-        ));
-    }
-
+    let calibration = inputs
+        .calibration
+        .expect("Stage 0 success requires class 7 calibration diagnostics to be empty");
     let input_hashes = compute_validated_input_hashes_for_artifact(
         &inputs,
         effective_artifact,
@@ -3189,12 +3182,10 @@ fn success_report(
     .expect("artifact_validation.v1 schema constants are valid")
 }
 
-fn missing_calibration_failure(
+fn push_missing_calibration_diagnostics(
     inputs: &ValidateInputs<'_>,
-    artifact: &ImportedArtifactView,
-    compatibility: ArtifactCompatibilitySection,
-    compatibility_adapter_hash: Option<Hash256>,
-) -> ValidationStageFailure {
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
     let compile_request_hash = input_hash(
         "gbf-policy",
         "CompileRequest",
@@ -3202,76 +3193,23 @@ fn missing_calibration_failure(
         "1.0.0",
         inputs.compile_request,
     );
-    let diagnostics = CalibrationLayer::all()
-        .into_iter()
-        .map(|class| ValidationDiagnostic {
-            severity: DiagnosticSeverity::Hard,
-            origin: ValidationOrigin::Calibration,
-            code: ValidationCode::CalibrationMissing { class },
-            detail: ValidationDetail::Field {
-                field: FieldPath::from(format!("calibration.{}", class.as_str())),
-            },
-            provenance: vec![EvidenceRef {
-                kind: "compile_request".to_owned(),
-                reference: "calibration_set_ref".to_owned(),
-                hash: Some(compile_request_hash),
-            }],
-        })
-        .collect::<Vec<_>>();
-    let body = ArtifactValidationReportBody {
-        identity: ArtifactValidationIdentitySection {
-            artifact_source_hash: Some(inputs.artifact.transport.transport_hash),
-            artifact_effective_core_hash: Some(artifact.core.semantic_hash()),
-            artifact_manifest_hash: Some(artifact.manifest_hash()),
-            semantic_core_hash: Some(artifact.core.semantic_hash()),
-            artifact_aux_hash: Some(input_hash(
-                "gbf-artifact",
-                "ArtifactAux",
-                "artifact_aux",
-                "1.0.0",
-                &artifact.aux,
-            )),
-            lowering_manifest_hash: Some(input_hash(
-                "gbf-artifact",
-                "TargetDataLoweringArtifactList",
-                "lowering_manifest",
-                "1.0.0",
-                inputs.lowerings,
-            )),
-            hint_bundle_hash: artifact.hint_bundle_hash(),
-            compile_request_hash,
-            target_profile_hash: input_hash(
-                "gbf-hw",
-                "TargetProfile",
-                "target_profile",
-                "1.0.0",
-                inputs.target_profile,
-            ),
-            compile_profile_hash: input_hash(
-                "gbf-policy",
-                "CompileProfileSpec",
-                "compile_profile",
-                "1.0.0",
-                inputs.compile_profile,
-            ),
-            calibration_hash: None,
-            compatibility_adapter_hash,
-        },
-        compatibility,
-        checked_inputs: checked_inputs(inputs, artifact),
-        diagnostics: diagnostics.clone(),
-    };
-    let report = ReportEnvelope::new(ReportOutcome::Failed, body)
-        .expect("artifact_validation.v1 schema constants are valid");
-    let (report, artifact_validation_self_hash, artifact_validation_canonical_bytes_hash) =
-        finalize_report(report);
-
-    ValidationStageFailure {
-        report,
-        diagnostics,
-        artifact_validation_self_hash,
-        artifact_validation_canonical_bytes_hash,
-    }
+    diagnostics.extend(
+        CalibrationLayer::all()
+            .into_iter()
+            .map(|class| ValidationDiagnostic {
+                severity: DiagnosticSeverity::Hard,
+                origin: ValidationOrigin::Calibration,
+                code: ValidationCode::CalibrationMissing { class },
+                detail: ValidationDetail::Field {
+                    field: FieldPath::from(format!("calibration.{}", class.as_str())),
+                },
+                provenance: vec![EvidenceRef {
+                    kind: "compile_request".to_owned(),
+                    reference: "calibration_set_ref".to_owned(),
+                    hash: Some(compile_request_hash),
+                }],
+            }),
+    );
 }
 
 fn checked_inputs(
@@ -5852,6 +5790,168 @@ mod tests {
         );
     }
 
+    #[test]
+    fn f_b2_validate_returns_all_diagnostics_in_one_pass() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.lowerings[0].packer_version = PackerVersion::new(2, 0, 0);
+        fixture
+            .calibration
+            .as_mut()
+            .expect("fixture has calibration")
+            .bundles
+            .get_mut(&CalibrationLayer::Platform)
+            .expect("platform calibration exists")
+            .target_profile_hash = hash(0xbb);
+        fixture
+            .artifact
+            .hint_bundle
+            .constraints
+            .entries
+            .push(build_constraint_with_scope(
+                TraceProbeId(42),
+                EvidenceScope::LayerScoped {
+                    layer: LayerId::new(99),
+                },
+            ));
+        fixture
+            .resolver
+            .missing_workloads
+            .insert(WorkloadId::from("workload.fixture"));
+        fixture
+            .compile_request
+            .required_features
+            .insert(CompilerFeature::StaticBudgetReport);
+        fixture
+            .compile_request
+            .requested_runtime_modes
+            .insert(RuntimeMode::Trace);
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        let class6 = diagnostic_position(&failure, |code| {
+            matches!(code, ValidationCode::LoweringPackerVersionMismatch { .. })
+        });
+        let class7 = diagnostic_position(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CalibrationStale {
+                    class: CalibrationLayer::Platform,
+                    ..
+                }
+            )
+        });
+        let class8 = diagnostic_position(&failure, |code| {
+            matches!(code, ValidationCode::HintProvenanceInconsistent { .. })
+        });
+        let class9 = diagnostic_position(&failure, |code| {
+            matches!(code, ValidationCode::WorkloadRefUnresolved { .. })
+        });
+        let class10_compiler = diagnostic_position(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestUnsupportedFeature {
+                    feature: CompilerFeature::StaticBudgetReport
+                }
+            )
+        });
+        let class10_runtime = diagnostic_position(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestRuntimeModeUnsupported {
+                    mode: RuntimeMode::Trace
+                }
+            )
+        });
+
+        assert!(
+            class6 < class7
+                && class7 < class8
+                && class8 < class9
+                && class9 < class10_compiler
+                && class10_compiler < class10_runtime,
+            "diagnostics were {:#?}",
+            failure.diagnostics
+        );
+        assert_eq!(failure.report.outcome, ReportOutcome::Failed);
+        assert!(
+            failure
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity == DiagnosticSeverity::Hard)
+        );
+        assert_eq!(failure.report.body.diagnostics, failure.diagnostics);
+    }
+
+    #[test]
+    fn f_b2_validate_short_circuits_when_continuing_is_unsafe() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.transport.transport_hash = hash(0xfa);
+        fixture.resolver.missing_sidecars.insert(SidecarRef {
+            kind: SidecarKind::SemanticCheckpointSchema,
+            id: "checkpoint.fixture".to_owned(),
+            hash: semantic_checkpoint_schema_hash(),
+        });
+        fixture
+            .compile_request
+            .required_features
+            .insert(CompilerFeature::StaticBudgetReport);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::ArtifactTransportManifestMismatch)
+        });
+        assert_no_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::ArtifactAuxSidecarMissing { .. })
+        });
+        assert_no_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CompileRequestUnsupportedFeature { .. }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_emits_failure_report_for_bad_schema() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.set_schema_version(ArtifactSchemaVersion { epoch: 2, minor: 0 });
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_eq!(failure.report.outcome, ReportOutcome::Failed);
+        assert_eq!(failure.report.body.diagnostics, failure.diagnostics);
+        assert!(failure.report.body.identity.artifact_source_hash.is_some());
+        assert!(failure.report.body.identity.compile_request_hash != Hash256::ZERO);
+        assert!(
+            failure
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Hard)
+        );
+        assert_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::SchemaEpochUnsupported)
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_accepts_canonical_fixture() {
+        let fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+
+        let product = validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+
+        assert_eq!(product.report.outcome, ReportOutcome::Passed);
+        assert!(product.report.body.diagnostics.is_empty());
+        assert_eq!(
+            product.validated.artifact.manifest,
+            fixture.artifact.manifest
+        );
+    }
+
     struct Fixture {
         artifact: ImportedArtifactView,
         lowerings: Vec<TargetDataLoweringArtifact>,
@@ -6383,6 +6483,17 @@ mod tests {
             "diagnostics were {:#?}",
             failure.diagnostics
         );
+    }
+
+    fn diagnostic_position(
+        failure: &ValidationStageFailure,
+        matches_code: impl Fn(&ValidationCode) -> bool,
+    ) -> usize {
+        failure
+            .diagnostics
+            .iter()
+            .position(|diagnostic| matches_code(&diagnostic.code))
+            .unwrap_or_else(|| panic!("diagnostic not found in {:#?}", failure.diagnostics))
     }
 
     fn assert_no_failure_code(
