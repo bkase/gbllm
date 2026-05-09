@@ -9,7 +9,7 @@ pub const BRINGUP_DMG_MBC5_CHROME_BUDGET_JSON: &str =
 pub const BRINGUP_DMG_MBC5_CHROME_BUDGET_SHA256_SIDECAR: &str =
     include_str!("../../fixtures/runtime-chrome-budget/bringup-dmg-mbc5.chrome_budget.sha256");
 pub const BRINGUP_DMG_MBC5_CHROME_BUDGET_SHA256: &str =
-    "6b48d1c8711c95456d1b5592ff8ad5a46b26aefa3580c0a30296c7a1b9209bf5";
+    "cf5ef1f9777075fdc202f66be7c53cbd5193cc0225f51db92cb330bd9f0a4eb9";
 pub const BRINGUP_DMG_MBC5_RUNTIME_NUCLEUS_HASH: &str =
     "sha256:2a1fc3405e389733a0006c5b1e6a314a7d81fbc671466a3bc02cdbb876cd1ec5";
 

@@ -16,9 +16,9 @@ pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_JSON: &str =
 pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256_SIDECAR: &str =
     include_str!("../../fixtures/calibration/bootstrap-dmg-mbc5.calibration.sha256");
 pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256: &str =
-    "0e955b21835596f3ade93ecfe680b8f402fad3ae2a1299d9a8b9950c57faa468";
+    "f1073528d74cfebba99aad3ddde6deb9c23832cf65d86523a9ea4337b5c34ac6";
 pub const BOOTSTRAP_DMG_MBC5_TARGET_PROFILE_HASH: &str =
-    "sha256:4c7d3f2d7c8d9ddc23d129defe53ed3e6510116784ef7106af86191c484878e8";
+    "sha256:4f471a6c2e0c76b9cc7c708c0b2e41b434619fbcb55416d027ce2ded39f9f96b";
 
 pub struct CalibrationBundleBuilder {
     bundle: CalibrationBundle,

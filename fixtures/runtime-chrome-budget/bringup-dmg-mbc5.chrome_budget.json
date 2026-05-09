@@ -37,7 +37,7 @@
     "wram_usable_bytes": 8192,
     "sram_usable_bytes": 32768,
     "hram_usable_bytes": 127,
-    "source_target_profile_hash": "sha256:4c7d3f2d7c8d9ddc23d129defe53ed3e6510116784ef7106af86191c484878e8"
+    "source_target_profile_hash": "sha256:4f471a6c2e0c76b9cc7c708c0b2e41b434619fbcb55416d027ce2ded39f9f96b"
   },
   "wram_reserved": 128,
   "sram_reserved": 512

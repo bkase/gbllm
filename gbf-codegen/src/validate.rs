@@ -1627,6 +1627,7 @@ struct ActiveCalibrationBinding {
     kernel_set_hash: Hash256,
     packer_version: PackerVersion,
     calibration_schema_hash: Hash256,
+    compile_request_hash: Hash256,
     calibration_set_hash: Hash256,
 }
 
@@ -1636,8 +1637,19 @@ fn validate_calibration_binding(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     let active = active_calibration_binding(inputs, calibration);
+    let referenced_layers =
+        referenced_calibration_layers(&inputs.compile_request.calibration_set_ref);
+    if referenced_layers.is_empty() {
+        for layer in CalibrationLayer::all() {
+            diagnostics.push(calibration_missing_request_ref_diagnostic(
+                layer,
+                active.compile_request_hash,
+            ));
+        }
+        return;
+    }
 
-    for layer in CalibrationLayer::all() {
+    for layer in referenced_layers {
         let Some(bundle) = calibration.bundles.get(&layer) else {
             diagnostics.push(calibration_missing_layer_diagnostic(
                 layer,
@@ -1668,13 +1680,20 @@ fn active_calibration_binding(
             "1.0.0",
             inputs.target_profile,
         ),
-        // F-B2 has no resolved kernel-set identity input yet; the bootstrap
-        // calibration schema pins that active identity to zero for this chunk.
+        // TODO(bd-2fj): replace this chunk-local sentinel when Stage 0 has a
+        // resolved kernel-set identity input.
         kernel_set_hash: Hash256::ZERO,
         packer_version: gbf_runtime::RUNTIME_PACKER_VERSION,
-        // T-B2.0f's calibration schema is the current schema with no migration
-        // epoch hash yet, so zero is the active schema identity in this chunk.
+        // TODO(bd-2sab): replace this sentinel when the calibration schema
+        // publishes a stable schema-epoch identity hash.
         calibration_schema_hash: Hash256::ZERO,
+        compile_request_hash: input_hash(
+            "gbf-policy",
+            "CompileRequest",
+            "compile_request",
+            "1.0.0",
+            inputs.compile_request,
+        ),
         calibration_set_hash: input_hash(
             "gbf-policy",
             "CalibrationBundleSet",
@@ -1723,6 +1742,19 @@ fn validate_calibration_bundle_freshness(
         active.calibration_set_hash,
         diagnostics,
     );
+}
+
+fn referenced_calibration_layers(
+    set_ref: &gbf_hw::calibration::CalibrationSetRef,
+) -> Vec<CalibrationLayer> {
+    [
+        (set_ref.platform.is_some(), CalibrationLayer::Platform),
+        (set_ref.kernel.is_some(), CalibrationLayer::Kernel),
+        (set_ref.runtime.is_some(), CalibrationLayer::Runtime),
+    ]
+    .into_iter()
+    .filter_map(|(is_referenced, layer)| is_referenced.then_some(layer))
+    .collect()
 }
 
 fn push_calibration_stale_if_hash_mismatch(
@@ -1797,6 +1829,27 @@ fn calibration_missing_layer_diagnostic(
             field: calibration_field(layer, "bundle"),
         },
         vec![calibration_evidence(layer, "bundle", calibration_set_hash)],
+    )
+}
+
+fn calibration_missing_request_ref_diagnostic(
+    layer: CalibrationLayer,
+    compile_request_hash: Hash256,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Calibration,
+        ValidationCode::CalibrationMissing { class: layer },
+        ValidationDetail::Field {
+            field: FieldPath::from(format!(
+                "compile_request.calibration_set_ref.{}",
+                layer.as_str()
+            )),
+        },
+        vec![EvidenceRef {
+            kind: "compile_request".to_owned(),
+            reference: format!("calibration_set_ref.{}", layer.as_str()),
+            hash: Some(compile_request_hash),
+        }],
     )
 }
 
@@ -2325,6 +2378,8 @@ pub fn validate_artifact_and_request<'a>(
     };
     validate_calibration_binding(&inputs, calibration, &mut diagnostics);
     if !diagnostics.is_empty() {
+        // TODO(bd-26zc): keep collecting classes 8-10 after class 7 once the
+        // full Stage 0 diagnostic collector replaces these fail-fast slices.
         return Err(stage0_failure(
             &inputs,
             Some(effective_artifact),
@@ -2764,8 +2819,11 @@ mod tests {
         let mut calibration = calibration();
         calibration.bundles.remove(&CalibrationLayer::Kernel);
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration));
-        fixture.compile_request.calibration_set_ref.kernel =
-            Some(KernelCalibrationId::from("kernel.missing"));
+        fixture.compile_request.calibration_set_ref = CalibrationSetRef {
+            platform: None,
+            kernel: Some(KernelCalibrationId::from("kernel.missing")),
+            runtime: None,
+        };
 
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
@@ -2790,29 +2848,138 @@ mod tests {
                 }
             )
         });
+        assert!(
+            !failure.diagnostics.iter().any(|diagnostic| matches!(
+                diagnostic.code,
+                ValidationCode::CalibrationMissing {
+                    class: CalibrationLayer::Platform | CalibrationLayer::Runtime
+                }
+            )),
+            "only the explicitly referenced missing layer is rejected"
+        );
     }
 
     #[test]
     fn f_b2_validate_rejects_calibration_stale() {
-        let mut calibration = calibration();
-        calibration
-            .bundles
-            .get_mut(&CalibrationLayer::Platform)
-            .expect("platform calibration exists")
-            .target_profile_hash = hash(0xbb);
-        let fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration));
+        struct StaleCase {
+            field: &'static str,
+            mutate: fn(&mut CalibrationBundle),
+            declared: Hash256,
+            observed: Hash256,
+        }
+
+        let stale_packer_version = PackerVersion::new(2, 0, 0);
+        let cases = [
+            StaleCase {
+                field: "target_profile_hash",
+                mutate: |bundle| bundle.target_profile_hash = hash(0xbb),
+                declared: hash(0xbb),
+                observed: active_target_profile_hash(),
+            },
+            StaleCase {
+                field: "kernel_set_hash",
+                mutate: |bundle| bundle.kernel_set_hash = hash(0xcc),
+                declared: hash(0xcc),
+                observed: Hash256::ZERO,
+            },
+            StaleCase {
+                field: "packer_version",
+                mutate: |bundle| bundle.packer_version = PackerVersion::new(2, 0, 0),
+                declared: packer_version_freshness_hash(&stale_packer_version),
+                observed: packer_version_freshness_hash(&gbf_runtime::RUNTIME_PACKER_VERSION),
+            },
+            StaleCase {
+                field: "calibration_schema_hash",
+                mutate: |bundle| bundle.calibration_schema_hash = hash(0xdd),
+                declared: hash(0xdd),
+                observed: Hash256::ZERO,
+            },
+        ];
+
+        for case in cases {
+            let mut calibration = calibration();
+            let bundle = calibration
+                .bundles
+                .get_mut(&CalibrationLayer::Platform)
+                .expect("platform calibration exists");
+            (case.mutate)(bundle);
+            let fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration));
+
+            let failure =
+                validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+            let diagnostic = failure
+                .diagnostics
+                .iter()
+                .find(|diagnostic| {
+                    matches!(
+                        &diagnostic.code,
+                        ValidationCode::CalibrationStale {
+                            class: CalibrationLayer::Platform,
+                            declared,
+                            observed,
+                        } if declared == &case.declared && observed == &case.observed
+                    )
+                })
+                .unwrap_or_else(|| panic!("{} stale diagnostic is present", case.field));
+
+            assert_eq!(
+                diagnostic.detail,
+                ValidationDetail::HashMismatch {
+                    expected: case.declared,
+                    observed: case.observed,
+                }
+            );
+            assert!(
+                diagnostic.provenance.iter().any(|evidence| {
+                    evidence.kind == "calibration_bundle"
+                        && evidence.reference == format!("Platform.{}", case.field)
+                        && evidence.hash == failure.report.body.identity.calibration_hash
+                }),
+                "{} stale diagnostic carries bundle-field evidence",
+                case.field
+            );
+        }
+    }
+
+    #[test]
+    fn f_b2_validate_accepts_checked_in_bootstrap_calibration_when_profile_requires_none() {
+        let fixture = Fixture::new(
+            Some(HintBundle::empty()),
+            Some(checked_in_bootstrap_calibration()),
+        );
+
+        let product = validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+
+        assert_eq!(product.report.outcome, ReportOutcome::Passed);
+        for bundle in product.validated.calibration.bundles.values() {
+            assert_eq!(bundle.target_profile_hash, active_target_profile_hash());
+        }
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_empty_calibration_set_ref() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.calibration_set_ref = CalibrationSetRef::default();
 
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
 
+        assert_eq!(
+            failure
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    matches!(diagnostic.code, ValidationCode::CalibrationMissing { .. })
+                })
+                .count(),
+            CalibrationLayer::all().len()
+        );
         assert_failure_code(&failure, |code| {
             matches!(
                 code,
-                ValidationCode::CalibrationStale {
+                ValidationCode::CalibrationMissing {
                     class: CalibrationLayer::Platform,
-                    declared,
-                    observed,
-                } if declared == &hash(0xbb) && observed != declared
+                }
             )
         });
     }
@@ -4271,10 +4438,22 @@ mod tests {
                     fallback_runtime_mode: Some(RuntimeMode::Safe),
                 },
             },
-            calibration_set_ref: CalibrationSetRef::default(),
+            calibration_set_ref: calibration_set_ref(),
             required_features: BTreeSet::from([CompilerFeature::ArtifactValidation]),
             constraint_overrides: None,
             requested_runtime_modes: BTreeSet::from([RuntimeMode::Safe]),
+        }
+    }
+
+    fn calibration_set_ref() -> CalibrationSetRef {
+        CalibrationSetRef {
+            platform: Some(gbf_foundation::PlatformCalibrationId::from(
+                "platform.bootstrap-dmg-mbc5",
+            )),
+            kernel: Some(KernelCalibrationId::from("kernel.bootstrap-dmg-mbc5")),
+            runtime: Some(gbf_foundation::RuntimeCalibrationId::from(
+                "runtime.bootstrap-dmg-mbc5",
+            )),
         }
     }
 
@@ -4292,6 +4471,13 @@ mod tests {
 
     fn calibration() -> CalibrationBundleSet {
         BootstrapCalibrationBundle::new(active_target_profile_hash())
+    }
+
+    fn checked_in_bootstrap_calibration() -> CalibrationBundleSet {
+        serde_json::from_str(include_str!(
+            "../../fixtures/calibration/bootstrap-dmg-mbc5.calibration.json"
+        ))
+        .expect("checked-in bootstrap calibration fixture deserializes")
     }
 
     fn active_target_profile_hash() -> Hash256 {
