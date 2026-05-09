@@ -51,7 +51,7 @@ use gbf_artifact::manifest::{
     ArtifactFeature, ArtifactSchemaVersion, ComponentKind, ManifestComponent, ManifestInvariant,
 };
 use gbf_artifact::{ArtifactAux, ArtifactManifest, HintBundle, TargetDataLoweringArtifact};
-use gbf_foundation::{BlobRef, Hash256, SemVer};
+use gbf_foundation::{BlobCodec, BlobRef, Hash256, SemVer};
 use gbf_hw::target::TargetProfile;
 use gbf_policy::{
     CalibrationBundleSet, CalibrationLayer, CompatibilityAdapterId, CompileProfileSpec,
@@ -245,7 +245,7 @@ pub struct ValidatedInputHashes {
     pub compatibility_adapter_hash: Option<Hash256>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidecarRef {
     pub kind: SidecarKind,
@@ -966,6 +966,275 @@ fn manifest_invariant_diagnostic(
     )
 }
 
+fn validate_artifact_payload(
+    artifact: &ImportedArtifactView,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    for tensor in artifact.core.tensors() {
+        let field = FieldPath::from(format!("core.tensors.{}.payload", tensor.id.as_str()));
+        let rebuilt = gbf_artifact::tensor::CanonicalTensor::new(
+            tensor.id.clone(),
+            tensor.kind,
+            tensor.layout.clone(),
+            tensor.payload.clone(),
+        );
+
+        let Ok(rebuilt) = rebuilt else {
+            diagnostics.push(artifact_payload_malformed_diagnostic(
+                field,
+                artifact.manifest.manifest_self_hash,
+            ));
+            continue;
+        };
+
+        if rebuilt.content_hash != tensor.content_hash {
+            let len = u32::try_from(tensor.payload.len()).unwrap_or(u32::MAX);
+            diagnostics.push(ValidationDiagnostic::hard(
+                ValidationOrigin::SemanticCore,
+                ValidationCode::ArtifactBlobDigestMismatch {
+                    blob: BlobRef {
+                        hash: tensor.content_hash,
+                        len,
+                        codec: BlobCodec::Raw,
+                    },
+                    expected: tensor.content_hash,
+                    observed: rebuilt.content_hash,
+                },
+                ValidationDetail::HashMismatch {
+                    expected: tensor.content_hash,
+                    observed: rebuilt.content_hash,
+                },
+                vec![EvidenceRef {
+                    kind: "artifact_tensor".to_owned(),
+                    reference: tensor.id.to_string(),
+                    hash: Some(artifact.manifest.manifest_self_hash),
+                }],
+            ));
+        }
+    }
+}
+
+fn artifact_payload_malformed_diagnostic(
+    field: FieldPath,
+    provenance_hash: Hash256,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::SemanticCore,
+        ValidationCode::ArtifactPayloadMalformed {
+            field: field.clone(),
+        },
+        ValidationDetail::Field {
+            field: field.clone(),
+        },
+        vec![EvidenceRef {
+            kind: "artifact_core".to_owned(),
+            reference: field.to_string(),
+            hash: Some(provenance_hash),
+        }],
+    )
+}
+
+fn validate_artifact_aux_sidecars(
+    artifact: &ImportedArtifactView,
+    resolver: &dyn ArtifactResolver,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    validate_golden_vector_sidecars(&artifact.aux, resolver, diagnostics);
+
+    if requires_checkpoint_schema(&artifact.manifest) && artifact.aux.checkpoint_schema.is_none() {
+        diagnostics.push(artifact_aux_sidecar_missing_diagnostic(
+            SidecarKind::SemanticCheckpointSchema,
+            artifact.manifest.manifest_self_hash,
+        ));
+    }
+
+    if requires_interaction_bundle(&artifact.manifest) && artifact.aux.interaction_bundle.is_none()
+    {
+        diagnostics.push(artifact_aux_sidecar_missing_diagnostic(
+            SidecarKind::InteractionBundle,
+            artifact.manifest.manifest_self_hash,
+        ));
+    }
+
+    if let Some(sidecar) = &artifact.aux.checkpoint_schema {
+        validate_resolved_sidecar(
+            SidecarRef {
+                kind: SidecarKind::SemanticCheckpointSchema,
+                id: sidecar.id.0.clone(),
+                hash: sidecar.hash,
+            },
+            resolver,
+            diagnostics,
+        );
+    }
+    if let Some(sidecar) = &artifact.aux.conformance_envelope {
+        validate_resolved_sidecar(
+            SidecarRef {
+                kind: SidecarKind::ConformanceEnvelope,
+                id: sidecar.id.0.clone(),
+                hash: sidecar.hash,
+            },
+            resolver,
+            diagnostics,
+        );
+    }
+    if let Some(sidecar) = &artifact.aux.reference_observation_cache {
+        validate_resolved_sidecar(
+            SidecarRef {
+                kind: SidecarKind::ReferenceObservationCache,
+                id: sidecar.id.0.clone(),
+                hash: sidecar.hash,
+            },
+            resolver,
+            diagnostics,
+        );
+    }
+    if let Some(sidecar) = &artifact.aux.interaction_bundle {
+        validate_resolved_sidecar(
+            SidecarRef {
+                kind: SidecarKind::InteractionBundle,
+                id: sidecar.id.0.clone(),
+                hash: sidecar.hash,
+            },
+            resolver,
+            diagnostics,
+        );
+    }
+}
+
+fn validate_golden_vector_sidecars(
+    aux: &ArtifactAux,
+    resolver: &dyn ArtifactResolver,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let mut seen = BTreeSet::new();
+    for vector in &aux.golden_vectors {
+        if !seen.insert(vector.id.clone()) {
+            diagnostics.push(artifact_aux_malformed_diagnostic(FieldPath::from(
+                "aux.golden_vectors",
+            )));
+        }
+        validate_resolved_sidecar(
+            SidecarRef {
+                kind: SidecarKind::GoldenVector,
+                id: vector.id.0.clone(),
+                hash: vector.manifest_hash,
+            },
+            resolver,
+            diagnostics,
+        );
+    }
+}
+
+fn validate_resolved_sidecar(
+    sidecar: SidecarRef,
+    resolver: &dyn ArtifactResolver,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match resolver.resolve_sidecar(&sidecar) {
+        Ok(resolved) => {
+            let observed = sha256_hash(&resolved.bytes);
+            if observed != sidecar.hash {
+                diagnostics.push(ValidationDiagnostic::hard(
+                    ValidationOrigin::Manifest,
+                    ValidationCode::ArtifactAuxSidecarDigestMismatch {
+                        kind: sidecar.kind,
+                        expected: sidecar.hash,
+                        observed,
+                    },
+                    ValidationDetail::HashMismatch {
+                        expected: sidecar.hash,
+                        observed,
+                    },
+                    vec![EvidenceRef {
+                        kind: "artifact_aux_sidecar".to_owned(),
+                        reference: sidecar.id,
+                        hash: Some(sidecar.hash),
+                    }],
+                ));
+            }
+        }
+        Err(ArtifactResolveError::NotFound { .. }) => {
+            diagnostics.push(artifact_aux_sidecar_missing_diagnostic(
+                sidecar.kind,
+                sidecar.hash,
+            ));
+        }
+        Err(ArtifactResolveError::HashMismatch {
+            expected, observed, ..
+        }) => diagnostics.push(ValidationDiagnostic::hard(
+            ValidationOrigin::Manifest,
+            ValidationCode::ArtifactAuxSidecarDigestMismatch {
+                kind: sidecar.kind,
+                expected,
+                observed,
+            },
+            ValidationDetail::HashMismatch { expected, observed },
+            vec![EvidenceRef {
+                kind: "artifact_aux_sidecar".to_owned(),
+                reference: sidecar.id,
+                hash: Some(expected),
+            }],
+        )),
+        Err(ArtifactResolveError::Unsupported { .. }) => {
+            diagnostics.push(artifact_aux_malformed_diagnostic(FieldPath::from(format!(
+                "aux.sidecars.{}",
+                sidecar.id
+            ))));
+        }
+    }
+}
+
+fn requires_checkpoint_schema(manifest: &ArtifactManifest) -> bool {
+    manifest
+        .required_features
+        .contains(&ArtifactFeature::LinearStateSequence)
+        || manifest
+            .required_features
+            .contains(&ArtifactFeature::BoundedKvSequence)
+}
+
+fn requires_interaction_bundle(manifest: &ArtifactManifest) -> bool {
+    manifest
+        .required_features
+        .contains(&ArtifactFeature::MoeRouting)
+}
+
+fn artifact_aux_sidecar_missing_diagnostic(
+    kind: SidecarKind,
+    provenance_hash: Hash256,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Manifest,
+        ValidationCode::ArtifactAuxSidecarMissing { kind },
+        ValidationDetail::Field {
+            field: FieldPath::from("aux"),
+        },
+        vec![EvidenceRef {
+            kind: "artifact_aux".to_owned(),
+            reference: format!("{kind:?}"),
+            hash: Some(provenance_hash),
+        }],
+    )
+}
+
+fn artifact_aux_malformed_diagnostic(field: FieldPath) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Manifest,
+        ValidationCode::ArtifactAuxMalformed {
+            field: field.clone(),
+        },
+        ValidationDetail::Field {
+            field: field.clone(),
+        },
+        vec![EvidenceRef {
+            kind: "artifact_aux".to_owned(),
+            reference: field.to_string(),
+            hash: None,
+        }],
+    )
+}
+
 fn stage0_failure(
     inputs: &ValidateInputs<'_>,
     artifact: Option<&ImportedArtifactView>,
@@ -1147,6 +1416,8 @@ pub fn validate_artifact_and_request<'a>(
         inputs.lowerings,
         &mut diagnostics,
     );
+    validate_artifact_payload(effective_artifact, &mut diagnostics);
+    validate_artifact_aux_sidecars(effective_artifact, inputs.resolver, &mut diagnostics);
 
     if !diagnostics.is_empty() {
         return Err(stage0_failure(
@@ -1390,7 +1661,10 @@ fn sha256_hash(bytes: &[u8]) -> Hash256 {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use gbf_artifact::aux::ArtifactAux;
+    use gbf_artifact::aux::{
+        ArtifactAux, ConformanceEnvelopeId, ConformanceEnvelopeRef, SemanticCheckpointSchemaId,
+        SemanticCheckpointSchemaRef,
+    };
     use gbf_artifact::core::ArtifactCore;
     use gbf_artifact::lowerings::{
         DataLoweringProfileId, LoweringShard, LoweringShardId, LoweringShardKind,
@@ -1401,6 +1675,10 @@ mod tests {
     };
     use gbf_artifact::quant::QuantSpec;
     use gbf_artifact::sequence::SequenceSemanticsSpec;
+    use gbf_artifact::tensor::{
+        CanonicalTensor, CanonicalTensorId, CanonicalTensorKind, CanonicalTensorLayout,
+        CanonicalTensorPayload, CanonicalTensorShape, TensorElementType,
+    };
     use gbf_foundation::{BlobCodec, CompileProfileId, PackerVersion, TargetProfileId};
     use gbf_hw::calibration::CalibrationSetRef;
     use gbf_hw::target::dmg_mbc5_8mib_128kib;
@@ -1515,7 +1793,7 @@ mod tests {
 
     #[test]
     fn f_b2_validate_uses_artifact_resolver_trait() {
-        let resolver = RecordingResolver;
+        let resolver = RecordingResolver::default();
         let blob = BlobRef {
             hash: hash(0x44),
             len: 3,
@@ -1870,6 +2148,102 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_rejects_artifact_payload_blob_digest_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let mut tensor = CanonicalTensor::new(
+            CanonicalTensorId::new("tensor.bias").expect("tensor id"),
+            CanonicalTensorKind::Bias,
+            CanonicalTensorLayout::new(
+                CanonicalTensorShape::from_usize_dims(&[2]).expect("shape"),
+                TensorElementType::Float32,
+            ),
+            CanonicalTensorPayload::F32(vec![1.0, 2.0]),
+        )
+        .expect("valid tensor");
+        tensor.content_hash = hash(0xaa);
+        fixture.artifact.core = ArtifactCore::new(
+            vec![tensor.clone()],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
+        )
+        .expect("core accepts non-deployable bias tensor");
+        fixture.artifact.manifest.components = vec![ManifestComponent {
+            digest: tensor.content_hash,
+            id: ComponentId("tensor.bias".to_owned()),
+            kind: ComponentKind::CanonicalTensor,
+        }];
+        fixture.artifact.manifest.semantic_core_hash = fixture.artifact.core.semantic_hash();
+        fixture.refresh_manifest_self_hash();
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::ArtifactBlobDigestMismatch { .. })
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_artifact_aux_sidecar_missing() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.checkpoint_schema = Some(SemanticCheckpointSchemaRef {
+            id: SemanticCheckpointSchemaId("checkpoint.fixture".to_owned()),
+            hash: hash(0x40),
+        });
+        fixture.resolver.missing_sidecars.insert(SidecarRef {
+            kind: SidecarKind::SemanticCheckpointSchema,
+            id: "checkpoint.fixture".to_owned(),
+            hash: hash(0x40),
+        });
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxSidecarMissing {
+                    kind: SidecarKind::SemanticCheckpointSchema
+                }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_artifact_aux_sidecar_digest_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.conformance_envelope = Some(ConformanceEnvelopeRef {
+            id: ConformanceEnvelopeId("conformance.fixture".to_owned()),
+            hash: hash(0x41),
+        });
+        fixture.resolver.sidecar_bytes.insert(
+            SidecarRef {
+                kind: SidecarKind::ConformanceEnvelope,
+                id: "conformance.fixture".to_owned(),
+                hash: hash(0x41),
+            },
+            b"conformance sidecar".to_vec(),
+        );
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxSidecarDigestMismatch {
+                    kind: SidecarKind::ConformanceEnvelope,
+                    expected,
+                    observed,
+                } if expected == &hash(0x41) && observed == &sha256_hash(b"conformance sidecar")
+            )
+        });
+    }
+
+    #[test]
     fn f_b2_validate_builtin_schema_adapters_excludes_test_only_proof_adapters() {
         let adapters = builtin_schema_adapters();
 
@@ -1913,7 +2287,7 @@ mod tests {
                 target_profile: dmg_mbc5_8mib_128kib(),
                 compile_profile: compile_profile(),
                 calibration,
-                resolver: RecordingResolver,
+                resolver: RecordingResolver::default(),
             }
         }
 
@@ -1948,7 +2322,11 @@ mod tests {
         }
     }
 
-    struct RecordingResolver;
+    #[derive(Default)]
+    struct RecordingResolver {
+        missing_sidecars: BTreeSet<SidecarRef>,
+        sidecar_bytes: BTreeMap<SidecarRef, Vec<u8>>,
+    }
 
     impl ArtifactResolver for RecordingResolver {
         fn resolve_blob(&self, blob: &BlobRef) -> Result<ResolvedBlob, ArtifactResolveError> {
@@ -1962,9 +2340,17 @@ mod tests {
             &self,
             sidecar: &SidecarRef,
         ) -> Result<ResolvedSidecar, ArtifactResolveError> {
+            if self.missing_sidecars.contains(sidecar) {
+                return Err(ArtifactResolveError::not_found(format!(
+                    "{:?}:{}",
+                    sidecar.kind, sidecar.id
+                )));
+            }
+            let bytes = self.sidecar_bytes.get(sidecar).cloned().unwrap_or_default();
+            let content_hash = sha256_hash(&bytes);
             Ok(ResolvedSidecar {
-                bytes: Vec::new(),
-                content_hash: sidecar.hash,
+                bytes,
+                content_hash,
             })
         }
 
