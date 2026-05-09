@@ -77,6 +77,32 @@ impl Stage0CacheKeyMaterial {
             artifact_validation_schema_hash: artifact_validation_schema_hash(),
         }
     }
+
+    #[must_use]
+    pub fn partial_failure(
+        artifact_source_hash: Hash256,
+        hint_bundle_hash: Hash256,
+        compile_request_hash: Hash256,
+        target_profile_hash: Hash256,
+        compile_profile_hash: Hash256,
+        compatibility_adapter_registry_hash: Hash256,
+    ) -> Self {
+        Self {
+            artifact_source_hash,
+            artifact_effective_core_hash: None,
+            artifact_manifest_hash: None,
+            artifact_aux_hash: None,
+            lowering_manifest_hash: None,
+            hint_bundle_hash,
+            compile_request_hash,
+            target_profile_hash,
+            compile_profile_hash,
+            calibration_hash: None,
+            compatibility_adapter_registry_hash,
+            crate_feature_set_hash: crate_feature_set_hash(),
+            artifact_validation_schema_hash: artifact_validation_schema_hash(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +131,17 @@ pub struct CachedValidationProduct {
     pub input_hashes: ValidatedInputHashes,
     pub artifact_validation_self_hash: Hash256,
     pub artifact_validation_canonical_bytes_hash: Hash256,
+}
+
+impl From<&ValidationProduct<'_>> for CachedValidationProduct {
+    fn from(product: &ValidationProduct<'_>) -> Self {
+        Self {
+            input_hashes: product.validated.input_hashes,
+            artifact_validation_self_hash: product.artifact_validation_self_hash,
+            artifact_validation_canonical_bytes_hash: product
+                .artifact_validation_canonical_bytes_hash,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,18 +313,15 @@ pub fn get_stage0_failure_memo(
 pub fn put_stage0_success(
     cache: &StoreStageCache<'_>,
     material: &Stage0CacheKeyMaterial,
-    product: &ValidationProduct<'_>,
+    product: impl Into<CachedValidationProduct>,
     report_bytes: Vec<u8>,
 ) -> Result<StageCacheKey, CodegenStageCacheError> {
+    let product = product.into();
+    let report_self_hash = product.artifact_validation_self_hash;
     let cell = Stage0CacheCell::ValidationSuccess {
-        product: Box::new(CachedValidationProduct {
-            input_hashes: product.validated.input_hashes,
-            artifact_validation_self_hash: product.artifact_validation_self_hash,
-            artifact_validation_canonical_bytes_hash: product
-                .artifact_validation_canonical_bytes_hash,
-        }),
+        product: Box::new(product),
         report: CachedReportBytes {
-            report_self_hash: product.artifact_validation_self_hash,
+            report_self_hash,
             canonical_bytes: report_bytes,
         },
     };
@@ -304,9 +338,13 @@ pub fn put_stage0_failure_memo(
     failure: &ValidationStageFailure,
     report_bytes: Vec<u8>,
 ) -> Result<StageCacheKey, CodegenStageCacheError> {
+    debug_assert_eq!(
+        failure.report.report_self_hash, failure.artifact_validation_self_hash,
+        "ValidationStageFailure self-hash mirrors its report envelope"
+    );
     let cell = Stage0CacheCell::FailureMemo {
         report: CachedReportBytes {
-            report_self_hash: failure.artifact_validation_self_hash,
+            report_self_hash: failure.report.report_self_hash,
             canonical_bytes: report_bytes,
         },
         diagnostics: failure.diagnostics.clone(),
@@ -469,6 +507,9 @@ fn stage_key<T: Serialize>(stage_id: &str, material: &T, pass_version: SemVer) -
         shard_local: ComponentDigestSet {
             components: BTreeMap::from([(ComponentId::from_static("key_material"), material_hash)]),
         },
+        // F-B2 Stage 0/0.5 keys are wholly captured in the canonical material hash above.
+        // `global` stays zero so gbf-store receives one deterministic component instead of
+        // duplicating the same digest in both StageKey halves.
         global: Hash256::ZERO,
         feature_flags: BTreeSet::<FeatureFlag>::new(),
         pass_version,
@@ -605,6 +646,24 @@ mod tests {
     }
 
     #[test]
+    fn stage_cache_key_resolve_policy_changes_with_pass_version() {
+        let material = stage05_material();
+
+        assert_ne!(
+            compose_key(&stage05_resolve_policy_store_key_with_pass_version(
+                &material,
+                Stage05CellKind::Success,
+                SemVer::new(1, 0, 0)
+            )),
+            compose_key(&stage05_resolve_policy_store_key_with_pass_version(
+                &material,
+                Stage05CellKind::Success,
+                SemVer::new(1, 0, 1)
+            ))
+        );
+    }
+
+    #[test]
     fn stage_cache_failed_pass_does_not_enter_success_cache() {
         let (_dir, store) = store();
         let cache = StageCache::new(&store);
@@ -669,35 +728,38 @@ mod tests {
 
     #[test]
     fn stage_cache_hit_materializes_cached_report_bytes() {
-        let cell = Stage0CacheCell::ValidationSuccess {
-            product: Box::new(CachedValidationProduct {
-                input_hashes: input_hashes(),
-                artifact_validation_self_hash: hash(95),
-                artifact_validation_canonical_bytes_hash: hash(96),
-            }),
-            report: CachedReportBytes {
-                report_self_hash: hash(97),
-                canonical_bytes: b"{\"z\":\"cached bytes stay byte-exact\"}".to_vec(),
-            },
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let material = stage0_material();
+        let report_bytes =
+            br#"{"cached":["bytes",17],"nested":{"order":"preserved"},"z":true}"#.to_vec();
+        let product = CachedValidationProduct {
+            input_hashes: input_hashes(),
+            artifact_validation_self_hash: hash(97),
+            artifact_validation_canonical_bytes_hash: hash(96),
         };
 
+        put_stage0_success(&cache, &material, product, report_bytes.clone())
+            .expect("put success cell");
+        let cell = get_stage0_success(&cache, &material)
+            .expect("success lookup")
+            .expect("cache hit");
         let materialized = materialize_stage0_cached_report(&cell);
 
         assert_eq!(materialized.report_self_hash, hash(97));
-        assert_eq!(
-            materialized.canonical_bytes,
-            b"{\"z\":\"cached bytes stay byte-exact\"}".to_vec()
-        );
+        assert_eq!(materialized.canonical_bytes, report_bytes);
     }
 
     #[test]
     fn stage_cache_validate_allows_partial_failure_key_without_fake_hashes() {
-        let mut material = stage0_material();
-        material.artifact_effective_core_hash = None;
-        material.artifact_manifest_hash = None;
-        material.artifact_aux_hash = None;
-        material.lowering_manifest_hash = None;
-        material.calibration_hash = None;
+        let mut material = Stage0CacheKeyMaterial::partial_failure(
+            hash(1),
+            hash(6),
+            hash(7),
+            hash(8),
+            hash(9),
+            hash(11),
+        );
 
         let value = serde_json::to_value(&material).expect("key serializes");
 
