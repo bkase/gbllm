@@ -11,6 +11,7 @@ pub mod lower_infer;
 pub mod lower_quant;
 pub mod observe;
 pub mod place;
+pub mod policy;
 pub mod range;
 pub mod reachability;
 pub mod report;
@@ -24,6 +25,10 @@ pub mod window;
 pub mod stages {
     pub mod budget {
         pub use crate::budget::*;
+    }
+
+    pub mod policy {
+        pub use crate::policy::*;
     }
 
     pub mod validate {

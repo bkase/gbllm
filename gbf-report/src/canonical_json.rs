@@ -1282,7 +1282,25 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
                 | "identity.compatibility_adapter_hash"
                 | "compatibility.decision"
         ),
-        POLICY_RESOLUTION_SCHEMA => path == "result",
+        POLICY_RESOLUTION_SCHEMA => {
+            path == "result"
+                || path.ends_with(".selector")
+                || path.ends_with(".field")
+                || path.ends_with(".runtime_chrome_budget")
+                || path.ends_with(".service")
+                || path.ends_with(".max_first_token_cycles_p95")
+                || path.ends_with(".max_checkpoint_gap_cycles_p95")
+                || path.ends_with(".max_resume_latency_cycles_p95")
+                || path.ends_with(".max_ui_jitter_frames_p99")
+                || path.ends_with(".max_cycles_per_token")
+                || path.ends_with(".max_bank_switches_per_token")
+                || path.ends_with(".max_sram_page_switches_per_token")
+                || path.ends_with(".max_rom_bytes")
+                || path.ends_with(".fallback_profile")
+                || path.ends_with(".fallback_runtime_mode")
+                || path.contains(".constraint_overrides.")
+                || path.contains(".overrides.")
+        }
         STATIC_BUDGET_SCHEMA => {
             matches!(
                 path,
