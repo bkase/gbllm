@@ -34,7 +34,7 @@ pub use gbf_report::report_schemas::static_budget_v1::{
     RuntimeChromeBudgetSection, StaticBudgetReportBody, StaticPlacementModel, UnassignedBecause,
     decision_interpretation_matches_fits,
     runtime_chrome_budget_hash as runtime_chrome_budget_section_hash,
-    static_fit_interpretation_for_fits,
+    sort_budget_failures_canonically, static_fit_interpretation_for_fits,
 };
 
 use crate::policy::ResolvedPolicyProduct;
@@ -476,9 +476,10 @@ fn budget_failure_report<Q: QuantGraphBudgetSource + ?Sized>(
     inputs: BudgetInputs<'_, Q>,
     runtime_chrome_budget: &RuntimeChromeBudget,
     quant_graph_hash: Hash256,
-    failures: Vec<BudgetFailure>,
+    mut failures: Vec<BudgetFailure>,
     projections: BudgetProjectionSection,
 ) -> StaticBudgetReport {
+    sort_budget_failures_canonically(&mut failures);
     let body = StaticBudgetReportBody {
         identity: identity_section(
             inputs.policy,
@@ -4002,7 +4003,7 @@ mod tests {
     fn f_b4_budget_common_footprint_overflow_is_malformed_view() {
         let policy = policy_with_placement(PlacementProfile::Budgeted);
         let budget = runtime_budget_with_slots(vec![
-            common_slot(1, u32::MAX, [PlacementProfile::Budgeted]),
+            common_slot(1, 4096, [PlacementProfile::Budgeted]),
             expert_slot(2, 64, 0, [PlacementProfile::Budgeted]),
         ]);
         let mut view = budget_view_fixture(1, 1, 3);

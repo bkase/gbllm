@@ -1,5 +1,6 @@
 //! `static_budget.v1` Stage 2 report schema.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use gbf_foundation::{
@@ -66,6 +67,7 @@ impl ReportBody for StaticBudgetReportBody {
             validate_expert_assignment_invariants(
                 &self.projections,
                 self.decision.fits,
+                &self.decision.failures,
                 &mut errors,
             );
         }
@@ -393,11 +395,393 @@ pub fn failure_diagnostics_are_one_to_one(
     failures: &[BudgetFailureRecord],
     diagnostics: &[ValidationDiagnosticRecord],
 ) -> bool {
-    failures.len() == diagnostics.len()
-        && failures
-            .iter()
-            .zip(diagnostics)
-            .all(|(failure, diagnostic)| budget_failure_matches_diagnostic(failure, diagnostic))
+    if failures.len() != diagnostics.len() {
+        return false;
+    }
+
+    let mut matched_diagnostics = vec![false; diagnostics.len()];
+    failures.iter().all(|failure| {
+        let Some((index, _)) = diagnostics.iter().enumerate().find(|(index, diagnostic)| {
+            !matched_diagnostics[*index] && budget_failure_matches_diagnostic(failure, diagnostic)
+        }) else {
+            return false;
+        };
+        matched_diagnostics[index] = true;
+        true
+    })
+}
+
+pub fn sort_budget_failures_canonically(failures: &mut [BudgetFailureRecord]) {
+    failures.sort_by(cmp_budget_failures);
+}
+
+fn is_canonically_ordered_by<T>(values: &[T], mut cmp: impl FnMut(&T, &T) -> Ordering) -> bool {
+    values
+        .windows(2)
+        .all(|pair| cmp(&pair[0], &pair[1]) != Ordering::Greater)
+}
+
+fn cmp_budget_failures(left: &BudgetFailure, right: &BudgetFailure) -> Ordering {
+    budget_failure_rank(left)
+        .cmp(&budget_failure_rank(right))
+        .then_with(|| cmp_budget_failure_fields(left, right))
+}
+
+fn budget_failure_rank(failure: &BudgetFailure) -> u8 {
+    match failure {
+        BudgetFailure::MissingRuntimeChromeBudget => 0,
+        BudgetFailure::QuantGraphBudgetViewMalformed { .. } => 1,
+        BudgetFailure::ExpertExceedsSlot { .. } => 2,
+        BudgetFailure::CommonBankExceedsCap { .. } => 3,
+        BudgetFailure::WramPeakExceedsCap { .. } => 4,
+        BudgetFailure::SramPeakExceedsCap { .. } => 5,
+        BudgetFailure::HramPeakExceedsCap { .. } => 6,
+        BudgetFailure::AccumulatorExceedsI32 { .. } => 7,
+        BudgetFailure::BankSwitchesPerTokenOverCap { .. } => 8,
+        BudgetFailure::SramPageSwitchesPerTokenOverCap { .. } => 9,
+        BudgetFailure::PlacementProfileInfeasible { .. } => 10,
+    }
+}
+
+fn cmp_budget_failure_fields(left: &BudgetFailure, right: &BudgetFailure) -> Ordering {
+    match (left, right) {
+        (
+            BudgetFailure::QuantGraphBudgetViewMalformed { field: left },
+            BudgetFailure::QuantGraphBudgetViewMalformed { field: right },
+        ) => left.cmp(right),
+        (
+            BudgetFailure::ExpertExceedsSlot {
+                layer: left_layer,
+                expert: left_expert,
+                slot: left_slot,
+                payload_bytes: left_payload,
+                cap_bytes: left_cap,
+                excess_bytes: left_excess,
+            },
+            BudgetFailure::ExpertExceedsSlot {
+                layer: right_layer,
+                expert: right_expert,
+                slot: right_slot,
+                payload_bytes: right_payload,
+                cap_bytes: right_cap,
+                excess_bytes: right_excess,
+            },
+        ) => (
+            left_layer,
+            left_expert,
+            left_slot,
+            left_payload,
+            left_cap,
+            left_excess,
+        )
+            .cmp(&(
+                right_layer,
+                right_expert,
+                right_slot,
+                right_payload,
+                right_cap,
+                right_excess,
+            )),
+        (
+            BudgetFailure::CommonBankExceedsCap {
+                assigned_bytes: left_assigned,
+                cap_bytes: left_cap,
+                excess_bytes: left_excess,
+            },
+            BudgetFailure::CommonBankExceedsCap {
+                assigned_bytes: right_assigned,
+                cap_bytes: right_cap,
+                excess_bytes: right_excess,
+            },
+        ) => (left_assigned, left_cap, left_excess).cmp(&(right_assigned, right_cap, right_excess)),
+        (
+            BudgetFailure::WramPeakExceedsCap {
+                peak: left_peak,
+                cap: left_cap,
+            },
+            BudgetFailure::WramPeakExceedsCap {
+                peak: right_peak,
+                cap: right_cap,
+            },
+        )
+        | (
+            BudgetFailure::SramPeakExceedsCap {
+                peak: left_peak,
+                cap: left_cap,
+            },
+            BudgetFailure::SramPeakExceedsCap {
+                peak: right_peak,
+                cap: right_cap,
+            },
+        )
+        | (
+            BudgetFailure::HramPeakExceedsCap {
+                peak: left_peak,
+                cap: left_cap,
+            },
+            BudgetFailure::HramPeakExceedsCap {
+                peak: right_peak,
+                cap: right_cap,
+            },
+        ) => (left_peak, left_cap).cmp(&(right_peak, right_cap)),
+        (
+            BudgetFailure::AccumulatorExceedsI32 {
+                site: left_site,
+                projected_max_abs: left_projected,
+            },
+            BudgetFailure::AccumulatorExceedsI32 {
+                site: right_site,
+                projected_max_abs: right_projected,
+            },
+        ) => (left_site, left_projected).cmp(&(right_site, right_projected)),
+        (
+            BudgetFailure::BankSwitchesPerTokenOverCap {
+                decision_value: left_decision,
+                upper_bound: left_upper,
+                cap: left_cap,
+                source: left_source,
+            },
+            BudgetFailure::BankSwitchesPerTokenOverCap {
+                decision_value: right_decision,
+                upper_bound: right_upper,
+                cap: right_cap,
+                source: right_source,
+            },
+        )
+        | (
+            BudgetFailure::SramPageSwitchesPerTokenOverCap {
+                decision_value: left_decision,
+                upper_bound: left_upper,
+                cap: left_cap,
+                source: left_source,
+            },
+            BudgetFailure::SramPageSwitchesPerTokenOverCap {
+                decision_value: right_decision,
+                upper_bound: right_upper,
+                cap: right_cap,
+                source: right_source,
+            },
+        ) => (left_decision, left_upper, left_cap, left_source).cmp(&(
+            right_decision,
+            right_upper,
+            right_cap,
+            right_source,
+        )),
+        (
+            BudgetFailure::PlacementProfileInfeasible {
+                profile: left_profile,
+                reason: left_reason,
+            },
+            BudgetFailure::PlacementProfileInfeasible {
+                profile: right_profile,
+                reason: right_reason,
+            },
+        ) => (left_profile, placement_reason_rank(left_reason))
+            .cmp(&(right_profile, placement_reason_rank(right_reason))),
+        _ => Ordering::Equal,
+    }
+}
+
+fn placement_reason_rank(reason: &gbf_policy::PlacementInfeasibilityReason) -> u8 {
+    match reason {
+        gbf_policy::PlacementInfeasibilityReason::NoSlotsForClass => 0,
+        gbf_policy::PlacementInfeasibilityReason::ExpertCountExceedsSlots => 1,
+        gbf_policy::PlacementInfeasibilityReason::RequiresUnavailableSlotClass => 2,
+        gbf_policy::PlacementInfeasibilityReason::ExceedsCommonBankCap => 3,
+        gbf_policy::PlacementInfeasibilityReason::ExceedsExpertBankCap => 4,
+        gbf_policy::PlacementInfeasibilityReason::ViolatesTargetLayout => 5,
+    }
+}
+
+fn cmp_diagnostics(left: &ValidationDiagnostic, right: &ValidationDiagnostic) -> Ordering {
+    validation_code_rank(&left.code)
+        .cmp(&validation_code_rank(&right.code))
+        .then_with(|| {
+            validation_origin_rank(left.origin).cmp(&validation_origin_rank(right.origin))
+        })
+        .then_with(|| cmp_validation_codes(&left.code, &right.code))
+        .then_with(|| {
+            diagnostic_detail_key(&left.detail).cmp(&diagnostic_detail_key(&right.detail))
+        })
+        .then_with(|| left.provenance.cmp(&right.provenance))
+}
+
+fn validation_origin_rank(origin: ValidationOrigin) -> u8 {
+    match origin {
+        ValidationOrigin::Schema => 0,
+        ValidationOrigin::SemanticCore => 1,
+        ValidationOrigin::Manifest => 2,
+        ValidationOrigin::Lowering => 3,
+        ValidationOrigin::Calibration => 4,
+        ValidationOrigin::HintBundle => 5,
+        ValidationOrigin::Workload => 6,
+        ValidationOrigin::GoldenVector => 7,
+        ValidationOrigin::CompileRequest => 8,
+        ValidationOrigin::PolicyResolution => 9,
+        ValidationOrigin::Budget => 10,
+    }
+}
+
+fn validation_code_rank(code: &ValidationCode) -> u8 {
+    match code {
+        ValidationCode::BudgetMissingRuntimeChromeBudget => 0,
+        ValidationCode::BudgetQuantGraphViewMalformed { .. } => 1,
+        ValidationCode::BudgetExpertExceedsSlot { .. } => 2,
+        ValidationCode::BudgetCommonBankExceedsCap { .. } => 3,
+        ValidationCode::BudgetWramPeakExceeds { .. } => 4,
+        ValidationCode::BudgetSramPeakExceeds { .. } => 5,
+        ValidationCode::BudgetHramPeakExceeds { .. } => 6,
+        ValidationCode::BudgetAccumulatorOverflow { .. } => 7,
+        ValidationCode::BudgetSwitchesPerTokenOverCap { .. } => 8,
+        ValidationCode::BudgetSramPageSwitchesPerTokenOverCap { .. } => 9,
+        ValidationCode::BudgetPlacementProfileInfeasible { .. } => 10,
+        _ => 100,
+    }
+}
+
+fn cmp_validation_codes(left: &ValidationCode, right: &ValidationCode) -> Ordering {
+    match (left, right) {
+        (
+            ValidationCode::BudgetQuantGraphViewMalformed { field: left },
+            ValidationCode::BudgetQuantGraphViewMalformed { field: right },
+        ) => left.cmp(right),
+        (
+            ValidationCode::BudgetExpertExceedsSlot {
+                layer: left_layer,
+                expert: left_expert,
+                slot: left_slot,
+                payload_bytes: left_payload,
+                cap_bytes: left_cap,
+                excess_bytes: left_excess,
+            },
+            ValidationCode::BudgetExpertExceedsSlot {
+                layer: right_layer,
+                expert: right_expert,
+                slot: right_slot,
+                payload_bytes: right_payload,
+                cap_bytes: right_cap,
+                excess_bytes: right_excess,
+            },
+        ) => (
+            left_layer,
+            left_expert,
+            left_slot,
+            left_payload,
+            left_cap,
+            left_excess,
+        )
+            .cmp(&(
+                right_layer,
+                right_expert,
+                right_slot,
+                right_payload,
+                right_cap,
+                right_excess,
+            )),
+        (
+            ValidationCode::BudgetCommonBankExceedsCap {
+                assigned_bytes: left_assigned,
+                cap_bytes: left_cap,
+            },
+            ValidationCode::BudgetCommonBankExceedsCap {
+                assigned_bytes: right_assigned,
+                cap_bytes: right_cap,
+            },
+        ) => (left_assigned, left_cap).cmp(&(right_assigned, right_cap)),
+        (
+            ValidationCode::BudgetWramPeakExceeds {
+                peak: left_peak,
+                cap: left_cap,
+            },
+            ValidationCode::BudgetWramPeakExceeds {
+                peak: right_peak,
+                cap: right_cap,
+            },
+        )
+        | (
+            ValidationCode::BudgetSramPeakExceeds {
+                peak: left_peak,
+                cap: left_cap,
+            },
+            ValidationCode::BudgetSramPeakExceeds {
+                peak: right_peak,
+                cap: right_cap,
+            },
+        )
+        | (
+            ValidationCode::BudgetHramPeakExceeds {
+                peak: left_peak,
+                cap: left_cap,
+            },
+            ValidationCode::BudgetHramPeakExceeds {
+                peak: right_peak,
+                cap: right_cap,
+            },
+        ) => (left_peak, left_cap).cmp(&(right_peak, right_cap)),
+        (
+            ValidationCode::BudgetAccumulatorOverflow {
+                site: left_site,
+                projected_max_abs: left_projected,
+            },
+            ValidationCode::BudgetAccumulatorOverflow {
+                site: right_site,
+                projected_max_abs: right_projected,
+            },
+        ) => (left_site, left_projected).cmp(&(right_site, right_projected)),
+        (
+            ValidationCode::BudgetSwitchesPerTokenOverCap {
+                decision_value: left_decision,
+                upper_bound: left_upper,
+                cap: left_cap,
+                source: left_source,
+            },
+            ValidationCode::BudgetSwitchesPerTokenOverCap {
+                decision_value: right_decision,
+                upper_bound: right_upper,
+                cap: right_cap,
+                source: right_source,
+            },
+        )
+        | (
+            ValidationCode::BudgetSramPageSwitchesPerTokenOverCap {
+                decision_value: left_decision,
+                upper_bound: left_upper,
+                cap: left_cap,
+                source: left_source,
+            },
+            ValidationCode::BudgetSramPageSwitchesPerTokenOverCap {
+                decision_value: right_decision,
+                upper_bound: right_upper,
+                cap: right_cap,
+                source: right_source,
+            },
+        ) => (left_decision, left_upper, left_cap, left_source).cmp(&(
+            right_decision,
+            right_upper,
+            right_cap,
+            right_source,
+        )),
+        (
+            ValidationCode::BudgetPlacementProfileInfeasible {
+                profile: left_profile,
+                reason: left_reason,
+            },
+            ValidationCode::BudgetPlacementProfileInfeasible {
+                profile: right_profile,
+                reason: right_reason,
+            },
+        ) => (left_profile, placement_reason_rank(left_reason))
+            .cmp(&(right_profile, placement_reason_rank(right_reason))),
+        _ => format!("{left:?}").cmp(&format!("{right:?}")),
+    }
+}
+
+fn diagnostic_detail_key(detail: &ValidationDetail) -> String {
+    match detail {
+        ValidationDetail::Selector { selector } => selector.0.clone(),
+        ValidationDetail::Field { field } => field.to_string(),
+        _ => format!("{detail:?}"),
+    }
 }
 
 pub fn runtime_chrome_budget_hash(
@@ -438,7 +822,9 @@ fn validate_missing_budget_shape(
         && missing_budget
         && outcome == ReportOutcome::Failed
         && missing_diagnostics == 1
-        && missing_failures == 1;
+        && missing_failures == 1
+        && report.diagnostics.len() == 1
+        && report.decision.failures.len() == 1;
 
     if any_missing_marker && !exact_missing_shape {
         errors.push(semantic_error("runtime_chrome_budget.missing_shape"));
@@ -472,6 +858,12 @@ fn validate_diagnostics(report: &StaticBudgetReportBody, errors: &mut Vec<Valida
     if !failure_diagnostics_are_one_to_one(&report.decision.failures, &report.diagnostics) {
         errors.push(semantic_error("diagnostics.budget_failure_one_to_one"));
     }
+    if !is_canonically_ordered_by(&report.decision.failures, cmp_budget_failures) {
+        errors.push(semantic_error("decision.failures"));
+    }
+    if !is_canonically_ordered_by(&report.diagnostics, cmp_diagnostics) {
+        errors.push(semantic_error("diagnostics"));
+    }
 }
 
 fn validate_projection_order(
@@ -491,6 +883,13 @@ fn validate_projection_order(
         .all(|pair| pair[0].slot < pair[1].slot)
     {
         errors.push(semantic_error("projections.per_bank_occupancy"));
+    }
+    if !projections
+        .accumulator_maxima
+        .windows(2)
+        .all(|pair| pair[0].site < pair[1].site)
+    {
+        errors.push(semantic_error("projections.accumulator_maxima"));
     }
     if projections.routing_model.kind.is_empty() {
         errors.push(semantic_error("projections.routing_model.kind"));
@@ -571,12 +970,13 @@ fn validate_runtime_chrome_budget(
             ));
         }
         let residual = effective_cap - i64::from(entry.assigned_bytes);
-        if let Ok(residual) = i32::try_from(residual)
-            && entry.residual_bytes != residual
-        {
-            errors.push(semantic_error(
-                "projections.per_bank_occupancy.residual_bytes",
-            ));
+        match i32::try_from(residual) {
+            Ok(residual) if entry.residual_bytes == residual => {}
+            _ => {
+                errors.push(semantic_error(
+                    "projections.per_bank_occupancy.residual_bytes",
+                ));
+            }
         }
     }
 }
@@ -604,6 +1004,7 @@ fn validate_missing_budget_has_no_view_payload(
 fn validate_expert_assignment_invariants(
     projections: &BudgetProjectionSection,
     fits: bool,
+    failures: &[BudgetFailure],
     errors: &mut Vec<ValidationDiagnostic>,
 ) {
     let assigned_experts = projections
@@ -635,12 +1036,41 @@ fn validate_expert_assignment_invariants(
                 "projections.per_expert_payload.assigned_component",
             ));
         }
-        if !fits && expert.assigned_slot.is_none() && expert.unassigned_because.is_none() {
+        if !fits
+            && expert.assigned_slot.is_none()
+            && expert.unassigned_because.is_none()
+            && !unassigned_expert_has_matching_failure(expert, failures)
+        {
             errors.push(semantic_error(
                 "projections.per_expert_payload.unassigned_because",
             ));
         }
     }
+}
+
+fn unassigned_expert_has_matching_failure(
+    expert: &PerExpertEntry,
+    failures: &[BudgetFailure],
+) -> bool {
+    failures.iter().any(|failure| match failure {
+        BudgetFailure::ExpertExceedsSlot {
+            layer,
+            expert: failure_expert,
+            ..
+        } => (*layer, *failure_expert) == (expert.layer, expert.expert),
+        BudgetFailure::PlacementProfileInfeasible { reason, .. } => matches!(
+            (&expert.placement_status, reason),
+            (
+                ExpertPlacementStatus::UnassignedNoEligibleSlots,
+                gbf_policy::PlacementInfeasibilityReason::NoSlotsForClass
+                    | gbf_policy::PlacementInfeasibilityReason::RequiresUnavailableSlotClass
+            ) | (
+                ExpertPlacementStatus::UnassignedStrictDistinctSlotsExhausted,
+                gbf_policy::PlacementInfeasibilityReason::ExpertCountExceedsSlots
+            )
+        ),
+        _ => false,
+    })
 }
 
 fn validate_switch_failures(
@@ -717,10 +1147,23 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    use crate::{ReportEnvelope, canonicalize, round_trip_self_hash};
+    use crate::{CanonicalJsonError, ReportEnvelope, canonicalize, round_trip_self_hash};
 
     fn hash(byte: u8) -> Hash256 {
         Hash256::from_bytes([byte; 32])
+    }
+
+    fn semantic_error_fields(body: &StaticBudgetReportBody) -> Vec<String> {
+        body.validate_semantics(ReportOutcome::Failed)
+            .expect_err("body should fail semantic validation")
+            .into_iter()
+            .filter_map(|diagnostic| match diagnostic.code {
+                ValidationCode::ReportSemanticInvariantViolated { field } => {
+                    Some(field.to_string())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn identity(runtime_chrome_budget_hash: Option<Hash256>) -> BudgetIdentitySection {
@@ -925,6 +1368,25 @@ mod tests {
         .expect("self hash")
     }
 
+    #[derive(Debug, Clone, Serialize)]
+    struct StaticBudgetFloatProbe {
+        projections: serde_json::Value,
+        diagnostics: Vec<ValidationDiagnosticRecord>,
+    }
+
+    impl ReportBody for StaticBudgetFloatProbe {
+        const REPORT_TYPE: &'static str = "StaticBudgetReport";
+        const SCHEMA_ID: &'static str = SCHEMA_ID;
+        const SCHEMA_VERSION: &'static str = SCHEMA_VERSION;
+
+        fn validate_semantics(
+            &self,
+            _outcome: ReportOutcome,
+        ) -> Result<(), Vec<ValidationDiagnostic>> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn f_b4_static_budget_v1_schema_accepts_canonical_fixture() {
         let report = report_fixture();
@@ -986,13 +1448,25 @@ mod tests {
 
     #[test]
     fn f_b4_static_budget_v1_rejects_float_values() {
-        let mut value = serde_json::to_value(report_fixture()).expect("report serializes");
-        value["projections"]["projected_wram"]["peak_bytes"] = serde_json::json!(1.25);
+        let report = ReportEnvelope::new(
+            ReportOutcome::Passed,
+            StaticBudgetFloatProbe {
+                projections: serde_json::json!({
+                    "projected_wram": {
+                        "peak_bytes": 1.25
+                    }
+                }),
+                diagnostics: Vec::new(),
+            },
+        )
+        .expect("float probe envelope");
 
-        assert!(matches!(
-            serde_json::from_value::<ReportEnvelope<StaticBudgetReportBody>>(value),
-            Err(_)
-        ));
+        assert_eq!(
+            canonicalize(&report),
+            Err(CanonicalJsonError::FloatingPointValue {
+                path: "projections.projected_wram.peak_bytes".to_owned()
+            })
+        );
     }
 
     #[test]
@@ -1014,6 +1488,18 @@ mod tests {
             missing_failure
                 .validate_semantics(ReportOutcome::Failed)
                 .is_err()
+        );
+
+        let extra_failure = BudgetFailure::WramPeakExceedsCap { peak: 2, cap: 1 };
+        let mut extra = report.body.clone();
+        extra.decision.failures.push(extra_failure.clone());
+        extra
+            .diagnostics
+            .push(budget_failure_diagnostic(&extra_failure));
+
+        assert!(
+            semantic_error_fields(&extra)
+                .contains(&"runtime_chrome_budget.missing_shape".to_owned())
         );
     }
 
@@ -1085,7 +1571,122 @@ mod tests {
 
         let mut mismatched = diagnostics.clone();
         mismatched.swap(0, 1);
+        assert!(failure_diagnostics_are_one_to_one(&failures, &mismatched));
+
+        mismatched[0] =
+            budget_failure_diagnostic(&BudgetFailure::WramPeakExceedsCap { peak: 9, cap: 8 });
         assert!(!failure_diagnostics_are_one_to_one(&failures, &mismatched));
+    }
+
+    #[test]
+    fn f_b4_static_budget_v1_enforces_projection_and_failure_ordering() {
+        let mut unordered_accumulators = report_fixture().body;
+        unordered_accumulators.projections.accumulator_maxima = vec![
+            AccumulatorBound {
+                site: ReductionSiteId("site.1".to_owned()),
+                projected_max_abs: 127,
+                i16_safe: true,
+                i32_safe: true,
+            },
+            AccumulatorBound {
+                site: ReductionSiteId("site.0".to_owned()),
+                projected_max_abs: 127,
+                i16_safe: true,
+                i32_safe: true,
+            },
+        ];
+
+        assert!(
+            semantic_error_fields(&unordered_accumulators)
+                .contains(&"projections.accumulator_maxima".to_owned())
+        );
+
+        let expert_failure = BudgetFailure::ExpertExceedsSlot {
+            layer: LayerId::new(0),
+            expert: ExpertId::new(0),
+            slot: BudgetSlotId::new(1),
+            payload_bytes: 1024,
+            cap_bytes: 896,
+            excess_bytes: 128,
+        };
+        let wram_failure = BudgetFailure::WramPeakExceedsCap {
+            peak: 8193,
+            cap: 8192,
+        };
+        let mut unordered_failures = failure_report_fixture().body;
+        unordered_failures.decision.failures = vec![wram_failure.clone(), expert_failure.clone()];
+        unordered_failures.diagnostics =
+            diagnostics_for_budget_failures(&[expert_failure.clone(), wram_failure.clone()]);
+
+        assert!(
+            semantic_error_fields(&unordered_failures).contains(&"decision.failures".to_owned())
+        );
+
+        let mut unordered_diagnostics = failure_report_fixture().body;
+        unordered_diagnostics.decision.failures =
+            vec![expert_failure.clone(), wram_failure.clone()];
+        unordered_diagnostics.diagnostics =
+            diagnostics_for_budget_failures(&[wram_failure, expert_failure]);
+
+        assert!(failure_diagnostics_are_one_to_one(
+            &unordered_diagnostics.decision.failures,
+            &unordered_diagnostics.diagnostics
+        ));
+        assert!(semantic_error_fields(&unordered_diagnostics).contains(&"diagnostics".to_owned()));
+    }
+
+    #[test]
+    fn f_b4_static_budget_v1_rejects_residual_overflow() {
+        let mut body = report_fixture().body;
+        let slot = &mut body
+            .runtime_chrome_budget
+            .as_mut()
+            .expect("runtime budget present")
+            .rom_slots[0];
+        slot.usable_bytes = u32::MAX;
+        slot.reserved_slack = 0;
+
+        body.projections.per_bank_occupancy[0].usable_bytes = u32::MAX;
+        body.projections.per_bank_occupancy[0].reserved_slack = 0;
+        body.projections.per_bank_occupancy[0].effective_cap_bytes = i64::from(u32::MAX);
+        body.projections.per_bank_occupancy[0].residual_bytes = i32::MAX;
+        body.identity.runtime_chrome_budget_hash =
+            Some(runtime_chrome_budget_hash(body.runtime_chrome_budget.as_ref().unwrap()).unwrap());
+
+        assert!(
+            semantic_error_fields(&body)
+                .contains(&"projections.per_bank_occupancy.residual_bytes".to_owned())
+        );
+    }
+
+    #[test]
+    fn f_b4_static_budget_v1_unassigned_experts_may_be_explained_by_failures() {
+        let mut body = report_fixture().body;
+        let failure = BudgetFailure::PlacementProfileInfeasible {
+            profile: PlacementProfile::Budgeted,
+            reason: gbf_policy::PlacementInfeasibilityReason::NoSlotsForClass,
+        };
+        body.decision = decision(false, vec![failure.clone()]);
+        body.diagnostics = vec![budget_failure_diagnostic(&failure)];
+        body.projections.per_expert_payload[0].assigned_slot = None;
+        body.projections.per_expert_payload[0].unassigned_because = None;
+        body.projections.per_expert_payload[0].placement_status =
+            ExpertPlacementStatus::UnassignedNoEligibleSlots;
+        body.projections.per_bank_occupancy[0].assigned_bytes = 0;
+        body.projections.per_bank_occupancy[0].residual_bytes = 896;
+        body.projections.per_bank_occupancy[0]
+            .assigned_components
+            .clear();
+
+        body.validate_semantics(ReportOutcome::Failed)
+            .expect("matching placement failure explains unassigned expert");
+
+        body.decision.failures.clear();
+        body.diagnostics.clear();
+        assert!(
+            semantic_error_fields(&body)
+                .contains(&"projections.per_expert_payload.unassigned_because".to_owned())
+        );
     }
 
     #[test]
