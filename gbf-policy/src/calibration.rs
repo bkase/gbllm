@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use gbf_foundation::{Hash256, PackerVersion};
-use gbf_hw::calibration::CalibrationConfidenceClass;
+use gbf_hw::calibration::{
+    CalibrationConfidenceClass, CalibrationSetRef as LayeredCalibrationSetRef,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -100,6 +102,7 @@ pub struct CalibrationBundle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalibrationBundleSet {
+    pub resolved_ref: LayeredCalibrationSetRef,
     pub bundles: BTreeMap<CalibrationLayer, CalibrationBundle>,
 }
 
@@ -110,6 +113,7 @@ impl Serialize for CalibrationBundleSet {
     {
         #[derive(Serialize)]
         struct CalibrationBundleSetRepr<'a> {
+            resolved_ref: &'a LayeredCalibrationSetRef,
             bundles: BTreeMap<&'static str, &'a CalibrationBundle>,
         }
 
@@ -118,7 +122,11 @@ impl Serialize for CalibrationBundleSet {
             .iter()
             .map(|(layer, bundle)| (layer.as_str(), bundle))
             .collect();
-        CalibrationBundleSetRepr { bundles }.serialize(serializer)
+        CalibrationBundleSetRepr {
+            resolved_ref: &self.resolved_ref,
+            bundles,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -130,6 +138,8 @@ impl<'de> Deserialize<'de> for CalibrationBundleSet {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct CalibrationBundleSetRepr {
+            #[serde(default)]
+            resolved_ref: LayeredCalibrationSetRef,
             bundles: BTreeMap<String, CalibrationBundle>,
         }
 
@@ -148,7 +158,10 @@ impl<'de> Deserialize<'de> for CalibrationBundleSet {
                 Ok((parsed, bundle))
             })
             .collect::<Result<_, _>>()?;
-        Ok(Self { bundles })
+        Ok(Self {
+            resolved_ref: repr.resolved_ref,
+            bundles,
+        })
     }
 }
 
@@ -180,6 +193,21 @@ pub struct MeasurementBlob {
 pub struct BootstrapCalibrationBundle;
 
 impl BootstrapCalibrationBundle {
+    #[must_use]
+    pub fn dmg_mbc5_ref() -> LayeredCalibrationSetRef {
+        LayeredCalibrationSetRef {
+            platform: Some(gbf_foundation::PlatformCalibrationId::from(
+                "platform.bootstrap-dmg-mbc5",
+            )),
+            kernel: Some(gbf_foundation::KernelCalibrationId::from(
+                "kernel.bootstrap-dmg-mbc5",
+            )),
+            runtime: Some(gbf_foundation::RuntimeCalibrationId::from(
+                "runtime.bootstrap-dmg-mbc5",
+            )),
+        }
+    }
+
     #[allow(clippy::new_ret_no_self)]
     #[must_use]
     pub fn new(synthetic_target_profile_hash: Hash256) -> CalibrationBundleSet {
@@ -202,6 +230,9 @@ impl BootstrapCalibrationBundle {
             })
             .collect();
 
-        CalibrationBundleSet { bundles }
+        CalibrationBundleSet {
+            resolved_ref: Self::dmg_mbc5_ref(),
+            bundles,
+        }
     }
 }

@@ -1,4 +1,9 @@
 {
+  "resolved_ref": {
+    "platform": "platform.bootstrap-dmg-mbc5",
+    "kernel": "kernel.bootstrap-dmg-mbc5",
+    "runtime": "runtime.bootstrap-dmg-mbc5"
+  },
   "bundles": {
     "Kernel": {
       "layer": {

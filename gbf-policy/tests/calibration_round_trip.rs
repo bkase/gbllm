@@ -53,6 +53,14 @@ fn expected_bundle_json(layer: CalibrationLayer) -> serde_json::Value {
     })
 }
 
+fn expected_resolved_ref_json() -> serde_json::Value {
+    serde_json::json!({
+        "platform": "platform.bootstrap-dmg-mbc5",
+        "kernel": "kernel.bootstrap-dmg-mbc5",
+        "runtime": "runtime.bootstrap-dmg-mbc5"
+    })
+}
+
 #[test]
 fn calibration_layer_round_trip_all_variants() {
     for layer in CalibrationLayer::all() {
@@ -96,7 +104,10 @@ fn calibration_bundle_set_round_trip() {
             calibration_bundle_fixture(CalibrationLayer::Runtime),
         ),
     ]);
-    let set = CalibrationBundleSet { bundles };
+    let set = CalibrationBundleSet {
+        resolved_ref: BootstrapCalibrationBundle::dmg_mbc5_ref(),
+        bundles,
+    };
     let encoded = serde_json::to_string(&set).expect("set serializes");
     let decoded: CalibrationBundleSet = serde_json::from_str(&encoded).expect("set deserializes");
 
@@ -108,7 +119,8 @@ fn calibration_bundle_set_round_trip() {
                 "Kernel": expected_bundle_json(CalibrationLayer::Kernel),
                 "Platform": expected_bundle_json(CalibrationLayer::Platform),
                 "Runtime": expected_bundle_json(CalibrationLayer::Runtime)
-            }
+            },
+            "resolved_ref": expected_resolved_ref_json()
         })
     );
 }

@@ -16,7 +16,7 @@ pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_JSON: &str =
 pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256_SIDECAR: &str =
     include_str!("../../fixtures/calibration/bootstrap-dmg-mbc5.calibration.sha256");
 pub const BOOTSTRAP_DMG_MBC5_CALIBRATION_SHA256: &str =
-    "f1073528d74cfebba99aad3ddde6deb9c23832cf65d86523a9ea4337b5c34ac6";
+    "f9a041aef8e42a5cfbdbb017d1da5c542bb89f3f5199339ef860569a239a8da5";
 pub const BOOTSTRAP_DMG_MBC5_TARGET_PROFILE_HASH: &str =
     "sha256:4f471a6c2e0c76b9cc7c708c0b2e41b434619fbcb55416d027ce2ded39f9f96b";
 
@@ -100,6 +100,7 @@ impl CalibrationBundleSetBuilder {
     #[must_use]
     pub fn build(self) -> CalibrationBundleSet {
         CalibrationBundleSet {
+            resolved_ref: BootstrapCalibrationBundle::dmg_mbc5_ref(),
             bundles: self.bundles,
         }
     }
