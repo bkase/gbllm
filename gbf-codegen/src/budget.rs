@@ -1127,9 +1127,8 @@ fn place_common_bank_components(
                 id: kernel.id.clone(),
             },
             kernel.bank0_compatible,
-            aggregate_bytes,
         ) {
-            push_unique_budget_failure(&mut failures, failure);
+            push_common_budget_failure(&mut failures, failure);
         }
     }
     for lut in &view.shared_luts {
@@ -1140,9 +1139,8 @@ fn place_common_bank_components(
             lut.bytes,
             BudgetComponentRef::SharedLut { id: lut.id.clone() },
             lut.bank0_compatible,
-            aggregate_bytes,
         ) {
-            push_unique_budget_failure(&mut failures, failure);
+            push_common_budget_failure(&mut failures, failure);
         }
     }
     if let Some(shared_dense_ffn) = &view.shared_dense_ffn
@@ -1153,16 +1151,38 @@ fn place_common_bank_components(
             shared_dense_ffn.bytes,
             BudgetComponentRef::SharedDenseFfn,
             shared_dense_ffn.bank0_compatible,
-            aggregate_bytes,
         )
     {
-        push_unique_budget_failure(&mut failures, failure);
+        push_common_budget_failure(&mut failures, failure);
     }
 
     failures
 }
 
-fn push_unique_budget_failure(failures: &mut Vec<BudgetFailure>, failure: BudgetFailure) {
+fn push_common_budget_failure(failures: &mut Vec<BudgetFailure>, failure: BudgetFailure) {
+    if let BudgetFailure::CommonBankExceedsCap {
+        assigned_bytes,
+        cap_bytes,
+        excess_bytes,
+    } = &failure
+        && let Some(existing) = failures.iter_mut().find_map(|candidate| match candidate {
+            BudgetFailure::CommonBankExceedsCap {
+                assigned_bytes,
+                cap_bytes,
+                excess_bytes,
+            } => Some((assigned_bytes, cap_bytes, excess_bytes)),
+            _ => None,
+        })
+    {
+        let (existing_assigned_bytes, existing_cap_bytes, existing_excess_bytes) = existing;
+        if (*excess_bytes, *assigned_bytes) > (*existing_excess_bytes, *existing_assigned_bytes) {
+            *existing_assigned_bytes = *assigned_bytes;
+            *existing_cap_bytes = *cap_bytes;
+            *existing_excess_bytes = *excess_bytes;
+        }
+        return;
+    }
+
     if !failures.contains(&failure) {
         failures.push(failure);
     }
@@ -1175,17 +1195,12 @@ fn place_common_component(
     component_bytes: u32,
     component: BudgetComponentRef,
     bank0_compatible: bool,
-    aggregate_bytes: u32,
 ) -> Option<BudgetFailure> {
     let mut saw_eligible_slot = false;
-    let mut eligible_cap_bytes = 0u32;
 
     for entry in per_bank_occupancy.iter() {
         if common_component_slot_eligible(runtime_chrome_budget, entry, profile, bank0_compatible) {
             saw_eligible_slot = true;
-            eligible_cap_bytes = eligible_cap_bytes.saturating_add(
-                u32::try_from(entry.effective_cap_bytes.max(0)).unwrap_or(u32::MAX),
-            );
         }
     }
 
@@ -1211,20 +1226,10 @@ fn place_common_component(
         slot.assigned_bytes = slot.assigned_bytes.saturating_add(component_bytes);
         slot.assigned_components.push(component);
         let slot_cap_bytes = u32::try_from(slot.effective_cap_bytes.max(0)).unwrap_or(u32::MAX);
-        let assigned_bytes = if aggregate_bytes > eligible_cap_bytes {
-            aggregate_bytes
-        } else {
-            slot.assigned_bytes
-        };
-        let cap_bytes = if aggregate_bytes > eligible_cap_bytes {
-            eligible_cap_bytes
-        } else {
-            slot_cap_bytes
-        };
         Some(BudgetFailure::CommonBankExceedsCap {
-            assigned_bytes,
-            cap_bytes,
-            excess_bytes: assigned_bytes.saturating_sub(cap_bytes),
+            assigned_bytes: slot.assigned_bytes,
+            cap_bytes: slot_cap_bytes,
+            excess_bytes: slot.assigned_bytes.saturating_sub(slot_cap_bytes),
         })
     } else {
         Some(BudgetFailure::PlacementProfileInfeasible {
@@ -3472,6 +3477,98 @@ mod tests {
     }
 
     #[test]
+    fn f_b4_budget_common_failure_excludes_bank0_bytes_from_common_only_cap() {
+        let policy = policy_with_placement(PlacementProfile::Budgeted);
+        let budget = runtime_budget_with_slots(vec![
+            bank0_slot(0, 8, [PlacementProfile::Budgeted]),
+            common_slot(1, 10, [PlacementProfile::Budgeted]),
+            expert_slot(2, 64, 0, [PlacementProfile::Budgeted]),
+        ]);
+        let mut view = budget_view_fixture(1, 1, 3);
+        view.shared_kernels = vec![SharedKernelProjection {
+            id: KernelSpecId::from("kernel.bank0.ok"),
+            bytes: 8,
+            bank0_compatible: true,
+        }];
+        view.shared_luts = vec![SharedLutProjection {
+            id: "lut.common.only".to_owned(),
+            bytes: 8,
+            bank0_compatible: false,
+        }];
+        view.shared_dense_ffn = Some(SharedDenseFfnProjection {
+            bytes: 5,
+            bank0_compatible: false,
+        });
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::CommonBankExceedsCap {
+                assigned_bytes: 13,
+                cap_bytes: 10,
+                excess_bytes: 3,
+            }]
+        );
+        assert_eq!(
+            report.report.body.projections.common_bank_footprint,
+            CommonBankFootprintSection {
+                kernel_bytes: 8,
+                lut_bytes: 8,
+                shared_dense_ffn_bytes: Some(5),
+                aggregate_bytes: 21,
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_bank0_compatible_failure_reports_slot_domain_cap() {
+        let policy = policy_with_placement(PlacementProfile::Budgeted);
+        let budget = runtime_budget_with_slots(vec![
+            bank0_slot(0, 10, [PlacementProfile::Budgeted]),
+            common_slot(1, 10, [PlacementProfile::Budgeted]),
+            expert_slot(2, 64, 0, [PlacementProfile::Budgeted]),
+        ]);
+        let mut view = budget_view_fixture(1, 1, 3);
+        view.shared_kernels = vec![SharedKernelProjection {
+            id: KernelSpecId::from("kernel.bank0.ok"),
+            bytes: 8,
+            bank0_compatible: true,
+        }];
+        view.shared_luts = vec![SharedLutProjection {
+            id: "lut.common.full".to_owned(),
+            bytes: 10,
+            bank0_compatible: false,
+        }];
+        view.shared_dense_ffn = Some(SharedDenseFfnProjection {
+            bytes: 5,
+            bank0_compatible: true,
+        });
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::CommonBankExceedsCap {
+                assigned_bytes: 13,
+                cap_bytes: 10,
+                excess_bytes: 3,
+            }]
+        );
+        assert_eq!(
+            report
+                .report
+                .body
+                .projections
+                .common_bank_footprint
+                .aggregate_bytes,
+            23
+        );
+    }
+
+    #[test]
     fn f_b4_budget_aggregate_bytes_equals_sum_of_components() {
         let policy = policy_with_placement(PlacementProfile::Budgeted);
         let budget = runtime_budget_with_slots(vec![
@@ -3499,10 +3596,43 @@ mod tests {
 
         assert_eq!(report.report.outcome, ReportOutcome::Passed);
         assert_eq!(
-            footprint.aggregate_bytes,
-            footprint.kernel_bytes
-                + footprint.lut_bytes
-                + footprint.shared_dense_ffn_bytes.unwrap_or(0)
+            *footprint,
+            CommonBankFootprintSection {
+                kernel_bytes: 14,
+                lut_bytes: 9,
+                shared_dense_ffn_bytes: Some(6),
+                aggregate_bytes: 29,
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_common_footprint_overflow_is_malformed_view() {
+        let policy = policy_with_placement(PlacementProfile::Budgeted);
+        let budget = runtime_budget_with_slots(vec![
+            common_slot(1, u32::MAX, [PlacementProfile::Budgeted]),
+            expert_slot(2, 64, 0, [PlacementProfile::Budgeted]),
+        ]);
+        let mut view = budget_view_fixture(1, 1, 3);
+        view.shared_kernels = vec![SharedKernelProjection {
+            id: KernelSpecId::from("kernel.max"),
+            bytes: u32::MAX,
+            bank0_compatible: false,
+        }];
+        view.shared_luts = vec![SharedLutProjection {
+            id: "lut.one".to_owned(),
+            bytes: 1,
+            bank0_compatible: false,
+        }];
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("budget_view.common_bank_footprint.aggregate_bytes"),
+            }]
         );
     }
 
