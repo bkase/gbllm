@@ -68,12 +68,13 @@ struct ResolutionState {
 pub fn resolve_policy(
     validation: &ValidationProduct<'_>,
 ) -> Result<ResolvedPolicyProduct, PolicyResolutionStageFailure> {
+    let values = conservative_target_values();
     let mut state = ResolutionState {
-        values: conservative_target_values(),
+        provenance: value_seed_provenance(&values, target_evidence(validation)),
+        values,
         bounds: canonical_default_bounds_fixture(),
         locks: KnobLockSet::default(),
         overrides: CompileKnobOverrides::default(),
-        provenance: BTreeMap::new(),
         hint_consumption: HintConsumptionSection::default(),
     };
 
@@ -275,9 +276,9 @@ fn apply_frame(
 
     for knob in &frame.locks.locked {
         state.locks.locked.insert(*knob);
-        push_provenance(
+        push_provenance_path(
             &mut state.provenance,
-            *knob,
+            lock_path(*knob),
             ConstraintProvenance {
                 source: frame.source.clone(),
                 operation: ConstraintOperation::SeedDefault,
@@ -313,9 +314,20 @@ fn apply_bounds(
                         frame.evidence.clone(),
                     ));
                 }
-                state.bounds.$field = meet_bound(state.bounds.$field, next);
+                let before = state.bounds.$field;
+                state.bounds.$field = meet_bound(before, next);
                 if compile_request_override {
                     state.overrides.bounds.$field = Some(next);
+                    push_bound_override_provenance(
+                        &mut state.provenance,
+                        $knob,
+                        next,
+                        ConstraintProvenance {
+                            source: frame.source.clone(),
+                            operation: ConstraintOperation::ApplyOverride,
+                            evidence: frame.evidence.clone(),
+                        },
+                    );
                 }
                 if !value_within_knob_bounds($knob, &state.values, &state.bounds) {
                     return Err(out_of_bounds_diagnostic(
@@ -325,9 +337,12 @@ fn apply_bounds(
                         frame.evidence.clone(),
                     ));
                 }
-                push_provenance(
+                push_bound_provenance(
                     &mut state.provenance,
                     $knob,
+                    before,
+                    state.bounds.$field,
+                    matches!(frame.source, PolicySource::TargetDefault),
                     ConstraintProvenance {
                         source: frame.source.clone(),
                         operation: operation_for_bound_source(&frame.source),
@@ -376,13 +391,27 @@ fn apply_values(
                         frame.evidence.clone(),
                     ));
                 }
+                let before = state.values.$field;
                 state.values.$field = next;
                 if matches!(frame.source, PolicySource::CompileRequestOverride) {
                     state.overrides.values.$field = Some(next);
+                    push_value_override_provenance(
+                        &mut state.provenance,
+                        $knob,
+                        next,
+                        ConstraintProvenance {
+                            source: frame.source.clone(),
+                            operation,
+                            evidence: frame.evidence.clone(),
+                        },
+                    );
                 }
-                push_provenance(
+                push_value_provenance(
                     &mut state.provenance,
                     $knob,
+                    before,
+                    next,
+                    !matches!(frame.source, PolicySource::Calibration),
                     ConstraintProvenance {
                         source: frame.source.clone(),
                         operation,
@@ -434,6 +463,7 @@ fn apply_preferences(
                         return Err(locked_diagnostic($knob, frame.evidence.clone()));
                     }
 
+                    let before = state.values.$field;
                     state.values.$field = next;
                     state
                         .hint_consumption
@@ -442,9 +472,12 @@ fn apply_preferences(
                             knob: $knob,
                             provenance: provenance.clone(),
                         });
-                    push_provenance(
+                    push_value_provenance(
                         &mut state.provenance,
                         $knob,
+                        before,
+                        next,
+                        true,
                         ConstraintProvenance {
                             source: frame.source.clone(),
                             operation: ConstraintOperation::ApplyPreference,
@@ -844,6 +877,7 @@ fn operation_for_value_source(source: &PolicySource) -> ConstraintOperation {
 
 fn operation_for_bound_source(source: &PolicySource) -> ConstraintOperation {
     match source {
+        PolicySource::TargetDefault => ConstraintOperation::SeedDefault,
         PolicySource::CompileRequestOverride => ConstraintOperation::ApplyOverride,
         PolicySource::HintBundle => ConstraintOperation::ApplyHardConstraint,
         PolicySource::Calibration => ConstraintOperation::ApplyCalibration,
@@ -851,19 +885,428 @@ fn operation_for_bound_source(source: &PolicySource) -> ConstraintOperation {
     }
 }
 
-fn push_provenance(
+fn push_provenance_path(
     provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
-    knob: CompileKnobId,
+    path: CompileKnobPath,
     entry: ConstraintProvenance,
 ) {
-    provenance.entry(knob_path(knob)).or_default().push(entry);
+    provenance.entry(path).or_default().push(entry);
+}
+
+fn value_seed_provenance(
+    values: &CompileKnobValues,
+    evidence: EvidenceRef,
+) -> BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>> {
+    let mut provenance = BTreeMap::new();
+    let entry = ConstraintProvenance {
+        source: PolicySource::TargetDefault,
+        operation: ConstraintOperation::SeedDefault,
+        evidence: vec![evidence],
+    };
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::Placement,
+        values.placement,
+        values.placement,
+        true,
+        entry.clone(),
+    );
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::Observation,
+        values.observation,
+        values.observation,
+        true,
+        entry.clone(),
+    );
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::Range,
+        values.range,
+        values.range,
+        true,
+        entry.clone(),
+    );
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::Storage,
+        values.storage,
+        values.storage,
+        true,
+        entry.clone(),
+    );
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::Sram,
+        values.sram,
+        values.sram,
+        true,
+        entry.clone(),
+    );
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::RomWindow,
+        values.rom_window,
+        values.rom_window,
+        true,
+        entry.clone(),
+    );
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::Overlay,
+        values.overlay,
+        values.overlay,
+        true,
+        entry.clone(),
+    );
+    push_value_provenance(
+        &mut provenance,
+        CompileKnobId::Schedule,
+        values.schedule,
+        values.schedule,
+        true,
+        entry,
+    );
+    provenance
+}
+
+trait ValueProvenanceFields: Copy + PartialEq {
+    fn push_value_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    );
+}
+
+trait BoundProvenanceFields: Copy + PartialEq {
+    fn push_bound_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    );
+}
+
+fn push_value_provenance<T: ValueProvenanceFields>(
+    provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+    knob: CompileKnobId,
+    before: T,
+    after: T,
+    force: bool,
+    entry: ConstraintProvenance,
+) {
+    T::push_value_fields(provenance, knob, before, after, force, entry, "global");
+}
+
+fn push_bound_provenance<T: BoundProvenanceFields>(
+    provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+    knob: CompileKnobId,
+    before: T,
+    after: T,
+    force: bool,
+    entry: ConstraintProvenance,
+) {
+    T::push_bound_fields(provenance, knob, before, after, force, entry, "bounds");
+}
+
+fn push_value_override_provenance<T: ValueProvenanceFields>(
+    provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+    knob: CompileKnobId,
+    value: T,
+    entry: ConstraintProvenance,
+) {
+    T::push_value_fields(
+        provenance,
+        knob,
+        value,
+        value,
+        true,
+        entry,
+        "overrides.values",
+    );
+}
+
+fn push_bound_override_provenance<T: BoundProvenanceFields>(
+    provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+    knob: CompileKnobId,
+    value: T,
+    entry: ConstraintProvenance,
+) {
+    T::push_bound_fields(
+        provenance,
+        knob,
+        value,
+        value,
+        true,
+        entry,
+        "overrides.bounds",
+    );
+}
+
+fn push_leaf_if_changed<T: PartialEq>(
+    provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+    knob: CompileKnobId,
+    before: &T,
+    after: &T,
+    force: bool,
+    field: &str,
+    entry: &ConstraintProvenance,
+) {
+    if force || before != after {
+        push_provenance_path(provenance, field_path(knob, field), entry.clone());
+    }
+}
+
+macro_rules! impl_single_value_provenance {
+    ($ty:ty, $field:ident) => {
+        impl ValueProvenanceFields for $ty {
+            fn push_value_fields(
+                provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+                knob: CompileKnobId,
+                before: Self,
+                after: Self,
+                force: bool,
+                entry: ConstraintProvenance,
+                prefix: &'static str,
+            ) {
+                push_leaf_if_changed(
+                    provenance,
+                    knob,
+                    &before.$field,
+                    &after.$field,
+                    force,
+                    &format!("{prefix}.{}", stringify!($field)),
+                    &entry,
+                );
+            }
+        }
+    };
+}
+
+macro_rules! impl_single_bound_provenance {
+    ($ty:ty, $field:ident) => {
+        impl BoundProvenanceFields for $ty {
+            fn push_bound_fields(
+                provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+                knob: CompileKnobId,
+                before: Self,
+                after: Self,
+                force: bool,
+                entry: ConstraintProvenance,
+                prefix: &'static str,
+            ) {
+                push_leaf_if_changed(
+                    provenance,
+                    knob,
+                    &before.$field,
+                    &after.$field,
+                    force,
+                    &format!("{prefix}.{}", stringify!($field)),
+                    &entry,
+                );
+            }
+        }
+    };
+}
+
+impl_single_value_provenance!(PlacementKnob, profile);
+impl_single_value_provenance!(gbf_policy::RangeKnob, reduction_ceiling);
+impl_single_value_provenance!(gbf_policy::StorageKnob, materialization);
+impl_single_value_provenance!(gbf_policy::SramKnob, page_aggression);
+impl_single_value_provenance!(gbf_policy::OverlayKnob, promotion);
+
+impl ValueProvenanceFields for ObservationKnob {
+    fn push_value_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.observability,
+            &after.observability,
+            force,
+            &format!("{prefix}.observability"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.probe_level,
+            &after.probe_level,
+            force,
+            &format!("{prefix}.probe_level"),
+            &entry,
+        );
+    }
+}
+
+impl ValueProvenanceFields for RomWindowKnob {
+    fn push_value_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.kernel_residency_bias,
+            &after.kernel_residency_bias,
+            force,
+            &format!("{prefix}.kernel_residency_bias"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.kernel_duplication_bias,
+            &after.kernel_duplication_bias,
+            force,
+            &format!("{prefix}.kernel_duplication_bias"),
+            &entry,
+        );
+    }
+}
+
+impl ValueProvenanceFields for ScheduleKnob {
+    fn push_value_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.tile_search,
+            &after.tile_search,
+            force,
+            &format!("{prefix}.tile_search"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.slice_coarsening,
+            &after.slice_coarsening,
+            force,
+            &format!("{prefix}.slice_coarsening"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.resource_pressure,
+            &after.resource_pressure,
+            force,
+            &format!("{prefix}.resource_pressure"),
+            &entry,
+        );
+    }
+}
+
+impl_single_bound_provenance!(gbf_policy::PlacementKnobBounds, max_profile);
+impl_single_bound_provenance!(gbf_policy::ObservationKnobBounds, max_probe_level);
+impl_single_bound_provenance!(gbf_policy::RangeKnobBounds, max_reduction_ceiling);
+impl_single_bound_provenance!(gbf_policy::StorageKnobBounds, max_materialization);
+impl_single_bound_provenance!(gbf_policy::SramKnobBounds, max_page_aggression);
+impl_single_bound_provenance!(gbf_policy::OverlayKnobBounds, max_promotion);
+
+impl BoundProvenanceFields for gbf_policy::RomWindowKnobBounds {
+    fn push_bound_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_kernel_residency_bias,
+            &after.max_kernel_residency_bias,
+            force,
+            &format!("{prefix}.max_kernel_residency_bias"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_kernel_duplication_bias,
+            &after.max_kernel_duplication_bias,
+            force,
+            &format!("{prefix}.max_kernel_duplication_bias"),
+            &entry,
+        );
+    }
+}
+
+impl BoundProvenanceFields for gbf_policy::ScheduleKnobBounds {
+    fn push_bound_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_tile_search,
+            &after.max_tile_search,
+            force,
+            &format!("{prefix}.max_tile_search"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_slice_coarsening,
+            &after.max_slice_coarsening,
+            force,
+            &format!("{prefix}.max_slice_coarsening"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_resource_pressure,
+            &after.max_resource_pressure,
+            force,
+            &format!("{prefix}.max_resource_pressure"),
+            &entry,
+        );
+    }
 }
 
 fn provenance_entries(
     mut provenance: BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
 ) -> Vec<CompileKnobProvenanceEntry> {
-    for knob in all_knobs() {
-        provenance.entry(knob_path(knob)).or_insert_with(|| {
+    for path in all_required_leaf_paths() {
+        provenance.entry(path).or_insert_with(|| {
             vec![ConstraintProvenance {
                 source: PolicySource::TargetDefault,
                 operation: ConstraintOperation::SeedDefault,
@@ -877,12 +1320,16 @@ fn provenance_entries(
         .collect()
 }
 
-fn knob_path(knob: CompileKnobId) -> CompileKnobPath {
+fn field_path(knob: CompileKnobId, field: &str) -> CompileKnobPath {
     CompileKnobPath {
         knob,
         selector: None,
-        field: None,
+        field: Some(FieldPath::from(field)),
     }
+}
+
+fn lock_path(knob: CompileKnobId) -> CompileKnobPath {
+    field_path(knob, "locks.locked")
 }
 
 fn all_knobs() -> [CompileKnobId; 8] {
@@ -896,6 +1343,39 @@ fn all_knobs() -> [CompileKnobId; 8] {
         CompileKnobId::Overlay,
         CompileKnobId::Schedule,
     ]
+}
+
+fn all_required_leaf_paths() -> Vec<CompileKnobPath> {
+    let mut paths = Vec::new();
+    paths.extend([
+        field_path(CompileKnobId::Placement, "global.profile"),
+        field_path(CompileKnobId::Placement, "bounds.max_profile"),
+        field_path(CompileKnobId::Observation, "global.observability"),
+        field_path(CompileKnobId::Observation, "global.probe_level"),
+        field_path(CompileKnobId::Observation, "bounds.max_probe_level"),
+        field_path(CompileKnobId::Range, "global.reduction_ceiling"),
+        field_path(CompileKnobId::Range, "bounds.max_reduction_ceiling"),
+        field_path(CompileKnobId::Storage, "global.materialization"),
+        field_path(CompileKnobId::Storage, "bounds.max_materialization"),
+        field_path(CompileKnobId::Sram, "global.page_aggression"),
+        field_path(CompileKnobId::Sram, "bounds.max_page_aggression"),
+        field_path(CompileKnobId::RomWindow, "global.kernel_residency_bias"),
+        field_path(CompileKnobId::RomWindow, "global.kernel_duplication_bias"),
+        field_path(CompileKnobId::RomWindow, "bounds.max_kernel_residency_bias"),
+        field_path(
+            CompileKnobId::RomWindow,
+            "bounds.max_kernel_duplication_bias",
+        ),
+        field_path(CompileKnobId::Overlay, "global.promotion"),
+        field_path(CompileKnobId::Overlay, "bounds.max_promotion"),
+        field_path(CompileKnobId::Schedule, "global.tile_search"),
+        field_path(CompileKnobId::Schedule, "global.slice_coarsening"),
+        field_path(CompileKnobId::Schedule, "global.resource_pressure"),
+        field_path(CompileKnobId::Schedule, "bounds.max_tile_search"),
+        field_path(CompileKnobId::Schedule, "bounds.max_slice_coarsening"),
+        field_path(CompileKnobId::Schedule, "bounds.max_resource_pressure"),
+    ]);
+    paths
 }
 
 fn state_hint_constraints(frame: &ConstraintFrame) -> Vec<ConstraintEnforcement> {
@@ -1594,6 +2074,103 @@ mod tests {
             product.report.body.hint_consumption.preferences_ignored[0].reason,
             "outside_bounds"
         );
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_records_per_knob_provenance() {
+        let fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let product = resolve_policy(&fixture.validation()).expect("policy resolves");
+        let knobs = product
+            .policy
+            .knobs
+            .provenance
+            .iter()
+            .map(|entry| entry.path.knob)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(knobs, BTreeSet::from(all_knobs()));
+        assert!(product.policy.knobs.provenance.iter().all(|entry| {
+            !entry.chain.is_empty()
+                && entry.chain.iter().all(|provenance| {
+                    !matches!(provenance.source, PolicySource::RepairProposal { .. })
+                })
+        }));
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_records_path_level_provenance() {
+        let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        fixture.add_runtime_measurement();
+
+        let product = resolve_policy(&fixture.validation()).expect("policy resolves");
+        assert!(
+            product
+                .policy
+                .knobs
+                .provenance
+                .iter()
+                .all(|entry| { entry.path.selector.is_none() && entry.path.field.is_some() })
+        );
+
+        let pressure = provenance_entry(
+            &product,
+            CompileKnobId::Schedule,
+            "global.resource_pressure",
+        );
+        assert!(pressure.chain.iter().any(|provenance| {
+            provenance.source == PolicySource::Calibration
+                && provenance.operation == ConstraintOperation::ApplyCalibration
+        }));
+
+        let max_pressure = provenance_entry(
+            &product,
+            CompileKnobId::Schedule,
+            "bounds.max_resource_pressure",
+        );
+        assert!(max_pressure.chain.iter().any(|provenance| {
+            provenance.source == PolicySource::TargetDefault
+                && provenance.operation == ConstraintOperation::SeedDefault
+        }));
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_no_repair_proposal_provenance_in_chunk() {
+        let fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let product = resolve_policy(&fixture.validation()).expect("policy resolves");
+
+        assert!(product.policy.knobs.provenance.iter().all(|entry| {
+            entry
+                .chain
+                .iter()
+                .all(|provenance| !matches!(provenance.source, PolicySource::RepairProposal { .. }))
+        }));
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_no_profile_relaxation_field() {
+        let fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let product = resolve_policy(&fixture.validation()).expect("policy resolves");
+        let encoded = serde_json::to_string(&product.report).expect("report serializes");
+
+        assert!(!encoded.contains("relaxation"));
+        assert!(!encoded.contains("AuthorizedRelaxation"));
+    }
+
+    fn provenance_entry<'a>(
+        product: &'a ResolvedPolicyProduct,
+        knob: CompileKnobId,
+        field: &str,
+    ) -> &'a CompileKnobProvenanceEntry {
+        product
+            .policy
+            .knobs
+            .provenance
+            .iter()
+            .find(|entry| {
+                entry.path.knob == knob
+                    && entry.path.field.as_ref() == Some(&FieldPath::from(field))
+            })
+            .expect("path-level provenance entry exists")
     }
 
     fn assert_policy_failure(
