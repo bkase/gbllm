@@ -3,6 +3,8 @@
 //! This module wires the failure taxonomy, Stage 2 invocation input, and the
 //! static budget report path used by F-B4.
 
+use std::num::NonZeroU8;
+
 use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, TernaryWeightPlan, WeightEncoding};
 use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, KernelSpecId, LayerId};
 use gbf_hw::target::TargetProfile;
@@ -158,6 +160,36 @@ pub enum QuantGraphBudgetViewError {
 }
 
 pub type ByteBudget = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScaleFormatByteWidths {
+    pow2_scale_bytes: NonZeroU8,
+}
+
+impl ScaleFormatByteWidths {
+    #[must_use]
+    pub const fn new(pow2_scale_bytes: NonZeroU8) -> Self {
+        Self { pow2_scale_bytes }
+    }
+
+    #[must_use]
+    pub fn for_target_profile(_target_profile: &TargetProfile) -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub const fn pow2_scale_bytes(self) -> NonZeroU8 {
+        self.pow2_scale_bytes
+    }
+}
+
+impl Default for ScaleFormatByteWidths {
+    fn default() -> Self {
+        Self {
+            pow2_scale_bytes: NonZeroU8::new(1).expect("default Pow2 scale width is non-zero"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetMathError {
@@ -580,6 +612,7 @@ fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
         inputs.policy.policy.knobs.global.placement.profile,
         runtime_chrome_budget,
         &view,
+        ScaleFormatByteWidths::for_target_profile(inputs.target_profile),
     );
     if failures.is_empty() {
         let body = StaticBudgetReportBody {
@@ -716,6 +749,7 @@ fn project_budget(
     profile: PlacementProfile,
     runtime_chrome_budget: &RuntimeChromeBudget,
     view: &QuantGraphBudgetView,
+    scale_format_byte_widths: ScaleFormatByteWidths,
 ) -> (BudgetProjectionSection, Vec<BudgetFailure>) {
     let mut per_bank_occupancy = runtime_chrome_budget
         .rom_slots
@@ -736,7 +770,9 @@ fn project_budget(
     let mut failures = Vec::new();
 
     for (expert_index, expert) in view.experts.iter().enumerate() {
-        let payload_bytes = match expert_payload_bytes(expert).and_then(u32_byte_budget) {
+        let payload_bytes = match expert_payload_bytes_with_widths(expert, scale_format_byte_widths)
+            .and_then(u32_byte_budget)
+        {
             Ok(payload_bytes) => payload_bytes,
             Err(error) => {
                 failures.push(budget_math_error_failure(error, expert_index));
@@ -836,6 +872,23 @@ fn project_budget(
 }
 
 pub fn expert_payload_bytes(expert: &ExpertProjection) -> Result<ByteBudget, BudgetMathError> {
+    expert_payload_bytes_with_widths(expert, ScaleFormatByteWidths::default())
+}
+
+pub fn expert_payload_bytes_for_target(
+    expert: &ExpertProjection,
+    target_profile: &TargetProfile,
+) -> Result<ByteBudget, BudgetMathError> {
+    expert_payload_bytes_with_widths(
+        expert,
+        ScaleFormatByteWidths::for_target_profile(target_profile),
+    )
+}
+
+fn expert_payload_bytes_with_widths(
+    expert: &ExpertProjection,
+    scale_format_byte_widths: ScaleFormatByteWidths,
+) -> Result<ByteBudget, BudgetMathError> {
     checked_add_byte_budget(
         checked_add_byte_budget(
             weight_bytes(expert.rows, expert.cols, expert.plan.encoding)?,
@@ -843,6 +896,7 @@ pub fn expert_payload_bytes(expert: &ExpertProjection) -> Result<ByteBudget, Bud
                 expert.rows,
                 expert.plan.scale_granularity,
                 expert.plan.scale_format,
+                scale_format_byte_widths,
             )?,
         )?,
         ByteBudget::from(expert.metadata_bytes),
@@ -871,6 +925,7 @@ fn scale_bytes(
     rows: u32,
     granularity: ScaleGranularity,
     format: ScaleFormat,
+    scale_format_byte_widths: ScaleFormatByteWidths,
 ) -> Result<ByteBudget, BudgetMathError> {
     let scale_count = match granularity {
         ScaleGranularity::PerTensor => 1,
@@ -880,14 +935,21 @@ fn scale_bytes(
         }
     };
     scale_count
-        .checked_mul(ByteBudget::from(scale_format_bytes(format)))
+        .checked_mul(ByteBudget::from(scale_format_bytes(
+            format,
+            scale_format_byte_widths,
+        )))
         .ok_or(BudgetMathError::Overflow)
 }
 
-const fn scale_format_bytes(format: ScaleFormat) -> u8 {
+const fn scale_format_bytes(
+    format: ScaleFormat,
+    scale_format_byte_widths: ScaleFormatByteWidths,
+) -> u8 {
     match format {
         ScaleFormat::Q8_8 => 2,
-        ScaleFormat::Q4_4 | ScaleFormat::Pow2 => 1,
+        ScaleFormat::Q4_4 => 1,
+        ScaleFormat::Pow2 => scale_format_byte_widths.pow2_scale_bytes().get(),
     }
 }
 
@@ -895,10 +957,7 @@ fn ceil_div_byte_budget(
     numerator: ByteBudget,
     denominator: ByteBudget,
 ) -> Result<ByteBudget, BudgetMathError> {
-    numerator
-        .checked_add(denominator.saturating_sub(1))
-        .ok_or(BudgetMathError::Overflow)
-        .map(|adjusted| adjusted / denominator)
+    Ok(numerator.div_ceil(denominator))
 }
 
 fn checked_add_byte_budget(
@@ -1329,6 +1388,75 @@ mod tests {
         assert_eq!(expert_payload_bytes(&per_tensor), Ok(11));
         assert_eq!(expert_payload_bytes(&per_output_row), Ok(19));
         assert_eq!(expert_payload_bytes(&per_group), Ok(12));
+    }
+
+    #[test]
+    fn f_b4_budget_applies_non_default_pow2_scale_width_from_project_budget_path() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(10, 7, 0);
+        view.experts[0].plan = plan_with(
+            WeightEncoding::Binary1,
+            ScaleGranularity::per_group(4).unwrap(),
+            ScaleFormat::Pow2,
+        );
+
+        let (projections, failures) = project_budget(
+            PlacementProfile::StrictOnePerBank,
+            &budget,
+            &view,
+            ScaleFormatByteWidths::new(NonZeroU8::new(3).unwrap()),
+        );
+
+        assert!(failures.is_empty());
+        assert_eq!(projections.per_expert_payload[0].payload_bytes, 18);
+        assert_eq!(
+            expert_payload_bytes_with_widths(
+                &view.experts[0],
+                ScaleFormatByteWidths::new(NonZeroU8::new(3).unwrap())
+            ),
+            Ok(18)
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_expert_payload_bytes_pins_bd_w80_matrix_orientation() {
+        let per_tensor = plan_with(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::PerTensor,
+            ScaleFormat::Q8_8,
+        );
+        let per_output_row = plan_with(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::PerOutputRow,
+            ScaleFormat::Q8_8,
+        );
+        let per_group = plan_with(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::per_group(16).unwrap(),
+            ScaleFormat::Q8_8,
+        );
+
+        assert_eq!(
+            expert_payload_bytes(&expert_with_plan(128, 224, 0, per_tensor)),
+            Ok(7_170)
+        );
+        assert_eq!(
+            expert_payload_bytes(&expert_with_plan(128, 224, 0, per_output_row)),
+            Ok(7_424)
+        );
+        assert_eq!(
+            expert_payload_bytes(&expert_with_plan(224, 128, 0, per_output_row)),
+            Ok(7_616)
+        );
+        assert_eq!(
+            expert_payload_bytes(&expert_with_plan(128, 224, 0, per_group)),
+            Ok(7_184)
+        );
+
+        let full_two_matrix_expert =
+            expert_payload_bytes(&expert_with_plan(224, 128, 0, per_output_row)).unwrap()
+                + expert_payload_bytes(&expert_with_plan(128, 224, 0, per_output_row)).unwrap();
+        assert_eq!(full_two_matrix_expert, 15_040);
     }
 
     #[test]
