@@ -461,6 +461,15 @@ pub struct PerExpertEntry {
     pub expert: ExpertId,
     pub payload_bytes: u32,
     pub assigned_slot: Option<BudgetSlotId>,
+    pub placement_status: ExpertPlacementStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ExpertPlacementStatus {
+    Assigned,
+    UnassignedNoEligibleSlots,
+    UnassignedStrictDistinctSlotsExhausted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -835,6 +844,7 @@ fn project_budget(
             expert: expert.expert,
             payload_bytes,
             assigned_slot: None,
+            placement_status: ExpertPlacementStatus::UnassignedNoEligibleSlots,
         });
         expert_payloads.push(ExpertPlacementPayload {
             payload_index,
@@ -960,6 +970,8 @@ fn place_experts_by_static_model(
             Ok(slot_index) => {
                 let slot = &mut per_bank_occupancy[slot_index];
                 per_expert_payload[payload.payload_index].assigned_slot = Some(slot.slot);
+                per_expert_payload[payload.payload_index].placement_status =
+                    ExpertPlacementStatus::Assigned;
                 slot.assigned_bytes = slot.assigned_bytes.saturating_add(payload.payload_bytes);
                 slot.assigned_components.push(BudgetComponentRef::Expert {
                     layer: payload.layer,
@@ -975,6 +987,8 @@ fn place_experts_by_static_model(
                 );
                 let slot = &mut per_bank_occupancy[slot_index];
                 per_expert_payload[payload.payload_index].assigned_slot = Some(slot.slot);
+                per_expert_payload[payload.payload_index].placement_status =
+                    ExpertPlacementStatus::Assigned;
                 slot.assigned_bytes = slot.assigned_bytes.saturating_add(payload.payload_bytes);
                 slot.assigned_components.push(BudgetComponentRef::Expert {
                     layer: payload.layer,
@@ -982,12 +996,16 @@ fn place_experts_by_static_model(
                 });
                 failures.push(failure);
             }
-            Err(failure) => failures.push(expert_placement_failure(
-                failure,
-                profile,
-                payload,
-                per_bank_occupancy,
-            )),
+            Err(failure) => {
+                per_expert_payload[payload.payload_index].placement_status =
+                    expert_unassigned_status(failure);
+                failures.push(expert_placement_failure(
+                    failure,
+                    profile,
+                    payload,
+                    per_bank_occupancy,
+                ));
+            }
         }
     }
 
@@ -1044,6 +1062,16 @@ fn first_fit_expert_slot(
     }
 }
 
+const fn expert_unassigned_status(failure: ExpertPlacementFailure) -> ExpertPlacementStatus {
+    match failure {
+        ExpertPlacementFailure::NoEligibleSlots => ExpertPlacementStatus::UnassignedNoEligibleSlots,
+        ExpertPlacementFailure::StrictDistinctSlotsExhausted => {
+            ExpertPlacementStatus::UnassignedStrictDistinctSlotsExhausted
+        }
+        ExpertPlacementFailure::ExceedsEligibleSlotCap { .. } => ExpertPlacementStatus::Assigned,
+    }
+}
+
 fn expert_placement_failure(
     failure: ExpertPlacementFailure,
     profile: PlacementProfile,
@@ -1090,7 +1118,7 @@ fn place_common_bank_components(
 
     let mut failures = Vec::new();
     for kernel in &view.shared_kernels {
-        if let Err(failure) = place_common_component(
+        if let Some(failure) = place_common_component(
             profile,
             runtime_chrome_budget,
             per_bank_occupancy,
@@ -1101,12 +1129,11 @@ fn place_common_bank_components(
             kernel.bank0_compatible,
             aggregate_bytes,
         ) {
-            failures.push(failure);
-            return failures;
+            push_unique_budget_failure(&mut failures, failure);
         }
     }
     for lut in &view.shared_luts {
-        if let Err(failure) = place_common_component(
+        if let Some(failure) = place_common_component(
             profile,
             runtime_chrome_budget,
             per_bank_occupancy,
@@ -1115,12 +1142,11 @@ fn place_common_bank_components(
             lut.bank0_compatible,
             aggregate_bytes,
         ) {
-            failures.push(failure);
-            return failures;
+            push_unique_budget_failure(&mut failures, failure);
         }
     }
     if let Some(shared_dense_ffn) = &view.shared_dense_ffn
-        && let Err(failure) = place_common_component(
+        && let Some(failure) = place_common_component(
             profile,
             runtime_chrome_budget,
             per_bank_occupancy,
@@ -1130,11 +1156,16 @@ fn place_common_bank_components(
             aggregate_bytes,
         )
     {
-        failures.push(failure);
-        return failures;
+        push_unique_budget_failure(&mut failures, failure);
     }
 
     failures
+}
+
+fn push_unique_budget_failure(failures: &mut Vec<BudgetFailure>, failure: BudgetFailure) {
+    if !failures.contains(&failure) {
+        failures.push(failure);
+    }
 }
 
 fn place_common_component(
@@ -1145,7 +1176,7 @@ fn place_common_component(
     component: BudgetComponentRef,
     bank0_compatible: bool,
     aggregate_bytes: u32,
-) -> Result<(), BudgetFailure> {
+) -> Option<BudgetFailure> {
     let mut saw_eligible_slot = false;
     let mut eligible_cap_bytes = 0u32;
 
@@ -1159,7 +1190,7 @@ fn place_common_component(
     }
 
     if !saw_eligible_slot {
-        return Err(BudgetFailure::PlacementProfileInfeasible {
+        return Some(BudgetFailure::PlacementProfileInfeasible {
             profile,
             reason: PlacementInfeasibilityReason::RequiresUnavailableSlotClass,
         });
@@ -1172,12 +1203,33 @@ fn place_common_component(
         let slot = &mut per_bank_occupancy[slot_index];
         slot.assigned_bytes = slot.assigned_bytes.saturating_add(component_bytes);
         slot.assigned_components.push(component);
-        Ok(())
+        None
+    } else if let Some(slot_index) = per_bank_occupancy.iter().position(|entry| {
+        common_component_slot_eligible(runtime_chrome_budget, entry, profile, bank0_compatible)
+    }) {
+        let slot = &mut per_bank_occupancy[slot_index];
+        slot.assigned_bytes = slot.assigned_bytes.saturating_add(component_bytes);
+        slot.assigned_components.push(component);
+        let slot_cap_bytes = u32::try_from(slot.effective_cap_bytes.max(0)).unwrap_or(u32::MAX);
+        let assigned_bytes = if aggregate_bytes > eligible_cap_bytes {
+            aggregate_bytes
+        } else {
+            slot.assigned_bytes
+        };
+        let cap_bytes = if aggregate_bytes > eligible_cap_bytes {
+            eligible_cap_bytes
+        } else {
+            slot_cap_bytes
+        };
+        Some(BudgetFailure::CommonBankExceedsCap {
+            assigned_bytes,
+            cap_bytes,
+            excess_bytes: assigned_bytes.saturating_sub(cap_bytes),
+        })
     } else {
-        Err(BudgetFailure::CommonBankExceedsCap {
-            assigned_bytes: aggregate_bytes,
-            cap_bytes: eligible_cap_bytes,
-            excess_bytes: aggregate_bytes.saturating_sub(eligible_cap_bytes),
+        Some(BudgetFailure::PlacementProfileInfeasible {
+            profile,
+            reason: PlacementInfeasibilityReason::RequiresUnavailableSlotClass,
         })
     }
 }
@@ -3086,23 +3138,28 @@ mod tests {
             expert_with_payload(1, 0, 30),
         ]);
 
-        let report = run_budget_with_policy(&policy, &budget, view);
+        let first = run_budget_with_policy(&policy, &budget, view.clone());
+        let second = run_budget_with_policy(&policy, &budget, view);
 
-        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert_eq!(first.report.outcome, ReportOutcome::Passed);
         assert_eq!(
-            report.report.body.projections.per_expert_payload[0].assigned_slot,
+            first.static_budget_canonical_bytes_hash,
+            second.static_budget_canonical_bytes_hash
+        );
+        assert_eq!(
+            first.report.body.projections.per_expert_payload[0].assigned_slot,
             Some(BudgetSlotId::new(1))
         );
         assert_eq!(
-            report.report.body.projections.per_expert_payload[1].assigned_slot,
+            first.report.body.projections.per_expert_payload[1].assigned_slot,
             Some(BudgetSlotId::new(1))
         );
         assert_eq!(
-            report.report.body.projections.per_expert_payload[2].assigned_slot,
+            first.report.body.projections.per_expert_payload[2].assigned_slot,
             Some(BudgetSlotId::new(2))
         );
         assert_eq!(
-            report.report.body.projections.per_bank_occupancy[0].assigned_components,
+            first.report.body.projections.per_bank_occupancy[0].assigned_components,
             vec![
                 BudgetComponentRef::Expert {
                     layer: LayerId::new(0),
@@ -3138,6 +3195,48 @@ mod tests {
                 profile: PlacementProfile::PackedExperts,
                 reason: PlacementInfeasibilityReason::NoSlotsForClass,
             }]
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[0].assigned_slot,
+            None
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[0].placement_status,
+            ExpertPlacementStatus::UnassignedNoEligibleSlots
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_unassigned_strict_expert_records_reason() {
+        let policy = policy_with_placement(PlacementProfile::StrictOnePerBank);
+        let budget = runtime_budget_with_slots(vec![expert_slot(
+            1,
+            64,
+            0,
+            [PlacementProfile::StrictOnePerBank],
+        )]);
+        let view = budget_view_with_experts(vec![
+            expert_with_payload(0, 0, 10),
+            expert_with_payload(0, 1, 10),
+        ]);
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::PlacementProfileInfeasible {
+                profile: PlacementProfile::StrictOnePerBank,
+                reason: PlacementInfeasibilityReason::ExpertCountExceedsSlots,
+            }]
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[1].assigned_slot,
+            None
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[1].placement_status,
+            ExpertPlacementStatus::UnassignedStrictDistinctSlotsExhausted
         );
     }
 
@@ -3321,6 +3420,54 @@ mod tests {
                 .common_bank_footprint
                 .aggregate_bytes,
             18
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].assigned_bytes,
+            18
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].assigned_components,
+            vec![
+                BudgetComponentRef::SharedKernel {
+                    id: KernelSpecId::from("kernel.shared"),
+                },
+                BudgetComponentRef::SharedLut {
+                    id: "lut.shared".to_owned(),
+                },
+                BudgetComponentRef::SharedDenseFfn,
+            ]
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_common_fragmentation_reports_positive_excess() {
+        let policy = policy_with_placement(PlacementProfile::Budgeted);
+        let budget = runtime_budget_with_slots(vec![
+            common_slot(1, 10, [PlacementProfile::Budgeted]),
+            common_slot(2, 10, [PlacementProfile::Budgeted]),
+            expert_slot(3, 64, 0, [PlacementProfile::Budgeted]),
+        ]);
+        let mut view = budget_view_fixture(1, 1, 3);
+        view.shared_kernels = vec![SharedKernelProjection {
+            id: KernelSpecId::from("kernel.fragmented"),
+            bytes: 15,
+            bank0_compatible: false,
+        }];
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::CommonBankExceedsCap {
+                assigned_bytes: 15,
+                cap_bytes: 10,
+                excess_bytes: 5,
+            }]
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].assigned_bytes,
+            15
         );
     }
 
