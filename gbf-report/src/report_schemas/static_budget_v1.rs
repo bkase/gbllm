@@ -1,5 +1,6 @@
 //! `static_budget.v1` report helpers.
 
+pub use gbf_policy::StaticFitInterpretation;
 use gbf_policy::{
     BudgetFailure, EvidenceRef, ValidationDiagnostic, budget_failure_diagnostic,
     budget_failure_diagnostic_with_provenance, budget_failure_matches_diagnostic,
@@ -7,6 +8,32 @@ use gbf_policy::{
 
 pub type BudgetFailureRecord = BudgetFailure;
 pub type ValidationDiagnosticRecord = ValidationDiagnostic;
+
+/// Return the binary Stage-2 interpretation for a `decision.fits` value.
+///
+/// `fits = true` only means the report passed necessary static checks. It is
+/// not a final deployability claim; F-B10, F-B12, F-B13, and final layout
+/// remain authoritative.
+#[must_use]
+pub const fn static_fit_interpretation_for_fits(fits: bool) -> StaticFitInterpretation {
+    if fits {
+        StaticFitInterpretation::PassesNecessaryStaticChecks
+    } else {
+        StaticFitInterpretation::FailsNecessaryStaticChecks
+    }
+}
+
+#[must_use]
+pub const fn decision_interpretation_matches_fits(
+    fits: bool,
+    interpretation: StaticFitInterpretation,
+) -> bool {
+    matches!(
+        (fits, interpretation),
+        (true, StaticFitInterpretation::PassesNecessaryStaticChecks)
+            | (false, StaticFitInterpretation::FailsNecessaryStaticChecks)
+    )
+}
 
 #[must_use]
 pub fn diagnostics_for_budget_failures(
@@ -159,6 +186,41 @@ mod tests {
             diagnostics
                 .iter()
                 .all(|diagnostic| diagnostic.provenance == provenance)
+        );
+    }
+
+    #[test]
+    fn f_b4_static_budget_v1_decision_interpretation_invariant() {
+        assert_eq!(
+            static_fit_interpretation_for_fits(true),
+            StaticFitInterpretation::PassesNecessaryStaticChecks
+        );
+        assert_eq!(
+            static_fit_interpretation_for_fits(false),
+            StaticFitInterpretation::FailsNecessaryStaticChecks
+        );
+
+        assert!(decision_interpretation_matches_fits(
+            true,
+            StaticFitInterpretation::PassesNecessaryStaticChecks
+        ));
+        assert!(decision_interpretation_matches_fits(
+            false,
+            StaticFitInterpretation::FailsNecessaryStaticChecks
+        ));
+        assert!(!decision_interpretation_matches_fits(
+            true,
+            StaticFitInterpretation::FailsNecessaryStaticChecks
+        ));
+        assert!(!decision_interpretation_matches_fits(
+            false,
+            StaticFitInterpretation::PassesNecessaryStaticChecks
+        ));
+
+        assert_eq!(
+            serde_json::to_value(StaticFitInterpretation::PassesNecessaryStaticChecks)
+                .expect("interpretation serializes"),
+            serde_json::json!({"kind": "PassesNecessaryStaticChecks"})
         );
     }
 }

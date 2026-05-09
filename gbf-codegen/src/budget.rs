@@ -22,10 +22,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use gbf_policy::{
-    BudgetFailure, PlacementInfeasibilityReason, ValidationCode, budget_failure_diagnostic,
-    budget_failure_diagnostic_with_provenance, budget_failure_diagnostics,
-    budget_failure_diagnostics_with_provenance, budget_failure_matches_diagnostic,
-    budget_failure_validation_code,
+    BudgetFailure, PlacementInfeasibilityReason, StaticFitInterpretation, ValidationCode,
+    budget_failure_diagnostic, budget_failure_diagnostic_with_provenance,
+    budget_failure_diagnostics, budget_failure_diagnostics_with_provenance,
+    budget_failure_matches_diagnostic, budget_failure_validation_code,
+};
+use gbf_report::report_schemas::static_budget_v1::{
+    decision_interpretation_matches_fits, static_fit_interpretation_for_fits,
 };
 
 use crate::policy::ResolvedPolicyProduct;
@@ -400,6 +403,10 @@ impl ReportBody for StaticBudgetReportBody {
             return Err(self.diagnostics.clone());
         }
 
+        if !decision_interpretation_matches_fits(self.decision.fits, self.decision.interpretation) {
+            return Err(self.diagnostics.clone());
+        }
+
         Ok(())
     }
 }
@@ -564,17 +571,13 @@ pub struct RoutingModelSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetDecisionSection {
+    /// True only when all Stage-2 necessary static checks pass. Later F-B10,
+    /// F-B12, F-B13, and final layout passes remain authoritative for final
+    /// deployability.
     pub fits: bool,
     pub interpretation: StaticFitInterpretation,
     pub placement_model: StaticPlacementModel,
     pub failures: Vec<BudgetFailure>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum StaticFitInterpretation {
-    PassesNecessaryStaticChecks,
-    FailsNecessaryStaticChecks,
 }
 
 pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
@@ -760,11 +763,7 @@ fn decision_section(
 ) -> BudgetDecisionSection {
     BudgetDecisionSection {
         fits,
-        interpretation: if fits {
-            StaticFitInterpretation::PassesNecessaryStaticChecks
-        } else {
-            StaticFitInterpretation::FailsNecessaryStaticChecks
-        },
+        interpretation: static_fit_interpretation_for_fits(fits),
         placement_model: placement_model_for_profile(profile),
         failures,
     }
@@ -2602,6 +2601,70 @@ mod tests {
         assert_eq!(
             report.report.body.decision.fits,
             report.report.body.decision.failures.is_empty()
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_fits_means_necessary_checks_only() {
+        let budget = runtime_budget_fixture();
+        let passing_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let passing_report = run_budget_with(Some(&budget), &passing_graph);
+
+        assert_eq!(passing_report.report.outcome, ReportOutcome::Passed);
+        assert!(passing_report.report.body.decision.fits);
+        assert!(passing_report.report.body.decision.failures.is_empty());
+        assert_eq!(
+            passing_report.report.body.decision.interpretation,
+            StaticFitInterpretation::PassesNecessaryStaticChecks
+        );
+        assert!(
+            passing_report
+                .report
+                .body
+                .validate_semantics(passing_report.report.outcome)
+                .is_ok()
+        );
+
+        let mut failing_view = budget_view_fixture(4, 4, 0);
+        failing_view.sequence_state.projected_wram_bytes = budget.memory_caps.wram_usable_bytes + 1;
+        let failing_graph = TrackingQuantGraph::new(failing_view);
+        let failing_report = run_budget_with(Some(&budget), &failing_graph);
+
+        assert_eq!(failing_report.report.outcome, ReportOutcome::Failed);
+        assert!(!failing_report.report.body.decision.fits);
+        assert!(!failing_report.report.body.decision.failures.is_empty());
+        assert_eq!(
+            failing_report.report.body.decision.interpretation,
+            StaticFitInterpretation::FailsNecessaryStaticChecks
+        );
+
+        let missing_budget_report = run_budget_with(None, &passing_graph);
+        assert!(!missing_budget_report.report.body.decision.fits);
+        assert_eq!(
+            missing_budget_report.report.body.decision.failures,
+            vec![BudgetFailure::MissingRuntimeChromeBudget]
+        );
+        assert_eq!(
+            missing_budget_report.report.body.decision.interpretation,
+            StaticFitInterpretation::FailsNecessaryStaticChecks
+        );
+
+        let mut mismatched = passing_report.report.body.clone();
+        mismatched.decision.interpretation = StaticFitInterpretation::FailsNecessaryStaticChecks;
+        assert!(
+            mismatched
+                .validate_semantics(ReportOutcome::Passed)
+                .is_err()
+        );
+
+        let mut mismatched_failure = failing_report.report.body.clone();
+        mismatched_failure.decision.interpretation =
+            StaticFitInterpretation::PassesNecessaryStaticChecks;
+        assert!(
+            mismatched_failure
+                .validate_semantics(ReportOutcome::Failed)
+                .is_err()
         );
     }
 

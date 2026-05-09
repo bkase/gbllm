@@ -621,6 +621,17 @@ pub enum SwitchProjectionSource {
     CalibrationClosedFormWithStaticCap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum StaticFitInterpretation {
+    /// All Stage-2 necessary static checks passed. F-B10, F-B12, F-B13,
+    /// and final layout remain authoritative for final deployability.
+    PassesNecessaryStaticChecks,
+    /// At least one Stage-2 necessary static check failed, so later passes
+    /// cannot make the build valid without a policy/input change.
+    FailsNecessaryStaticChecks,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum PlacementInfeasibilityReason {

@@ -46,11 +46,11 @@ pub use diagnostics::{
     DataLoweringProfileId, DiagnosticSeverity, GoldenVectorId, KnobValueDescriptor, LineageId,
     LoweringShardId, LoweringShardRef, ManifestInvariant, ObjectiveRejection,
     PlacementInfeasibilityReason, ReductionSiteId, RiskQuantileField, ServiceLevelField,
-    SidecarKind, SwitchProjectionSource, TargetIncompatibilityReason, TraceProbeId, ValidationCode,
-    ValidationDetail, ValidationDiagnostic, ValidationOrigin, budget_failure_diagnostic,
-    budget_failure_diagnostic_with_provenance, budget_failure_diagnostics,
-    budget_failure_diagnostics_with_provenance, budget_failure_matches_diagnostic,
-    budget_failure_validation_code,
+    SidecarKind, StaticFitInterpretation, SwitchProjectionSource, TargetIncompatibilityReason,
+    TraceProbeId, ValidationCode, ValidationDetail, ValidationDiagnostic, ValidationOrigin,
+    budget_failure_diagnostic, budget_failure_diagnostic_with_provenance,
+    budget_failure_diagnostics, budget_failure_diagnostics_with_provenance,
+    budget_failure_matches_diagnostic, budget_failure_validation_code,
 };
 pub use objective::{CompileObjective, RiskPolicy, ServiceLevelObjective};
 pub use repair::{RepairPolicy, RepairPolicyProfile, RepairProposalId};
