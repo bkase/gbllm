@@ -64,8 +64,8 @@ use gbf_hw::target::TargetProfile;
 use gbf_policy::{
     CalibrationBundle, CalibrationBundleSet, CalibrationConfidenceRequirement, CalibrationLayer,
     CompatibilityAdapterId, CompileProfileSpec, CompileRequest, CompilerFeature,
-    DiagnosticSeverity, EvidenceRef, FieldPath, ObjectiveRejection, RuntimeMode,
-    TargetIncompatibilityReason, TraceProbeId, ValidationCode, ValidationDetail,
+    DiagnosticSeverity, EvidenceRef, FieldPath, ObjectiveRejection, RiskQuantileField, RuntimeMode,
+    ServiceLevelField, TargetIncompatibilityReason, TraceProbeId, ValidationCode, ValidationDetail,
     ValidationDiagnostic as PolicyValidationDiagnostic, ValidationOrigin,
 };
 use gbf_report::report_schemas::artifact_validation_v1::{
@@ -2145,28 +2145,26 @@ fn profile_objective_rejections(request: &CompileRequest) -> Vec<ObjectiveReject
     if let Some(service) = &objective.service {
         for (field, value) in [
             (
-                "max_first_token_cycles_p95",
+                ServiceLevelField::MaxFirstTokenCyclesP95,
                 service.max_first_token_cycles_p95,
             ),
             (
-                "max_checkpoint_gap_cycles_p95",
+                ServiceLevelField::MaxCheckpointGapCyclesP95,
                 service.max_checkpoint_gap_cycles_p95,
             ),
             (
-                "max_resume_latency_cycles_p95",
+                ServiceLevelField::MaxResumeLatencyCyclesP95,
                 service.max_resume_latency_cycles_p95,
             ),
         ] {
             if value == Some(0) {
-                rejections.push(ObjectiveRejection::ServiceLevelZero {
-                    field: field.to_owned(),
-                });
+                rejections.push(ObjectiveRejection::ServiceLevelZero { field });
             }
         }
 
         if service.max_ui_jitter_frames_p99 == Some(0) {
             rejections.push(ObjectiveRejection::ServiceLevelZero {
-                field: "max_ui_jitter_frames_p99".to_owned(),
+                field: ServiceLevelField::MaxUiJitterFramesP99,
             });
         }
     }
@@ -2190,14 +2188,14 @@ fn profile_objective_rejections(request: &CompileRequest) -> Vec<ObjectiveReject
     let risk = &objective.risk;
     if !(1..=100).contains(&risk.cycle_quantile) {
         rejections.push(ObjectiveRejection::RiskQuantileInvalid {
-            field: "cycle_quantile".to_owned(),
+            field: RiskQuantileField::CycleQuantile,
             value: risk.cycle_quantile,
         });
     }
 
     if !(1..=100).contains(&risk.switch_quantile) {
         rejections.push(ObjectiveRejection::RiskQuantileInvalid {
-            field: "switch_quantile".to_owned(),
+            field: RiskQuantileField::SwitchQuantile,
             value: risk.switch_quantile,
         });
     }
@@ -3041,8 +3039,8 @@ mod tests {
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationConfidenceClass,
         CalibrationConfidenceRequirement, CompileKnobId, CompileObjective, CompilerFeature,
         ConstraintValue, DEFAULT_COMPILE_PROFILE_ID, ObjectiveRejection, PlacementProfile,
-        RiskPolicy, RuntimeMode, ServiceLevelObjective, TargetIncompatibilityReason,
-        canonical_compile_profile_specs,
+        RiskPolicy, RiskQuantileField, RuntimeMode, ServiceLevelField, ServiceLevelObjective,
+        TargetIncompatibilityReason, canonical_compile_profile_specs,
     };
     use gbf_workload::{GoldenVectorId, WorkloadLocator};
 
@@ -3896,7 +3894,7 @@ mod tests {
                         value: 0,
                     },
                 } if profile == &CompileProfileId::from(BRINGUP_COMPILE_PROFILE_ID)
-                    && field == "cycle_quantile"
+                    && field == &RiskQuantileField::CycleQuantile
             )
         });
     }
@@ -3923,19 +3921,19 @@ mod tests {
 
         assert_eq!(reasons.len(), 6);
         assert!(reasons.contains(&ObjectiveRejection::ServiceLevelZero {
-            field: "max_first_token_cycles_p95".to_owned()
+            field: ServiceLevelField::MaxFirstTokenCyclesP95
         }));
         assert!(reasons.contains(&ObjectiveRejection::ServiceLevelZero {
-            field: "max_resume_latency_cycles_p95".to_owned()
+            field: ServiceLevelField::MaxResumeLatencyCyclesP95
         }));
         assert!(reasons.contains(&ObjectiveRejection::MaxCyclesPerTokenZero));
         assert!(reasons.contains(&ObjectiveRejection::MaxRomBytesZero));
         assert!(reasons.contains(&ObjectiveRejection::RiskQuantileInvalid {
-            field: "cycle_quantile".to_owned(),
+            field: RiskQuantileField::CycleQuantile,
             value: 0,
         }));
         assert!(reasons.contains(&ObjectiveRejection::RiskQuantileInvalid {
-            field: "switch_quantile".to_owned(),
+            field: RiskQuantileField::SwitchQuantile,
             value: 101,
         }));
     }
@@ -3953,7 +3951,7 @@ mod tests {
                         .max_first_token_cycles_p95 = Some(0);
                 },
                 ObjectiveRejection::ServiceLevelZero {
-                    field: "max_first_token_cycles_p95".to_owned(),
+                    field: ServiceLevelField::MaxFirstTokenCyclesP95,
                 },
             ),
             (
@@ -3966,7 +3964,7 @@ mod tests {
                         .max_checkpoint_gap_cycles_p95 = Some(0);
                 },
                 ObjectiveRejection::ServiceLevelZero {
-                    field: "max_checkpoint_gap_cycles_p95".to_owned(),
+                    field: ServiceLevelField::MaxCheckpointGapCyclesP95,
                 },
             ),
             (
@@ -3979,7 +3977,7 @@ mod tests {
                         .max_resume_latency_cycles_p95 = Some(0);
                 },
                 ObjectiveRejection::ServiceLevelZero {
-                    field: "max_resume_latency_cycles_p95".to_owned(),
+                    field: ServiceLevelField::MaxResumeLatencyCyclesP95,
                 },
             ),
             (
@@ -3992,7 +3990,7 @@ mod tests {
                         .max_ui_jitter_frames_p99 = Some(0);
                 },
                 ObjectiveRejection::ServiceLevelZero {
-                    field: "max_ui_jitter_frames_p99".to_owned(),
+                    field: ServiceLevelField::MaxUiJitterFramesP99,
                 },
             ),
             (
@@ -4019,7 +4017,23 @@ mod tests {
                 "cycle_quantile_zero",
                 |objective| objective.risk.cycle_quantile = 0,
                 ObjectiveRejection::RiskQuantileInvalid {
-                    field: "cycle_quantile".to_owned(),
+                    field: RiskQuantileField::CycleQuantile,
+                    value: 0,
+                },
+            ),
+            (
+                "cycle_quantile_above_100",
+                |objective| objective.risk.cycle_quantile = 101,
+                ObjectiveRejection::RiskQuantileInvalid {
+                    field: RiskQuantileField::CycleQuantile,
+                    value: 101,
+                },
+            ),
+            (
+                "switch_quantile_zero",
+                |objective| objective.risk.switch_quantile = 0,
+                ObjectiveRejection::RiskQuantileInvalid {
+                    field: RiskQuantileField::SwitchQuantile,
                     value: 0,
                 },
             ),
@@ -4027,7 +4041,7 @@ mod tests {
                 "switch_quantile_above_100",
                 |objective| objective.risk.switch_quantile = 101,
                 ObjectiveRejection::RiskQuantileInvalid {
-                    field: "switch_quantile".to_owned(),
+                    field: RiskQuantileField::SwitchQuantile,
                     value: 101,
                 },
             ),

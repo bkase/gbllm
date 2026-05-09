@@ -556,19 +556,31 @@ pub struct CompatibilityAdapterId(pub String);
 #[serde(transparent)]
 pub struct TraceProbeId(pub u16);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ServiceLevelField {
+    MaxFirstTokenCyclesP95,
+    MaxCheckpointGapCyclesP95,
+    MaxResumeLatencyCyclesP95,
+    MaxUiJitterFramesP99,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum RiskQuantileField {
+    CycleQuantile,
+    SwitchQuantile,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ObjectiveRejection {
-    ServiceLevelTooStrict,
-    ServiceLevelZero { field: String },
+    ServiceLevelZero { field: ServiceLevelField },
     MaxCyclesPerTokenZero,
-    RomBudgetTooStrict,
     MaxRomBytesZero,
-    RuntimeSwitchBudgetTooStrict,
     MaxBankSwitchesPerTokenZero,
     MaxSramPageSwitchesPerTokenZero,
-    RiskPolicyNotSupported,
-    RiskQuantileInvalid { field: String, value: u8 },
+    RiskQuantileInvalid { field: RiskQuantileField, value: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -862,7 +874,9 @@ mod tests {
             },
             ValidationCode::CompileRequestProfileForbidsObjective {
                 profile: CompileProfileId::from("Bringup"),
-                reason: ObjectiveRejection::ServiceLevelTooStrict,
+                reason: ObjectiveRejection::ServiceLevelZero {
+                    field: ServiceLevelField::MaxFirstTokenCyclesP95,
+                },
             },
             ValidationCode::CompileRequestRuntimeModeUnsupported {
                 mode: RuntimeMode::Trace,
@@ -1066,6 +1080,51 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn objective_rejection_pins_typed_payload_json_shapes() {
+        assert_eq!(
+            serde_json::to_value(ObjectiveRejection::ServiceLevelZero {
+                field: ServiceLevelField::MaxUiJitterFramesP99,
+            })
+            .expect("service-level rejection serializes"),
+            serde_json::json!({
+                "kind": "ServiceLevelZero",
+                "field": { "kind": "MaxUiJitterFramesP99" }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ObjectiveRejection::RiskQuantileInvalid {
+                field: RiskQuantileField::SwitchQuantile,
+                value: 101,
+            })
+            .expect("risk-quantile rejection serializes"),
+            serde_json::json!({
+                "kind": "RiskQuantileInvalid",
+                "field": { "kind": "SwitchQuantile" },
+                "value": 101
+            })
+        );
+    }
+
+    #[test]
+    fn compile_request_profile_forbids_objective_round_trips_typed_rejections() {
+        for reason in [
+            ObjectiveRejection::ServiceLevelZero {
+                field: ServiceLevelField::MaxFirstTokenCyclesP95,
+            },
+            ObjectiveRejection::RiskQuantileInvalid {
+                field: RiskQuantileField::CycleQuantile,
+                value: 0,
+            },
+        ] {
+            assert_code_round_trip(ValidationCode::CompileRequestProfileForbidsObjective {
+                profile: CompileProfileId::from("Bringup"),
+                reason,
+            });
+        }
     }
 
     #[test]
