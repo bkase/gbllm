@@ -136,6 +136,12 @@ pub struct ImportedArtifactView {
     pub hint_bundle: HintBundle,
     pub reference: Option<ReferenceLink>,
     pub transport: ArtifactTransportIdentity,
+    /// Raw forbidden build-identity evidence captured before typed
+    /// deserialization.
+    ///
+    /// Paths use the same canonical convention as the raw importer:
+    /// `<root>/<key>[/...]` with no leading slash, for example
+    /// `manifest/build_identity`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub forbidden_build_identity_fields: BTreeSet<FieldPath>,
 }
@@ -1080,19 +1086,25 @@ fn collect_forbidden_build_identity_fields(
         serde_json::Value::Object(map) => {
             for (key, child) in map {
                 let child_path = if path.is_empty() {
-                    format!("/{key}")
+                    key.to_owned()
                 } else {
                     format!("{path}/{key}")
                 };
                 if is_forbidden_build_identity_key(key) {
-                    fields.push(FieldPath::from(child_path.clone()));
+                    fields.push(FieldPath::from(child_path));
+                    continue;
                 }
                 collect_forbidden_build_identity_fields(child, &child_path, fields);
             }
         }
         serde_json::Value::Array(items) => {
             for (index, child) in items.iter().enumerate() {
-                collect_forbidden_build_identity_fields(child, &format!("{path}/{index}"), fields);
+                let child_path = if path.is_empty() {
+                    index.to_string()
+                } else {
+                    format!("{path}/{index}")
+                };
+                collect_forbidden_build_identity_fields(child, &child_path, fields);
             }
         }
         serde_json::Value::Null
@@ -4947,7 +4959,7 @@ mod tests {
         fixture
             .artifact
             .forbidden_build_identity_fields
-            .insert(FieldPath::from("/build_identity"));
+            .insert(FieldPath::from("manifest/build_identity"));
         fixture.refresh_transport_hash();
 
         let failure =
@@ -4957,7 +4969,7 @@ mod tests {
             matches!(
                 code,
                 ValidationCode::ArtifactForbiddenBuildIdentityField { field }
-                    if field == &FieldPath::from("/build_identity")
+                    if field == &FieldPath::from("manifest/build_identity")
             )
         });
     }
@@ -4969,6 +4981,7 @@ mod tests {
             serde_json::to_value(&fixture.artifact.manifest).expect("manifest serializes");
         manifest_json["build_identity"] = serde_json::json!({
             "backend": "must not be part of frozen inputs",
+            "backend_identity": "nested evidence should be covered by the rejected subtree",
         });
         assert!(
             serde_json::from_value::<ArtifactManifest>(manifest_json.clone()).is_err(),
@@ -5032,7 +5045,7 @@ mod tests {
         let value = serde_json::json!({
             "metadata": {
                 "compatibility_envelope": {
-                    "ignored": true
+                    "backend_identity": "covered by compatibility_envelope"
                 },
                 "items": [
                     {

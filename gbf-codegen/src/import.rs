@@ -1,4 +1,9 @@
-//! Artifact import helpers.
+//! Artifact import helpers for boundary-time JSON validation.
+//!
+//! Raw artifact JSON can carry forbidden build-identity fields that typed
+//! deserialization would reject or drop before Stage 0 validation sees them.
+//! This module records those raw field paths as side-channel evidence, scrubs
+//! the forbidden subtrees, and only then deserializes the stable artifact types.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -13,6 +18,12 @@ use crate::validate::{
     is_forbidden_build_identity_key, raw_forbidden_build_identity_fields,
 };
 
+/// Raw JSON inputs for building an [`ImportedArtifactView`].
+///
+/// `manifest_json`, `aux_json`, and `lowerings_json` are scanned for forbidden
+/// build-identity keys before typed deserialization. The remaining members are
+/// already typed because bd-3lsf only proves the raw manifest/aux/lowering
+/// boundary.
 #[derive(Debug, Clone)]
 pub struct RawArtifactJsonImport {
     pub core: ArtifactCore,
@@ -24,12 +35,17 @@ pub struct RawArtifactJsonImport {
     pub transport: ArtifactTransportIdentity,
 }
 
+/// Result of importing a raw artifact JSON envelope.
+///
+/// `artifact.forbidden_build_identity_fields` contains canonical raw evidence
+/// paths in `<root>/<key>[/...]` form with no leading slash.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportedArtifactJson {
     pub artifact: ImportedArtifactView,
     pub lowerings: Vec<TargetDataLoweringArtifact>,
 }
 
+/// Error returned when scrubbed raw JSON cannot be deserialized.
 #[derive(Debug)]
 pub enum ArtifactImportError {
     Manifest(serde_json::Error),
@@ -55,6 +71,12 @@ impl Error for ArtifactImportError {
     }
 }
 
+/// Imports an artifact view from raw manifest, aux, and lowering JSON.
+///
+/// Forbidden build-identity subtrees are recorded in
+/// [`ImportedArtifactView::forbidden_build_identity_fields`] and removed before
+/// deserialization so Stage 0 can report the raw evidence without letting those
+/// fields become part of the typed artifact input.
 pub fn import_artifact_view_from_raw_json(
     input: RawArtifactJsonImport,
 ) -> Result<ImportedArtifactJson, ArtifactImportError> {
