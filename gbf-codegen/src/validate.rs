@@ -798,13 +798,19 @@ fn validate_transport_manifest(
         ));
     }
     if let Some(metadata) = &source.transport.manifest_metadata {
-        validate_transport_manifest_metadata(&source.manifest, metadata, diagnostics);
+        validate_transport_manifest_metadata(
+            &source.manifest,
+            metadata,
+            source.transport.transport_hash,
+            diagnostics,
+        );
     }
 }
 
 fn validate_transport_manifest_metadata(
     manifest: &ArtifactManifest,
     metadata: &ArtifactTransportManifestMetadata,
+    transport_hash: Hash256,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     if metadata.semantic_core_hash != manifest.semantic_core_hash {
@@ -813,12 +819,14 @@ fn validate_transport_manifest_metadata(
             manifest.semantic_core_hash,
             metadata.semantic_core_hash,
             manifest.manifest_self_hash,
+            transport_hash,
         ));
     }
     if metadata.schema_version != manifest.schema_version {
         diagnostics.push(transport_manifest_field_mismatch(
             "manifest_metadata.schema_version",
             manifest.manifest_self_hash,
+            transport_hash,
         ));
     }
     if metadata.lineage != manifest.lineage {
@@ -827,6 +835,7 @@ fn validate_transport_manifest_metadata(
             manifest.lineage.0,
             metadata.lineage.0,
             manifest.manifest_self_hash,
+            transport_hash,
         ));
     }
 
@@ -849,12 +858,14 @@ fn validate_transport_manifest_metadata(
                     *expected,
                     *observed,
                     manifest.manifest_self_hash,
+                    transport_hash,
                 ));
             }
             Some(_) => {}
             None => diagnostics.push(transport_manifest_field_mismatch(
                 format!("manifest_metadata.components.{}", component.0),
                 manifest.manifest_self_hash,
+                transport_hash,
             )),
         }
     }
@@ -864,6 +875,7 @@ fn validate_transport_manifest_metadata(
             diagnostics.push(transport_manifest_field_mismatch(
                 format!("manifest_metadata.components.{}", component.0),
                 manifest.manifest_self_hash,
+                transport_hash,
             ));
         }
     }
@@ -874,19 +886,21 @@ fn transport_manifest_hash_mismatch(
     expected: Hash256,
     observed: Hash256,
     manifest_hash: Hash256,
+    transport_hash: Hash256,
 ) -> ValidationDiagnostic {
     let reference = reference.into();
     ValidationDiagnostic::hard(
         ValidationOrigin::Manifest,
         ValidationCode::ArtifactTransportManifestMismatch,
         ValidationDetail::HashMismatch { expected, observed },
-        transport_manifest_provenance(reference, manifest_hash),
+        transport_manifest_provenance(reference, manifest_hash, transport_hash),
     )
 }
 
 fn transport_manifest_field_mismatch(
     reference: impl Into<String>,
     manifest_hash: Hash256,
+    transport_hash: Hash256,
 ) -> ValidationDiagnostic {
     let reference = reference.into();
     ValidationDiagnostic::hard(
@@ -895,16 +909,20 @@ fn transport_manifest_field_mismatch(
         ValidationDetail::Field {
             field: FieldPath::from(reference.clone()),
         },
-        transport_manifest_provenance(reference, manifest_hash),
+        transport_manifest_provenance(reference, manifest_hash, transport_hash),
     )
 }
 
-fn transport_manifest_provenance(reference: String, manifest_hash: Hash256) -> Vec<EvidenceRef> {
+fn transport_manifest_provenance(
+    reference: String,
+    manifest_hash: Hash256,
+    transport_hash: Hash256,
+) -> Vec<EvidenceRef> {
     vec![
         EvidenceRef {
             kind: "artifact_transport".to_owned(),
             reference,
-            hash: Some(manifest_hash),
+            hash: Some(transport_hash),
         },
         EvidenceRef {
             kind: "artifact_manifest".to_owned(),
@@ -4936,7 +4954,7 @@ mod tests {
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
 
-        let mismatch_count = failure
+        let mismatch_diagnostics = failure
             .diagnostics
             .iter()
             .filter(|diagnostic| {
@@ -4945,12 +4963,70 @@ mod tests {
                     ValidationCode::ArtifactTransportManifestMismatch
                 )
             })
-            .count();
+            .collect::<Vec<_>>();
         assert_eq!(
-            mismatch_count, 4,
+            mismatch_diagnostics.len(),
+            4,
             "diagnostics were {:#?}",
             failure.diagnostics
         );
+        let expected_transport_references = [
+            "manifest_metadata.semantic_core_hash",
+            "manifest_metadata.schema_version",
+            "manifest_metadata.lineage",
+            "manifest_metadata.components.quant.default.digest",
+        ];
+        for reference in expected_transport_references {
+            assert!(
+                mismatch_diagnostics.iter().any(|diagnostic| {
+                    diagnostic.provenance.iter().any(|evidence| {
+                        evidence.kind == "artifact_transport"
+                            && evidence.reference == reference
+                            && evidence.hash == Some(fixture.artifact.transport.transport_hash)
+                    })
+                }),
+                "missing artifact transport evidence for {reference}; diagnostics were {:#?}",
+                failure.diagnostics
+            );
+        }
+        assert!(mismatch_diagnostics.iter().all(|diagnostic| {
+            diagnostic.provenance.iter().any(|evidence| {
+                evidence.kind == "artifact_manifest"
+                    && evidence.reference == "manifest_self_hash"
+                    && evidence.hash == Some(fixture.artifact.manifest.manifest_self_hash)
+            })
+        }));
+    }
+
+    #[test]
+    fn f_b2_validate_accepts_matching_typed_transport_manifest_metadata() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .artifact
+            .manifest
+            .components
+            .push(ManifestComponent {
+                digest: hash(0x33),
+                id: ComponentId("quant.default".to_owned()),
+                kind: ComponentKind::QuantSpec,
+            });
+        fixture.refresh_manifest_self_hash();
+        fixture.refresh_transport_hash();
+        fixture.artifact.transport.manifest_metadata = Some(
+            ArtifactTransportManifestMetadata::from_manifest(&fixture.artifact.manifest),
+        );
+
+        let mut diagnostics = Vec::new();
+        validate_transport_manifest(&fixture.artifact, &mut diagnostics);
+        assert!(
+            diagnostics.iter().all(|diagnostic| !matches!(
+                diagnostic.code,
+                ValidationCode::ArtifactTransportManifestMismatch
+            )),
+            "diagnostics were {diagnostics:#?}"
+        );
+
+        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
     }
 
     #[test]
