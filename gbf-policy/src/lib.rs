@@ -33,12 +33,13 @@ pub use compile::{
     canonical_default_bounds_fixture, compile_profile_defaults_hash, load_compile_profile_spec,
 };
 pub use diagnostics::{
-    ArtifactFeature, ArtifactSchemaVersion, CompatibilityAdapterId, ComponentId,
+    ArtifactFeature, ArtifactSchemaVersion, BudgetFailure, CompatibilityAdapterId, ComponentId,
     DataLoweringProfileId, DiagnosticSeverity, GoldenVectorId, KnobValueDescriptor, LineageId,
     LoweringShardId, LoweringShardRef, ManifestInvariant, ObjectiveRejection,
     PlacementInfeasibilityReason, ReductionSiteId, SidecarKind, SwitchProjectionSource,
     TargetIncompatibilityReason, TraceProbeId, ValidationCode, ValidationDetail,
-    ValidationDiagnostic, ValidationOrigin,
+    ValidationDiagnostic, ValidationOrigin, budget_failure_diagnostic, budget_failure_diagnostics,
+    budget_failure_matches_diagnostic, budget_failure_validation_code,
 };
 pub use objective::{CompileObjective, RiskPolicy, ServiceLevelObjective};
 pub use repair::{RepairPolicy, RepairPolicyProfile, RepairProposalId};

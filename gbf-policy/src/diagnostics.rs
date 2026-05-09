@@ -247,6 +247,229 @@ pub enum ValidationCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "fields", deny_unknown_fields)]
+pub enum BudgetFailure {
+    MissingRuntimeChromeBudget,
+    QuantGraphBudgetViewMalformed {
+        field: FieldPath,
+    },
+    ExpertExceedsSlot {
+        layer: LayerId,
+        expert: ExpertId,
+        slot: BudgetSlotId,
+        payload_bytes: u32,
+        cap_bytes: u32,
+        excess_bytes: u32,
+    },
+    CommonBankExceedsCap {
+        assigned_bytes: u32,
+        cap_bytes: u32,
+        excess_bytes: u32,
+    },
+    WramPeakExceedsCap {
+        peak: u32,
+        cap: u32,
+    },
+    SramPeakExceedsCap {
+        peak: u32,
+        cap: u32,
+    },
+    HramPeakExceedsCap {
+        peak: u32,
+        cap: u32,
+    },
+    AccumulatorExceedsI32 {
+        site: ReductionSiteId,
+        projected_max_abs: u64,
+    },
+    BankSwitchesPerTokenOverCap {
+        decision_value: u16,
+        upper_bound: u16,
+        cap: u16,
+        source: SwitchProjectionSource,
+    },
+    SramPageSwitchesPerTokenOverCap {
+        decision_value: u16,
+        upper_bound: u16,
+        cap: u16,
+        source: SwitchProjectionSource,
+    },
+    PlacementProfileInfeasible {
+        profile: PlacementProfile,
+        reason: PlacementInfeasibilityReason,
+    },
+}
+
+impl BudgetFailure {
+    #[must_use]
+    pub fn validation_code(&self) -> ValidationCode {
+        match self {
+            Self::MissingRuntimeChromeBudget => ValidationCode::BudgetMissingRuntimeChromeBudget,
+            Self::QuantGraphBudgetViewMalformed { field } => {
+                ValidationCode::BudgetQuantGraphViewMalformed {
+                    field: field.clone(),
+                }
+            }
+            Self::ExpertExceedsSlot {
+                layer,
+                expert,
+                slot,
+                payload_bytes,
+                cap_bytes,
+                ..
+            } => ValidationCode::BudgetExpertExceedsSlot {
+                layer: *layer,
+                expert: *expert,
+                slot: *slot,
+                payload_bytes: *payload_bytes,
+                cap_bytes: *cap_bytes,
+            },
+            Self::CommonBankExceedsCap {
+                assigned_bytes,
+                cap_bytes,
+                ..
+            } => ValidationCode::BudgetCommonBankExceedsCap {
+                assigned_bytes: *assigned_bytes,
+                cap_bytes: *cap_bytes,
+            },
+            Self::WramPeakExceedsCap { peak, cap } => ValidationCode::BudgetWramPeakExceeds {
+                peak: *peak,
+                cap: *cap,
+            },
+            Self::SramPeakExceedsCap { peak, cap } => ValidationCode::BudgetSramPeakExceeds {
+                peak: *peak,
+                cap: *cap,
+            },
+            Self::HramPeakExceedsCap { peak, cap } => ValidationCode::BudgetHramPeakExceeds {
+                peak: *peak,
+                cap: *cap,
+            },
+            Self::AccumulatorExceedsI32 {
+                site,
+                projected_max_abs,
+            } => ValidationCode::BudgetAccumulatorOverflow {
+                site: site.clone(),
+                projected_max_abs: *projected_max_abs,
+            },
+            Self::BankSwitchesPerTokenOverCap {
+                decision_value,
+                upper_bound,
+                cap,
+                source,
+            } => ValidationCode::BudgetSwitchesPerTokenOverCap {
+                decision_value: *decision_value,
+                upper_bound: *upper_bound,
+                cap: *cap,
+                source: *source,
+            },
+            Self::SramPageSwitchesPerTokenOverCap {
+                decision_value,
+                upper_bound,
+                cap,
+                source,
+            } => ValidationCode::BudgetSramPageSwitchesPerTokenOverCap {
+                decision_value: *decision_value,
+                upper_bound: *upper_bound,
+                cap: *cap,
+                source: *source,
+            },
+            Self::PlacementProfileInfeasible { profile, reason } => {
+                ValidationCode::BudgetPlacementProfileInfeasible {
+                    profile: *profile,
+                    reason: reason.clone(),
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn diagnostic_detail(&self) -> ValidationDetail {
+        match self {
+            Self::MissingRuntimeChromeBudget => ValidationDetail::Field {
+                field: FieldPath::from("runtime_chrome_budget"),
+            },
+            Self::QuantGraphBudgetViewMalformed { field } => ValidationDetail::Field {
+                field: field.clone(),
+            },
+            _ => ValidationDetail::Selector {
+                selector: self
+                    .diagnostic_selector()
+                    .expect("budget failure has selector"),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn diagnostic_selector(&self) -> Option<SelectorPath> {
+        let selector = match self {
+            Self::MissingRuntimeChromeBudget | Self::QuantGraphBudgetViewMalformed { .. } => {
+                return None;
+            }
+            Self::ExpertExceedsSlot {
+                layer,
+                expert,
+                slot,
+                ..
+            } => format!(
+                "budget.expert[layer={},expert={},slot={}]",
+                layer, expert, slot
+            ),
+            Self::CommonBankExceedsCap { .. } => "budget.common_bank".to_owned(),
+            Self::WramPeakExceedsCap { .. } => "budget.memory.wram".to_owned(),
+            Self::SramPeakExceedsCap { .. } => "budget.memory.sram".to_owned(),
+            Self::HramPeakExceedsCap { .. } => "budget.memory.hram".to_owned(),
+            Self::AccumulatorExceedsI32 { site, .. } => {
+                format!("budget.accumulator[site={}]", site.0.as_str())
+            }
+            Self::BankSwitchesPerTokenOverCap { .. } => "budget.switches.bank_per_token".to_owned(),
+            Self::SramPageSwitchesPerTokenOverCap { .. } => {
+                "budget.switches.sram_page_per_token".to_owned()
+            }
+            Self::PlacementProfileInfeasible { profile, reason } => {
+                format!("budget.placement[profile={profile:?},reason={reason:?}]")
+            }
+        };
+        Some(SelectorPath(selector))
+    }
+
+    #[must_use]
+    pub fn diagnostic(&self) -> ValidationDiagnostic {
+        budget_failure_diagnostic(self)
+    }
+}
+
+#[must_use]
+pub fn budget_failure_validation_code(failure: &BudgetFailure) -> ValidationCode {
+    failure.validation_code()
+}
+
+#[must_use]
+pub fn budget_failure_diagnostic(failure: &BudgetFailure) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Budget,
+        failure.validation_code(),
+        failure.diagnostic_detail(),
+        Vec::new(),
+    )
+}
+
+#[must_use]
+pub fn budget_failure_diagnostics(failures: &[BudgetFailure]) -> Vec<ValidationDiagnostic> {
+    failures.iter().map(budget_failure_diagnostic).collect()
+}
+
+#[must_use]
+pub fn budget_failure_matches_diagnostic(
+    failure: &BudgetFailure,
+    diagnostic: &ValidationDiagnostic,
+) -> bool {
+    diagnostic.severity == DiagnosticSeverity::Hard
+        && diagnostic.origin == ValidationOrigin::Budget
+        && diagnostic.code == failure.validation_code()
+        && diagnostic.detail == failure.diagnostic_detail()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ValidationDetail {
     None,
@@ -319,6 +542,8 @@ pub enum SwitchProjectionSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum PlacementInfeasibilityReason {
+    NoSlotsForClass,
+    ExpertCountExceedsSlots,
     RequiresUnavailableSlotClass,
     ExceedsCommonBankCap,
     ExceedsExpertBankCap,

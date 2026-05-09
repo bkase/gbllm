@@ -1,6 +1,7 @@
 //! Compiler pipeline from artifact import through scheduling, assembly lowering, ROM emission, and reports.
 
 pub mod arena;
+pub mod budget;
 pub mod f_b1;
 pub mod import;
 pub mod kernel_select;
@@ -21,6 +22,10 @@ pub mod validate;
 pub mod window;
 
 pub mod stages {
+    pub mod budget {
+        pub use crate::budget::*;
+    }
+
     pub mod validate {
         pub use crate::validate::*;
     }
