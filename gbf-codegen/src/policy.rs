@@ -16,8 +16,8 @@ use gbf_policy::{
 };
 use gbf_report::report_schemas::policy_resolution_v1::{
     ArtifactIdentitySection, CompileKnobsSection, CompileRequestSection, ConstraintEnforcement,
-    HintConsumptionSection, PolicyProvenanceSection, PolicyResolutionReportBody,
-    PolicyResolutionSuccessSection, ResolvedSection,
+    HintConsumptionSection, IgnoredPreference, PolicyProvenanceSection, PolicyResolutionReportBody,
+    PolicyResolutionSuccessSection, PreferenceUse, ResolvedSection,
 };
 use gbf_report::{
     ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report, compute_self_hash,
@@ -77,22 +77,21 @@ pub fn resolve_policy(
         hint_consumption: HintConsumptionSection::default(),
     };
 
-    let mut frames = initial_constraint_frames(validation);
-    let compile_request_frame_index = frames.len();
+    let mut frames = match initial_constraint_frames(validation) {
+        Ok(frames) => frames,
+        Err(diagnostic) => return Err(finalized_failure(validation, diagnostic)),
+    };
     frames.push(compile_request_frame(validation));
+    let profile_frame_index = profile_frame_index(&frames);
 
     for (index, frame) in frames.iter().enumerate() {
         if let Err(diagnostic) = apply_frame(
             &mut state,
             frame,
-            index >= compile_request_frame_index,
+            index > profile_frame_index,
             matches!(frame.source, PolicySource::CompileRequestOverride),
         ) {
-            let report = failure_report(validation, vec![diagnostic.clone()]);
-            return Err(PolicyResolutionStageFailure {
-                report,
-                diagnostics: vec![diagnostic],
-            });
+            return Err(finalized_failure(validation, diagnostic));
         }
     }
 
@@ -101,14 +100,10 @@ pub fn resolve_policy(
     if let Err(diagnostic) = apply_frame(
         &mut state,
         &calibration_frame,
-        calibration_frame_index >= compile_request_frame_index,
+        calibration_frame_index > profile_frame_index,
         false,
     ) {
-        let report = failure_report(validation, vec![diagnostic.clone()]);
-        return Err(PolicyResolutionStageFailure {
-            report,
-            diagnostics: vec![diagnostic],
-        });
+        return Err(finalized_failure(validation, diagnostic));
     }
 
     let hint_consumption = state.hint_consumption.clone();
@@ -127,8 +122,11 @@ pub fn resolve_policy(
     })
 }
 
-fn initial_constraint_frames(validation: &ValidationProduct<'_>) -> Vec<ConstraintFrame> {
-    vec![
+#[allow(clippy::result_large_err)]
+fn initial_constraint_frames(
+    validation: &ValidationProduct<'_>,
+) -> Result<Vec<ConstraintFrame>, ValidationDiagnostic> {
+    Ok(vec![
         ConstraintFrame {
             source: PolicySource::TargetDefault,
             evidence: vec![target_evidence(validation)],
@@ -146,22 +144,46 @@ fn initial_constraint_frames(validation: &ValidationProduct<'_>) -> Vec<Constrai
             locks: validation.validated.compile_profile.locks.clone(),
         },
         hint_preference_frame(validation),
-        hint_constraint_frame(validation),
-    ]
+        hint_constraint_frame(validation)?,
+    ])
+}
+
+fn profile_frame_index(frames: &[ConstraintFrame]) -> usize {
+    frames
+        .iter()
+        .position(|frame| matches!(frame.source, PolicySource::ProfileDefault))
+        .expect("policy resolution frames include a profile-default frame")
 }
 
 fn hint_preference_frame(validation: &ValidationProduct<'_>) -> ConstraintFrame {
+    let mut preferences = CompileKnobPartialValues::default();
+    if !validation
+        .validated
+        .artifact
+        .hint_bundle
+        .preferences
+        .expert_slot_affinity()
+        .is_empty()
+    {
+        preferences.placement = Some(PlacementKnob {
+            profile: gbf_policy::PlacementProfile::PackedExperts,
+        });
+    }
+
     ConstraintFrame {
         source: PolicySource::HintBundle,
         evidence: vec![hint_evidence(validation)],
         defaults: CompileKnobPartialValues::default(),
         hard_bounds: CompileKnobPartialBounds::default(),
-        preferences: CompileKnobPartialValues::default(),
+        preferences,
         locks: KnobLockSet::default(),
     }
 }
 
-fn hint_constraint_frame(validation: &ValidationProduct<'_>) -> ConstraintFrame {
+#[allow(clippy::result_large_err)]
+fn hint_constraint_frame(
+    validation: &ValidationProduct<'_>,
+) -> Result<ConstraintFrame, ValidationDiagnostic> {
     let mut defaults = CompileKnobPartialValues::default();
     for entry in &validation
         .validated
@@ -170,17 +192,23 @@ fn hint_constraint_frame(validation: &ValidationProduct<'_>) -> ConstraintFrame 
         .constraints
         .entries
     {
-        set_partial_value_from_constraint(&mut defaults, entry.knob, &entry.value);
+        set_partial_value_from_constraint(&mut defaults, entry.knob, &entry.value).map_err(
+            |()| {
+                let mut evidence = vec![hint_evidence(validation)];
+                evidence.extend(entry.evidence.clone());
+                unsupported_hint_constraint_diagnostic(entry.knob, entry.value.clone(), evidence)
+            },
+        )?;
     }
 
-    ConstraintFrame {
+    Ok(ConstraintFrame {
         source: PolicySource::HintBundle,
         evidence: vec![hint_evidence(validation)],
         defaults,
         hard_bounds: CompileKnobPartialBounds::default(),
         preferences: CompileKnobPartialValues::default(),
         locks: KnobLockSet::default(),
-    }
+    })
 }
 
 fn compile_request_frame(validation: &ValidationProduct<'_>) -> ConstraintFrame {
@@ -243,13 +271,7 @@ fn apply_frame(
         locks_active,
         operation_for_value_source(&frame.source),
     )?;
-    apply_values(
-        state,
-        &frame.preferences,
-        frame,
-        locks_active,
-        ConstraintOperation::ApplyPreference,
-    )?;
+    apply_preferences(state, &frame.preferences, frame, locks_active)?;
 
     for knob in &frame.locks.locked {
         state.locks.locked.insert(*knob);
@@ -292,6 +314,9 @@ fn apply_bounds(
                     ));
                 }
                 state.bounds.$field = meet_bound(state.bounds.$field, next);
+                if compile_request_override {
+                    state.overrides.bounds.$field = Some(next);
+                }
                 if !value_within_knob_bounds($knob, &state.values, &state.bounds) {
                     return Err(out_of_bounds_diagnostic(
                         $knob,
@@ -379,6 +404,70 @@ fn apply_values(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+fn apply_preferences(
+    state: &mut ResolutionState,
+    values: &CompileKnobPartialValues,
+    frame: &ConstraintFrame,
+    locks_active: bool,
+) -> Result<(), ValidationDiagnostic> {
+    macro_rules! apply_one {
+        ($field:ident, $knob:expr) => {
+            if let Some(next) = values.$field {
+                let provenance = preference_provenance(frame);
+                let mut candidate = state.values.clone();
+                candidate.$field = next;
+                if !value_within_knob_bounds($knob, &candidate, &state.bounds) {
+                    state
+                        .hint_consumption
+                        .preferences_ignored
+                        .push(IgnoredPreference {
+                            knob: $knob,
+                            reason: "outside_bounds".to_owned(),
+                            provenance,
+                        });
+                } else {
+                    if locks_active
+                        && state.locks.locked.contains(&$knob)
+                        && state.values.$field != next
+                    {
+                        return Err(locked_diagnostic($knob, frame.evidence.clone()));
+                    }
+
+                    state.values.$field = next;
+                    state
+                        .hint_consumption
+                        .preferences_honored
+                        .push(PreferenceUse {
+                            knob: $knob,
+                            provenance: provenance.clone(),
+                        });
+                    push_provenance(
+                        &mut state.provenance,
+                        $knob,
+                        ConstraintProvenance {
+                            source: frame.source.clone(),
+                            operation: ConstraintOperation::ApplyPreference,
+                            evidence: frame.evidence.clone(),
+                        },
+                    );
+                }
+            }
+        };
+    }
+
+    apply_one!(placement, CompileKnobId::Placement);
+    apply_one!(observation, CompileKnobId::Observation);
+    apply_one!(range, CompileKnobId::Range);
+    apply_one!(storage, CompileKnobId::Storage);
+    apply_one!(sram, CompileKnobId::Sram);
+    apply_one!(rom_window, CompileKnobId::RomWindow);
+    apply_one!(overlay, CompileKnobId::Overlay);
+    apply_one!(schedule, CompileKnobId::Schedule);
+
+    Ok(())
+}
+
 fn build_policy(
     validation: &ValidationProduct<'_>,
     state: ResolutionState,
@@ -452,6 +541,19 @@ fn failure_report(
         diagnostics,
         ReportOutcome::Failed,
     )
+}
+
+fn finalized_failure(
+    validation: &ValidationProduct<'_>,
+    diagnostic: ValidationDiagnostic,
+) -> PolicyResolutionStageFailure {
+    let diagnostics = vec![diagnostic];
+    let report = failure_report(validation, diagnostics.clone());
+    let (report, _, _) = finalize_report(report);
+    PolicyResolutionStageFailure {
+        report,
+        diagnostics,
+    }
 }
 
 fn policy_report(
@@ -595,7 +697,7 @@ fn set_partial_value_from_constraint(
     values: &mut CompileKnobPartialValues,
     knob: CompileKnobId,
     value: &ConstraintValue,
-) {
+) -> Result<(), ()> {
     match (knob, value) {
         (CompileKnobId::Placement, ConstraintValue::PlacementProfile { value }) => {
             values.placement = Some(PlacementKnob { profile: *value });
@@ -607,8 +709,9 @@ fn set_partial_value_from_constraint(
             observation.observability = *value;
             values.observation = Some(observation);
         }
-        _ => {}
+        _ => return Err(()),
     }
+    Ok(())
 }
 
 fn value_within_knob_bounds(
@@ -714,6 +817,22 @@ fn loosened_bound_diagnostic(
     }
 }
 
+fn unsupported_hint_constraint_diagnostic(
+    knob: CompileKnobId,
+    value: ConstraintValue,
+    provenance: Vec<EvidenceRef>,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic {
+        severity: DiagnosticSeverity::Hard,
+        origin: ValidationOrigin::PolicyResolution,
+        code: ValidationCode::PolicyHintConstraintUnsupported { knob, value },
+        detail: ValidationDetail::Field {
+            field: FieldPath::from(format!("hint_bundle.constraints.{knob:?}")),
+        },
+        provenance,
+    }
+}
+
 fn operation_for_value_source(source: &PolicySource) -> ConstraintOperation {
     match source {
         PolicySource::CompileRequestOverride => ConstraintOperation::ApplyOverride,
@@ -792,6 +911,14 @@ fn state_hint_constraints(frame: &ConstraintFrame) -> Vec<ConstraintEnforcement>
             }],
         })
         .collect()
+}
+
+fn preference_provenance(frame: &ConstraintFrame) -> Vec<ConstraintProvenance> {
+    vec![ConstraintProvenance {
+        source: frame.source.clone(),
+        operation: ConstraintOperation::ApplyPreference,
+        evidence: frame.evidence.clone(),
+    }]
 }
 
 fn partial_has_value(values: &CompileKnobPartialValues, knob: CompileKnobId) -> bool {
@@ -967,11 +1094,13 @@ mod tests {
 
     use gbf_artifact::aux::{ArtifactAux, SemanticCheckpointSchemaId, SemanticCheckpointSchemaRef};
     use gbf_artifact::core::ArtifactCore;
+    use gbf_artifact::export_facts::RateQ8_8;
     use gbf_artifact::lowerings::{
         DataLoweringProfileId, LoweringManifest, LoweringShard, LoweringShardId, LoweringShardKind,
         Pack,
     };
     use gbf_artifact::manifest::{ArtifactFeature, ArtifactManifest, ManifestTimestamp};
+    use gbf_artifact::preferences::{AffinityPair, CompilePreferences, ExpertSlotAffinity};
     use gbf_artifact::quant::QuantSpec;
     use gbf_artifact::sequence::SequenceSemanticsSpec;
     use gbf_artifact::{
@@ -979,8 +1108,8 @@ mod tests {
         TargetDataLoweringArtifact,
     };
     use gbf_foundation::{
-        BlobRef, CompileProfileId, GoldenVectorId, Hash256, LineageId, PackerVersion,
-        TargetProfileId, WorkloadId,
+        BlobRef, CompileProfileId, ExpertId, GoldenVectorId, Hash256, LayerId, LineageId,
+        PackerVersion, TargetProfileId, WorkloadId,
     };
     use gbf_hw::target::{TargetProfile, dmg_mbc5_8mib_128kib};
     use gbf_policy::{
@@ -990,7 +1119,7 @@ mod tests {
         PlacementProfile, RomKernelResidencyBias, RomWindowKnob, RuntimeMode,
         ServiceLevelObjective, ValidationCode, canonical_compile_profile_specs,
     };
-    use gbf_report::ReportOutcome;
+    use gbf_report::{ReportOutcome, round_trip_self_hash};
     use gbf_workload::{GoldenVectorRef, WorkloadLocator, WorkloadManifest, WorkloadManifestRef};
     use serde::Serialize;
     use sha2::{Digest, Sha256};
@@ -1072,6 +1201,27 @@ mod tests {
         assert_eq!(
             product.policy.knobs.bounds.placement.max_profile,
             PlacementProfile::Budgeted
+        );
+        assert_eq!(
+            product.policy.knobs.overrides.bounds.placement,
+            Some(PlacementKnobBounds {
+                max_profile: PlacementProfile::Budgeted,
+            })
+        );
+        assert_eq!(
+            product
+                .report
+                .body
+                .result
+                .as_ref()
+                .expect("success report has result")
+                .compile_knobs
+                .overrides
+                .bounds
+                .placement,
+            Some(PlacementKnobBounds {
+                max_profile: PlacementProfile::Budgeted,
+            })
         );
     }
 
@@ -1173,6 +1323,7 @@ mod tests {
         assert_eq!(failure.report.schema.as_str(), "policy_resolution.v1");
         assert_eq!(failure.report.outcome, ReportOutcome::Failed);
         assert!(failure.report.body.result.is_none());
+        round_trip_self_hash(&failure.report).expect("failure report self-hash round-trips");
     }
 
     #[test]
@@ -1252,7 +1403,7 @@ mod tests {
     fn f_b2_resolve_policy_target_fixture_leaves_profile_specific_knobs_unset() {
         let fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
         let validation = fixture.validation();
-        let frames = initial_constraint_frames(&validation);
+        let frames = initial_constraint_frames(&validation).expect("frames collect");
 
         assert_eq!(frames[0].source, PolicySource::TargetDefault);
         assert_eq!(frames[0].defaults, CompileKnobPartialValues::default());
@@ -1289,6 +1440,160 @@ mod tests {
         });
 
         resolve_policy(&fixture.validation()).expect("identical locked value is allowed");
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_lock_blocks_hint_change() {
+        let mut fixture = Fixture::new(BRINGUP_COMPILE_PROFILE_ID);
+        fixture
+            .artifact
+            .hint_bundle
+            .constraints
+            .entries
+            .push(BuildConstraintEntry {
+                knob: CompileKnobId::Placement,
+                path: None,
+                value: ConstraintValue::PlacementProfile {
+                    value: PlacementProfile::PackedExperts,
+                },
+                evidence: Vec::new(),
+                scope: EvidenceScope::WholeArtifact,
+            });
+        fixture.refresh_transport_hash();
+
+        let failure = resolve_policy(&fixture.validation()).expect_err("locked hint rejects");
+        assert_policy_failure(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::PolicyKnobLockedAndOverridden {
+                    knob: CompileKnobId::Placement
+                }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_lock_allows_identical_hint_re_affirmation() {
+        let mut fixture = Fixture::new(BRINGUP_COMPILE_PROFILE_ID);
+        fixture
+            .artifact
+            .hint_bundle
+            .constraints
+            .entries
+            .push(BuildConstraintEntry {
+                knob: CompileKnobId::Placement,
+                path: None,
+                value: ConstraintValue::PlacementProfile {
+                    value: PlacementProfile::StrictOnePerBank,
+                },
+                evidence: Vec::new(),
+                scope: EvidenceScope::WholeArtifact,
+            });
+        fixture.refresh_transport_hash();
+
+        let product = resolve_policy(&fixture.validation()).expect("identical hint is allowed");
+        assert_eq!(
+            product.policy.knobs.global.placement.profile,
+            PlacementProfile::StrictOnePerBank
+        );
+        assert_eq!(
+            product
+                .report
+                .body
+                .hint_consumption
+                .constraints_enforced
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_rejects_unsupported_hint_constraint_value() {
+        let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        fixture
+            .artifact
+            .hint_bundle
+            .constraints
+            .entries
+            .push(BuildConstraintEntry {
+                knob: CompileKnobId::Schedule,
+                path: None,
+                value: ConstraintValue::Bool { value: true },
+                evidence: Vec::new(),
+                scope: EvidenceScope::WholeArtifact,
+            });
+        fixture.refresh_transport_hash();
+
+        let failure = resolve_policy(&fixture.validation()).expect_err("unsupported hint rejects");
+        assert_policy_failure(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::PolicyHintConstraintUnsupported {
+                    knob: CompileKnobId::Schedule,
+                    value: ConstraintValue::Bool { value: true },
+                }
+            )
+        });
+        round_trip_self_hash(&failure.report).expect("unsupported failure report self-hash");
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_records_honored_hint_preference() {
+        let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        fixture.artifact.hint_bundle.preferences = slot_affinity_preferences();
+        fixture.refresh_transport_hash();
+
+        let product = resolve_policy(&fixture.validation()).expect("preference resolves");
+        assert_eq!(
+            product.policy.knobs.global.placement.profile,
+            PlacementProfile::PackedExperts
+        );
+        assert_eq!(
+            product
+                .report
+                .body
+                .hint_consumption
+                .preferences_honored
+                .len(),
+            1
+        );
+        assert!(
+            product
+                .report
+                .body
+                .hint_consumption
+                .preferences_ignored
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_ignores_out_of_bounds_hint_preference() {
+        let mut fixture = Fixture::new(BRINGUP_COMPILE_PROFILE_ID);
+        fixture.artifact.hint_bundle.preferences = slot_affinity_preferences();
+        fixture.refresh_transport_hash();
+
+        let product = resolve_policy(&fixture.validation()).expect("oob preference is ignored");
+        assert_eq!(
+            product.policy.knobs.global.placement.profile,
+            PlacementProfile::StrictOnePerBank
+        );
+        assert!(
+            product
+                .report
+                .body
+                .hint_consumption
+                .preferences_honored
+                .is_empty()
+        );
+        assert_eq!(
+            product.report.body.hint_consumption.preferences_ignored[0].knob,
+            CompileKnobId::Placement
+        );
+        assert_eq!(
+            product.report.body.hint_consumption.preferences_ignored[0].reason,
+            "outside_bounds"
+        );
     }
 
     fn assert_policy_failure(
@@ -1601,6 +1906,24 @@ mod tests {
             constraint_overrides: None,
             requested_runtime_modes: BTreeSet::from([RuntimeMode::Safe]),
         }
+    }
+
+    fn slot_affinity_preferences() -> CompilePreferences {
+        CompilePreferences::new(vec![
+            ExpertSlotAffinity::new(
+                LayerId::new(0),
+                vec![
+                    AffinityPair::new(
+                        ExpertId::new(0),
+                        ExpertId::new(1),
+                        RateQ8_8::new(128).expect("rate is valid"),
+                    )
+                    .expect("affinity pair is valid"),
+                ],
+            )
+            .expect("slot affinity is valid"),
+        ])
+        .expect("preferences are valid")
     }
 
     fn compile_profile(id: &str) -> CompileProfileSpec {
