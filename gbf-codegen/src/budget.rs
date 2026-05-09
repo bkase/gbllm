@@ -4,7 +4,7 @@
 //! static budget report path used by F-B4.
 
 use gbf_artifact::weight_plan::TernaryWeightPlan;
-use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, LayerId};
+use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, KernelSpecId, LayerId};
 use gbf_hw::target::TargetProfile;
 use gbf_policy::{
     BudgetSlotClass, PlacementProfile, ReductionSiteId, RomBudgetSlot, RuntimeChromeBudget,
@@ -63,11 +63,12 @@ pub trait QuantGraphBudgetSource {
     fn to_budget_view(&self) -> Result<QuantGraphBudgetView, QuantGraphBudgetViewError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuantGraphBudgetView {
     pub semantic_core_hash: Hash256,
     pub quant_graph_hash: Hash256,
+    pub layers: Vec<LayerId>,
     pub experts: Vec<ExpertProjection>,
     pub shared_kernels: Vec<SharedKernelProjection>,
     pub shared_luts: Vec<SharedLutProjection>,
@@ -76,7 +77,7 @@ pub struct QuantGraphBudgetView {
     pub routing: RoutingProjection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExpertProjection {
     pub layer: LayerId,
@@ -87,21 +88,21 @@ pub struct ExpertProjection {
     pub plan: TernaryWeightPlan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedKernelProjection {
-    pub id: String,
+    pub id: KernelSpecId,
     pub bytes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedLutProjection {
     pub id: String,
     pub bytes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReductionSiteProjection {
     pub site: ReductionSiteId,
@@ -114,7 +115,7 @@ pub struct ReductionSiteProjection {
     pub accumulator_domain: AccumulatorDomain,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum AccumulatorDomain {
     RawIntegerProducts,
@@ -122,7 +123,7 @@ pub enum AccumulatorDomain {
     PostScaleQ16_16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SequenceStateProjection {
     pub projected_wram_bytes: u32,
@@ -131,7 +132,7 @@ pub struct SequenceStateProjection {
     pub projected_sram_page_switches_per_token: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingProjection {
     pub model: RoutingModelSection,
@@ -157,10 +158,97 @@ pub enum QuantGraphBudgetViewError {
 }
 
 impl QuantGraphBudgetViewError {
+    #[must_use]
+    pub fn field_path(&self) -> &FieldPath {
+        match self {
+            Self::Malformed { field } => field,
+        }
+    }
+
     fn into_failure(self) -> BudgetFailure {
         match self {
             Self::Malformed { field } => BudgetFailure::QuantGraphBudgetViewMalformed { field },
         }
+    }
+}
+
+impl std::fmt::Display for QuantGraphBudgetViewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed { field } => write!(f, "malformed QuantGraph budget view at {field}"),
+        }
+    }
+}
+
+impl std::error::Error for QuantGraphBudgetViewError {}
+
+impl QuantGraphBudgetView {
+    pub fn validate_semantics(&self) -> Result<(), QuantGraphBudgetViewError> {
+        ensure_sorted_by(
+            self.layers.windows(2).all(|pair| pair[0] <= pair[1]),
+            "budget_view.layers",
+        )?;
+        ensure_sorted_by(
+            self.experts
+                .windows(2)
+                .all(|pair| (pair[0].layer, pair[0].expert) <= (pair[1].layer, pair[1].expert)),
+            "budget_view.experts",
+        )?;
+        ensure_sorted_by(
+            self.shared_kernels
+                .windows(2)
+                .all(|pair| pair[0].id <= pair[1].id),
+            "budget_view.shared_kernels",
+        )?;
+        ensure_sorted_by(
+            self.shared_luts
+                .windows(2)
+                .all(|pair| pair[0].id <= pair[1].id),
+            "budget_view.shared_luts",
+        )?;
+        ensure_sorted_by(
+            self.reduction_sites
+                .windows(2)
+                .all(|pair| pair[0].site <= pair[1].site),
+            "budget_view.reduction_sites",
+        )?;
+
+        for (index, expert) in self.experts.iter().enumerate() {
+            if !self.layers.contains(&expert.layer) {
+                return Err(malformed_field(format!(
+                    "budget_view.experts[{index}].layer"
+                )));
+            }
+            if expert.rows == 0 {
+                return Err(malformed_field(format!(
+                    "budget_view.experts[{index}].rows"
+                )));
+            }
+            if expert.cols == 0 {
+                return Err(malformed_field(format!(
+                    "budget_view.experts[{index}].cols"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn ensure_sorted_by(
+    is_sorted: bool,
+    field: impl Into<String>,
+) -> Result<(), QuantGraphBudgetViewError> {
+    if is_sorted {
+        Ok(())
+    } else {
+        Err(malformed_field(field))
+    }
+}
+
+fn malformed_field(field: impl Into<String>) -> QuantGraphBudgetViewError {
+    QuantGraphBudgetViewError::Malformed {
+        field: FieldPath::from(field.into()),
     }
 }
 
@@ -366,7 +454,7 @@ impl Default for ProjectedSwitchCountSection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingModelSection {
     pub kind: String,
@@ -613,28 +701,8 @@ fn validate_budget_view<Q: QuantGraphBudgetSource + ?Sized>(
         });
     }
 
-    for (index, expert) in view.experts.iter().enumerate() {
-        if expert.rows == 0 {
-            return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
-                field: FieldPath::from(format!("budget_view.experts[{index}].rows")),
-            });
-        }
-        if expert.cols == 0 {
-            return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
-                field: FieldPath::from(format!("budget_view.experts[{index}].cols")),
-            });
-        }
-    }
-    if !view
-        .experts
-        .windows(2)
-        .all(|pair| (pair[0].layer, pair[0].expert) <= (pair[1].layer, pair[1].expert))
-    {
-        return Err(BudgetFailure::QuantGraphBudgetViewMalformed {
-            field: FieldPath::from("budget_view.experts"),
-        });
-    }
-    Ok(())
+    view.validate_semantics()
+        .map_err(QuantGraphBudgetViewError::into_failure)
 }
 
 fn project_budget(
@@ -1074,6 +1142,7 @@ mod tests {
         QuantGraphBudgetView {
             semantic_core_hash: hash(0x02),
             quant_graph_hash: hash(0x23),
+            layers: vec![LayerId::new(0)],
             experts: vec![ExpertProjection {
                 layer: LayerId::new(0),
                 expert: ExpertId::new(0),
@@ -1088,6 +1157,153 @@ mod tests {
             sequence_state: SequenceStateProjection::default(),
             routing: RoutingProjection::default(),
         }
+    }
+
+    #[test]
+    fn f_b4_budget_validates_quant_graph_budget_view_ordering() {
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.layers = vec![LayerId::new(1), LayerId::new(0)];
+        assert_eq!(
+            view.validate_semantics().expect_err("layers are unsorted"),
+            QuantGraphBudgetViewError::Malformed {
+                field: FieldPath::from("budget_view.layers")
+            }
+        );
+
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.layers = vec![LayerId::new(0), LayerId::new(1)];
+        view.experts[0].layer = LayerId::new(1);
+        view.experts.push(ExpertProjection {
+            layer: LayerId::new(0),
+            expert: ExpertId::new(0),
+            rows: 4,
+            cols: 4,
+            metadata_bytes: 0,
+            plan: ternary_plan(),
+        });
+        assert_eq!(
+            view.validate_semantics().expect_err("experts are unsorted"),
+            QuantGraphBudgetViewError::Malformed {
+                field: FieldPath::from("budget_view.experts")
+            }
+        );
+
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.shared_kernels = vec![
+            SharedKernelProjection {
+                id: KernelSpecId::from("kernel.z"),
+                bytes: 8,
+            },
+            SharedKernelProjection {
+                id: KernelSpecId::from("kernel.a"),
+                bytes: 4,
+            },
+        ];
+        assert_eq!(
+            view.validate_semantics()
+                .expect_err("shared kernels are unsorted"),
+            QuantGraphBudgetViewError::Malformed {
+                field: FieldPath::from("budget_view.shared_kernels")
+            }
+        );
+
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.shared_luts = vec![
+            SharedLutProjection {
+                id: "lut.z".to_owned(),
+                bytes: 8,
+            },
+            SharedLutProjection {
+                id: "lut.a".to_owned(),
+                bytes: 4,
+            },
+        ];
+        assert_eq!(
+            view.validate_semantics()
+                .expect_err("shared LUTs are unsorted"),
+            QuantGraphBudgetViewError::Malformed {
+                field: FieldPath::from("budget_view.shared_luts")
+            }
+        );
+
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.reduction_sites = vec![
+            ReductionSiteProjection {
+                site: ReductionSiteId("site.z".to_owned()),
+                layer: Some(LayerId::new(0)),
+                expert: Some(ExpertId::new(0)),
+                term_count: 4,
+                input_max_abs_q: 2,
+                weight_max_abs_q: 3,
+                bias_max_abs_q: Some(1),
+                accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+            },
+            ReductionSiteProjection {
+                site: ReductionSiteId("site.a".to_owned()),
+                layer: Some(LayerId::new(0)),
+                expert: Some(ExpertId::new(0)),
+                term_count: 4,
+                input_max_abs_q: 2,
+                weight_max_abs_q: 3,
+                bias_max_abs_q: Some(1),
+                accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+            },
+        ];
+        assert_eq!(
+            view.validate_semantics()
+                .expect_err("reduction sites are unsorted"),
+            QuantGraphBudgetViewError::Malformed {
+                field: FieldPath::from("budget_view.reduction_sites")
+            }
+        );
+    }
+
+    #[test]
+    fn quant_graph_budget_view_round_trips_canonically() {
+        let mut view = budget_view_fixture(4, 8, 12);
+        view.layers = vec![LayerId::new(0), LayerId::new(1)];
+        view.experts.push(ExpertProjection {
+            layer: LayerId::new(1),
+            expert: ExpertId::new(0),
+            rows: 8,
+            cols: 4,
+            metadata_bytes: 16,
+            plan: ternary_plan(),
+        });
+        view.shared_kernels = vec![SharedKernelProjection {
+            id: KernelSpecId::from("kernel.shared.ffn"),
+            bytes: 128,
+        }];
+        view.shared_luts = vec![SharedLutProjection {
+            id: "lut.affine_clip.0".to_owned(),
+            bytes: 64,
+        }];
+        view.reduction_sites = vec![ReductionSiteProjection {
+            site: ReductionSiteId("ffn.0.acc".to_owned()),
+            layer: Some(LayerId::new(0)),
+            expert: Some(ExpertId::new(0)),
+            term_count: 16,
+            input_max_abs_q: 7,
+            weight_max_abs_q: 5,
+            bias_max_abs_q: Some(3),
+            accumulator_domain: AccumulatorDomain::PostScaleQ8_8,
+        }];
+
+        view.validate_semantics().expect("fixture view is valid");
+        let first_value = serde_json::to_value(&view).expect("view serializes");
+        let first_canonical =
+            canonicalize_value(&first_value).expect("view canonicalizes before round trip");
+        let decoded: QuantGraphBudgetView =
+            serde_json::from_slice(&first_canonical).expect("canonical view deserializes");
+        decoded
+            .validate_semantics()
+            .expect("decoded view remains valid");
+        let second_value = serde_json::to_value(&decoded).expect("decoded view serializes");
+        let second_canonical =
+            canonicalize_value(&second_value).expect("view canonicalizes after round trip");
+
+        assert_eq!(decoded, view);
+        assert_eq!(second_canonical, first_canonical);
     }
 
     struct TrackingQuantGraph {
@@ -1116,6 +1332,26 @@ mod tests {
         fn to_budget_view(&self) -> Result<QuantGraphBudgetView, QuantGraphBudgetViewError> {
             self.calls.set(self.calls.get() + 1);
             Ok(self.view.clone())
+        }
+    }
+
+    struct ErrorQuantGraph {
+        quant_graph_hash: Hash256,
+        semantic_core_hash: Hash256,
+        error: QuantGraphBudgetViewError,
+    }
+
+    impl QuantGraphBudgetSource for ErrorQuantGraph {
+        fn quant_graph_hash(&self) -> Hash256 {
+            self.quant_graph_hash
+        }
+
+        fn semantic_core_hash(&self) -> Hash256 {
+            self.semantic_core_hash
+        }
+
+        fn to_budget_view(&self) -> Result<QuantGraphBudgetView, QuantGraphBudgetViewError> {
+            Err(self.error.clone())
         }
     }
 
@@ -1240,6 +1476,26 @@ mod tests {
     }
 
     #[test]
+    fn f_b4_budget_uses_quant_graph_budget_source_trait_stub_until_f_b3() {
+        let budget = runtime_budget_fixture();
+        let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(quant_graph.calls.get(), 1);
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert_eq!(report.report.body.identity.quant_graph_hash, hash(0x23));
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[0].layer,
+            LayerId::new(0)
+        );
+        assert_eq!(
+            report.report.body.projections.per_expert_payload[0].expert,
+            ExpertId::new(0)
+        );
+    }
+
+    #[test]
     fn f_b4_budget_runtime_chrome_budget_excerpt_hash_matches_input() {
         let budget = runtime_budget_fixture();
         let quant_graph = TrackingQuantGraph::new(budget_view_fixture(4, 4, 0));
@@ -1322,6 +1578,57 @@ mod tests {
             report.report.body.diagnostics[0].code,
             ValidationCode::BudgetQuantGraphViewMalformed {
                 field: FieldPath::from("quant_graph.semantic_core_hash")
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_quant_graph_view_error_maps_to_typed_field_path() {
+        let budget = runtime_budget_fixture();
+        let error = QuantGraphBudgetViewError::Malformed {
+            field: FieldPath::from("budget_view.shared_kernels"),
+        };
+        assert_eq!(
+            error.field_path(),
+            &FieldPath::from("budget_view.shared_kernels")
+        );
+        let quant_graph = ErrorQuantGraph {
+            quant_graph_hash: hash(0x23),
+            semantic_core_hash: hash(0x02),
+            error,
+        };
+        let policy = policy_fixture();
+
+        let report = run_static_budget(BudgetInputs {
+            policy: &policy,
+            quant_graph: &quant_graph,
+            runtime_chrome_budget: Some(&budget),
+            target_profile: &dmg_mbc5_8mib_128kib(),
+        });
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("budget_view.shared_kernels")
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetQuantGraphViewMalformed {
+                field: FieldPath::from("budget_view.shared_kernels")
+            }
+        );
+
+        let mut invalid_view = budget_view_fixture(4, 4, 0);
+        invalid_view.experts[0].layer = LayerId::new(9);
+        let quant_graph = TrackingQuantGraph::new(invalid_view);
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetQuantGraphViewMalformed {
+                field: FieldPath::from("budget_view.experts[0].layer")
             }
         );
     }
