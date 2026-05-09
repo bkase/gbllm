@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 
 pub use gbf_policy::{
     BudgetFailure, PlacementInfeasibilityReason, SwitchProjectionSource, ValidationCode,
-    budget_failure_diagnostic, budget_failure_diagnostics, budget_failure_matches_diagnostic,
-    budget_failure_validation_code,
+    budget_failure_diagnostic, budget_failure_diagnostic_with_provenance,
+    budget_failure_diagnostics, budget_failure_diagnostics_with_provenance,
+    budget_failure_matches_diagnostic, budget_failure_validation_code,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,8 +53,8 @@ pub fn validation_diagnostics_for_budget_failures(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, LayerId};
-    use gbf_policy::{ReductionSiteId, ValidationDetail, ValidationOrigin};
+    use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, LayerId};
+    use gbf_policy::{EvidenceRef, ReductionSiteId, ValidationDetail, ValidationOrigin};
 
     fn round_trip_failure(failure: BudgetFailure) {
         let encoded = serde_json::to_string(&failure).expect("budget failure serializes");
@@ -224,6 +225,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn f_b4_budget_failure_pins_selector_detail_strings() {
+        let cases = [
+            (
+                BudgetFailure::ExpertExceedsSlot {
+                    layer: LayerId::new(0),
+                    expert: ExpertId::new(1),
+                    slot: BudgetSlotId::new(2),
+                    payload_bytes: 17_000,
+                    cap_bytes: 16_128,
+                    excess_bytes: 872,
+                },
+                "budget.expert[layer=0,expert=1,slot=2]",
+            ),
+            (
+                BudgetFailure::CommonBankExceedsCap {
+                    assigned_bytes: 20_000,
+                    cap_bytes: 16_384,
+                    excess_bytes: 3_616,
+                },
+                "budget.common_bank",
+            ),
+            (
+                BudgetFailure::AccumulatorExceedsI32 {
+                    site: ReductionSiteId("ffn.0.acc".to_owned()),
+                    projected_max_abs: i32::MAX as u64 + 1,
+                },
+                "budget.accumulator[site=ffn.0.acc]",
+            ),
+            (
+                BudgetFailure::BankSwitchesPerTokenOverCap {
+                    decision_value: 9,
+                    upper_bound: 9,
+                    cap: 5,
+                    source: SwitchProjectionSource::ConservativeStaticUpperBound,
+                },
+                "budget.switches.bank_per_token",
+            ),
+            (
+                BudgetFailure::PlacementProfileInfeasible {
+                    profile: PlacementProfile::PackedExperts,
+                    reason: PlacementInfeasibilityReason::ExpertCountExceedsSlots,
+                },
+                "budget.placement[profile=packed_experts,reason=expert_count_exceeds_slots]",
+            ),
+        ];
+
+        for (failure, selector) in cases {
+            assert_eq!(
+                serde_json::to_value(failure.diagnostic_detail())
+                    .expect("selector detail serializes"),
+                serde_json::json!({
+                    "kind": "Selector",
+                    "selector": selector
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn f_b4_budget_failure_diagnostic_accepts_provenance() {
+        let failure = BudgetFailure::CommonBankExceedsCap {
+            assigned_bytes: 20_000,
+            cap_bytes: 16_384,
+            excess_bytes: 3_616,
+        };
+        let provenance = vec![EvidenceRef {
+            kind: "Fixture".to_owned(),
+            reference: "static-budget-input".to_owned(),
+            hash: Some(Hash256::from_bytes([7; 32])),
+        }];
+
+        let diagnostic = budget_failure_diagnostic_with_provenance(&failure, provenance.clone());
+
+        assert_eq!(diagnostic.provenance, provenance);
+        assert!(budget_failure_matches_diagnostic(&failure, &diagnostic));
     }
 
     #[test]

@@ -426,7 +426,11 @@ impl BudgetFailure {
                 "budget.switches.sram_page_per_token".to_owned()
             }
             Self::PlacementProfileInfeasible { profile, reason } => {
-                format!("budget.placement[profile={profile:?},reason={reason:?}]")
+                format!(
+                    "budget.placement[profile={},reason={}]",
+                    placement_profile_selector_tag(*profile),
+                    placement_infeasibility_reason_selector_tag(reason)
+                )
             }
         };
         Some(SelectorPath(selector))
@@ -443,14 +447,40 @@ pub fn budget_failure_validation_code(failure: &BudgetFailure) -> ValidationCode
     failure.validation_code()
 }
 
+/// Canonical taxonomy helper for Stage 2 budget producers that already have
+/// typed evidence. Use this rather than rebuilding the code/detail mapping at
+/// call sites, so the `BudgetFailure` <-> `ValidationDiagnostic` invariant
+/// stays centralized.
 #[must_use]
-pub fn budget_failure_diagnostic(failure: &BudgetFailure) -> ValidationDiagnostic {
+pub fn budget_failure_diagnostic_with_provenance(
+    failure: &BudgetFailure,
+    provenance: Vec<EvidenceRef>,
+) -> ValidationDiagnostic {
     ValidationDiagnostic::hard(
         ValidationOrigin::Budget,
         failure.validation_code(),
         failure.diagnostic_detail(),
-        Vec::new(),
+        provenance,
     )
+}
+
+/// Taxonomy-only convenience helper for tests and Stage 2 scaffolding that has
+/// not yet attached evidence. Producer beads should prefer
+/// [`budget_failure_diagnostic_with_provenance`].
+#[must_use]
+pub fn budget_failure_diagnostic(failure: &BudgetFailure) -> ValidationDiagnostic {
+    budget_failure_diagnostic_with_provenance(failure, Vec::new())
+}
+
+#[must_use]
+pub fn budget_failure_diagnostics_with_provenance(
+    failures: &[BudgetFailure],
+    provenance: Vec<EvidenceRef>,
+) -> Vec<ValidationDiagnostic> {
+    failures
+        .iter()
+        .map(|failure| budget_failure_diagnostic_with_provenance(failure, provenance.clone()))
+        .collect()
 }
 
 #[must_use]
@@ -467,6 +497,29 @@ pub fn budget_failure_matches_diagnostic(
         && diagnostic.origin == ValidationOrigin::Budget
         && diagnostic.code == failure.validation_code()
         && diagnostic.detail == failure.diagnostic_detail()
+}
+
+const fn placement_profile_selector_tag(profile: PlacementProfile) -> &'static str {
+    match profile {
+        PlacementProfile::StrictOnePerBank => "strict_one_per_bank",
+        PlacementProfile::Budgeted => "budgeted",
+        PlacementProfile::PackedExperts => "packed_experts",
+    }
+}
+
+fn placement_infeasibility_reason_selector_tag(
+    reason: &PlacementInfeasibilityReason,
+) -> &'static str {
+    match reason {
+        PlacementInfeasibilityReason::NoSlotsForClass => "no_slots_for_class",
+        PlacementInfeasibilityReason::ExpertCountExceedsSlots => "expert_count_exceeds_slots",
+        PlacementInfeasibilityReason::RequiresUnavailableSlotClass => {
+            "requires_unavailable_slot_class"
+        }
+        PlacementInfeasibilityReason::ExceedsCommonBankCap => "exceeds_common_bank_cap",
+        PlacementInfeasibilityReason::ExceedsExpertBankCap => "exceeds_expert_bank_cap",
+        PlacementInfeasibilityReason::ViolatesTargetLayout => "violates_target_layout",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

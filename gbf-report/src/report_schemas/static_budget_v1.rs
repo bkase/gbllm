@@ -1,8 +1,8 @@
 //! `static_budget.v1` report helpers.
 
 use gbf_policy::{
-    BudgetFailure, ValidationDiagnostic, budget_failure_diagnostic,
-    budget_failure_matches_diagnostic,
+    BudgetFailure, EvidenceRef, ValidationDiagnostic, budget_failure_diagnostic,
+    budget_failure_diagnostic_with_provenance, budget_failure_matches_diagnostic,
 };
 
 pub type BudgetFailureRecord = BudgetFailure;
@@ -13,6 +13,17 @@ pub fn diagnostics_for_budget_failures(
     failures: &[BudgetFailureRecord],
 ) -> Vec<ValidationDiagnosticRecord> {
     failures.iter().map(budget_failure_diagnostic).collect()
+}
+
+#[must_use]
+pub fn diagnostics_for_budget_failures_with_provenance(
+    failures: &[BudgetFailureRecord],
+    provenance: Vec<EvidenceRef>,
+) -> Vec<ValidationDiagnosticRecord> {
+    failures
+        .iter()
+        .map(|failure| budget_failure_diagnostic_with_provenance(failure, provenance.clone()))
+        .collect()
 }
 
 #[must_use]
@@ -30,10 +41,10 @@ pub fn failure_diagnostics_are_one_to_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, LayerId};
+    use gbf_foundation::{BudgetSlotId, ExpertId, FieldPath, Hash256, LayerId};
     use gbf_policy::{
-        PlacementInfeasibilityReason, PlacementProfile, ReductionSiteId, SwitchProjectionSource,
-        ValidationCode, ValidationDetail, ValidationOrigin,
+        EvidenceRef, PlacementInfeasibilityReason, PlacementProfile, ReductionSiteId,
+        SwitchProjectionSource, ValidationCode, ValidationDetail, ValidationOrigin,
     };
 
     fn all_failure_variants() -> Vec<BudgetFailureRecord> {
@@ -120,8 +131,34 @@ mod tests {
         missing.pop();
         assert!(!failure_diagnostics_are_one_to_one(&failures, &missing));
 
-        let mut mismatched = diagnostics;
+        let mut mismatched = diagnostics.clone();
         mismatched.swap(0, 1);
         assert!(!failure_diagnostics_are_one_to_one(&failures, &mismatched));
+
+        let mut selector_mismatched = diagnostics;
+        selector_mismatched.swap(2, 3);
+        assert!(!failure_diagnostics_are_one_to_one(
+            &failures,
+            &selector_mismatched
+        ));
+    }
+
+    #[test]
+    fn f_b4_static_budget_v1_provenance_helper_preserves_one_to_one_mapping() {
+        let failures = all_failure_variants();
+        let provenance = vec![EvidenceRef {
+            kind: "Fixture".to_owned(),
+            reference: "static-budget-report".to_owned(),
+            hash: Some(Hash256::from_bytes([4; 32])),
+        }];
+        let diagnostics =
+            diagnostics_for_budget_failures_with_provenance(&failures, provenance.clone());
+
+        assert!(failure_diagnostics_are_one_to_one(&failures, &diagnostics));
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.provenance == provenance)
+        );
     }
 }

@@ -1844,13 +1844,27 @@ pub enum BudgetFailure {
         cap_bytes: u32,
         excess_bytes: u32,
     },
-    CommonBankExceedsCap { excess_bytes: u32 },
+    CommonBankExceedsCap {
+        assigned_bytes: u32,
+        cap_bytes: u32,
+        excess_bytes: u32,
+    },
     WramPeakExceedsCap { peak: u32, cap: u32 },
     SramPeakExceedsCap { peak: u32, cap: u32 },
     HramPeakExceedsCap { peak: u32, cap: u32 },
     AccumulatorExceedsI32 { site: ReductionSiteId, projected_max_abs: u64 },
-    BankSwitchesPerTokenOverCap { projected: u16, cap: u16 },
-    SramPageSwitchesPerTokenOverCap { projected: u16, cap: u16 },
+    BankSwitchesPerTokenOverCap {
+        decision_value: u16,
+        upper_bound: u16,
+        cap: u16,
+        source: SwitchProjectionSource,
+    },
+    SramPageSwitchesPerTokenOverCap {
+        decision_value: u16,
+        upper_bound: u16,
+        cap: u16,
+        source: SwitchProjectionSource,
+    },
     PlacementProfileInfeasible { profile: PlacementProfile, reason: PlacementInfeasibilityReason },
 }
 ```
