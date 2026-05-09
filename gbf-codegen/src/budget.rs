@@ -312,7 +312,7 @@ fn malformed_field(field: impl Into<String>) -> QuantGraphBudgetViewError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaticBudgetReport {
     pub report: ReportEnvelope<StaticBudgetReportBody>,
     pub static_budget_self_hash: Hash256,
