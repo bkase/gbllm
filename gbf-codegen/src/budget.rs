@@ -12,6 +12,7 @@ use gbf_policy::{
     BudgetSlotClass, PlacementProfile, ReductionSiteId, RomBudgetSlot, RuntimeChromeBudget,
     SwitchProjectionSource, ValidationDiagnostic,
 };
+use gbf_policy::{CompileKnobId, ReductionPlanCeiling};
 use gbf_report::{
     ReportBody, ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report,
     canonicalize_value, compute_self_hash,
@@ -270,6 +271,18 @@ impl QuantGraphBudgetView {
             }
         }
 
+        for (index, site) in self.reduction_sites.iter().enumerate() {
+            let zero_terms_with_nonzero_bound = site.term_count == 0
+                && (site.input_max_abs_q != 0
+                    || site.weight_max_abs_q != 0
+                    || site.bias_max_abs_q.unwrap_or(0) != 0);
+            if zero_terms_with_nonzero_bound {
+                return Err(malformed_field(format!(
+                    "budget_view.reduction_sites[{index}].term_count"
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -396,7 +409,7 @@ pub struct BudgetProjectionSection {
     pub per_expert_payload: Vec<PerExpertEntry>,
     pub per_bank_occupancy: Vec<PerBankEntry>,
     pub common_bank_footprint: CommonBankFootprintSection,
-    pub accumulator_maxima: Vec<AccumulatorEntry>,
+    pub accumulator_maxima: Vec<AccumulatorBound>,
     pub projected_wram: ProjectedSizeSection,
     pub projected_sram: ProjectedSizeSection,
     pub projected_hram: ProjectedSizeSection,
@@ -462,9 +475,11 @@ pub struct CommonBankFootprintSection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AccumulatorEntry {
+pub struct AccumulatorBound {
     pub site: ReductionSiteId,
     pub projected_max_abs: u64,
+    pub i16_safe: bool,
+    pub i32_safe: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -609,6 +624,7 @@ fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
     view: QuantGraphBudgetView,
 ) -> StaticBudgetReport {
     let (projections, failures) = project_budget(
+        inputs.policy,
         inputs.policy.policy.knobs.global.placement.profile,
         runtime_chrome_budget,
         &view,
@@ -746,6 +762,7 @@ fn validate_budget_view<Q: QuantGraphBudgetSource + ?Sized>(
 }
 
 fn project_budget(
+    policy: &ResolvedPolicyProduct,
     profile: PlacementProfile,
     runtime_chrome_budget: &RuntimeChromeBudget,
     view: &QuantGraphBudgetView,
@@ -833,6 +850,10 @@ fn project_budget(
     let shared_lut_bytes = checked_sum_u32(view.shared_luts.iter().map(|lut| lut.bytes));
     let common_total = shared_kernel_bytes.saturating_add(shared_lut_bytes);
 
+    let (accumulator_maxima, mut accumulator_failures) =
+        accumulator_maxima(&view.reduction_sites, single_i16_only_locked(policy));
+    failures.append(&mut accumulator_failures);
+
     (
         BudgetProjectionSection {
             per_expert_payload,
@@ -843,7 +864,7 @@ fn project_budget(
                 shared_dense_ffn_bytes: None,
                 total_bytes: common_total,
             },
-            accumulator_maxima: accumulator_maxima(&view.reduction_sites),
+            accumulator_maxima,
             projected_wram: ProjectedSizeSection {
                 bytes: view.sequence_state.projected_wram_bytes,
             },
@@ -983,20 +1004,74 @@ fn checked_sum_u32(values: impl Iterator<Item = u32>) -> u32 {
     values.fold(0u32, u32::saturating_add)
 }
 
-fn accumulator_maxima(reduction_sites: &[ReductionSiteProjection]) -> Vec<AccumulatorEntry> {
-    reduction_sites
-        .iter()
-        .map(|site| {
-            let bias = u64::from(site.bias_max_abs_q.unwrap_or(0));
-            let product = u64::from(site.term_count)
-                .saturating_mul(u64::from(site.input_max_abs_q))
-                .saturating_mul(u64::from(site.weight_max_abs_q));
-            AccumulatorEntry {
-                site: site.site.clone(),
-                projected_max_abs: product.saturating_add(bias),
+fn single_i16_only_locked(policy: &ResolvedPolicyProduct) -> bool {
+    policy
+        .policy
+        .knobs
+        .locks
+        .locked
+        .contains(&CompileKnobId::Range)
+        && policy.policy.knobs.global.range.reduction_ceiling == ReductionPlanCeiling::ExactOnly
+}
+
+fn accumulator_maxima(
+    reduction_sites: &[ReductionSiteProjection],
+    single_i16_only_locked: bool,
+) -> (Vec<AccumulatorBound>, Vec<BudgetFailure>) {
+    let mut bounds = Vec::with_capacity(reduction_sites.len());
+    let mut failures = Vec::new();
+
+    for (index, site) in reduction_sites.iter().enumerate() {
+        let bound = match accumulator_bound(site, index) {
+            Ok(bound) => bound,
+            Err(failure) => {
+                failures.push(failure);
+                continue;
             }
-        })
-        .collect()
+        };
+
+        if !bound.i32_safe || (single_i16_only_locked && !bound.i16_safe) {
+            failures.push(BudgetFailure::AccumulatorExceedsI32 {
+                site: bound.site.clone(),
+                projected_max_abs: bound.projected_max_abs,
+            });
+        }
+        bounds.push(bound);
+    }
+
+    (bounds, failures)
+}
+
+fn accumulator_bound(
+    site: &ReductionSiteProjection,
+    index: usize,
+) -> Result<AccumulatorBound, BudgetFailure> {
+    let raw_product_bound = u128::from(site.input_max_abs_q)
+        .checked_mul(u128::from(site.weight_max_abs_q))
+        .ok_or_else(|| malformed_accumulator_projection(index))?;
+    let sum_bound = u128::from(site.term_count)
+        .checked_mul(raw_product_bound)
+        .ok_or_else(|| malformed_accumulator_projection(index))?;
+    let projected_max_abs = sum_bound
+        .checked_add(u128::from(site.bias_max_abs_q.unwrap_or(0)))
+        .ok_or_else(|| malformed_accumulator_projection(index))?;
+    let projected_max_abs =
+        u64::try_from(projected_max_abs).map_err(|_| malformed_accumulator_projection(index))?;
+
+    Ok(AccumulatorBound {
+        site: site.site.clone(),
+        projected_max_abs,
+        i16_safe: projected_max_abs <= i16::MAX as u64,
+        i32_safe: projected_max_abs <= i32::MAX as u64,
+    })
+}
+
+fn malformed_accumulator_projection(index: usize) -> BudgetFailure {
+    BudgetFailure::QuantGraphBudgetViewMalformed {
+        field: FieldPath::from(format!(
+            "budget_view.reduction_sites[{index}].projected_max_abs"
+        )),
+    }
 }
 
 fn hash_json_value<T: Serialize + ?Sized>(value: &T) -> Result<Hash256, serde_json::Error> {
@@ -1401,6 +1476,7 @@ mod tests {
         );
 
         let (projections, failures) = project_budget(
+            &policy_fixture(),
             PlacementProfile::StrictOnePerBank,
             &budget,
             &view,
@@ -1916,6 +1992,152 @@ mod tests {
         assert_eq!(
             report.report.body.projections.per_expert_payload[0].expert,
             ExpertId::new(0)
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_accumulator_exceeds_i32() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.reduction_sites = vec![ReductionSiteProjection {
+            site: ReductionSiteId("site.i32.overflow".to_owned()),
+            layer: Some(LayerId::new(0)),
+            expert: Some(ExpertId::new(0)),
+            term_count: i32::MAX as u32 + 1,
+            input_max_abs_q: 1,
+            weight_max_abs_q: 1,
+            bias_max_abs_q: None,
+            accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+        }];
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.accumulator_maxima,
+            vec![AccumulatorBound {
+                site: ReductionSiteId("site.i32.overflow".to_owned()),
+                projected_max_abs: i32::MAX as u64 + 1,
+                i16_safe: false,
+                i32_safe: false,
+            }]
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::AccumulatorExceedsI32 {
+                site: ReductionSiteId("site.i32.overflow".to_owned()),
+                projected_max_abs: i32::MAX as u64 + 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_records_i16_safe_for_range_plan() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.reduction_sites = vec![ReductionSiteProjection {
+            site: ReductionSiteId("site.i16.range_plan".to_owned()),
+            layer: Some(LayerId::new(0)),
+            expert: Some(ExpertId::new(0)),
+            term_count: 40_000,
+            input_max_abs_q: 1,
+            weight_max_abs_q: 1,
+            bias_max_abs_q: None,
+            accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+        }];
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert!(report.report.body.decision.failures.is_empty());
+        assert_eq!(
+            report.report.body.projections.accumulator_maxima,
+            vec![AccumulatorBound {
+                site: ReductionSiteId("site.i16.range_plan".to_owned()),
+                projected_max_abs: 40_000,
+                i16_safe: false,
+                i32_safe: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_hard_fail_on_i16_only_lock_with_unsafe_site() {
+        let budget = runtime_budget_fixture();
+        let mut policy = policy_fixture();
+        policy
+            .policy
+            .knobs
+            .locks
+            .locked
+            .insert(CompileKnobId::Range);
+        policy.policy.knobs.global.range.reduction_ceiling = ReductionPlanCeiling::ExactOnly;
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.reduction_sites = vec![ReductionSiteProjection {
+            site: ReductionSiteId("site.i16.locked".to_owned()),
+            layer: Some(LayerId::new(0)),
+            expert: Some(ExpertId::new(0)),
+            term_count: 40_000,
+            input_max_abs_q: 1,
+            weight_max_abs_q: 1,
+            bias_max_abs_q: None,
+            accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+        }];
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_static_budget(BudgetInputs {
+            policy: &policy,
+            quant_graph: &quant_graph,
+            runtime_chrome_budget: Some(&budget),
+            target_profile: &dmg_mbc5_8mib_128kib(),
+        });
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.accumulator_maxima,
+            vec![AccumulatorBound {
+                site: ReductionSiteId("site.i16.locked".to_owned()),
+                projected_max_abs: 40_000,
+                i16_safe: false,
+                i32_safe: true,
+            }]
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::AccumulatorExceedsI32 {
+                site: ReductionSiteId("site.i16.locked".to_owned()),
+                projected_max_abs: 40_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_accumulator_projection_that_cannot_fit_u64() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.reduction_sites = vec![ReductionSiteProjection {
+            site: ReductionSiteId("site.u64.overflow".to_owned()),
+            layer: Some(LayerId::new(0)),
+            expert: Some(ExpertId::new(0)),
+            term_count: u32::MAX,
+            input_max_abs_q: u32::MAX,
+            weight_max_abs_q: u32::MAX,
+            bias_max_abs_q: Some(u32::MAX),
+            accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+        }];
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert!(report.report.body.projections.accumulator_maxima.is_empty());
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("budget_view.reduction_sites[0].projected_max_abs")
+            }]
         );
     }
 
