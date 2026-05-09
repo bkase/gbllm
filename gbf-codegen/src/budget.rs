@@ -2012,6 +2012,24 @@ mod tests {
     }
 
     #[test]
+    fn f_b4_budget_byte_math_is_canonical_when_artifact_diagnostic_differs() {
+        let per_group = plan_with(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::per_group(16).unwrap(),
+            ScaleFormat::Q8_8,
+        );
+
+        // TernaryWeightPlan::compute_byte_cost is the target-independent
+        // artifact/model diagnostic helper and keeps the historical flattened
+        // PerGroup scale count. Stage 2 owns canonical deployed payload bytes.
+        assert_eq!(per_group.compute_byte_cost(128, 224).as_u64(), 10_752);
+        assert_eq!(
+            expert_payload_bytes(&expert_with_plan(128, 224, 0, per_group)),
+            Ok(7_184)
+        );
+    }
+
+    #[test]
     fn f_b4_budget_computes_sparse_bitplane_payload_without_plan_metadata_layout() {
         let expert = expert_with_plan(
             3,

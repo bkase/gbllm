@@ -52,6 +52,14 @@ impl TernaryWeightPlan {
         }
     }
 
+    /// Computes target-independent artifact/model diagnostic storage bytes.
+    ///
+    /// This is the historical model/export estimate: `PerGroup` scales are
+    /// counted over flattened matrix elements and arithmetic saturates into
+    /// `ByteCost`. It is intentionally not the canonical F-B4 deployed
+    /// per-expert payload formula. Stage 2 (`gbf-codegen::budget`) owns deployed
+    /// byte math, including row-oriented `PerGroup` scale counts, target-specific
+    /// `Pow2` scale byte widths, metadata bytes, and checked `u64` arithmetic.
     #[must_use]
     pub fn compute_byte_cost(&self, rows: u32, cols: u32) -> ByteCost {
         if rows == 0 || cols == 0 {
@@ -178,6 +186,21 @@ mod tests {
         assert_eq!(per_tensor.compute_byte_cost(2, 8), ByteCost::new(6));
         assert_eq!(per_group.compute_byte_cost(2, 8), ByteCost::new(5));
         assert_eq!(per_tensor.compute_byte_cost(0, 8), ByteCost::ZERO);
+    }
+
+    #[test]
+    fn ternary_weight_plan_per_group_cost_is_artifact_model_diagnostic() {
+        let per_group = TernaryWeightPlan::new(
+            WeightEncoding::Ternary2,
+            ScaleGranularity::per_group(16).unwrap(),
+            ScaleFormat::Q8_8,
+            ThresholdPlan::FixedQ8_8,
+        );
+
+        // This helper keeps the artifact/model estimate that counts groups over
+        // flattened elements: ceil(128 * 224 / 16) scales. F-B4 deployed byte
+        // math is intentionally owned and tested in gbf-codegen::budget.
+        assert_eq!(per_group.compute_byte_cost(128, 224), ByteCost::new(10_752));
     }
 
     #[test]
