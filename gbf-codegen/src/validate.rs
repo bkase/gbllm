@@ -45,6 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
+use gbf_abi::SemanticCheckpointSchema;
 use gbf_artifact::aux::SidecarKind;
 use gbf_artifact::core::{ArtifactCore, ArtifactCoreError};
 use gbf_artifact::lowerings::{
@@ -1517,11 +1518,9 @@ fn validate_resolved_sidecar(
                         hash: Some(sidecar.hash),
                     }],
                 ));
+                return;
             }
-            // The current gbf-artifact aux schema exposes these sidecars as
-            // ref placeholders only. Concrete body parsing, including
-            // interaction-bundle malformed checks, belongs with the schema
-            // owner bead that introduces typed sidecar payloads.
+            validate_sidecar_body(&sidecar, &resolved.bytes, diagnostics);
         }
         Err(ArtifactResolveError::NotFound { .. }) => {
             diagnostics.push(artifact_aux_sidecar_missing_diagnostic(
@@ -1552,6 +1551,63 @@ fn validate_resolved_sidecar(
             ));
         }
     }
+}
+
+fn validate_sidecar_body(
+    sidecar: &SidecarRef,
+    bytes: &[u8],
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match sidecar.kind {
+        SidecarKind::SemanticCheckpointSchema => {
+            validate_semantic_checkpoint_schema_sidecar(sidecar, bytes, diagnostics);
+        }
+        SidecarKind::ConformanceEnvelope => {
+            // Body schema owner: F-C4 / bd-35l3. Until that lands, Stage 0
+            // validates presence and digest only for this ref placeholder.
+        }
+        SidecarKind::ReferenceObservationCache => {
+            // Body schema owner: Epic C oracle stack / bd-1rcc + bd-c4wg.
+            // Until that lands, Stage 0 validates presence and digest only.
+        }
+        SidecarKind::InteractionBundle | SidecarKind::LexicalSpec => {
+            // Body schema owner: F-G2 / bd-2ym0. Until that lands, Stage 0
+            // validates presence and digest only for these ref placeholders.
+        }
+        SidecarKind::GoldenVector => {
+            // Golden vectors resolve through class 9 workload/golden-vector
+            // validation rather than this generic aux sidecar body path.
+        }
+    }
+}
+
+fn validate_semantic_checkpoint_schema_sidecar(
+    sidecar: &SidecarRef,
+    bytes: &[u8],
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match serde_json::from_slice::<SemanticCheckpointSchema>(bytes) {
+        Ok(schema) if schema.validate().is_ok() => {}
+        Ok(_) | Err(_) => diagnostics.push(artifact_aux_malformed_sidecar_diagnostic(sidecar)),
+    }
+}
+
+fn artifact_aux_malformed_sidecar_diagnostic(sidecar: &SidecarRef) -> ValidationDiagnostic {
+    let field = aux_sidecar_field(sidecar);
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Manifest,
+        ValidationCode::ArtifactAuxMalformed {
+            field: field.clone(),
+        },
+        ValidationDetail::Field {
+            field: field.clone(),
+        },
+        vec![EvidenceRef {
+            kind: "artifact_aux_sidecar".to_owned(),
+            reference: sidecar.id.clone(),
+            hash: Some(sidecar.hash),
+        }],
+    )
 }
 
 fn validate_golden_vector_presence(
@@ -1587,6 +1643,10 @@ fn requires_interaction_bundle(manifest: &ArtifactManifest) -> bool {
     manifest
         .required_features
         .contains(&ArtifactFeature::MoeRouting)
+}
+
+fn aux_sidecar_field(sidecar: &SidecarRef) -> FieldPath {
+    FieldPath::from(format!("aux.sidecars.{}", sidecar.id))
 }
 
 fn golden_vector_aux_field(id: &GoldenVectorId) -> FieldPath {
@@ -3295,6 +3355,10 @@ mod tests {
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
 
+    use gbf_abi::{
+        CURRENT_ABI, CheckpointEntry, CompactCheckpointId, SemanticCheckpointId,
+        SemanticCheckpointSchema, SemanticStratum,
+    };
     use gbf_artifact::BuildConstraintEntry;
     use gbf_artifact::aux::{
         ArtifactAux, ConformanceEnvelopeId, ConformanceEnvelopeRef, InteractionBundleId,
@@ -5405,6 +5469,52 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_rejects_digest_matching_malformed_checkpoint_schema_sidecar() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let malformed_bytes = br#"{
+            "schema_version": 0,
+            "abi_version": { "major": 0, "minor": 1, "patch": 0 },
+            "build_hash": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            "compile_request_hash": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+            "checkpoints": []
+        }"#;
+        let sidecar_hash = sha256_hash(malformed_bytes);
+        fixture.artifact.aux.checkpoint_schema = Some(SemanticCheckpointSchemaRef {
+            id: SemanticCheckpointSchemaId("checkpoint.fixture".to_owned()),
+            hash: sidecar_hash,
+        });
+        fixture.resolver.sidecar_bytes.insert(
+            SidecarRef {
+                kind: SidecarKind::SemanticCheckpointSchema,
+                id: "checkpoint.fixture".to_owned(),
+                hash: sidecar_hash,
+            },
+            malformed_bytes.to_vec(),
+        );
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxMalformed { field }
+                    if field == &FieldPath::from("aux.sidecars.checkpoint.fixture")
+            )
+        });
+        assert!(!failure.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                ValidationCode::ArtifactAuxSidecarDigestMismatch {
+                    kind: SidecarKind::SemanticCheckpointSchema,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
     fn f_b2_validate_rejects_resolver_reported_aux_sidecar_hash_mismatch() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         let sidecar = SidecarRef {
@@ -5775,7 +5885,7 @@ mod tests {
                 target_profile: dmg_mbc5_8mib_128kib(),
                 compile_profile: compile_profile(),
                 calibration,
-                resolver: RecordingResolver::default(),
+                resolver: RecordingResolver::with_default_sidecars(),
             }
         }
 
@@ -5841,6 +5951,22 @@ mod tests {
         golden_vector_hash_mismatches: BTreeMap<GoldenVectorId, (Hash256, Hash256)>,
         unsupported_golden_vectors: BTreeSet<GoldenVectorId>,
         golden_vector_resolve_calls: Cell<usize>,
+    }
+
+    impl RecordingResolver {
+        fn with_default_sidecars() -> Self {
+            let mut resolver = Self::default();
+            let bytes = semantic_checkpoint_schema_bytes();
+            resolver.sidecar_bytes.insert(
+                SidecarRef {
+                    kind: SidecarKind::SemanticCheckpointSchema,
+                    id: "checkpoint.fixture".to_owned(),
+                    hash: sha256_hash(&bytes),
+                },
+                bytes,
+            );
+            resolver
+        }
     }
 
     impl ArtifactResolver for RecordingResolver {
@@ -5997,7 +6123,7 @@ mod tests {
         ArtifactAux {
             checkpoint_schema: Some(SemanticCheckpointSchemaRef {
                 id: SemanticCheckpointSchemaId("checkpoint.fixture".to_owned()),
-                hash: sha256_hash(&[]),
+                hash: semantic_checkpoint_schema_hash(),
             }),
             conformance_envelope: None,
             golden_vectors: Vec::new(),
@@ -6005,6 +6131,27 @@ mod tests {
             lexical_spec: None,
             reference_observation_cache: None,
         }
+    }
+
+    fn semantic_checkpoint_schema_bytes() -> Vec<u8> {
+        let schema = SemanticCheckpointSchema {
+            schema_version: 1,
+            abi_version: CURRENT_ABI,
+            build_hash: [1; 32],
+            compile_request_hash: [2; 32],
+            checkpoints: vec![CheckpointEntry {
+                semantic: SemanticCheckpointId::from_static("fixture.checkpoint")
+                    .expect("fixture checkpoint id"),
+                compact: CompactCheckpointId(1),
+                stratum: SemanticStratum::Operational,
+                source_op: None,
+            }],
+        };
+        serde_json::to_vec(&schema).expect("checkpoint schema fixture serializes")
+    }
+
+    fn semantic_checkpoint_schema_hash() -> Hash256 {
+        sha256_hash(&semantic_checkpoint_schema_bytes())
     }
 
     fn artifact_manifest() -> ArtifactManifest {

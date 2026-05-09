@@ -2748,7 +2748,7 @@ mod tests {
             &self,
             _sidecar: &SidecarRef,
         ) -> Result<ResolvedSidecar, ArtifactResolveError> {
-            let bytes = Vec::new();
+            let bytes = semantic_checkpoint_schema_bytes();
             Ok(ResolvedSidecar {
                 content_hash: sha256_hash(&bytes),
                 bytes,
@@ -2808,7 +2808,7 @@ mod tests {
         ArtifactAux {
             checkpoint_schema: Some(SemanticCheckpointSchemaRef {
                 id: SemanticCheckpointSchemaId("checkpoint.fixture".to_owned()),
-                hash: sha256_hash(&[]),
+                hash: semantic_checkpoint_schema_hash(),
             }),
             conformance_envelope: None,
             golden_vectors: Vec::new(),
@@ -2816,6 +2816,28 @@ mod tests {
             lexical_spec: None,
             reference_observation_cache: None,
         }
+    }
+
+    fn semantic_checkpoint_schema_bytes() -> Vec<u8> {
+        br#"{
+            "schema_version": 1,
+            "abi_version": { "major": 0, "minor": 1, "patch": 0 },
+            "build_hash": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            "compile_request_hash": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+            "checkpoints": [
+                {
+                    "semantic": "fixture.checkpoint",
+                    "compact": 1,
+                    "stratum": "Operational",
+                    "source_op": null
+                }
+            ]
+        }"#
+        .to_vec()
+    }
+
+    fn semantic_checkpoint_schema_hash() -> Hash256 {
+        sha256_hash(&semantic_checkpoint_schema_bytes())
     }
 
     fn artifact_manifest() -> ArtifactManifest {
