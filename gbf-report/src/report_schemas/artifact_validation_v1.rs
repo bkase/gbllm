@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use gbf_artifact::{ArtifactFeature, GoldenVectorId};
-use gbf_foundation::{Hash256, SemVer, WorkloadId};
+use gbf_foundation::{CompileProfileId, Hash256, SemVer, TargetProfileId, WorkloadId};
 use gbf_policy::{CompilerFeature, EvidenceRef, RuntimeMode};
 use serde::{Deserialize, Serialize};
 
@@ -119,10 +119,54 @@ pub enum ValidationOrigin {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ValidationCode {
     SchemaEpochUnsupported,
-    SchemaCompatibilityAdapterMissing { observed: SemVer, target: SemVer },
-    SchemaCompatibilityAdapterNotLossless { adapter: CompatibilityAdapterId },
-    SchemaCompatibilitySemanticHashChanged { before: Hash256, after: Hash256 },
-    ArtifactValidationInvariant { name: String },
+    SchemaCompatibilityAdapterMissing {
+        observed: SemVer,
+        target: SemVer,
+    },
+    SchemaCompatibilityAdapterNotLossless {
+        adapter: CompatibilityAdapterId,
+    },
+    SchemaCompatibilitySemanticHashChanged {
+        before: Hash256,
+        after: Hash256,
+    },
+    ArtifactRequiredFeatureUnsupported {
+        feature: ArtifactFeature,
+    },
+    CompileRequestUnsupportedFeature {
+        feature: CompilerFeature,
+    },
+    CompileRequestProfileForbidsObjective {
+        profile: CompileProfileId,
+        reason: ObjectiveRejection,
+    },
+    CompileRequestRuntimeModeUnsupported {
+        mode: RuntimeMode,
+    },
+    CompileRequestTargetIncompatible {
+        target: TargetProfileId,
+        reason: TargetIncompatibilityReason,
+    },
+    ArtifactValidationInvariant {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ObjectiveRejection {
+    ServiceLevelZero { field: String },
+    MaxCyclesPerTokenZero,
+    MaxRomBytesZero,
+    MaxBankSwitchesPerTokenZero,
+    MaxSramPageSwitchesPerTokenZero,
+    RiskQuantileInvalid { field: String, value: u8 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum TargetIncompatibilityReason {
+    CompileRequestTargetMismatch { expected: TargetProfileId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

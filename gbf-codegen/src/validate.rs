@@ -54,7 +54,8 @@ use gbf_report::report_envelope::canonicalize as canonicalize_report;
 use gbf_report::report_schemas::artifact_validation_v1::{
     ArtifactCompatibilityDecision, ArtifactCompatibilitySection, ArtifactValidationIdentitySection,
     ArtifactValidationInputSection, ArtifactValidationReportBody, DiagnosticSeverity,
-    ValidationCode, ValidationDetail, ValidationDiagnosticRecord, ValidationOrigin,
+    ObjectiveRejection, TargetIncompatibilityReason, ValidationCode, ValidationDetail,
+    ValidationDiagnosticRecord, ValidationOrigin,
 };
 use gbf_report::{ReportEnvelope, ReportOutcome, compute_self_hash};
 use gbf_workload::{
@@ -337,6 +338,11 @@ pub fn validate_artifact_and_request<'a>(
         return Err(missing_calibration_failure(&inputs));
     };
 
+    let diagnostics = compile_request_diagnostics(&inputs);
+    if !diagnostics.is_empty() {
+        return Err(validation_failure(&inputs, Some(calibration), diagnostics));
+    }
+
     let input_hashes = compute_validated_input_hashes(&inputs, calibration);
     let report = success_report(&inputs, &input_hashes);
     let (report, artifact_validation_self_hash, artifact_validation_canonical_bytes_hash) =
@@ -398,6 +404,15 @@ fn missing_calibration_failure(inputs: &ValidateInputs<'_>) -> ValidationStageFa
             hash: None,
         }],
     };
+
+    validation_failure(inputs, None, vec![diagnostic])
+}
+
+fn validation_failure(
+    inputs: &ValidateInputs<'_>,
+    calibration: Option<&CalibrationBundleSet>,
+    diagnostics: Vec<ValidationDiagnostic>,
+) -> ValidationStageFailure {
     let body = ArtifactValidationReportBody {
         identity: ArtifactValidationIdentitySection {
             artifact_source_hash: Some(inputs.artifact.transport.transport_hash),
@@ -413,7 +428,7 @@ fn missing_calibration_failure(inputs: &ValidateInputs<'_>) -> ValidationStageFa
             compile_request_hash: input_hash("compile_request", inputs.compile_request),
             target_profile_hash: input_hash("target_profile", inputs.target_profile),
             compile_profile_hash: input_hash("compile_profile", inputs.compile_profile),
-            calibration_hash: None,
+            calibration_hash: calibration.map(|calibration| input_hash("calibration", calibration)),
             compatibility_adapter_hash: None,
         },
         compatibility: ArtifactCompatibilitySection {
@@ -421,15 +436,143 @@ fn missing_calibration_failure(inputs: &ValidateInputs<'_>) -> ValidationStageFa
             failures: Vec::new(),
         },
         checked_inputs: checked_inputs(inputs),
-        diagnostics: vec![diagnostic.clone()],
+        diagnostics: diagnostics.clone(),
     };
     let report = ReportEnvelope::new(ReportOutcome::Failed, body);
     let (report, _, _) = finalize_report(report);
 
     ValidationStageFailure {
         report,
-        diagnostics: vec![diagnostic],
+        diagnostics,
     }
+}
+
+fn compile_request_diagnostics(inputs: &ValidateInputs<'_>) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for feature in &inputs.compile_request.required_features {
+        if !supported_compiler_features().contains(feature) {
+            diagnostics.push(compile_request_diagnostic(
+                ValidationCode::CompileRequestUnsupportedFeature { feature: *feature },
+                ValidationDetail::Field {
+                    field: "compile_request.required_features".to_owned(),
+                },
+            ));
+        }
+    }
+
+    if inputs.compile_request.target != *inputs.target_profile.id() {
+        diagnostics.push(compile_request_diagnostic(
+            ValidationCode::CompileRequestTargetIncompatible {
+                target: inputs.compile_request.target.clone(),
+                reason: TargetIncompatibilityReason::CompileRequestTargetMismatch {
+                    expected: inputs.target_profile.id().clone(),
+                },
+            },
+            ValidationDetail::Field {
+                field: "compile_request.target".to_owned(),
+            },
+        ));
+    }
+
+    profile_objective_rejections(inputs)
+        .into_iter()
+        .map(|reason| {
+            compile_request_diagnostic(
+                ValidationCode::CompileRequestProfileForbidsObjective {
+                    profile: inputs.compile_profile.id.clone(),
+                    reason,
+                },
+                ValidationDetail::Field {
+                    field: "compile_request.objective".to_owned(),
+                },
+            )
+        })
+        .for_each(|diagnostic| diagnostics.push(diagnostic));
+
+    diagnostics
+}
+
+fn profile_objective_rejections(inputs: &ValidateInputs<'_>) -> Vec<ObjectiveRejection> {
+    let objective = &inputs.compile_request.objective;
+    let mut rejections = Vec::new();
+
+    if let Some(service) = &objective.service {
+        for (field, value) in [
+            (
+                "max_first_token_cycles_p95",
+                service.max_first_token_cycles_p95,
+            ),
+            (
+                "max_checkpoint_gap_cycles_p95",
+                service.max_checkpoint_gap_cycles_p95,
+            ),
+            (
+                "max_resume_latency_cycles_p95",
+                service.max_resume_latency_cycles_p95,
+            ),
+        ] {
+            if value == Some(0) {
+                rejections.push(ObjectiveRejection::ServiceLevelZero {
+                    field: field.to_owned(),
+                });
+            }
+        }
+
+        if service.max_ui_jitter_frames_p99 == Some(0) {
+            rejections.push(ObjectiveRejection::ServiceLevelZero {
+                field: "max_ui_jitter_frames_p99".to_owned(),
+            });
+        }
+    }
+
+    if objective.max_cycles_per_token == Some(0) {
+        rejections.push(ObjectiveRejection::MaxCyclesPerTokenZero);
+    }
+    if objective.max_rom_bytes == Some(0) {
+        rejections.push(ObjectiveRejection::MaxRomBytesZero);
+    }
+    if objective.max_bank_switches_per_token == Some(0) {
+        rejections.push(ObjectiveRejection::MaxBankSwitchesPerTokenZero);
+    }
+    if objective.max_sram_page_switches_per_token == Some(0) {
+        rejections.push(ObjectiveRejection::MaxSramPageSwitchesPerTokenZero);
+    }
+    if !(1..=100).contains(&objective.risk.cycle_quantile) {
+        rejections.push(ObjectiveRejection::RiskQuantileInvalid {
+            field: "cycle_quantile".to_owned(),
+            value: objective.risk.cycle_quantile,
+        });
+    }
+    if !(1..=100).contains(&objective.risk.switch_quantile) {
+        rejections.push(ObjectiveRejection::RiskQuantileInvalid {
+            field: "switch_quantile".to_owned(),
+            value: objective.risk.switch_quantile,
+        });
+    }
+
+    rejections
+}
+
+fn compile_request_diagnostic(
+    code: ValidationCode,
+    detail: ValidationDetail,
+) -> ValidationDiagnostic {
+    ValidationDiagnosticRecord {
+        severity: DiagnosticSeverity::Hard,
+        origin: ValidationOrigin::CompileRequest,
+        code,
+        detail,
+        provenance: vec![EvidenceRef {
+            kind: "compile_request".to_owned(),
+            reference: "compile_request".to_owned(),
+            hash: None,
+        }],
+    }
+}
+
+fn supported_compiler_features() -> std::collections::BTreeSet<gbf_policy::CompilerFeature> {
+    std::collections::BTreeSet::from([gbf_policy::CompilerFeature::ArtifactValidation])
 }
 
 fn checked_inputs(inputs: &ValidateInputs<'_>) -> ArtifactValidationInputSection {
@@ -635,6 +778,178 @@ mod tests {
             product.report.body.identity.calibration_hash,
             Some(product.validated.input_hashes.calibration_hash)
         );
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_compile_request_max_cycles_per_token_zero() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.objective.max_cycles_per_token = Some(0);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_eq!(failure.report.outcome, ReportOutcome::Failed);
+        assert!(
+            objective_rejection_reasons(&failure)
+                .contains(&ObjectiveRejection::MaxCyclesPerTokenZero)
+        );
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_all_independent_objective_violations() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let service = fixture
+            .compile_request
+            .objective
+            .service
+            .as_mut()
+            .expect("fixture has service objective");
+        service.max_first_token_cycles_p95 = Some(0);
+        service.max_resume_latency_cycles_p95 = Some(0);
+        fixture.compile_request.objective.max_cycles_per_token = Some(0);
+        fixture.compile_request.objective.max_rom_bytes = Some(0);
+        fixture.compile_request.objective.risk.cycle_quantile = 0;
+        fixture.compile_request.objective.risk.switch_quantile = 101;
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+        let reasons = objective_rejection_reasons(&failure);
+
+        assert_eq!(reasons.len(), 6);
+        assert!(reasons.contains(&ObjectiveRejection::ServiceLevelZero {
+            field: "max_first_token_cycles_p95".to_owned()
+        }));
+        assert!(reasons.contains(&ObjectiveRejection::ServiceLevelZero {
+            field: "max_resume_latency_cycles_p95".to_owned()
+        }));
+        assert!(reasons.contains(&ObjectiveRejection::MaxCyclesPerTokenZero));
+        assert!(reasons.contains(&ObjectiveRejection::MaxRomBytesZero));
+        assert!(reasons.contains(&ObjectiveRejection::RiskQuantileInvalid {
+            field: "cycle_quantile".to_owned(),
+            value: 0,
+        }));
+        assert!(reasons.contains(&ObjectiveRejection::RiskQuantileInvalid {
+            field: "switch_quantile".to_owned(),
+            value: 101,
+        }));
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_compile_request_objective_rules_table() {
+        let cases: Vec<(&str, fn(&mut CompileObjective), ObjectiveRejection)> = vec![
+            (
+                "service_first_token_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_first_token_cycles_p95 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_first_token_cycles_p95".to_owned(),
+                },
+            ),
+            (
+                "service_checkpoint_gap_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_checkpoint_gap_cycles_p95 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_checkpoint_gap_cycles_p95".to_owned(),
+                },
+            ),
+            (
+                "service_resume_latency_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_resume_latency_cycles_p95 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_resume_latency_cycles_p95".to_owned(),
+                },
+            ),
+            (
+                "service_ui_jitter_zero",
+                |objective| {
+                    objective
+                        .service
+                        .as_mut()
+                        .expect("fixture has service objective")
+                        .max_ui_jitter_frames_p99 = Some(0);
+                },
+                ObjectiveRejection::ServiceLevelZero {
+                    field: "max_ui_jitter_frames_p99".to_owned(),
+                },
+            ),
+            (
+                "rom_zero",
+                |objective| objective.max_rom_bytes = Some(0),
+                ObjectiveRejection::MaxRomBytesZero,
+            ),
+            (
+                "max_cycles_per_token_zero",
+                |objective| objective.max_cycles_per_token = Some(0),
+                ObjectiveRejection::MaxCyclesPerTokenZero,
+            ),
+            (
+                "bank_switch_zero",
+                |objective| objective.max_bank_switches_per_token = Some(0),
+                ObjectiveRejection::MaxBankSwitchesPerTokenZero,
+            ),
+            (
+                "sram_page_switch_zero",
+                |objective| objective.max_sram_page_switches_per_token = Some(0),
+                ObjectiveRejection::MaxSramPageSwitchesPerTokenZero,
+            ),
+            (
+                "cycle_quantile_zero",
+                |objective| objective.risk.cycle_quantile = 0,
+                ObjectiveRejection::RiskQuantileInvalid {
+                    field: "cycle_quantile".to_owned(),
+                    value: 0,
+                },
+            ),
+            (
+                "switch_quantile_above_100",
+                |objective| objective.risk.switch_quantile = 101,
+                ObjectiveRejection::RiskQuantileInvalid {
+                    field: "switch_quantile".to_owned(),
+                    value: 101,
+                },
+            ),
+        ];
+
+        for (case, mutate, expected) in cases {
+            let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+            mutate(&mut fixture.compile_request.objective);
+
+            let failure = validate_artifact_and_request(fixture.inputs()).expect_err(case);
+
+            assert_eq!(
+                objective_rejection_reasons(&failure),
+                vec![expected],
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn f_b2_validate_fallback_objective_fields_are_not_stage0_gates() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.objective.risk.fallback_profile =
+            Some(CompileProfileId::from("recovery"));
+        fixture.compile_request.objective.risk.fallback_runtime_mode =
+            Some(RuntimeMode::Interactive);
+
+        validate_artifact_and_request(fixture.inputs()).expect("fallback fields are accepted");
     }
 
     struct Fixture {
@@ -845,6 +1160,19 @@ mod tests {
         CalibrationBundleSet {
             bundles: BTreeMap::from_iter(BootstrapCalibrationBundle::new(hash(0x08)).bundles),
         }
+    }
+
+    fn objective_rejection_reasons(failure: &ValidationStageFailure) -> Vec<ObjectiveRejection> {
+        failure
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| match &diagnostic.code {
+                ValidationCode::CompileRequestProfileForbidsObjective { reason, .. } => {
+                    Some(reason.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn hash(byte: u8) -> Hash256 {
