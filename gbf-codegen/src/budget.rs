@@ -191,25 +191,25 @@ impl QuantGraphBudgetView {
         ensure_sorted_by(
             self.experts
                 .windows(2)
-                .all(|pair| (pair[0].layer, pair[0].expert) <= (pair[1].layer, pair[1].expert)),
+                .all(|pair| (pair[0].layer, pair[0].expert) < (pair[1].layer, pair[1].expert)),
             "budget_view.experts",
         )?;
         ensure_sorted_by(
             self.shared_kernels
                 .windows(2)
-                .all(|pair| pair[0].id <= pair[1].id),
+                .all(|pair| pair[0].id < pair[1].id),
             "budget_view.shared_kernels",
         )?;
         ensure_sorted_by(
             self.shared_luts
                 .windows(2)
-                .all(|pair| pair[0].id <= pair[1].id),
+                .all(|pair| pair[0].id < pair[1].id),
             "budget_view.shared_luts",
         )?;
         ensure_sorted_by(
             self.reduction_sites
                 .windows(2)
-                .all(|pair| pair[0].site <= pair[1].site),
+                .all(|pair| pair[0].site < pair[1].site),
             "budget_view.reduction_sites",
         )?;
 
@@ -1256,6 +1256,84 @@ mod tests {
                 field: FieldPath::from("budget_view.reduction_sites")
             }
         );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_duplicate_quant_graph_budget_view_keys() {
+        let duplicate_expert = {
+            let mut view = budget_view_fixture(4, 4, 0);
+            view.experts.push(view.experts[0].clone());
+            view
+        };
+        let duplicate_shared_kernel = {
+            let mut view = budget_view_fixture(4, 4, 0);
+            view.shared_kernels = vec![
+                SharedKernelProjection {
+                    id: KernelSpecId::from("kernel.shared"),
+                    bytes: 8,
+                },
+                SharedKernelProjection {
+                    id: KernelSpecId::from("kernel.shared"),
+                    bytes: 4,
+                },
+            ];
+            view
+        };
+        let duplicate_shared_lut = {
+            let mut view = budget_view_fixture(4, 4, 0);
+            view.shared_luts = vec![
+                SharedLutProjection {
+                    id: "lut.shared".to_owned(),
+                    bytes: 8,
+                },
+                SharedLutProjection {
+                    id: "lut.shared".to_owned(),
+                    bytes: 4,
+                },
+            ];
+            view
+        };
+        let duplicate_reduction_site = {
+            let mut view = budget_view_fixture(4, 4, 0);
+            view.reduction_sites = vec![
+                ReductionSiteProjection {
+                    site: ReductionSiteId("site.shared".to_owned()),
+                    layer: Some(LayerId::new(0)),
+                    expert: Some(ExpertId::new(0)),
+                    term_count: 4,
+                    input_max_abs_q: 2,
+                    weight_max_abs_q: 3,
+                    bias_max_abs_q: Some(1),
+                    accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+                },
+                ReductionSiteProjection {
+                    site: ReductionSiteId("site.shared".to_owned()),
+                    layer: Some(LayerId::new(0)),
+                    expert: Some(ExpertId::new(0)),
+                    term_count: 8,
+                    input_max_abs_q: 2,
+                    weight_max_abs_q: 3,
+                    bias_max_abs_q: Some(1),
+                    accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+                },
+            ];
+            view
+        };
+
+        for (view, expected_field) in [
+            (duplicate_expert, "budget_view.experts"),
+            (duplicate_shared_kernel, "budget_view.shared_kernels"),
+            (duplicate_shared_lut, "budget_view.shared_luts"),
+            (duplicate_reduction_site, "budget_view.reduction_sites"),
+        ] {
+            assert_eq!(
+                view.validate_semantics()
+                    .expect_err("duplicate keyed projection is malformed"),
+                QuantGraphBudgetViewError::Malformed {
+                    field: FieldPath::from(expected_field)
+                }
+            );
+        }
     }
 
     #[test]
