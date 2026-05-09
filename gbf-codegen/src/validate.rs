@@ -65,8 +65,9 @@ use gbf_policy::{
     CalibrationBundle, CalibrationBundleSet, CalibrationConfidenceRequirement, CalibrationLayer,
     CompatibilityAdapterId, CompileProfileSpec, CompileRequest, CompilerFeature,
     DiagnosticSeverity, EvidenceRef, FieldPath, ObjectiveRejection, RiskQuantileField, RuntimeMode,
-    ServiceLevelField, TargetIncompatibilityReason, TraceProbeId, ValidationCode, ValidationDetail,
-    ValidationDiagnostic as PolicyValidationDiagnostic, ValidationOrigin,
+    ServiceLevelField, Stage0Class10TargetCapabilities, TargetIncompatibilityReason, TraceProbeId,
+    ValidationCode, ValidationDetail, ValidationDiagnostic as PolicyValidationDiagnostic,
+    ValidationOrigin, compiler_build_supports_feature,
 };
 use gbf_report::report_schemas::artifact_validation_v1::{
     ArtifactCompatibilityDecision, ArtifactCompatibilityFailure, ArtifactCompatibilitySection,
@@ -2075,8 +2076,10 @@ fn validate_compile_request_admissibility(
     artifact: &ImportedArtifactView,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
+    let target_capabilities =
+        Stage0Class10TargetCapabilities::from_target_profile(inputs.target_profile);
     for feature in &artifact.manifest.required_features {
-        if !target_supports_artifact_feature(inputs.target_profile, *feature) {
+        if !target_capabilities.supports_artifact_feature(*feature) {
             diagnostics.push(artifact_required_feature_unsupported_diagnostic(
                 inputs, artifact, *feature,
             ));
@@ -2098,44 +2101,18 @@ fn validate_compile_request_admissibility(
     }
 
     for mode in &inputs.compile_request.requested_runtime_modes {
-        if !target_supports_runtime_mode(inputs.target_profile, *mode) {
+        if !target_capabilities.supports_runtime_mode(*mode) {
             diagnostics.push(compile_request_runtime_mode_unsupported_diagnostic(
                 inputs, *mode,
             ));
         }
     }
 
-    if inputs.compile_request.target.as_str() != inputs.target_profile.id().as_str() {
+    if let Err(reason) = target_capabilities.target_compatibility(&inputs.compile_request.target) {
         diagnostics.push(compile_request_target_incompatible_diagnostic(
-            inputs,
-            TargetIncompatibilityReason::TargetFamilyMismatch,
+            inputs, reason,
         ));
     }
-}
-
-fn target_supports_artifact_feature(
-    target_profile: &TargetProfile,
-    feature: ArtifactFeature,
-) -> bool {
-    match feature {
-        ArtifactFeature::DenseI8
-        | ArtifactFeature::Ternary2Quant
-        | ArtifactFeature::Binary1Quant
-        | ArtifactFeature::SparseTernaryBitplanes
-        | ArtifactFeature::LinearStateSequence
-        | ArtifactFeature::BoundedKvSequence => true,
-        ArtifactFeature::MoeRouting => {
-            let capabilities = target_profile.capabilities();
-            capabilities.double_speed_mode && capabilities.vram_dma
-        }
-    }
-}
-
-fn compiler_build_supports_feature(feature: CompilerFeature) -> bool {
-    matches!(
-        feature,
-        CompilerFeature::ArtifactValidation | CompilerFeature::PolicyResolution
-    )
 }
 
 fn profile_objective_rejections(request: &CompileRequest) -> Vec<ObjectiveRejection> {
@@ -2201,16 +2178,6 @@ fn profile_objective_rejections(request: &CompileRequest) -> Vec<ObjectiveReject
     }
 
     rejections
-}
-
-fn target_supports_runtime_mode(target_profile: &TargetProfile, mode: RuntimeMode) -> bool {
-    match mode {
-        RuntimeMode::Interactive | RuntimeMode::Steady | RuntimeMode::Safe => true,
-        RuntimeMode::Trace => {
-            let capabilities = target_profile.capabilities();
-            capabilities.double_speed_mode && capabilities.vram_dma
-        }
-    }
 }
 
 fn artifact_required_feature_unsupported_diagnostic(
@@ -3830,6 +3797,10 @@ mod tests {
         fixture.refresh_manifest_self_hash();
         fixture.refresh_transport_hash();
 
+        let target_capabilities =
+            Stage0Class10TargetCapabilities::from_target_profile(&fixture.target_profile);
+        assert!(!target_capabilities.supports_artifact_feature(ArtifactFeature::MoeRouting));
+
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
 
@@ -3856,6 +3827,10 @@ mod tests {
             .compile_request
             .required_features
             .insert(CompilerFeature::StaticBudgetReport);
+
+        assert!(!compiler_build_supports_feature(
+            CompilerFeature::StaticBudgetReport
+        ));
 
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
@@ -4079,6 +4054,10 @@ mod tests {
             .requested_runtime_modes
             .insert(RuntimeMode::Trace);
 
+        let target_capabilities =
+            Stage0Class10TargetCapabilities::from_target_profile(&fixture.target_profile);
+        assert!(!target_capabilities.supports_runtime_mode(RuntimeMode::Trace));
+
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
 
@@ -4096,6 +4075,13 @@ mod tests {
     fn f_b2_validate_rejects_compile_request_target_incompatible() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture.compile_request.target = TargetProfileId::from("cgb-mbc5-8mib-128kib");
+
+        let target_capabilities =
+            Stage0Class10TargetCapabilities::from_target_profile(&fixture.target_profile);
+        assert_eq!(
+            target_capabilities.target_compatibility(&fixture.compile_request.target),
+            Err(TargetIncompatibilityReason::TargetFamilyMismatch)
+        );
 
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");

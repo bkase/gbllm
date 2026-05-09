@@ -2,6 +2,7 @@
 
 pub mod budget;
 pub mod calibration;
+pub mod capabilities;
 pub mod compile;
 pub mod diagnostics;
 pub mod envelope;
@@ -13,6 +14,12 @@ pub use budget::{BudgetSlotClass, RomBudgetSlot, RuntimeChromeBudget, RuntimeMem
 pub use calibration::{
     BootstrapCalibrationBundle, CalibrationBundle, CalibrationBundleSet, CalibrationLayer,
     CalibrationSetRef, MeasurementBlob, ValidityEnvelope, ValidityEnvelopeFuturePlaceholder,
+};
+pub use capabilities::{
+    STAGE0_CLASS10_TARGET_CAPABILITY_OWNER, STAGE0_CLASS10_TARGET_CAPABILITY_RULES,
+    STAGE0_COMPILER_FEATURE_REGISTRY_OWNER, STAGE0_COMPILER_SUPPORTED_FEATURES,
+    Stage0Class10TargetCapabilities, Stage0Class10TargetCapabilityRule,
+    TargetCapabilityRequirement, compiler_build_supports_feature,
 };
 pub use compile::{
     ArtifactRef, BRINGUP_COMPILE_PROFILE_ID, BRINGUP_COMPILE_PROFILE_TOML, CompileInvocationInputs,
