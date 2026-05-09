@@ -1637,9 +1637,8 @@ fn validate_calibration_binding(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     let active = active_calibration_binding(inputs, calibration);
-    let referenced_layers =
-        referenced_calibration_layers(&inputs.compile_request.calibration_set_ref);
-    if referenced_layers.is_empty() {
+    let referenced_refs = referenced_calibration_refs(&inputs.compile_request.calibration_set_ref);
+    if referenced_refs.is_empty() {
         for layer in CalibrationLayer::all() {
             diagnostics.push(calibration_missing_request_ref_diagnostic(
                 layer,
@@ -1649,7 +1648,16 @@ fn validate_calibration_binding(
         return;
     }
 
-    for layer in referenced_layers {
+    for requested_ref in referenced_refs {
+        let layer = requested_ref.layer();
+        if !requested_ref.is_resolved_by(&calibration.resolved_ref) {
+            diagnostics.push(calibration_missing_request_ref_diagnostic(
+                layer,
+                active.compile_request_hash,
+            ));
+            continue;
+        }
+
         let Some(bundle) = calibration.bundles.get(&layer) else {
             diagnostics.push(calibration_missing_layer_diagnostic(
                 layer,
@@ -1744,17 +1752,45 @@ fn validate_calibration_bundle_freshness(
     );
 }
 
-fn referenced_calibration_layers(
+#[derive(Clone, Copy)]
+enum RequestedCalibrationRef<'a> {
+    Platform(&'a gbf_foundation::PlatformCalibrationId),
+    Kernel(&'a gbf_foundation::KernelCalibrationId),
+    Runtime(&'a gbf_foundation::RuntimeCalibrationId),
+}
+
+impl RequestedCalibrationRef<'_> {
+    const fn layer(self) -> CalibrationLayer {
+        match self {
+            Self::Platform(_) => CalibrationLayer::Platform,
+            Self::Kernel(_) => CalibrationLayer::Kernel,
+            Self::Runtime(_) => CalibrationLayer::Runtime,
+        }
+    }
+
+    fn is_resolved_by(self, resolved_ref: &gbf_hw::calibration::CalibrationSetRef) -> bool {
+        match self {
+            Self::Platform(id) => resolved_ref.platform.as_ref() == Some(id),
+            Self::Kernel(id) => resolved_ref.kernel.as_ref() == Some(id),
+            Self::Runtime(id) => resolved_ref.runtime.as_ref() == Some(id),
+        }
+    }
+}
+
+fn referenced_calibration_refs(
     set_ref: &gbf_hw::calibration::CalibrationSetRef,
-) -> Vec<CalibrationLayer> {
-    [
-        (set_ref.platform.is_some(), CalibrationLayer::Platform),
-        (set_ref.kernel.is_some(), CalibrationLayer::Kernel),
-        (set_ref.runtime.is_some(), CalibrationLayer::Runtime),
-    ]
-    .into_iter()
-    .filter_map(|(is_referenced, layer)| is_referenced.then_some(layer))
-    .collect()
+) -> Vec<RequestedCalibrationRef<'_>> {
+    let mut refs = Vec::new();
+    if let Some(id) = &set_ref.platform {
+        refs.push(RequestedCalibrationRef::Platform(id));
+    }
+    if let Some(id) = &set_ref.kernel {
+        refs.push(RequestedCalibrationRef::Kernel(id));
+    }
+    if let Some(id) = &set_ref.runtime {
+        refs.push(RequestedCalibrationRef::Runtime(id));
+    }
+    refs
 }
 
 fn push_calibration_stale_if_hash_mismatch(
@@ -1842,15 +1878,26 @@ fn calibration_missing_request_ref_diagnostic(
         ValidationDetail::Field {
             field: FieldPath::from(format!(
                 "compile_request.calibration_set_ref.{}",
-                layer.as_str()
+                calibration_request_ref_field(layer)
             )),
         },
         vec![EvidenceRef {
             kind: "compile_request".to_owned(),
-            reference: format!("calibration_set_ref.{}", layer.as_str()),
+            reference: format!(
+                "calibration_set_ref.{}",
+                calibration_request_ref_field(layer)
+            ),
             hash: Some(compile_request_hash),
         }],
     )
+}
+
+const fn calibration_request_ref_field(layer: CalibrationLayer) -> &'static str {
+    match layer {
+        CalibrationLayer::Platform => "platform",
+        CalibrationLayer::Kernel => "kernel",
+        CalibrationLayer::Runtime => "runtime",
+    }
 }
 
 fn calibration_stale_diagnostic(
@@ -1954,6 +2001,11 @@ fn active_layer_ids(artifact: &ImportedArtifactView) -> BTreeSet<LayerId> {
         .collect()
 }
 
+/// Temporary Stage-0 layer inventory until artifact core exposes typed layer ids.
+///
+/// The accepted v1 tensor-path grammar is segment based:
+/// `... . layer . <u16> . ...`, for example `model.layer.3.weight`.
+/// Shorthand such as `layer3` is intentionally not parsed here.
 fn layer_id_from_artifact_path(path: &str) -> Option<LayerId> {
     let mut segments = path.split('.');
     while let Some(segment) = segments.next() {
@@ -1981,21 +2033,65 @@ fn hint_provenance_inconsistent_diagnostic(
         },
         vec![EvidenceRef {
             kind: "hint_bundle".to_owned(),
-            reference: format!("constraints.entries.{index}.scope={scope:?}"),
+            reference: format!(
+                "constraints.entries.{index}.scope={}",
+                evidence_scope_reference(scope)
+            ),
             hash: Some(hint_bundle_hash),
         }],
     )
 }
 
+fn evidence_scope_reference(scope: &EvidenceScope) -> String {
+    match scope {
+        EvidenceScope::WholeArtifact => "whole_artifact".to_owned(),
+        EvidenceScope::LayerScoped { layer } => format!("layer:{layer}"),
+        EvidenceScope::TargetFamily { family } => format!("target_family:{family}"),
+        EvidenceScope::WorkloadScoped { workload } => format!("workload:{workload}"),
+        EvidenceScope::LoweringScoped { shard } => format!("lowering_shard:{}", shard.0),
+    }
+}
+
 fn validate_workload_and_golden_refs(
     inputs: &ValidateInputs<'_>,
+    artifact: &ImportedArtifactView,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for workload in inputs.workloads {
-        validate_workload_ref(inputs.resolver, workload, diagnostics);
-    }
+    let mut golden_refs = ActiveGoldenVectorRefs::default();
     for vector in inputs.golden_vectors {
+        golden_refs.insert(vector);
+    }
+    for vector in &artifact.aux.golden_vectors {
+        golden_refs.insert(vector);
+    }
+
+    for workload in inputs.workloads {
+        if let Some(resolved) = validate_workload_ref(inputs.resolver, workload, diagnostics) {
+            for vector in &resolved.manifest.golden_vectors {
+                golden_refs.insert(vector);
+            }
+        }
+    }
+    for vector in golden_refs.iter() {
         validate_golden_vector_ref(inputs.resolver, vector, diagnostics);
+    }
+}
+
+#[derive(Default)]
+struct ActiveGoldenVectorRefs {
+    seen: BTreeSet<(GoldenVectorId, Hash256)>,
+    refs: Vec<GoldenVectorRef>,
+}
+
+impl ActiveGoldenVectorRefs {
+    fn insert(&mut self, vector: &GoldenVectorRef) {
+        if self.seen.insert((vector.id.clone(), vector.manifest_hash)) {
+            self.refs.push(vector.clone());
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &GoldenVectorRef> {
+        self.refs.iter()
     }
 }
 
@@ -2003,7 +2099,7 @@ fn validate_workload_ref(
     resolver: &dyn ArtifactResolver,
     workload: &WorkloadManifestRef,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) {
+) -> Option<ResolvedWorkload> {
     match resolver.resolve_workload(workload) {
         Ok(resolved) => {
             if resolved.manifest.id.as_str() != workload.id.as_str() {
@@ -2013,7 +2109,7 @@ fn validate_workload_ref(
                         field: workload_ref_field(&workload.id, "id"),
                     },
                 ));
-                return;
+                return None;
             }
             if resolved.manifest.self_hash != workload.manifest_hash {
                 diagnostics.push(workload_ref_unresolved_diagnostic(
@@ -2023,14 +2119,19 @@ fn validate_workload_ref(
                         observed: resolved.manifest.self_hash,
                     },
                 ));
+                return None;
             }
+            Some(resolved)
         }
         Err(ArtifactResolveError::HashMismatch {
             expected, observed, ..
-        }) => diagnostics.push(workload_ref_unresolved_diagnostic(
-            workload,
-            ValidationDetail::HashMismatch { expected, observed },
-        )),
+        }) => {
+            diagnostics.push(workload_ref_unresolved_diagnostic(
+                workload,
+                ValidationDetail::HashMismatch { expected, observed },
+            ));
+            None
+        }
         Err(ArtifactResolveError::NotFound { .. })
         | Err(ArtifactResolveError::Unsupported { .. }) => {
             diagnostics.push(workload_ref_unresolved_diagnostic(
@@ -2039,6 +2140,7 @@ fn validate_workload_ref(
                     field: FieldPath::from(format!("workloads.{}", workload.id)),
                 },
             ));
+            None
         }
     }
 }
@@ -2390,7 +2492,7 @@ pub fn validate_artifact_and_request<'a>(
     }
 
     validate_hint_provenance(&inputs, effective_artifact, &mut diagnostics);
-    validate_workload_and_golden_refs(&inputs, &mut diagnostics);
+    validate_workload_and_golden_refs(&inputs, effective_artifact, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(stage0_failure(
             &inputs,
@@ -2816,9 +2918,7 @@ mod tests {
 
     #[test]
     fn f_b2_validate_rejects_explicit_calibration_unresolved() {
-        let mut calibration = calibration();
-        calibration.bundles.remove(&CalibrationLayer::Kernel);
-        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration));
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture.compile_request.calibration_set_ref = CalibrationSetRef {
             platform: None,
             kernel: Some(KernelCalibrationId::from("kernel.missing")),
@@ -2848,6 +2948,32 @@ mod tests {
                 }
             )
         });
+        let diagnostic = failure
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::CalibrationMissing {
+                        class: CalibrationLayer::Kernel
+                    }
+                )
+            })
+            .expect("kernel calibration missing diagnostic is present");
+        assert_eq!(
+            diagnostic.detail,
+            ValidationDetail::Field {
+                field: FieldPath::from("compile_request.calibration_set_ref.kernel"),
+            }
+        );
+        assert!(
+            diagnostic.provenance.iter().any(|evidence| {
+                evidence.kind == "compile_request"
+                    && evidence.reference == "calibration_set_ref.kernel"
+                    && evidence.hash.is_some()
+            }),
+            "unresolved requested ID points at the request field"
+        );
         assert!(
             !failure.diagnostics.iter().any(|diagnostic| matches!(
                 diagnostic.code,
@@ -3046,6 +3172,93 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_accepts_hint_scope_matrix_for_active_and_broader_scopes() {
+        let mut hint_bundle = HintBundle::empty();
+        for scope in [
+            EvidenceScope::WholeArtifact,
+            EvidenceScope::TargetFamily {
+                family: TargetFamilyId::from("dmg"),
+            },
+            EvidenceScope::WorkloadScoped {
+                workload: WorkloadId::from("workload.fixture"),
+            },
+            EvidenceScope::LoweringScoped {
+                shard: LoweringShardId("weight.layer0".to_owned()),
+            },
+            EvidenceScope::LayerScoped {
+                layer: LayerId::new(0),
+            },
+        ] {
+            hint_bundle
+                .constraints
+                .entries
+                .push(build_constraint_with_scope(scope));
+        }
+        let mut fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
+        fixture.set_single_layer_tensor(0);
+
+        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_hint_scope_matrix_for_inactive_narrower_scopes() {
+        let mut hint_bundle = HintBundle::empty();
+        for scope in [
+            EvidenceScope::TargetFamily {
+                family: TargetFamilyId::from("cgb"),
+            },
+            EvidenceScope::WorkloadScoped {
+                workload: WorkloadId::from("workload.other"),
+            },
+            EvidenceScope::LoweringScoped {
+                shard: LoweringShardId("weight.layer99".to_owned()),
+            },
+            EvidenceScope::LayerScoped {
+                layer: LayerId::new(9),
+            },
+        ] {
+            hint_bundle
+                .constraints
+                .entries
+                .push(build_constraint_with_scope(scope));
+        }
+        let mut fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
+        fixture.set_single_layer_tensor(0);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        let provenance_failures = failure
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::HintProvenanceInconsistent { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            provenance_failures, 4,
+            "diagnostics were {:#?}",
+            failure.diagnostics
+        );
+    }
+
+    #[test]
+    fn f_b2_validate_active_layer_ids_use_segmented_layer_path_grammar() {
+        assert_eq!(
+            layer_id_from_artifact_path("model.layer.12.weight"),
+            Some(LayerId::new(12))
+        );
+        assert_eq!(layer_id_from_artifact_path("model.layer12.weight"), None);
+        assert_eq!(
+            layer_id_from_artifact_path("model.layer.not_u16.weight"),
+            None
+        );
+    }
+
+    #[test]
     fn f_b2_validate_rejects_workload_ref_unresolved() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture
@@ -3063,6 +3276,35 @@ mod tests {
                     if workload == &WorkloadId::from("workload.fixture")
             )
         });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_workload_ref_id_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.resolver.workload_id_mismatches.insert(
+            WorkloadId::from("workload.fixture"),
+            WorkloadId::from("workload.other"),
+        );
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::WorkloadRefUnresolved { workload }
+                    if workload == &WorkloadId::from("workload.fixture")
+            )
+        });
+        assert!(
+            failure.diagnostics.iter().any(|diagnostic| matches!(
+                &diagnostic.detail,
+                ValidationDetail::Field { field }
+                    if field == &FieldPath::from("workloads.workload.fixture.id")
+            )),
+            "diagnostics were {:#?}",
+            failure.diagnostics
+        );
     }
 
     #[test]
@@ -3138,6 +3380,68 @@ mod tests {
                     observed: actual_observed,
                 } if vector == &GoldenVectorId("golden.fixture".to_owned())
                     && actual_expected == &expected
+                    && actual_observed == &observed
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rechecks_aux_golden_vectors_in_class9() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let vector = golden_vector_with_id("golden.aux");
+        fixture.golden_vectors.clear();
+        fixture.artifact.aux.golden_vectors = vec![vector.clone()];
+        fixture
+            .resolver
+            .golden_vector_bytes
+            .insert(vector.id.clone(), b"mutated aux golden vector".to_vec());
+        fixture.refresh_transport_hash();
+        let observed = sha256_hash(b"mutated aux golden vector");
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::GoldenVectorDigestMismatch {
+                    vector: actual_vector,
+                    expected,
+                    observed: actual_observed,
+                } if actual_vector == &vector.id
+                    && expected == &golden_vector_hash()
+                    && actual_observed == &observed
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rechecks_workload_manifest_golden_vectors_in_class9() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let vector = golden_vector_with_id("golden.workload");
+        fixture.golden_vectors.clear();
+        fixture
+            .resolver
+            .workload_golden_vectors
+            .insert(WorkloadId::from("workload.fixture"), vec![vector.clone()]);
+        fixture.resolver.golden_vector_bytes.insert(
+            vector.id.clone(),
+            b"mutated workload golden vector".to_vec(),
+        );
+        let observed = sha256_hash(b"mutated workload golden vector");
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::GoldenVectorDigestMismatch {
+                    vector: actual_vector,
+                    expected,
+                    observed: actual_observed,
+                } if actual_vector == &vector.id
+                    && expected == &golden_vector_hash()
                     && actual_observed == &observed
             )
         });
@@ -4133,6 +4437,16 @@ mod tests {
                 compute_imported_artifact_source_hash(&self.artifact);
         }
 
+        fn set_single_layer_tensor(&mut self, layer: u16) {
+            self.artifact.core = ArtifactCore::new(
+                vec![layer_tensor(layer)],
+                QuantSpec::default(),
+                SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
+            )
+            .expect("layer tensor core is valid");
+            self.refresh_core_identity();
+        }
+
         fn inputs(&self) -> ValidateInputs<'_> {
             ValidateInputs {
                 artifact: &self.artifact,
@@ -4154,7 +4468,9 @@ mod tests {
         sidecar_bytes: BTreeMap<SidecarRef, Vec<u8>>,
         sidecar_hash_mismatches: BTreeMap<SidecarRef, (Hash256, Hash256)>,
         missing_workloads: BTreeSet<WorkloadId>,
+        workload_id_mismatches: BTreeMap<WorkloadId, WorkloadId>,
         workload_hash_mismatches: BTreeMap<WorkloadId, (Hash256, Hash256)>,
+        workload_golden_vectors: BTreeMap<WorkloadId, Vec<GoldenVectorRef>>,
         workload_resolve_calls: Cell<usize>,
         golden_vector_bytes: BTreeMap<GoldenVectorId, Vec<u8>>,
         missing_golden_vectors: BTreeSet<GoldenVectorId>,
@@ -4232,12 +4548,22 @@ mod tests {
             } else {
                 workload.manifest_hash
             };
+            let id = self
+                .workload_id_mismatches
+                .get(&workload.id)
+                .cloned()
+                .unwrap_or_else(|| workload.id.clone());
+            let golden_vectors = self
+                .workload_golden_vectors
+                .get(&workload.id)
+                .cloned()
+                .unwrap_or_default();
             Ok(ResolvedWorkload {
                 manifest: WorkloadManifest {
-                    id: workload.id.clone(),
+                    id,
                     schema_version: gbf_workload::WorkloadSchemaVersion { epoch: 1, minor: 0 },
                     self_hash,
-                    golden_vectors: Vec::new(),
+                    golden_vectors,
                     future_fields: gbf_workload::WorkloadFuturePlaceholder::default(),
                 },
             })
@@ -4387,8 +4713,12 @@ mod tests {
     }
 
     fn golden_vector() -> GoldenVectorRef {
+        golden_vector_with_id("golden.fixture")
+    }
+
+    fn golden_vector_with_id(id: &str) -> GoldenVectorRef {
         GoldenVectorRef {
-            id: GoldenVectorId("golden.fixture".to_owned()),
+            id: GoldenVectorId(id.to_owned()),
             manifest_hash: golden_vector_hash(),
         }
     }
@@ -4399,6 +4729,19 @@ mod tests {
 
     fn golden_vector_hash() -> Hash256 {
         sha256_hash(golden_vector_bytes())
+    }
+
+    fn layer_tensor(layer: u16) -> CanonicalTensor {
+        CanonicalTensor::new(
+            CanonicalTensorId::new(format!("model.layer.{layer}.bias")).expect("tensor id"),
+            CanonicalTensorKind::Bias,
+            CanonicalTensorLayout::new(
+                CanonicalTensorShape::from_usize_dims(&[1, 1]).expect("shape"),
+                TensorElementType::Float32,
+            ),
+            CanonicalTensorPayload::F32(vec![1.0]),
+        )
+        .expect("layer tensor is valid")
     }
 
     fn build_constraint_with_scope(scope: EvidenceScope) -> BuildConstraintEntry {
@@ -4446,15 +4789,7 @@ mod tests {
     }
 
     fn calibration_set_ref() -> CalibrationSetRef {
-        CalibrationSetRef {
-            platform: Some(gbf_foundation::PlatformCalibrationId::from(
-                "platform.bootstrap-dmg-mbc5",
-            )),
-            kernel: Some(KernelCalibrationId::from("kernel.bootstrap-dmg-mbc5")),
-            runtime: Some(gbf_foundation::RuntimeCalibrationId::from(
-                "runtime.bootstrap-dmg-mbc5",
-            )),
-        }
+        BootstrapCalibrationBundle::dmg_mbc5_ref()
     }
 
     fn compile_profile() -> CompileProfileSpec {
