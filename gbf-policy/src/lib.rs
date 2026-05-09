@@ -20,6 +20,7 @@ pub use capabilities::{
     STAGE0_COMPILER_FEATURE_REGISTRY_OWNER, STAGE0_COMPILER_SUPPORTED_FEATURES,
     Stage0Class10TargetCapabilities, Stage0Class10TargetCapabilityRule,
     TargetCapabilityRequirement, compiler_build_supports_feature,
+    stage0_class10_lowering_profile_for_family, stage0_class10_target_family_for_profile_id,
 };
 pub use compile::{
     ArtifactRef, BRINGUP_COMPILE_PROFILE_ID, BRINGUP_COMPILE_PROFILE_TOML, CompileInvocationInputs,

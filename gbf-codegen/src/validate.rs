@@ -3001,7 +3001,11 @@ mod tests {
         TargetProfileId,
     };
     use gbf_hw::calibration::CalibrationSetRef;
-    use gbf_hw::target::dmg_mbc5_8mib_128kib;
+    use gbf_hw::target::{
+        CapabilitySet, CartridgeProfile, ConsoleModel, canonical_target_profile_id,
+        dmg_mbc5_8mib_128kib,
+    };
+    use gbf_hw::timing::dmg_timing;
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationConfidenceClass,
         CalibrationConfidenceRequirement, CompileKnobId, CompileObjective, CompilerFeature,
@@ -4095,6 +4099,21 @@ mod tests {
                 } if target == &TargetProfileId::from("cgb-mbc5-8mib-128kib")
             )
         });
+    }
+
+    #[test]
+    fn f_b2_validate_allows_compile_request_target_with_same_family_lowering() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.target = dmg_family_sibling_target_id(ConsoleModel::Mgb);
+
+        let target_capabilities =
+            Stage0Class10TargetCapabilities::from_target_profile(&fixture.target_profile);
+        assert_eq!(
+            target_capabilities.target_compatibility(&fixture.compile_request.target),
+            Ok(())
+        );
+
+        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
     }
 
     #[test]
@@ -5412,6 +5431,18 @@ mod tests {
             aggregate_hash: Hash256::ZERO,
         };
         sha256_hash(&manifest.pack().expect("fixture lowering manifest packs"))
+    }
+
+    fn dmg_family_sibling_target_id(console: ConsoleModel) -> TargetProfileId {
+        let cartridge = CartridgeProfile::dmg_mbc5_8mib_128kib_battery();
+        let timing = dmg_timing();
+        let capabilities = CapabilitySet::default();
+        TargetProfileId::from(canonical_target_profile_id(
+            console,
+            &cartridge,
+            timing,
+            capabilities,
+        ))
     }
 
     fn workload() -> WorkloadManifestRef {

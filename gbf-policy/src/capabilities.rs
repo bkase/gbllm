@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use gbf_foundation::{ArtifactFeature, TargetProfileId};
-use gbf_hw::target::TargetProfile;
+use gbf_foundation::{ArtifactFeature, DataLoweringProfileId, TargetFamilyId, TargetProfileId};
+use gbf_hw::target::{DMG_TARGET_FAMILY_ID, TargetProfile};
 
 use crate::compile::{CompilerFeature, RuntimeMode};
 use crate::diagnostics::TargetIncompatibilityReason;
@@ -49,6 +49,8 @@ pub const STAGE0_CLASS10_TARGET_CAPABILITY_RULES: &[Stage0Class10TargetCapabilit
 pub struct Stage0Class10TargetCapabilities {
     pub owner: &'static str,
     pub target: TargetProfileId,
+    pub target_family: TargetFamilyId,
+    pub compatible_lowering_profile: DataLoweringProfileId,
     pub supported_artifact_features: BTreeSet<ArtifactFeature>,
     pub supported_runtime_modes: BTreeSet<RuntimeMode>,
 }
@@ -70,6 +72,10 @@ impl Stage0Class10TargetCapabilities {
         Self {
             owner: STAGE0_CLASS10_TARGET_CAPABILITY_OWNER,
             target: target_profile.id().clone(),
+            target_family: target_profile.family().clone(),
+            compatible_lowering_profile: stage0_class10_lowering_profile_for_family(
+                target_profile.family(),
+            ),
             supported_artifact_features,
             supported_runtime_modes,
         }
@@ -89,12 +95,52 @@ impl Stage0Class10TargetCapabilities {
         &self,
         requested: &TargetProfileId,
     ) -> Result<(), TargetIncompatibilityReason> {
-        if requested.as_str() == self.target.as_str() {
-            Ok(())
-        } else {
-            Err(TargetIncompatibilityReason::TargetFamilyMismatch)
+        let Some(requested_family) = stage0_class10_target_family_for_profile_id(requested) else {
+            return Err(TargetIncompatibilityReason::MissingLoweringProfile);
+        };
+
+        if requested_family != self.target_family {
+            return Err(TargetIncompatibilityReason::TargetFamilyMismatch);
         }
+
+        if stage0_class10_lowering_profile_for_family(&requested_family)
+            != self.compatible_lowering_profile
+        {
+            return Err(TargetIncompatibilityReason::MissingLoweringProfile);
+        }
+
+        Ok(())
     }
+}
+
+/// Resolve canonical target profile ids onto the class-10 lowering family axis.
+///
+/// Stage 0 class 10 only proves compatibility with the artifact's
+/// target-family lowering. Unknown profile ids therefore do not imply a family
+/// mismatch; callers surface those as a missing lowering profile instead.
+#[must_use]
+pub fn stage0_class10_target_family_for_profile_id(
+    profile_id: &TargetProfileId,
+) -> Option<TargetFamilyId> {
+    let profile_id = profile_id.as_str();
+    if profile_id.starts_with("dmg-")
+        || profile_id.starts_with("mgb-")
+        || profile_id.starts_with("sgb-")
+    {
+        Some(TargetFamilyId::from_static(DMG_TARGET_FAMILY_ID))
+    } else if profile_id.starts_with("cgb-") {
+        Some(TargetFamilyId::from_static("cgb"))
+    } else {
+        None
+    }
+}
+
+/// Return the family-default lowering profile Stage 0 class 10 can accept.
+#[must_use]
+pub fn stage0_class10_lowering_profile_for_family(
+    family: &TargetFamilyId,
+) -> DataLoweringProfileId {
+    DataLoweringProfileId(format!("{}-default", family.as_str()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +182,7 @@ mod tests {
         CapabilitySet, CartridgeProfile, ConsoleModel, TargetProfile, canonical_target_profile_id,
         dmg_mbc5_8mib_128kib,
     };
-    use gbf_hw::timing::{DOT_CLOCK_HZ, FRAME_DOTS, TimingProfile, VBLANK_DOTS};
+    use gbf_hw::timing::{DOT_CLOCK_HZ, FRAME_DOTS, TimingProfile, VBLANK_DOTS, dmg_timing};
 
     use super::*;
 
@@ -160,6 +206,11 @@ mod tests {
             Stage0Class10TargetCapabilities::from_target_profile(&dmg_mbc5_8mib_128kib());
 
         assert_eq!(contract.owner, STAGE0_CLASS10_TARGET_CAPABILITY_OWNER);
+        assert_eq!(contract.target_family, TargetFamilyId::from("dmg"));
+        assert_eq!(
+            contract.compatible_lowering_profile,
+            DataLoweringProfileId("dmg-default".to_owned())
+        );
         assert!(contract.supports_artifact_feature(ArtifactFeature::DenseI8));
         assert!(contract.supports_artifact_feature(ArtifactFeature::LinearStateSequence));
         assert!(!contract.supports_artifact_feature(ArtifactFeature::MoeRouting));
@@ -174,6 +225,28 @@ mod tests {
 
         assert!(contract.supports_artifact_feature(ArtifactFeature::MoeRouting));
         assert!(contract.supports_runtime_mode(RuntimeMode::Trace));
+    }
+
+    #[test]
+    fn stage0_target_compatibility_uses_family_lowering_axis() {
+        let contract =
+            Stage0Class10TargetCapabilities::from_target_profile(&dmg_mbc5_8mib_128kib());
+        let same_family_request = dmg_family_sibling_target_id(ConsoleModel::Mgb);
+        let different_family_request = cgb_double_speed_vram_dma_target().id().clone();
+
+        assert_eq!(
+            stage0_class10_target_family_for_profile_id(&same_family_request),
+            Some(TargetFamilyId::from("dmg"))
+        );
+        assert_eq!(contract.target_compatibility(&same_family_request), Ok(()));
+        assert_eq!(
+            contract.target_compatibility(&different_family_request),
+            Err(TargetIncompatibilityReason::TargetFamilyMismatch)
+        );
+        assert_eq!(
+            contract.target_compatibility(&TargetProfileId::from("fixture-target-without-family")),
+            Err(TargetIncompatibilityReason::MissingLoweringProfile)
+        );
     }
 
     fn cgb_double_speed_vram_dma_target() -> TargetProfile {
@@ -202,5 +275,17 @@ mod tests {
             capabilities,
         )
         .expect("fixture target is valid")
+    }
+
+    fn dmg_family_sibling_target_id(console: ConsoleModel) -> TargetProfileId {
+        let cartridge = CartridgeProfile::dmg_mbc5_8mib_128kib_battery();
+        let timing = dmg_timing();
+        let capabilities = CapabilitySet::default();
+        TargetProfileId::from(canonical_target_profile_id(
+            console,
+            &cartridge,
+            timing,
+            capabilities,
+        ))
     }
 }
