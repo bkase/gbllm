@@ -1722,13 +1722,7 @@ fn validate_target_data_lowering(
             vec![EvidenceRef {
                 kind: "target_profile".to_owned(),
                 reference: target.to_string(),
-                hash: Some(input_hash(
-                    "gbf-hw",
-                    "TargetProfile",
-                    "target_profile",
-                    "1.0.0",
-                    inputs.target_profile,
-                )),
+                hash: Some(canonical_target_profile_hash(inputs.target_profile)),
             }],
         ));
         return;
@@ -2674,13 +2668,7 @@ fn target_profile_evidence(inputs: &ValidateInputs<'_>) -> EvidenceRef {
     EvidenceRef {
         kind: "target_profile".to_owned(),
         reference: inputs.target_profile.id().to_string(),
-        hash: Some(input_hash(
-            "gbf-hw",
-            "TargetProfile",
-            "target_profile",
-            "1.0.0",
-            inputs.target_profile,
-        )),
+        hash: Some(canonical_target_profile_hash(inputs.target_profile)),
     }
 }
 
@@ -3309,8 +3297,8 @@ mod tests {
     };
     use gbf_hw::calibration::CalibrationSetRef;
     use gbf_hw::target::{
-        CapabilitySet, CartridgeProfile, ConsoleModel, canonical_target_profile_id,
-        dmg_mbc5_8mib_128kib,
+        CapabilitySet, CartridgeProfile, ConsoleModel, TARGET_PROFILE_CONTENT_HASH_DOMAIN,
+        canonical_target_profile_id, dmg_mbc5_8mib_128kib,
     };
     use gbf_hw::timing::dmg_timing;
     use gbf_policy::{
@@ -3403,6 +3391,26 @@ mod tests {
             )
             .to_string(),
             "4dac1a04bf8464cc8239fa0a1feb1fa1dfa7b112599272d999ebc8634fcf6962"
+        );
+    }
+
+    #[test]
+    fn f_b2_validate_target_profile_hash_matches_report_canonical_json() {
+        let profile = dmg_mbc5_8mib_128kib();
+        let value = serde_json::to_value(&profile).expect("target profile serializes");
+        let canonical = canonicalize_value(&value).expect("report canonical JSON emits");
+        let mut hasher = Sha256::new();
+        hasher.update(TARGET_PROFILE_CONTENT_HASH_DOMAIN);
+        hasher.update(&canonical);
+        let report_canonical_hash = Hash256::from_bytes(hasher.finalize().into());
+
+        assert_eq!(
+            target_profile_content_hash(&profile).expect("target profile hashes"),
+            report_canonical_hash
+        );
+        assert_eq!(
+            canonical_target_profile_hash(&profile),
+            report_canonical_hash
         );
     }
 

@@ -161,6 +161,11 @@ fn write_canonical_json_value(
     value: &serde_json::Value,
     out: &mut Vec<u8>,
 ) -> Result<(), serde_json::Error> {
+    // TODO(F-B2-F-B4/bd-1irp): This intentionally mirrors
+    // `gbf_report::canonical_json`, but `gbf-hw` sits below `gbf-report` in the
+    // crate graph and cannot depend on it. RFC §2.5 makes duplicated canonical
+    // JSON emitters a contract risk; keep the cross-crate parity proof in
+    // `gbf-codegen` until canonicalization moves to a lower shared crate.
     match value {
         serde_json::Value::Null
         | serde_json::Value::Bool(_)
