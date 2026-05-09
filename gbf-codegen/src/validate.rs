@@ -1638,19 +1638,16 @@ fn validate_calibration_binding(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     let active = active_calibration_binding(inputs, calibration);
-    let referenced_refs = referenced_calibration_refs(&inputs.compile_request.calibration_set_ref);
-    if referenced_refs.is_empty() {
-        for layer in CalibrationLayer::all() {
+    for layer in CalibrationLayer::all() {
+        let Some(requested_ref) =
+            requested_calibration_ref(&inputs.compile_request.calibration_set_ref, layer)
+        else {
             diagnostics.push(calibration_missing_request_ref_diagnostic(
                 layer,
                 active.compile_request_hash,
             ));
-        }
-        return;
-    }
-
-    for requested_ref in referenced_refs {
-        let layer = requested_ref.layer();
+            continue;
+        };
         if !requested_ref.is_resolved_by(&calibration.resolved_ref) {
             diagnostics.push(calibration_missing_request_ref_diagnostic(
                 layer,
@@ -1659,14 +1656,16 @@ fn validate_calibration_binding(
             continue;
         }
 
-        let Some(bundle) = calibration.bundles.get(&layer) else {
+        if !calibration.bundles.contains_key(&layer) {
             diagnostics.push(calibration_missing_layer_diagnostic(
                 layer,
                 active.calibration_set_hash,
             ));
             continue;
-        };
+        }
+    }
 
+    for bundle in calibration.bundles.values() {
         validate_calibration_bundle_freshness(bundle, active, diagnostics);
         validate_calibration_bundle_confidence(
             inputs,
@@ -1761,14 +1760,6 @@ enum RequestedCalibrationRef<'a> {
 }
 
 impl RequestedCalibrationRef<'_> {
-    const fn layer(self) -> CalibrationLayer {
-        match self {
-            Self::Platform(_) => CalibrationLayer::Platform,
-            Self::Kernel(_) => CalibrationLayer::Kernel,
-            Self::Runtime(_) => CalibrationLayer::Runtime,
-        }
-    }
-
     fn is_resolved_by(self, resolved_ref: &gbf_hw::calibration::CalibrationSetRef) -> bool {
         match self {
             Self::Platform(id) => resolved_ref.platform.as_ref() == Some(id),
@@ -1778,20 +1769,21 @@ impl RequestedCalibrationRef<'_> {
     }
 }
 
-fn referenced_calibration_refs(
+fn requested_calibration_ref(
     set_ref: &gbf_hw::calibration::CalibrationSetRef,
-) -> Vec<RequestedCalibrationRef<'_>> {
-    let mut refs = Vec::new();
-    if let Some(id) = &set_ref.platform {
-        refs.push(RequestedCalibrationRef::Platform(id));
+    layer: CalibrationLayer,
+) -> Option<RequestedCalibrationRef<'_>> {
+    match layer {
+        CalibrationLayer::Platform => set_ref
+            .platform
+            .as_ref()
+            .map(RequestedCalibrationRef::Platform),
+        CalibrationLayer::Kernel => set_ref.kernel.as_ref().map(RequestedCalibrationRef::Kernel),
+        CalibrationLayer::Runtime => set_ref
+            .runtime
+            .as_ref()
+            .map(RequestedCalibrationRef::Runtime),
     }
-    if let Some(id) = &set_ref.kernel {
-        refs.push(RequestedCalibrationRef::Kernel(id));
-    }
-    if let Some(id) = &set_ref.runtime {
-        refs.push(RequestedCalibrationRef::Runtime(id));
-    }
-    refs
 }
 
 fn push_calibration_stale_if_hash_mismatch(
@@ -3212,11 +3204,9 @@ mod tests {
     #[test]
     fn f_b2_validate_rejects_explicit_calibration_unresolved() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
-        fixture.compile_request.calibration_set_ref = CalibrationSetRef {
-            platform: None,
-            kernel: Some(KernelCalibrationId::from("kernel.missing")),
-            runtime: None,
-        };
+        let mut set_ref = calibration_set_ref();
+        set_ref.kernel = Some(KernelCalibrationId::from("kernel.missing"));
+        fixture.compile_request.calibration_set_ref = set_ref;
 
         let failure =
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
@@ -3267,14 +3257,74 @@ mod tests {
             }),
             "unresolved requested ID points at the request field"
         );
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_partial_calibration_set_ref() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.compile_request.calibration_set_ref = CalibrationSetRef {
+            platform: calibration_set_ref().platform,
+            kernel: None,
+            runtime: None,
+        };
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_eq!(
+            failure.report.body.identity.calibration_hash,
+            fixture.calibration.as_ref().map(|calibration| {
+                input_hash(
+                    "gbf-policy",
+                    "CalibrationBundleSet",
+                    "calibration",
+                    "1.0.0",
+                    calibration,
+                )
+            })
+        );
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CalibrationMissing {
+                    class: CalibrationLayer::Kernel
+                }
+            )
+        });
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CalibrationMissing {
+                    class: CalibrationLayer::Runtime
+                }
+            )
+        });
+        let kernel_diagnostic = failure
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::CalibrationMissing {
+                        class: CalibrationLayer::Kernel
+                    }
+                )
+            })
+            .expect("kernel calibration missing diagnostic is present");
+        assert_eq!(
+            kernel_diagnostic.detail,
+            ValidationDetail::Field {
+                field: FieldPath::from("compile_request.calibration_set_ref.kernel"),
+            }
+        );
         assert!(
             !failure.diagnostics.iter().any(|diagnostic| matches!(
                 diagnostic.code,
                 ValidationCode::CalibrationMissing {
-                    class: CalibrationLayer::Platform | CalibrationLayer::Runtime
+                    class: CalibrationLayer::Platform
                 }
             )),
-            "only the explicitly referenced missing layer is rejected"
+            "referenced platform layer is not rejected"
         );
     }
 
@@ -3358,6 +3408,95 @@ mod tests {
                 case.field
             );
         }
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_stale_unrequested_calibration_bundle() {
+        let mut calibration = calibration();
+        calibration
+            .bundles
+            .get_mut(&CalibrationLayer::Kernel)
+            .expect("kernel calibration exists")
+            .target_profile_hash = hash(0xbb);
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration));
+        fixture.compile_request.calibration_set_ref = CalibrationSetRef {
+            platform: calibration_set_ref().platform,
+            kernel: None,
+            runtime: None,
+        };
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CalibrationStale {
+                    class: CalibrationLayer::Kernel,
+                    declared,
+                    observed,
+                } if *declared == hash(0xbb) && *observed == active_target_profile_hash()
+            )
+        });
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::CalibrationMissing {
+                    class: CalibrationLayer::Kernel
+                }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_low_confidence_unrequested_calibration_bundle() {
+        let mut calibration = calibration();
+        calibration
+            .bundles
+            .get_mut(&CalibrationLayer::Platform)
+            .expect("platform calibration exists")
+            .confidence = CalibrationConfidenceClass::Transferred;
+        calibration
+            .bundles
+            .get_mut(&CalibrationLayer::Runtime)
+            .expect("runtime calibration exists")
+            .confidence = CalibrationConfidenceClass::Transferred;
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration));
+        fixture.compile_request.calibration_set_ref = CalibrationSetRef {
+            platform: calibration_set_ref().platform,
+            kernel: None,
+            runtime: None,
+        };
+        fixture.compile_request.profile = CompileProfileId::from(DEFAULT_COMPILE_PROFILE_ID);
+        fixture.compile_profile = compile_profile_by_id(DEFAULT_COMPILE_PROFILE_ID);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        let diagnostic = failure
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::CalibrationConfidenceTooLow {
+                        required: CalibrationConfidenceClass::Transferred,
+                        observed: CalibrationConfidenceClass::None,
+                    }
+                ) && diagnostic.detail
+                    == (ValidationDetail::Field {
+                        field: FieldPath::from("calibration.Kernel.confidence"),
+                    })
+            })
+            .expect("unrequested kernel low-confidence diagnostic is present");
+        assert!(
+            diagnostic.provenance.iter().any(|evidence| {
+                evidence.kind == "calibration_bundle"
+                    && evidence.reference == "Kernel.confidence"
+                    && evidence.hash == failure.report.body.identity.calibration_hash
+            }),
+            "low-confidence diagnostic points at the downstream calibration bundle"
+        );
     }
 
     #[test]
