@@ -535,14 +535,16 @@ pub enum ProjectedSizeSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProjectedSwitchCountSection {
+pub struct ProjectedSwitchCount {
     pub upper_bound: u16,
     pub expected_q16_16: Option<u32>,
     pub decision_value: u16,
     pub source: SwitchProjectionSource,
 }
 
-impl Default for ProjectedSwitchCountSection {
+pub type ProjectedSwitchCountSection = ProjectedSwitchCount;
+
+impl Default for ProjectedSwitchCount {
     fn default() -> Self {
         Self {
             upper_bound: 0,
@@ -905,6 +907,14 @@ fn project_budget(
         &projected_hram,
         runtime_chrome_budget,
     ));
+    let projected_bank_switches_per_token = projected_bank_switches_per_token(view);
+    let projected_sram_page_switches_per_token =
+        projected_sram_page_switches_per_token(&view.sequence_state);
+    failures.append(&mut switch_count_failures(
+        &policy.policy.objective,
+        &projected_bank_switches_per_token,
+        &projected_sram_page_switches_per_token,
+    ));
 
     (
         BudgetProjectionSection {
@@ -915,18 +925,8 @@ fn project_budget(
             projected_wram,
             projected_sram,
             projected_hram,
-            projected_bank_switches_per_token: ProjectedSwitchCountSection {
-                upper_bound: view.routing.projected_bank_switches_per_token,
-                expected_q16_16: view.routing.expected_bank_switches_q16_16,
-                decision_value: view.routing.projected_bank_switches_per_token,
-                source: SwitchProjectionSource::ConservativeStaticUpperBound,
-            },
-            projected_sram_page_switches_per_token: ProjectedSwitchCountSection {
-                upper_bound: view.sequence_state.projected_sram_page_switches_per_token,
-                expected_q16_16: None,
-                decision_value: view.sequence_state.projected_sram_page_switches_per_token,
-                source: SwitchProjectionSource::ConservativeStaticUpperBound,
-            },
+            projected_bank_switches_per_token,
+            projected_sram_page_switches_per_token,
             routing_model: view.routing.model.clone(),
         },
         failures,
@@ -1483,6 +1483,61 @@ fn memory_peak_failures(
         failures.push(BudgetFailure::HramPeakExceedsCap {
             peak: projected_hram.peak_bytes,
             cap: memory_caps.hram_usable_bytes,
+        });
+    }
+
+    failures
+}
+
+fn projected_bank_switches_per_token(view: &QuantGraphBudgetView) -> ProjectedSwitchCount {
+    ProjectedSwitchCount {
+        upper_bound: view.routing.projected_bank_switches_per_token,
+        expected_q16_16: view.routing.expected_bank_switches_q16_16,
+        decision_value: view.routing.projected_bank_switches_per_token,
+        source: SwitchProjectionSource::ConservativeStaticUpperBound,
+    }
+}
+
+fn projected_sram_page_switches_per_token(
+    sequence_state: &SequenceStateProjection,
+) -> ProjectedSwitchCount {
+    // T-B4.7 treats the sequence-state page count as the static per-token
+    // upper bound for the current access pattern. F-B9 owns the detailed SRAM
+    // page plan; v1 budget decisions still use this conservative count.
+    ProjectedSwitchCount {
+        upper_bound: sequence_state.projected_sram_page_switches_per_token,
+        expected_q16_16: None,
+        decision_value: sequence_state.projected_sram_page_switches_per_token,
+        source: SwitchProjectionSource::ConservativeStaticUpperBound,
+    }
+}
+
+fn switch_count_failures(
+    objective: &gbf_policy::CompileObjective,
+    projected_bank_switches_per_token: &ProjectedSwitchCount,
+    projected_sram_page_switches_per_token: &ProjectedSwitchCount,
+) -> Vec<BudgetFailure> {
+    let mut failures = Vec::new();
+
+    if let Some(cap) = objective.max_bank_switches_per_token
+        && projected_bank_switches_per_token.decision_value > cap
+    {
+        failures.push(BudgetFailure::BankSwitchesPerTokenOverCap {
+            decision_value: projected_bank_switches_per_token.decision_value,
+            upper_bound: projected_bank_switches_per_token.upper_bound,
+            cap,
+            source: projected_bank_switches_per_token.source,
+        });
+    }
+
+    if let Some(cap) = objective.max_sram_page_switches_per_token
+        && projected_sram_page_switches_per_token.decision_value > cap
+    {
+        failures.push(BudgetFailure::SramPageSwitchesPerTokenOverCap {
+            decision_value: projected_sram_page_switches_per_token.decision_value,
+            upper_bound: projected_sram_page_switches_per_token.upper_bound,
+            cap,
+            source: projected_sram_page_switches_per_token.source,
         });
     }
 
@@ -2782,6 +2837,191 @@ mod tests {
                 "peak_bytes": 16,
                 "source": { "kind": "StaticGraphProjection" }
             })
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_routing_model_named_in_report() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.routing = RoutingProjection {
+            model: RoutingModelSection {
+                kind: "top-2-deterministic-once-per-token".to_owned(),
+            },
+            projected_bank_switches_per_token: 7,
+            expected_bank_switches_q16_16: Some(3 * 65_536),
+        };
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert_eq!(
+            report.report.body.projections.routing_model,
+            RoutingModelSection {
+                kind: "top-2-deterministic-once-per-token".to_owned(),
+            }
+        );
+        assert_eq!(
+            report
+                .report
+                .body
+                .projections
+                .projected_bank_switches_per_token,
+            ProjectedSwitchCount {
+                upper_bound: 7,
+                expected_q16_16: Some(3 * 65_536),
+                decision_value: 7,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_switch_decision_uses_upper_bound_by_default() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.routing.projected_bank_switches_per_token = 9;
+        view.routing.expected_bank_switches_q16_16 = Some(2 * 65_536);
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert_eq!(
+            report
+                .report
+                .body
+                .projections
+                .projected_bank_switches_per_token,
+            ProjectedSwitchCount {
+                upper_bound: 9,
+                expected_q16_16: Some(2 * 65_536),
+                decision_value: 9,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_recovery_switch_decision_uses_upper_bound() {
+        let mut policy = policy_fixture();
+        policy.policy.profile = gbf_foundation::CompileProfileId::from("Recovery");
+        policy.policy.objective.max_bank_switches_per_token = Some(8);
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.routing.projected_bank_switches_per_token = 9;
+        view.routing.expected_bank_switches_q16_16 = Some(65_536);
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_static_budget(BudgetInputs {
+            policy: &policy,
+            quant_graph: &quant_graph,
+            runtime_chrome_budget: Some(&budget),
+            target_profile: &dmg_mbc5_8mib_128kib(),
+        });
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report
+                .report
+                .body
+                .projections
+                .projected_bank_switches_per_token,
+            ProjectedSwitchCount {
+                upper_bound: 9,
+                expected_q16_16: Some(65_536),
+                decision_value: 9,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::BankSwitchesPerTokenOverCap {
+                decision_value: 9,
+                upper_bound: 9,
+                cap: 8,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }]
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_switches_per_token_over_cap() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.routing.model = RoutingModelSection {
+            kind: "top-1-deterministic-once-per-token".to_owned(),
+        };
+        view.routing.projected_bank_switches_per_token = 18;
+        view.routing.expected_bank_switches_q16_16 = Some(4 * 65_536);
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::BankSwitchesPerTokenOverCap {
+                decision_value: 18,
+                upper_bound: 18,
+                cap: 17,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetSwitchesPerTokenOverCap {
+                decision_value: 18,
+                upper_bound: 18,
+                cap: 17,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_sram_page_switches_per_token_over_cap() {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.sequence_state.projected_sram_bytes = 8192;
+        view.sequence_state.projected_sram_source = ProjectedSizeSource::StaticGraphProjection;
+        view.sequence_state.projected_sram_page_switches_per_token = 4;
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report
+                .report
+                .body
+                .projections
+                .projected_sram_page_switches_per_token,
+            ProjectedSwitchCount {
+                upper_bound: 4,
+                expected_q16_16: None,
+                decision_value: 4,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::SramPageSwitchesPerTokenOverCap {
+                decision_value: 4,
+                upper_bound: 4,
+                cap: 3,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetSramPageSwitchesPerTokenOverCap {
+                decision_value: 4,
+                upper_bound: 4,
+                cap: 3,
+                source: SwitchProjectionSource::ConservativeStaticUpperBound,
+            }
         );
     }
 
