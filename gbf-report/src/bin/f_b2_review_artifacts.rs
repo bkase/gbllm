@@ -5,21 +5,23 @@ use std::path::{Path, PathBuf};
 
 use gbf_artifact::{ArtifactFeature, GoldenVectorId as ArtifactGoldenVectorId, HintBundle};
 use gbf_foundation::{
-    CompileProfileId, FieldPath, GoldenVectorId, Hash256, KernelCalibrationId, LineageId,
-    PlatformCalibrationId, RuntimeCalibrationId, SemVer, TargetProfileId, WorkloadId,
+    BudgetSlotId, CompileProfileId, ExpertId, FieldPath, GoldenVectorId, Hash256,
+    KernelCalibrationId, LayerId, LineageId, PlatformCalibrationId, RuntimeCalibrationId, SemVer,
+    TargetProfileId, WorkloadId,
 };
 use gbf_hw::calibration::CalibrationSetRef;
 use gbf_policy::{
-    CalibrationConfidenceRequirement, CompileKnobId, CompileKnobPath, CompileKnobProvenanceEntry,
-    CompileKnobValues, CompileObjective, CompilerFeature, ConstraintOperation,
-    ConstraintProvenance, EffectiveConstraints, EvidenceRef, KnobLockSet, ObservabilityMode,
-    ObservationKnob, OverlayKnob, OverlayPromotion, PlacementKnob, PlacementProfile, PolicySource,
-    ProbeCollectionLevel, RangeKnob, ReductionPlanCeiling, RepairPolicy, RepairPolicyProfile,
-    RiskPolicy, RomKernelDuplicationBias, RomKernelResidencyBias, RomWindowKnob, RuntimeMode,
-    ScheduleKnob, ScheduleResourcePressure, ScheduleSliceCoarsening, ScheduleTileSearch,
-    ServiceLevelObjective, SramKnob, SramPageAggression, StorageKnob, StorageMaterialization,
-    TraceBudget, TraceDropPolicy, ValidationCode, ValidationDetail, ValidationDiagnostic,
-    ValidationOrigin, canonical_default_bounds_fixture,
+    BudgetFailure, BudgetSlotClass, CalibrationConfidenceRequirement, CompileKnobId,
+    CompileKnobPath, CompileKnobProvenanceEntry, CompileKnobValues, CompileObjective,
+    CompilerFeature, ConstraintOperation, ConstraintProvenance, EffectiveConstraints, EvidenceRef,
+    KnobLockSet, ObservabilityMode, ObservationKnob, OverlayKnob, OverlayPromotion, PlacementKnob,
+    PlacementProfile, PolicySource, ProbeCollectionLevel, RangeKnob, ReductionPlanCeiling,
+    ReductionSiteId, RepairPolicy, RepairPolicyProfile, RiskPolicy, RomKernelDuplicationBias,
+    RomKernelResidencyBias, RomWindowKnob, RuntimeMode, ScheduleKnob, ScheduleResourcePressure,
+    ScheduleSliceCoarsening, ScheduleTileSearch, ServiceLevelObjective, SramKnob,
+    SramPageAggression, StorageKnob, StorageMaterialization, SwitchProjectionSource, TraceBudget,
+    TraceDropPolicy, ValidationCode, ValidationDetail, ValidationDiagnostic, ValidationOrigin,
+    budget_failure_diagnostic, canonical_default_bounds_fixture,
 };
 use gbf_report::report_schemas::artifact_validation_v1::{
     ArtifactCompatibilityDecision, ArtifactCompatibilityFailure, ArtifactCompatibilitySection,
@@ -31,6 +33,14 @@ use gbf_report::report_schemas::policy_resolution_v1::{
     PolicyProvenanceSection, PolicyResolutionReportBody, PolicyResolutionSuccessSection,
     ResolvedSection,
 };
+use gbf_report::report_schemas::static_budget_v1::{
+    AccumulatorBound, BudgetComponentRef, BudgetDecisionSection, BudgetIdentitySection,
+    BudgetPolicySection, BudgetProjectionSection, CommonBankFootprintSection,
+    ExpertPlacementStatus, PerBankEntry, PerExpertEntry, ProjectedSizeSection, ProjectedSizeSource,
+    ProjectedSwitchCountSection, RomBudgetSlotEntry, RoutingModelSection,
+    RuntimeChromeBudgetSection, RuntimeMemoryCapSection, StaticBudgetReportBody,
+    StaticPlacementModel, runtime_chrome_budget_hash, static_fit_interpretation_for_fits,
+};
 use gbf_report::{ReportEnvelope, ReportOutcome, canonicalize, round_trip_self_hash};
 use sha2::{Digest, Sha256};
 
@@ -38,6 +48,8 @@ const ARTIFACT_SUCCESS: &str = "artifact_validation.golden.json";
 const ARTIFACT_FAILURE: &str = "artifact_validation.failure.golden.json";
 const POLICY_SUCCESS: &str = "policy_resolution.golden.json";
 const POLICY_FAILURE: &str = "policy_resolution.failure.golden.json";
+const STATIC_BUDGET_SUCCESS: &str = "static_budget.golden.json";
+const STATIC_BUDGET_FAILURE: &str = "static_budget.failure.golden.json";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -61,11 +73,24 @@ fn default_artifact_dir() -> PathBuf {
 }
 
 fn regen(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if out_dir.exists() {
+        fs::remove_dir_all(out_dir)?;
+    }
     fs::create_dir_all(out_dir)?;
     write_report(out_dir, ARTIFACT_SUCCESS, &artifact_success_report()?)?;
     write_report(out_dir, ARTIFACT_FAILURE, &artifact_failure_report()?)?;
     write_report(out_dir, POLICY_SUCCESS, &policy_success_report()?)?;
     write_report(out_dir, POLICY_FAILURE, &policy_failure_report()?)?;
+    write_report(
+        out_dir,
+        STATIC_BUDGET_SUCCESS,
+        &static_budget_success_report()?,
+    )?;
+    write_report(
+        out_dir,
+        STATIC_BUDGET_FAILURE,
+        &static_budget_failure_report()?,
+    )?;
     write_fixture_tomls(out_dir)?;
     verify(out_dir)
 }
@@ -89,6 +114,39 @@ fn verify(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     if policy_failure.body.result.is_some() {
         return Err("policy_resolution failure golden must carry result = null".into());
+    }
+    verify_report::<StaticBudgetReportBody>(out_dir, STATIC_BUDGET_SUCCESS, ReportOutcome::Passed)?;
+    let static_budget_failure = verify_report::<StaticBudgetReportBody>(
+        out_dir,
+        STATIC_BUDGET_FAILURE,
+        ReportOutcome::Failed,
+    )?;
+    if !static_budget_failure
+        .body
+        .diagnostics
+        .iter()
+        .any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                ValidationCode::BudgetMissingRuntimeChromeBudget
+            )
+        })
+    {
+        return Err(
+            "static_budget failure golden must carry BudgetMissingRuntimeChromeBudget diagnostic"
+                .into(),
+        );
+    }
+    if !static_budget_failure
+        .body
+        .decision
+        .failures
+        .contains(&BudgetFailure::MissingRuntimeChromeBudget)
+    {
+        return Err(
+            "static_budget failure golden must carry BudgetFailure::MissingRuntimeChromeBudget"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -228,7 +286,7 @@ fn policy_success_report()
                 artifact_manifest_hash: hash(0x03),
                 semantic_lineage: LineageId(hash(0x0c)),
                 lowering_manifest_hash: hash(0x06),
-                hint_bundle_hash: hash(0x07),
+                hint_bundle_hash: empty_hint_bundle_hash(),
                 workload_refs: vec![WorkloadId::from("workload.f-b2.review")],
                 golden_vector_refs: vec![GoldenVectorId("golden.f-b2.review".to_owned())],
             },
@@ -238,7 +296,7 @@ fn policy_success_report()
                 compile_knobs: CompileKnobsSection::from(&policy.knobs),
                 provenance: PolicyProvenanceSection::from_policy(
                     &policy.provenance,
-                    hash(0x07),
+                    empty_hint_bundle_hash(),
                     hash(0x0b),
                 ),
             }),
@@ -257,6 +315,175 @@ fn policy_failure_report()
     report.body.result = None;
     report.body.diagnostics = vec![policy_hard_diagnostic()];
     Ok(report.with_computed_self_hash()?)
+}
+
+fn static_budget_success_report()
+-> Result<ReportEnvelope<StaticBudgetReportBody>, Box<dyn std::error::Error>> {
+    let budget = static_runtime_budget_section();
+    let budget_hash = runtime_chrome_budget_hash(&budget)?;
+    Ok(ReportEnvelope::new(
+        ReportOutcome::Passed,
+        StaticBudgetReportBody {
+            identity: static_budget_identity(Some(budget_hash)),
+            policy: static_budget_policy_section(),
+            runtime_chrome_budget: Some(budget),
+            projections: static_budget_projection_section(),
+            decision: static_budget_decision(true, Vec::new()),
+            diagnostics: Vec::new(),
+        },
+    )?
+    .with_computed_self_hash()?)
+}
+
+fn static_budget_failure_report()
+-> Result<ReportEnvelope<StaticBudgetReportBody>, Box<dyn std::error::Error>> {
+    let failure = BudgetFailure::MissingRuntimeChromeBudget;
+    Ok(ReportEnvelope::new(
+        ReportOutcome::Failed,
+        StaticBudgetReportBody {
+            identity: static_budget_identity(None),
+            policy: static_budget_policy_section(),
+            runtime_chrome_budget: None,
+            projections: BudgetProjectionSection::default(),
+            decision: static_budget_decision(false, vec![failure.clone()]),
+            diagnostics: vec![budget_failure_diagnostic(&failure)],
+        },
+    )?
+    .with_computed_self_hash()?)
+}
+
+fn static_budget_identity(runtime_chrome_budget_hash: Option<Hash256>) -> BudgetIdentitySection {
+    BudgetIdentitySection {
+        artifact_core_hash: hash(0x02),
+        quant_graph_hash: hash(0x23),
+        policy_resolution_self_hash: policy_success_report()
+            .expect("policy report builds")
+            .report_self_hash,
+        runtime_chrome_budget_hash,
+        target_profile_hash: hash(0x09),
+    }
+}
+
+fn static_budget_policy_section() -> BudgetPolicySection {
+    BudgetPolicySection {
+        placement_profile: PlacementProfile::Budgeted,
+        objective_hash: hash(0x24),
+    }
+}
+
+fn static_runtime_budget_section() -> RuntimeChromeBudgetSection {
+    RuntimeChromeBudgetSection {
+        target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
+        profile: CompileProfileId::from("Bringup"),
+        runtime_nucleus_hash: hash(0x40),
+        rom_slots: vec![
+            RomBudgetSlotEntry {
+                id: BudgetSlotId::new(1),
+                class: BudgetSlotClass::ExpertBank,
+                usable_bytes: 1024,
+                reserved_slack: 128,
+                placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+            },
+            RomBudgetSlotEntry {
+                id: BudgetSlotId::new(2),
+                class: BudgetSlotClass::CommonBank,
+                usable_bytes: 2048,
+                reserved_slack: 0,
+                placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+            },
+        ],
+        memory_caps: RuntimeMemoryCapSection {
+            wram_usable_bytes: 8192,
+            sram_usable_bytes: 32768,
+            hram_usable_bytes: 127,
+            source_target_profile_hash: hash(0x09),
+        },
+        wram_reserved: 0,
+        sram_reserved: 0,
+    }
+}
+
+fn static_budget_projection_section() -> BudgetProjectionSection {
+    BudgetProjectionSection {
+        per_expert_payload: vec![PerExpertEntry {
+            layer: LayerId::new(0),
+            expert: ExpertId::new(0),
+            payload_bytes: 64,
+            assigned_slot: Some(BudgetSlotId::new(1)),
+            unassigned_because: None,
+            placement_status: ExpertPlacementStatus::Assigned,
+        }],
+        per_bank_occupancy: vec![
+            PerBankEntry {
+                slot: BudgetSlotId::new(1),
+                class: BudgetSlotClass::ExpertBank,
+                usable_bytes: 1024,
+                reserved_slack: 128,
+                effective_cap_bytes: 896,
+                assigned_bytes: 64,
+                residual_bytes: 832,
+                assigned_components: vec![BudgetComponentRef::Expert {
+                    layer: LayerId::new(0),
+                    expert: ExpertId::new(0),
+                }],
+                placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+            },
+            PerBankEntry {
+                slot: BudgetSlotId::new(2),
+                class: BudgetSlotClass::CommonBank,
+                usable_bytes: 2048,
+                reserved_slack: 0,
+                effective_cap_bytes: 2048,
+                assigned_bytes: 0,
+                residual_bytes: 2048,
+                assigned_components: Vec::new(),
+                placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+            },
+        ],
+        common_bank_footprint: CommonBankFootprintSection {
+            kernel_bytes: 0,
+            lut_bytes: 0,
+            shared_dense_ffn_bytes: None,
+            aggregate_bytes: 0,
+        },
+        accumulator_maxima: vec![AccumulatorBound {
+            site: ReductionSiteId("review.accumulator.0".to_owned()),
+            projected_max_abs: 127,
+            i16_safe: true,
+            i32_safe: true,
+        }],
+        projected_wram: ProjectedSizeSection {
+            peak_bytes: 256,
+            source: ProjectedSizeSource::StaticGraphProjection,
+        },
+        projected_sram: ProjectedSizeSection {
+            peak_bytes: 0,
+            source: ProjectedSizeSource::StaticGraphProjection,
+        },
+        projected_hram: ProjectedSizeSection {
+            peak_bytes: 8,
+            source: ProjectedSizeSource::StaticGraphProjection,
+        },
+        projected_bank_switches_per_token: ProjectedSwitchCountSection {
+            upper_bound: 1,
+            expected_q16_16: None,
+            decision_value: 1,
+            source: SwitchProjectionSource::ConservativeStaticUpperBound,
+        },
+        projected_sram_page_switches_per_token: ProjectedSwitchCountSection::default(),
+        routing_model: RoutingModelSection {
+            kind: "Top1DeterministicReviewFixture".to_owned(),
+        },
+    }
+}
+
+fn static_budget_decision(fits: bool, failures: Vec<BudgetFailure>) -> BudgetDecisionSection {
+    BudgetDecisionSection {
+        fits,
+        interpretation: static_fit_interpretation_for_fits(fits),
+        placement_model: StaticPlacementModel::BudgetedFirstFit,
+        failures,
+    }
 }
 
 fn compile_request_section() -> CompileRequestSection {
@@ -344,7 +571,7 @@ fn policy_fixture() -> gbf_policy::ResolvedCompilePolicy {
         provenance: gbf_policy::PolicyProvenance {
             target_defaults: hash(0x09),
             profile_defaults: hash(0x0a),
-            hint_bundle_hash: Some(hash(0x07)),
+            hint_bundle_hash: Some(empty_hint_bundle_hash()),
             compile_request_hash: hash(0x08),
             calibration_hash: Some(hash(0x0b)),
         },
@@ -512,7 +739,7 @@ fn knob_entry(
                     PolicySource::TargetDefault => hash(0x09),
                     PolicySource::ProfileDefault => hash(0x0a),
                     PolicySource::CompileRequestOverride => hash(0x08),
-                    PolicySource::HintBundle => hash(0x07),
+                    PolicySource::HintBundle => empty_hint_bundle_hash(),
                     PolicySource::Calibration => hash(0x0b),
                     PolicySource::RepairProposal { .. } => {
                         unreachable!("F-B2 forbids RepairProposal")
@@ -585,9 +812,8 @@ fn write_fixture_tomls(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>>
         r#"# F-B2 Stage 0 review fixture.
 #
 # This tiny fixture describes the generated success and failure reports in this
-# directory. T-B4.13 extends the shared regen script to run the full chunk
-# pipeline, but these fields intentionally mirror the F-B2 Stage 0 report
-# identity sections so reviewers can read the whole fixture in one screen.
+# directory. These fields intentionally mirror the F-B2 Stage 0 report identity
+# sections so reviewers can read the whole fixture in one screen.
 
 [success]
 profile = "Bringup"
@@ -632,11 +858,42 @@ expected_result = "null"
 expected_hard_diagnostic = "PolicyKnobLockedAndOverridden"
 "#,
     )?;
+    fs::write(
+        out_dir.join("static_budget.fixture.toml"),
+        r#"# F-B4 Stage 2 review fixture.
+#
+# The success case is a tiny synthetic QuantGraph-budget projection that fits
+# a runtime chrome budget. The failure case models the RFC §7.7 missing-budget
+# short circuit: Stage 2 records no view-derived payload and emits both the
+# Hard diagnostic and BudgetFailure marker.
+
+[success]
+profile = "Bringup"
+target = "dmg-mbc5-8mib-128kib"
+placement_profile = "Budgeted"
+quant_graph_hash = "2323232323232323232323232323232323232323232323232323232323232323"
+runtime_chrome_budget = "present"
+expert_payload_bytes = 64
+assigned_slot = 1
+diagnostics = []
+
+[failure]
+case = "missing_runtime_chrome_budget"
+expected_outcome = "Failed"
+expected_hard_diagnostic = "BudgetMissingRuntimeChromeBudget"
+expected_budget_failure = "BudgetFailure::MissingRuntimeChromeBudget"
+runtime_chrome_budget = "null"
+"#,
+    )?;
     Ok(())
 }
 
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
+}
+
+fn empty_hint_bundle_hash() -> Hash256 {
+    HintBundle::empty().compute_canonical_hash()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

@@ -32,4 +32,7 @@
 | T-B2.18 | `bd-19by` | BootstrapCalibrationBundle + chrome-budget fixtures | Implemented before this packet |
 | T-B2.19 | `bd-2aua` | policy_resolution.v1 schema + validator | Implemented before this packet |
 | T-B2.20 | `bd-30ul` | StageCache success + failure memo keys | Implemented before this packet |
-| T-B2.21 | `bd-2uvs` | F-B2 review-packet sub-bundle | This bead; do not close from this subagent turn |
+| T-B2.21 | `bd-2uvs` | F-B2 review-packet sub-bundle | Implemented before this packet |
+| T-B4.11 | `bd-3euv` | static_budget.v1 schema + semantic validator + tests | Implemented before this packet |
+| T-B4.12 | `bd-jmns` | StageCache key for Stage 2 | Implemented before this packet |
+| T-B4.13 | `bd-3fug` | F-B4 review-packet sub-bundle + chunk regen/verify scripts | This bead; keep in progress |

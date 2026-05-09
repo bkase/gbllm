@@ -20,4 +20,4 @@ Regeneration path for this bead:
 git diff -- docs/review/f-b2-f-b4 scripts/review/f-b2-f-b4
 ```
 
-`verify-packet.sh` validates sidecars, canonical bytes, semantic validators, `report_self_hash` round trips, and byte-identical regeneration for the F-B2 artifact/policy goldens. T-B4.13 extends the same path with `static_budget.v1`.
+`verify-packet.sh` validates sidecars, canonical bytes, semantic validators, `report_self_hash` round trips, byte-identical regeneration for the Stage 0/0.5/2 goldens, and the exposed Soft-diagnostic/nullability allow-list gates.

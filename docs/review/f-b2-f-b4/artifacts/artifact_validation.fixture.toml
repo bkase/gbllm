@@ -1,9 +1,8 @@
 # F-B2 Stage 0 review fixture.
 #
 # This tiny fixture describes the generated success and failure reports in this
-# directory. T-B4.13 extends the shared regen script to run the full chunk
-# pipeline, but these fields intentionally mirror the F-B2 Stage 0 report
-# identity sections so reviewers can read the whole fixture in one screen.
+# directory. These fields intentionally mirror the F-B2 Stage 0 report identity
+# sections so reviewers can read the whole fixture in one screen.
 
 [success]
 profile = "Bringup"

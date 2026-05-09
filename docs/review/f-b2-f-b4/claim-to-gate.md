@@ -27,7 +27,8 @@ F-B2 rows copied from RFC §11:
 | `policy_resolution.v1` rejects RepairProposal provenance | `gbf-report::f_b2_policy_resolution_v1_rejects_repair_proposal_provenance` | Public schema enforces the F-B2 source allowlist. |
 | StageCache keys are deterministic | `gbf-codegen::stage_cache_key_*_is_deterministic` | Stage 0/0.5 success and failure memo keys are content-addressed. |
 | Failed passes do not enter cache | `gbf-codegen::stage_cache_failed_pass_does_not_enter_success_cache` | Failure memoization cannot masquerade as success. |
-| Review packet regenerates cleanly | `./scripts/review/f-b2-f-b4/regen.sh` then clean diff | This bead verifies the F-B2 subset; T-B4.13 extends the same script for static budget. |
-| Review packet verifier rejects staleness | `./scripts/review/f-b2-f-b4/verify-packet.sh` | Compares regenerated F-B2 goldens/fixtures byte-for-byte. |
+| Review packet regenerates cleanly | `./scripts/review/f-b2-f-b4/regen.sh` then clean diff | Regenerates Stage 0, Stage 0.5, and Stage 2 success/failure goldens plus sidecars. |
+| Review packet verifier rejects staleness | `./scripts/review/f-b2-f-b4/verify-packet.sh` | Compares regenerated Stage 0/0.5/2 goldens/fixtures byte-for-byte and runs exposed report invariant gates. |
+| Static-budget missing-runtime-budget failure is reviewable | `artifacts/static_budget.failure.golden.json` and `gbf-report::f_b2_f_b4_reports_reject_unlisted_null_fields` | The failure golden carries both the expected Hard diagnostic and `BudgetFailure::MissingRuntimeChromeBudget`. |
 
 F-B4 rows from RFC §11 are out of scope for `bd-2uvs` and remain with `bd-3fug`.
