@@ -1427,16 +1427,15 @@ fn validate_target_data_lowering(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     let target = inputs.target_profile.id();
-    let Some(lowering) = inputs
-        .lowerings
-        .iter()
-        .find(|lowering| lowering.target.as_str() == target.as_str())
-    else {
+    let expected_profile = expected_lowering_profile(inputs);
+    let Some(lowering) = inputs.lowerings.iter().find(|lowering| {
+        lowering.target.as_str() == target.as_str() && lowering.profile == expected_profile
+    }) else {
         diagnostics.push(ValidationDiagnostic::hard(
             ValidationOrigin::Lowering,
             ValidationCode::LoweringMissingForTarget {
                 target: target.clone(),
-                lowering_profile: expected_lowering_profile(inputs),
+                lowering_profile: expected_profile,
             },
             ValidationDetail::Field {
                 field: FieldPath::from("lowerings"),
@@ -1634,14 +1633,10 @@ fn lowering_shard_ref(shard: &LoweringShard) -> LoweringShardRef {
 }
 
 fn lowering_manifest_diagnostic_ref(lowering: &TargetDataLoweringArtifact) -> LoweringShardRef {
-    lowering
-        .shards
-        .first()
-        .map(lowering_shard_ref)
-        .unwrap_or_else(|| LoweringShardRef {
-            id: LoweringShardId("lowering_manifest".to_owned()),
-            manifest_hash: lowering.manifest_hash,
-        })
+    LoweringShardRef {
+        id: LoweringShardId("lowering_manifest".to_owned()),
+        manifest_hash: lowering.manifest_hash,
+    }
 }
 
 fn lowering_round_trip_failed_diagnostic(
@@ -3082,6 +3077,26 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_rejects_lowering_wrong_profile_for_target() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.lowerings[0].profile = DataLoweringProfileId("wrong-profile".to_owned());
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::LoweringMissingForTarget {
+                    target,
+                    lowering_profile,
+                } if target == fixture.target_profile.id()
+                    && lowering_profile == &DataLoweringProfileId("dmg-default".to_owned())
+            )
+        });
+    }
+
+    #[test]
     fn f_b2_validate_rejects_lowering_packer_version_mismatch() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture.lowerings[0].packer_version = PackerVersion::new(2, 0, 0);
@@ -3113,7 +3128,12 @@ mod tests {
             validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
 
         assert_failure_code(&failure, |code| {
-            matches!(code, ValidationCode::LoweringRoundTripFailed { .. })
+            matches!(
+                code,
+                ValidationCode::LoweringRoundTripFailed { shard }
+                    if shard.id == LoweringShardId("lowering_manifest".to_owned())
+                        && shard.manifest_hash == hash(0xfb)
+            )
         });
     }
 
@@ -3368,7 +3388,7 @@ mod tests {
             hash(0x04),
         )];
         TargetDataLoweringArtifact {
-            profile: DataLoweringProfileId("fixture.dmg".to_owned()),
+            profile: DataLoweringProfileId("dmg-default".to_owned()),
             target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
             packer_version: PackerVersion::new(1, 0, 0),
             manifest_hash: lowering_manifest_hash(&shards),
