@@ -1,0 +1,11 @@
+{
+  "schema": "s1_oracle.v1",
+  "o_metric_0": true,
+  "o_metric_1": true,
+  "o_metric_2": true,
+  "o_metric_3": true,
+  "o_metric_4": true,
+  "metric_oracle_passed": true,
+  "failed_oracle_ids": [],
+  "oracle_self_hash": "sha256:7db7bfda8d539b2f644e109efc6f312e7bc9f181aba9dba0ef53678fb6949bb2"
+}
