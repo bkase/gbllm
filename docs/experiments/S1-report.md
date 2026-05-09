@@ -1,73 +1,5 @@
 ---
-{
-  "schema": "s1_report.v1",
-  "s1_outcome": null,
-  "decision": "NotYetRun",
-  "baseline_self_hash": null,
-  "per_seed_artifacts": [
-    {
-      "seed": 0,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 1,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 2,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 3,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 4,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    }
-  ],
-  "generated_at": "2026-05-09T18:15:00Z",
-  "rfc_revision": "7852fd17328e0631123df016baa88a4c0e48b601",
-  "predictions_section_hash": "sha256:a05b43620bd26cb2cb79b37c041bd7cbed57508321f9bd81b775940c33370b3f",
-  "predictions_commit": null,
-  "first_result_commit": null,
-  "report_self_hash": "sha256:b7244d90d7bb10b34d633a3ddc27e4126950c4e5ac0ff3ec1c9d5147599112bd"
-}
+{"baseline_self_hash":"sha256:ab10244caffbdedf7727b08a17edc970f392f258a05c8b2de486b1a20d8e731c","decision":{"kind":"Investigate","reason":"propose-Toy1"},"first_result_commit":"f6752976c8e6be9df364ce613a8d261a1548587c","generated_at":"2026-05-09T23:10:50Z","per_seed_artifacts":[{"ablation_self_hash":"sha256:57229bbaeae60c19057c00eacaf1f2079c200be14f1c17c77eaaa57139733898","checkpoint_self_hash":"sha256:468b78bd28070e9fdc3ab4382a3c8a91d773c8ae2b5667a32367295bed2c2b8c","completion":{"kind":"completed"},"negative_self_hash":"sha256:f33ca53e3f4e387b0b5c802b12a98555f56b2521cb742fa2268e21fe6b1fdc9a","run_log_self_hash":"sha256:b709918eddbd41b54e9074b039a932d8be552d1131be009336db99a485b07c68","score_self_hash":"sha256:dbf543b2aa237c12d8936ef4b7b62f7ad5d433a8bf5098b8faaa9350b364ec03","seed":0},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:152ccc04946cd5562b1ac8f3dd614240b6afa2930e79a42e0902014493a1ded3","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:38083ec648d08aedf57df299d137e603e2deed5f5f338e1d1ccf671c3150edc3","score_self_hash":"sha256:77b2f1df965cbb87be2b6e5fe6e361fbbc5e041dbb33d99d5da455f163c2447b","seed":1},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:26d82622d15ae35d1edd1233cf1f2a574ca355aa243d497f09989ee87fa1b5e8","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:8aa1e41223aab730337e17debd2700d11170b970bc6d5c52573bc7b1bf92820f","score_self_hash":"sha256:4efb4c7ae1759fe516ce04f1e2841a0504e7b0f4b69232fe0062de13cf2d5220","seed":2},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:7e42b52f28e3416c172bd11620eae469f3bb07dc618f97ee341d84e2b556c97d","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:e36d30dea8c4896412fd986c5bf6e6de3377847750da46bfe5fc7d051616364b","score_self_hash":"sha256:c8729444352d3e6a1f29576f83de9a580a79dcba663bc41a78fed07232ed24ea","seed":3},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:c2e7b137e80a8dce0ef00c72458958a5b55049bbf76f2461c69baf734c0536f6","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:62ad2e23ca53be23dc3db4c9805f73df67d1053d022f7d1cada08e30d3f4ed0f","score_self_hash":"sha256:b6973c1bcc8c135d579a4fe9528039e47168cf508826de793b23374e2d1628d9","seed":4}],"predictions_commit":"b35897756ceeea29be2ef969f8b22176770abe5a","predictions_section_hash":"sha256:a05b43620bd26cb2cb79b37c041bd7cbed57508321f9bd81b775940c33370b3f","report_self_hash":"sha256:1d458a7207a66b547e2617aeb15967d91ea6abb63473037820f1c21c19d8ef58","rfc_revision":"7852fd17328e0631123df016baa88a4c0e48b601","s1_outcome":"Fail-capacity","schema":"s1_report.v1"}
 ---
 # S1 Report
 
@@ -221,24 +153,38 @@ Prediction-status rule:
 
 ## Observed
 
-Populated by F-S1.29 after the run completes.
+| seed | completion | val_bpc | neg_test_delta | ablation_eq |
+| --- | --- | --- | --- | --- |
+| 0 | Completed | 3.111780 | 7.428885 | true |
+| 1 | Completed | 3.148044 | NA | NA |
+| 2 | Completed | 3.081588 | NA | NA |
+| 3 | Completed | 3.137616 | NA | NA |
+| 4 | Completed | 3.115104 | NA | NA |
 
 ## Hypothesis verdicts
 
-Populated by F-S1.29 after the run completes.
+| hypothesis | status | observation |
+| --- | --- | --- |
+| H1 | Confirmed | Production seeds 0..4 completed; minimum H1 loss-window drop was 2.332301 and final grad norms were finite, nonnegative, and nonzero |
+| H2 | Refuted | Production seed 0 val_bpc 3.111780 failed H2 threshold 2.570544; best=3.081588 median=3.115104 worst=3.148044 |
+| H3 | Confirmed | Production all-seed val_bpc beat H3 unigram threshold 3.950948; best=3.081588 median=3.115104 worst=3.148044; negative delta 7.428885 sensitive=true |
+| H4 | Confirmed | Production ablation phase_a_eq_ablation=true |
+| H5 | Confirmed | Production oracle metric_oracle_passed=true failed_ids=[] |
 
 ## Falsification analysis
 
-Populated by F-S1.29 after the run completes.
+Production S1 CLI report collected canonical TinyStories artifacts from disk.
 
 ## Surprises
 
-Populated by F-S1.29 after the run completes.
+None.
 
 ## Decision
 
-Populated by F-S1.29 after the run completes.
+`Investigate(propose-Toy1)`. Decision follows RFC section 8 dispatch.
 
 ## Reproducibility statement
 
-Populated by F-S1.29 after the run completes.
+- command: `gbf s1 replay --manifest fixtures/corpora/tinystories.toml --seed-list 0,1,2,3,4`
+- pass_version: `0.1.0`
+- manifests: train_sha=sha256:6418d412de72888f52b5142c761ac21a582f7d1166f0bfbdb5f03ccfdec90443 val_sha=sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d

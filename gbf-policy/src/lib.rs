@@ -6,6 +6,7 @@ pub mod capabilities;
 pub mod compile;
 pub mod diagnostics;
 pub mod envelope;
+pub mod model_profile;
 pub mod objective;
 pub mod repair;
 pub mod risk;

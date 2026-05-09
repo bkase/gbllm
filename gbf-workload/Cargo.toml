@@ -7,5 +7,7 @@ publish = false
 
 [dependencies]
 gbf-foundation = { path = "../gbf-foundation" }
+gbf-policy = { path = "../gbf-policy" }
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true

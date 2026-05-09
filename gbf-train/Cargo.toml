@@ -8,6 +8,8 @@ publish = false
 [features]
 default = []
 burn-adapter = ["dep:burn", "burn/autodiff", "burn/ndarray"]
+qat = []
+qat-ablation = []
 
 [dependencies]
 burn = { workspace = true, optional = true }

@@ -1,0 +1,116 @@
+name: S1 PR Gates
+
+on:
+  pull_request:
+    paths:
+      - "gbf-experiments/**"
+      - "gbf-train/**"
+      - "gbf-policy/**"
+      - "gbf-data/**"
+      - "gbf-artifact/**"
+      - "gbf-foundation/**"
+      - "gbf-model/**"
+      - "gbf-workload/**"
+      - "gbf-test/**"
+      - "gbf-cli/**"
+      - "scripts/s1_*.sh"
+      - "scripts/download_tinystories.py"
+      - "fixtures/corpora/tinystories.toml"
+      - "docs/experiments/S1-report.md"
+      - ".github/workflows/s1-*.yml"
+
+concurrency:
+  group: s1-pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  s1-pr:
+    name: S1 PR gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: s1-pr-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            s1-pr-cargo-${{ runner.os }}-
+
+      - name: Format S1 workspace
+        run: cargo fmt --check --all
+
+      - name: Lint S1 default build
+        run: cargo clippy -p gbf-experiments --all-targets -- -D warnings
+
+      - name: Build S1 default build
+        run: cargo build -p gbf-experiments
+
+      - name: Build S1 ablation build
+        run: cargo build -p gbf-experiments --no-default-features --features ablation
+
+      - name: QAT feature mutex must reject mixed build
+        shell: bash
+        run: |
+          set +e
+          output="$(cargo build -p gbf-train --features qat,qat-ablation 2>&1)"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "expected qat+qat-ablation build to fail, but it succeeded"
+            exit 1
+          fi
+          if ! grep -q "qat and qat-ablation are mutually exclusive" <<<"$output"; then
+            echo "qat+qat-ablation build failed without the expected diagnostic"
+            echo "$output"
+            exit 1
+          fi
+
+      - name: S1 unit and integration tests
+        run: cargo test -p gbf-experiments
+
+      - name: S1 falsification tests
+        run: cargo test -p gbf-experiments --features falsify --test falsification
+
+      - name: S1 oracle tests
+        run: cargo test -p gbf-experiments --test oracle
+
+      - name: S1 canonical JSON tests
+        run: cargo test -p gbf-experiments --test canonical_json
+
+      - name: S1 integration tests
+        run: cargo test -p gbf-experiments --test integration
+
+      - name: S1 E2E tests
+        run: cargo test -p gbf-experiments --test e2e
+
+      - name: S1 pre-registration check
+        run: scripts/s1_preregistration_check.sh --report docs/experiments/S1-report.md
+
+      - name: S1 determinism fast gate
+        run: scripts/s1_determinism_check.sh --fast
+
+      - name: S1 isolation fast gate
+        run: scripts/s1_isolation_check.sh --fast
+
+      - name: S1 CLI tiny fixture producer smoke
+        run: scripts/s1_e2e_cli.sh --fixture tiny --out-dir artifacts/s1-pr-e2e
+
+      - name: Upload S1 PR artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s1-pr-artifacts
+          path: artifacts/s1-pr-e2e
+          if-no-files-found: warn
+          retention-days: 7

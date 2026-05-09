@@ -1,0 +1,148 @@
+name: S1 Nightly Full Protocol
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed_list:
+        description: "Comma-separated seed list for the Phase A replay step"
+        required: false
+        default: "0,1,2,3,4"
+      pass_version:
+        description: "S1 pass version"
+        required: false
+        default: "0.1.0"
+
+concurrency:
+  group: s1-full-protocol
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  s1-nightly:
+    name: S1 nightly full protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    env:
+      S1_SEED_LIST: ${{ github.event.inputs.seed_list || '0,1,2,3,4' }}
+      S1_PASS_VERSION: ${{ github.event.inputs.pass_version || '0.1.0' }}
+      S1_ARTIFACT_DIR: experiments/S1
+      GBF_BIN: target/release/gbf-cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: s1-nightly-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            s1-nightly-cargo-${{ runner.os }}-
+
+      - name: Cache TinyStories validation split
+        uses: actions/cache@v4
+        with:
+          path: corpus/tinystories/raw/TinyStoriesV2-GPT4-valid.txt
+          key: s1-tinystories-valid-${{ runner.os }}-${{ hashFiles('fixtures/corpora/tinystories.toml') }}
+
+      - name: Verify pre-registration before result production
+        run: scripts/s1_preregistration_check.sh --report docs/experiments/S1-report.md
+
+      - name: Download and verify canonical TinyStories bytes
+        run: python3 scripts/download_tinystories.py --split all
+
+      - name: Build production CLI
+        run: cargo build --release -p gbf-cli
+
+      - name: S1 doctor preflight
+        shell: bash
+        run: |
+          env -i \
+            BURN_NDARRAY_NUM_THREADS=1 \
+            BURN_DETERMINISTIC=1 \
+            OMP_NUM_THREADS=1 \
+            RAYON_NUM_THREADS=1 \
+            "$GBF_BIN" s1 doctor \
+              --manifest fixtures/corpora/tinystories.toml \
+              --out-dir "$S1_ARTIFACT_DIR" \
+              --json
+
+      - name: Canonical TinyStories O-metric-4 pin check
+        run: scripts/s1_canonical_o_metric_4_check.sh
+
+      - name: Emit canonical S1 oracle artifact
+        shell: bash
+        run: |
+          mkdir -p "$S1_ARTIFACT_DIR/oracle"
+          env -i \
+            BURN_NDARRAY_NUM_THREADS=1 \
+            BURN_DETERMINISTIC=1 \
+            OMP_NUM_THREADS=1 \
+            RAYON_NUM_THREADS=1 \
+            "$GBF_BIN" s1 oracle \
+              --manifest fixtures/corpora/tinystories.toml \
+              --seed 0 > "$S1_ARTIFACT_DIR/oracle/s1_oracle.v1.json"
+
+      - name: Full protocol preflight and current implementation boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$S1_ARTIFACT_DIR/baseline" "$S1_ARTIFACT_DIR/checkpoints" "$S1_ARTIFACT_DIR/runs"
+
+          env -i \
+            BURN_NDARRAY_NUM_THREADS=1 \
+            BURN_DETERMINISTIC=1 \
+            OMP_NUM_THREADS=1 \
+            RAYON_NUM_THREADS=1 \
+            "$GBF_BIN" s1 fit-baseline \
+              --manifest fixtures/corpora/tinystories.toml \
+              --seed 0 > "$S1_ARTIFACT_DIR/baseline/s1_baseline.v1.json"
+
+          env -i \
+            BURN_NDARRAY_NUM_THREADS=1 \
+            BURN_DETERMINISTIC=1 \
+            OMP_NUM_THREADS=1 \
+            RAYON_NUM_THREADS=1 \
+            "$GBF_BIN" s1 replay \
+              --manifest fixtures/corpora/tinystories.toml \
+              --pass-version "$S1_PASS_VERSION" \
+              --seed-list "$S1_SEED_LIST" \
+              --device-profile S1CpuDeterministic \
+              --out-dir "$S1_ARTIFACT_DIR" > "$S1_ARTIFACT_DIR/replay_summary.json"
+
+          cat >&2 <<'BOUNDARY'
+          bd-ah6o installed the scheduled full-protocol workflow shell.
+          The current implementation still has full-run blockers owned outside this workflow:
+          - bd-1ehz owns the actual 5-seed TinyStories + ablation seed-0 execution and result acceptance.
+          - bd-1261 owns final S1-report.md assembly, Decision binding, and closure-allowed evidence.
+          - production score, negative-test, ablation checkpoint loading, and report artifacts must be available before this job can turn green.
+          This job fails here intentionally rather than claiming fixture artifacts as full S1 closure artifacts.
+          BOUNDARY
+          exit 1
+
+      - name: Full TinyStories determinism gate
+        if: success()
+        run: scripts/s1_determinism_check.sh
+
+      - name: Full TinyStories isolation gate
+        if: success()
+        run: scripts/s1_isolation_check.sh
+
+      - name: Upload S1 nightly artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s1-nightly-artifacts
+          path: |
+            experiments/S1
+            corpus/tinystories/raw/TinyStoriesV2-GPT4-valid.txt
+          if-no-files-found: warn
+          retention-days: 90

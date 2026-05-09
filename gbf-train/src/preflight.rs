@@ -8,6 +8,7 @@ use gbf_foundation::ByteCost;
 use gbf_model::budget::{
     ExpertBudgetError, ExpertSlotFit, StaticBudgetReport, compute_expert_bytes_checked,
 };
+use gbf_policy::model_profile::ModelSizeProfile;
 
 use crate::logging::{ExpertSlotPreflightEvent, LoggingEventError, TrainingLogEmitter};
 
@@ -17,6 +18,100 @@ pub fn compute_preflight_expert_bytes(
     d_ff: u32,
 ) -> Result<ByteCost, ExpertBudgetError> {
     compute_expert_bytes_checked(plan, d_model, d_ff)
+}
+
+/// Narrow training-side view of the runtime chrome budget.
+///
+/// The source-of-truth `RuntimeChromeBudget` type is not yet present in this
+/// workspace. This object models only the boundary this preflight owns: the
+/// usable byte capacity of every `ExpertBank` slot emitted by a future runtime
+/// budget artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpertBankBudgetSurface {
+    expert_bank_usable_bytes: Vec<ByteCost>,
+}
+
+impl ExpertBankBudgetSurface {
+    pub fn new(expert_bank_usable_bytes: Vec<ByteCost>) -> Result<Self, ProfilePreflightError> {
+        if expert_bank_usable_bytes.is_empty() {
+            return Err(ProfilePreflightError::MissingExpertBanks);
+        }
+        if expert_bank_usable_bytes.contains(&ByteCost::ZERO) {
+            return Err(ProfilePreflightError::EmptyExpertBank);
+        }
+
+        Ok(Self {
+            expert_bank_usable_bytes,
+        })
+    }
+
+    #[must_use]
+    pub fn expert_bank_usable_bytes(&self) -> &[ByteCost] {
+        &self.expert_bank_usable_bytes
+    }
+
+    #[must_use]
+    pub fn smallest_expert_bank_usable_bytes(&self) -> ByteCost {
+        *self
+            .expert_bank_usable_bytes
+            .iter()
+            .min()
+            .expect("constructor requires at least one ExpertBank")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileExpertBankPreflightReport {
+    profile: ModelSizeProfile,
+    expert_bytes: ByteCost,
+    smallest_expert_bank_usable_bytes: ByteCost,
+    slack_bytes: ByteCost,
+}
+
+impl ProfileExpertBankPreflightReport {
+    #[must_use]
+    pub const fn profile(self) -> ModelSizeProfile {
+        self.profile
+    }
+
+    #[must_use]
+    pub const fn expert_bytes(self) -> ByteCost {
+        self.expert_bytes
+    }
+
+    #[must_use]
+    pub const fn smallest_expert_bank_usable_bytes(self) -> ByteCost {
+        self.smallest_expert_bank_usable_bytes
+    }
+
+    #[must_use]
+    pub const fn slack_bytes(self) -> ByteCost {
+        self.slack_bytes
+    }
+}
+
+pub fn preflight_profile_expert_bank_budget(
+    budget: &ExpertBankBudgetSurface,
+    profile: ModelSizeProfile,
+) -> Result<ProfileExpertBankPreflightReport, ProfilePreflightError> {
+    let expert_bytes = profile.expert_byte_cost();
+    let smallest_expert_bank_usable_bytes = budget.smallest_expert_bank_usable_bytes();
+
+    let Some(slack_bytes) = smallest_expert_bank_usable_bytes.checked_sub(expert_bytes) else {
+        return Err(ProfilePreflightError::ExpertExceedsSmallestBank {
+            profile,
+            expert_bytes,
+            smallest_expert_bank_usable_bytes,
+            over_by: expert_bytes - smallest_expert_bank_usable_bytes,
+        });
+    };
+
+    Ok(ProfileExpertBankPreflightReport {
+        profile,
+        expert_bytes,
+        smallest_expert_bank_usable_bytes,
+        slack_bytes,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +256,43 @@ impl From<LoggingEventError> for PreflightLoggingError {
         Self::Logging(error)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProfilePreflightError {
+    MissingExpertBanks,
+    EmptyExpertBank,
+    ExpertExceedsSmallestBank {
+        profile: ModelSizeProfile,
+        expert_bytes: ByteCost,
+        smallest_expert_bank_usable_bytes: ByteCost,
+        over_by: ByteCost,
+    },
+}
+
+impl fmt::Display for ProfilePreflightError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingExpertBanks => {
+                f.write_str("runtime chrome budget surface has no ExpertBank slots")
+            }
+            Self::EmptyExpertBank => {
+                f.write_str("runtime chrome budget surface has an empty ExpertBank slot")
+            }
+            Self::ExpertExceedsSmallestBank {
+                profile,
+                expert_bytes,
+                smallest_expert_bank_usable_bytes,
+                over_by,
+            } => write!(
+                f,
+                "{profile:?} expert payload {expert_bytes} exceeds smallest ExpertBank usable capacity {smallest_expert_bank_usable_bytes} by {over_by}"
+            ),
+        }
+    }
+}
+
+impl Error for ProfilePreflightError {}
 
 #[cfg(test)]
 mod tests {
@@ -307,6 +439,95 @@ mod tests {
         assert_eq!(
             ExpertBudgetPreflightReport::check_expert_slot(&plan, 128, 0, ByteCost::new(16_384),),
             Err(ExpertBudgetError::EmptyDimension { field: "d_ff" })
+        );
+    }
+
+    #[test]
+    fn profile_expert_budget_passes_when_profile_fits_smallest_expert_bank() {
+        let profile = ModelSizeProfile::moe_tiny(4).unwrap();
+        let budget = ExpertBankBudgetSurface::new(vec![
+            ByteCost::new(8_192),
+            ByteCost::new(4_480),
+            ByteCost::new(16_384),
+        ])
+        .unwrap();
+
+        let report = preflight_profile_expert_bank_budget(&budget, profile).unwrap();
+
+        assert_eq!(report.profile(), profile);
+        assert_eq!(report.expert_bytes(), ByteCost::new(4_480));
+        assert_eq!(
+            report.smallest_expert_bank_usable_bytes(),
+            ByteCost::new(4_480)
+        );
+        assert_eq!(report.slack_bytes(), ByteCost::ZERO);
+    }
+
+    #[test]
+    fn profile_expert_budget_reports_positive_slack() {
+        let profile = ModelSizeProfile::moe_tiny(2).unwrap();
+        let budget =
+            ExpertBankBudgetSurface::new(vec![ByteCost::new(16_384), ByteCost::new(8_192)])
+                .unwrap();
+
+        let report = preflight_profile_expert_bank_budget(&budget, profile).unwrap();
+
+        assert_eq!(report.expert_bytes(), ByteCost::new(4_480));
+        assert_eq!(
+            report.smallest_expert_bank_usable_bytes(),
+            ByteCost::new(8_192)
+        );
+        assert_eq!(report.slack_bytes(), ByteCost::new(3_712));
+    }
+
+    #[test]
+    fn profile_expert_budget_rejects_profile_larger_than_smallest_expert_bank() {
+        let profile = ModelSizeProfile::upper_bank_candidate(128, 4).unwrap();
+        let budget =
+            ExpertBankBudgetSurface::new(vec![ByteCost::new(16_384), ByteCost::new(12_000)])
+                .unwrap();
+
+        assert_eq!(
+            preflight_profile_expert_bank_budget(&budget, profile),
+            Err(ProfilePreflightError::ExpertExceedsSmallestBank {
+                profile,
+                expert_bytes: ByteCost::new(12_928),
+                smallest_expert_bank_usable_bytes: ByteCost::new(12_000),
+                over_by: ByteCost::new(928),
+            })
+        );
+    }
+
+    #[test]
+    fn profile_expert_budget_selects_smallest_expert_bank() {
+        let budget = ExpertBankBudgetSurface::new(vec![
+            ByteCost::new(16_384),
+            ByteCost::new(9_000),
+            ByteCost::new(12_000),
+        ])
+        .unwrap();
+        let profile = ModelSizeProfile::upper_bank_candidate(96, 4).unwrap();
+
+        assert_eq!(
+            preflight_profile_expert_bank_budget(&budget, profile),
+            Err(ProfilePreflightError::ExpertExceedsSmallestBank {
+                profile,
+                expert_bytes: ByteCost::new(9_792),
+                smallest_expert_bank_usable_bytes: ByteCost::new(9_000),
+                over_by: ByteCost::new(792),
+            })
+        );
+    }
+
+    #[test]
+    fn profile_expert_budget_surface_rejects_missing_or_empty_banks() {
+        assert_eq!(
+            ExpertBankBudgetSurface::new(vec![]),
+            Err(ProfilePreflightError::MissingExpertBanks)
+        );
+        assert_eq!(
+            ExpertBankBudgetSurface::new(vec![ByteCost::new(16_384), ByteCost::ZERO]),
+            Err(ProfilePreflightError::EmptyExpertBank)
         );
     }
 

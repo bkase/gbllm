@@ -145,7 +145,7 @@ impl ComputeBringupRequest {
     pub fn emit_imported_event(&self) -> Result<Hash256, ComputeBringupRequestError> {
         let hash = self.hash()?;
         emit_fb1_event(&FB1TraceEvent::ComputeReqImported {
-            request_hash: format!("sha256:{hash}"),
+            request_hash: hash.to_string(),
         });
         Ok(hash)
     }

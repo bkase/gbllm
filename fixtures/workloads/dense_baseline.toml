@@ -1,0 +1,66 @@
+schema = "gbf.workload_manifest.v1"
+schema_version = "1.0.0"
+id = "dense_baseline"
+class = "conformance"
+deferred_scope = [
+  "F13 matched-deployed-bytes parity report",
+  "F-C4 full ConformanceEnvelope regression producer",
+  "Hardware gate promotion after emulator harness proves the first token path",
+]
+
+[model]
+profile = "Toy0"
+ffn_path = "dense"
+
+[intent]
+dense_run_end_to_end = true
+run_goal = "Exercise the dense baseline through training/export/shadow-compile/run intent before F13 parity reporting."
+parity_report_owner = "bd-2zv4"
+
+[corpus]
+manifest_path = "fixtures/corpora/tinystories.toml"
+split = "validation"
+
+[prompts]
+min_prompt_chars = 64
+max_prompt_chars = 128
+min_generated_chars = 128
+seeds = [3735928559, 4919]
+
+[[prompts.cases]]
+id = "tinystories-dense-001"
+prompt = "Once there was a small robot who learned to tell careful stories about stars, trains, and sleepy kitchens."
+
+[[prompts.cases]]
+id = "tinystories-dense-002"
+prompt = "Mira packed a blue notebook, counted every button on her coat, and followed the warm road to school."
+
+[observation]
+checkpoints = "semantic_and_operational"
+trace_level = "checkpoints"
+compare_domain = "generated_bytes"
+determinism_requirement = "seeded_decode"
+
+[execution]
+denotational = true
+artifact = true
+schedule = true
+harness = true
+hardware = false
+
+[acceptance.conformance_gate]
+envelope = "v0_success_envelope"
+report_ref = "conformance.json"
+
+[acceptance.experience_gate]
+max_repetition_collapse_run = 32
+valid_charset_only = true
+
+[acceptance.quality_gate]
+baseline = "character_5gram_backoff"
+metric = "bits_per_character"
+relation = "less_than"
+
+[acceptance.deployability_gate]
+runtime_chrome_budget = "RuntimeChromeBudget"
+emulator_token_smoke = true

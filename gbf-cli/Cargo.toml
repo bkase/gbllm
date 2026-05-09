@@ -6,7 +6,23 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+clap = { version = "=4.6.1", features = ["derive"] }
 gbf-codegen = { path = "../gbf-codegen" }
+gbf-experiments = { path = "../gbf-experiments", default-features = false }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-policy = { path = "../gbf-policy" }
 gbf-report = { path = "../gbf-report" }
+
+[features]
+default = ["phase-a"]
+phase-a = ["gbf-experiments/phase-a"]
+ablation = ["gbf-experiments/ablation"]
+falsify = ["phase-a", "gbf-experiments/falsify"]
+
+[dev-dependencies]
+assert_cmd.workspace = true
+gbf-artifact = { path = "../gbf-artifact" }
+predicates.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

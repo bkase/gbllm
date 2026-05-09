@@ -240,7 +240,7 @@ pub(crate) fn cache_index_root(store: &BlobStore) -> PathBuf {
 }
 
 pub(crate) fn cache_index_path(store: &BlobStore, key: StageCacheKey) -> PathBuf {
-    let hex = key.to_string();
+    let hex = key.0.to_hex();
     cache_index_root(store).join(&hex[..2]).join(hex)
 }
 

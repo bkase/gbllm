@@ -208,11 +208,8 @@ fn realism_run_from_bringup(run: &BringupRun, byte_exact_match: bool) -> Realism
         n,
         build_identity: BuildIdentity {
             build_hash: hash_string("f-b1-build"),
-            runtime_nucleus_hash: format!(
-                "sha256:{}",
-                gbf_runtime::compute_runtime_nucleus_hash_for_test()
-            ),
-            compute_bringup_request_hash: format!("sha256:{request_hash}"),
+            runtime_nucleus_hash: gbf_runtime::compute_runtime_nucleus_hash_for_test().to_string(),
+            compute_bringup_request_hash: request_hash.to_string(),
             asm_ir_hash: hash_string("f-b1-asm-ir"),
             rom_sha256: run
                 .rom_sha256

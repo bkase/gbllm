@@ -154,7 +154,7 @@ impl BlobStore {
                     continue;
                 };
                 if name.len() == 64
-                    && let Ok(hash) = name.parse::<Hash256>()
+                    && let Ok(hash) = format!("sha256:{name}").parse::<Hash256>()
                 {
                     hashes.push(hash);
                 }
@@ -167,7 +167,7 @@ impl BlobStore {
 
     #[must_use]
     pub fn path_for(&self, hash: Hash256) -> PathBuf {
-        let hex = hash.to_string();
+        let hex = hash.to_hex();
         self.sha256_root().join(&hex[..2]).join(hex)
     }
 

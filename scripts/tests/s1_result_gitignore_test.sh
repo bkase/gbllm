@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-if ! git check-ignore -q experiments/S1/checkpoints/seed-0/final.safetensors; then
+if ! git check-ignore --no-index -q experiments/S1/checkpoints/seed-0/final.safetensors; then
   echo "expected experiments/S1 result artifacts to be ignored before prereg commit" >&2
   exit 1
 fi

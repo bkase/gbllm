@@ -1,0 +1,47 @@
+schema = "tinystories_manifest.v1"
+schema_version = "1.0.0"
+corpus_id = "tinystories"
+dataset_version = "v2-gpt4-raw-2026-05-09"
+source_name = "roneneldan/TinyStories"
+source_url = "https://huggingface.co/datasets/roneneldan/TinyStories"
+train_path = "../../corpus/tinystories/raw/TinyStoriesV2-GPT4-train.txt"
+val_path = "../../corpus/tinystories/raw/TinyStoriesV2-GPT4-valid.txt"
+train_sha256 = "sha256:6418d412de72888f52b5142c761ac21a582f7d1166f0bfbdb5f03ccfdec90443"
+val_sha256 = "sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d"
+val_shuffle_deadeef_sha256 = "sha256:33ab115b5d230b6286fd39347e7e542bb7663ed148d80e16fc3de1a866f60388"
+val_shuffle_deadeef_pinned_at_pass_version = "F-S1.09.bd-2who.2026-05-09"
+raw_root = "../../corpus/tinystories/raw"
+raw_byte_policy = "post-decompression bytes; no normalization. Stories are separated by the literal ASCII string <|endoftext|>; this separator is treated as ordinary input bytes (14 bytes) and is NOT stripped, replaced, or interpreted as a semantic boundary token."
+story_separator = "<|endoftext|>"
+s1_policy = "S1 treats source files as raw UTF-8 bytes. The story separator remains ordinary input bytes and is not stripped, replaced, or interpreted as a semantic boundary token."
+deferred_scope = [
+  "S3 charset_v1 normalization with unmappable-rate policy",
+  "S3 deterministic held-out test split",
+  "S3 5-gram Kneser-Ney baseline",
+  "Cross-corpus contamination checks once additional corpora exist",
+]
+
+[source]
+name = "roneneldan/TinyStories"
+url = "https://huggingface.co/datasets/roneneldan/TinyStories"
+dataset_card_url = "https://huggingface.co/datasets/roneneldan/TinyStories/blob/main/README.md"
+license = "CDLA-Sharing-1.0"
+license_url = "https://cdla.dev/sharing-1-0/"
+downloaded_at = "2026-05-09"
+decompression = "none"
+
+[splits.train]
+role = "train"
+url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt"
+local_filename = "TinyStoriesV2-GPT4-train.txt"
+sha256 = "sha256:6418d412de72888f52b5142c761ac21a582f7d1166f0bfbdb5f03ccfdec90443"
+byte_length = 2227753162
+story_count = 2717699
+
+[splits.validation]
+role = "validation"
+url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt"
+local_filename = "TinyStoriesV2-GPT4-valid.txt"
+sha256 = "sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d"
+byte_length = 22502601
+story_count = 27630

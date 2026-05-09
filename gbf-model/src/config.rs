@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroUsize;
 
+use gbf_policy::model_profile::ModelSizeProfile;
 use serde::{Deserialize, Deserializer};
 
 use crate::qat::SharedDenseBranchConfig;
@@ -43,6 +44,68 @@ impl ModelTopologyConfig {
         }
 
         Ok(Self { blocks })
+    }
+
+    pub fn all_dense(
+        n_blocks: usize,
+        shared_sequence_block: SharedSequenceConfig,
+        dense_ffn: DenseFfnConfig,
+    ) -> Result<Self, ModelConfigError> {
+        validate_registered_profile_d_ff(dense_ffn.d_ff())?;
+
+        let mut blocks = Vec::with_capacity(n_blocks);
+        for _ in 0..n_blocks {
+            blocks.push(MoeBlockConfig::dense_ffn(
+                shared_sequence_block.clone(),
+                dense_ffn.clone(),
+            )?);
+        }
+
+        Self::new(blocks)
+    }
+
+    pub fn from_profile_dense(profile: ModelSizeProfile) -> Result<Self, ModelConfigError> {
+        match profile {
+            ModelSizeProfile::Toy0 | ModelSizeProfile::Toy1 => {
+                let d_model = usize::from(profile.d_model());
+                let shared_sequence_block = SharedSequenceConfig::linear_state(
+                    d_model,
+                    dense_profile_linear_state_bytes(profile),
+                )?;
+                let dense_ffn = DenseFfnConfig::new(d_model, usize::from(profile.d_ff()))?;
+                Self::all_dense(
+                    usize::from(profile.n_blocks()),
+                    shared_sequence_block,
+                    dense_ffn,
+                )
+            }
+            _ => Err(ModelConfigError::UnsupportedDenseProfile { profile }),
+        }
+    }
+
+    pub fn from_profile(
+        profile: ModelSizeProfile,
+        moe_block_selection: MoeBlockSelection,
+    ) -> Result<Self, ModelConfigError> {
+        match profile {
+            ModelSizeProfile::Toy0 | ModelSizeProfile::Toy1 => Self::from_profile_dense(profile),
+            ModelSizeProfile::MoeTiny { .. } | ModelSizeProfile::UpperBankCandidate { .. } => {
+                let d_model = usize::from(profile.d_model());
+                let d_ff = usize::from(profile.d_ff());
+                let shared_sequence_block =
+                    SharedSequenceConfig::linear_state(d_model, profile.d_model())?;
+                let dense_ffn = DenseFfnConfig::new(d_model, d_ff)?;
+                let moe_ffn = MoeFfnConfig::new(d_model, d_ff, usize::from(profile.n_experts()))?;
+                Self::from_moe_block_selection(
+                    usize::from(profile.n_blocks()),
+                    &moe_block_selection,
+                    shared_sequence_block,
+                    Some(dense_ffn),
+                    moe_ffn,
+                )
+            }
+            _ => Err(ModelConfigError::UnsupportedProfile { profile }),
+        }
     }
 
     pub fn from_moe_block_selection(
@@ -595,6 +658,15 @@ pub enum ModelConfigError {
     DuplicateBlockSelectionIndex {
         index: usize,
     },
+    UnsupportedDenseProfile {
+        profile: ModelSizeProfile,
+    },
+    UnsupportedProfile {
+        profile: ModelSizeProfile,
+    },
+    UnregisteredDenseFfnHiddenDim {
+        d_ff: usize,
+    },
 }
 
 impl fmt::Display for ModelConfigError {
@@ -672,6 +744,15 @@ impl fmt::Display for ModelConfigError {
             Self::DuplicateBlockSelectionIndex { index } => {
                 write!(f, "MoE block selection repeats block index {index}")
             }
+            Self::UnsupportedDenseProfile { profile } => {
+                write!(f, "{profile:?} is not a dense-only model size profile")
+            }
+            Self::UnsupportedProfile { profile } => {
+                write!(f, "{profile:?} is not a supported model size profile")
+            }
+            Self::UnregisteredDenseFfnHiddenDim { d_ff } => {
+                write!(f, "dense d_ff {d_ff} is not registered by ModelSizeProfile")
+            }
         }
     }
 }
@@ -722,6 +803,24 @@ fn validate_same_d_model(
     Ok(())
 }
 
+fn validate_registered_profile_d_ff(d_ff: usize) -> Result<(), ModelConfigError> {
+    let registered_d_ff = [
+        usize::from(ModelSizeProfile::TOY0_D_FF),
+        usize::from(ModelSizeProfile::TOY1_D_FF),
+        usize::from(ModelSizeProfile::MOE_TINY_D_FF),
+        usize::from(ModelSizeProfile::UPPER_BANK_D_FF),
+    ];
+    if registered_d_ff.contains(&d_ff) {
+        Ok(())
+    } else {
+        Err(ModelConfigError::UnregisteredDenseFfnHiddenDim { d_ff })
+    }
+}
+
+fn dense_profile_linear_state_bytes(profile: ModelSizeProfile) -> u16 {
+    profile.d_model()
+}
+
 fn validate_block_index(index: usize, total_blocks: usize) -> Result<(), ModelConfigError> {
     if index >= total_blocks {
         return Err(ModelConfigError::BlockSelectionIndexOutOfRange {
@@ -748,6 +847,199 @@ fn validate_explicit_block_selection(block_indices: &[usize]) -> Result<(), Mode
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod dense {
+    use super::*;
+
+    #[test]
+    fn all_dense_builds_every_block_with_shared_sequence_and_dense_ffn() {
+        let topology =
+            ModelTopologyConfig::all_dense(3, shared_sequence(16), dense_ffn(16, 32)).unwrap();
+
+        assert_eq!(topology.blocks().len(), 3);
+        assert_eq!(topology.d_model(), 16);
+        assert_eq!(
+            topology.sequence_semantics(),
+            shared_sequence(16).sequence_semantics()
+        );
+        assert!(topology.blocks().iter().all(|block| {
+            !block.has_moe_ffn() && block.d_model() == 16 && block.ffn_path().d_ff() == 32
+        }));
+    }
+
+    #[test]
+    fn all_dense_rejects_zero_blocks_and_shape_mismatches() {
+        let err =
+            ModelTopologyConfig::all_dense(0, shared_sequence(16), dense_ffn(16, 32)).unwrap_err();
+        assert_eq!(err, ModelConfigError::EmptyBlockSet);
+
+        let err =
+            ModelTopologyConfig::all_dense(1, shared_sequence(16), dense_ffn(32, 64)).unwrap_err();
+        assert_eq!(
+            err,
+            ModelConfigError::FfnModelDimMismatch {
+                path: "dense_ffn",
+                expected: 16,
+                actual: 32,
+            }
+        );
+
+        let err =
+            ModelTopologyConfig::all_dense(1, shared_sequence(16), dense_ffn(16, 96)).unwrap_err();
+        assert_eq!(
+            err,
+            ModelConfigError::UnregisteredDenseFfnHiddenDim { d_ff: 96 }
+        );
+    }
+
+    #[test]
+    fn all_dense_accepts_registered_profile_hidden_dims() {
+        for d_ff in [
+            ModelSizeProfile::TOY0_D_FF,
+            ModelSizeProfile::TOY1_D_FF,
+            ModelSizeProfile::MOE_TINY_D_FF,
+            ModelSizeProfile::UPPER_BANK_D_FF,
+        ] {
+            ModelTopologyConfig::all_dense(
+                1,
+                shared_sequence(16),
+                dense_ffn(16, usize::from(d_ff)),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn from_profile_dense_builds_toy0_and_toy1_dense_topologies() {
+        assert_profile_dense_topology(
+            ModelSizeProfile::toy0(),
+            usize::from(ModelSizeProfile::TOY0_N_BLOCKS),
+            usize::from(ModelSizeProfile::TOY0_D_MODEL),
+            usize::from(ModelSizeProfile::TOY0_D_FF),
+        );
+        assert_profile_dense_topology(
+            ModelSizeProfile::toy1(),
+            usize::from(ModelSizeProfile::TOY1_N_BLOCKS),
+            usize::from(ModelSizeProfile::TOY1_D_MODEL),
+            usize::from(ModelSizeProfile::TOY1_D_FF),
+        );
+    }
+
+    #[test]
+    fn from_profile_builds_toy0_and_toy1_dense_topologies() {
+        assert_profile_topology(
+            ModelSizeProfile::toy0(),
+            MoeBlockSelection::all_blocks(),
+            usize::from(ModelSizeProfile::TOY0_N_BLOCKS),
+            usize::from(ModelSizeProfile::TOY0_D_MODEL),
+            usize::from(ModelSizeProfile::TOY0_D_FF),
+            &[false],
+        );
+        assert_profile_topology(
+            ModelSizeProfile::toy1(),
+            MoeBlockSelection::middle(4, 4).unwrap(),
+            usize::from(ModelSizeProfile::TOY1_N_BLOCKS),
+            usize::from(ModelSizeProfile::TOY1_D_MODEL),
+            usize::from(ModelSizeProfile::TOY1_D_FF),
+            &[false, false],
+        );
+    }
+
+    #[test]
+    fn from_profile_ignores_moe_selection_for_dense_profiles() {
+        let topology = ModelTopologyConfig::from_profile(
+            ModelSizeProfile::toy1(),
+            MoeBlockSelection::explicit(vec![0, 99]).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            topology
+                .blocks()
+                .iter()
+                .map(MoeBlockConfig::has_moe_ffn)
+                .collect::<Vec<_>>(),
+            vec![false, false]
+        );
+    }
+
+    #[test]
+    fn from_profile_dense_rejects_moe_profiles_at_constructor_boundary() {
+        let moe_tiny = ModelSizeProfile::moe_tiny(2).unwrap();
+        assert_eq!(
+            ModelTopologyConfig::from_profile_dense(moe_tiny),
+            Err(ModelConfigError::UnsupportedDenseProfile { profile: moe_tiny })
+        );
+
+        let upper_bank = ModelSizeProfile::upper_bank_candidate(96, 4).unwrap();
+        assert_eq!(
+            ModelTopologyConfig::from_profile_dense(upper_bank),
+            Err(ModelConfigError::UnsupportedDenseProfile {
+                profile: upper_bank
+            })
+        );
+    }
+
+    fn assert_profile_dense_topology(
+        profile: ModelSizeProfile,
+        n_blocks: usize,
+        d_model: usize,
+        d_ff: usize,
+    ) {
+        let topology = ModelTopologyConfig::from_profile_dense(profile).unwrap();
+
+        assert_eq!(topology.blocks().len(), n_blocks);
+        assert_eq!(topology.d_model(), d_model);
+        assert_eq!(
+            topology.sequence_semantics(),
+            SequenceSemanticsSpec::linear_state(profile.d_model()).unwrap()
+        );
+        assert!(topology.blocks().iter().all(|block| {
+            !block.has_moe_ffn() && block.d_model() == d_model && block.ffn_path().d_ff() == d_ff
+        }));
+    }
+
+    fn assert_profile_topology(
+        profile: ModelSizeProfile,
+        block_selection: MoeBlockSelection,
+        n_blocks: usize,
+        d_model: usize,
+        d_ff: usize,
+        expected_moe_mask: &[bool],
+    ) {
+        let topology = ModelTopologyConfig::from_profile(profile, block_selection).unwrap();
+
+        assert_eq!(topology.blocks().len(), n_blocks);
+        assert_eq!(topology.d_model(), d_model);
+        assert_eq!(
+            topology.sequence_semantics(),
+            SequenceSemanticsSpec::linear_state(profile.d_model()).unwrap()
+        );
+        assert_eq!(
+            topology
+                .blocks()
+                .iter()
+                .map(MoeBlockConfig::has_moe_ffn)
+                .collect::<Vec<_>>(),
+            expected_moe_mask
+        );
+        assert!(
+            topology
+                .blocks()
+                .iter()
+                .all(|block| block.d_model() == d_model && block.ffn_path().d_ff() == d_ff)
+        );
+    }
+
+    fn shared_sequence(d_model: usize) -> SharedSequenceConfig {
+        SharedSequenceConfig::linear_state(d_model, 4).unwrap()
+    }
+
+    fn dense_ffn(d_model: usize, d_ff: usize) -> DenseFfnConfig {
+        DenseFfnConfig::new(d_model, d_ff).unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -877,6 +1169,87 @@ mod moe {
         )
         .unwrap();
         assert!(topology.blocks().iter().all(MoeBlockConfig::has_moe_ffn));
+    }
+
+    #[test]
+    fn from_profile_builds_moe_tiny_and_upper_bank_topologies() {
+        let moe_tiny = ModelSizeProfile::moe_tiny(2).unwrap();
+        let topology =
+            ModelTopologyConfig::from_profile(moe_tiny, MoeBlockSelection::default()).unwrap();
+        assert_eq!(topology.blocks().len(), 4);
+        assert_eq!(topology.d_model(), 64);
+        assert_eq!(
+            topology_moe_mask_from(&topology),
+            vec![false, false, true, false]
+        );
+        assert!(
+            topology
+                .blocks()
+                .iter()
+                .all(|block| block.ffn_path().d_ff() == 128)
+        );
+
+        let upper_bank = ModelSizeProfile::upper_bank_candidate(128, 4).unwrap();
+        let topology =
+            ModelTopologyConfig::from_profile(upper_bank, MoeBlockSelection::all_blocks()).unwrap();
+        assert_eq!(topology.blocks().len(), 4);
+        assert_eq!(topology.d_model(), 128);
+        assert_eq!(
+            topology_moe_mask_from(&topology),
+            vec![true, true, true, true]
+        );
+        assert!(
+            topology
+                .blocks()
+                .iter()
+                .all(|block| block.ffn_path().d_ff() == 192)
+        );
+    }
+
+    #[test]
+    fn from_profile_preserves_non_default_moe_selection_masks() {
+        let profile = ModelSizeProfile::moe_tiny(4).unwrap();
+
+        let middle =
+            ModelTopologyConfig::from_profile(profile, MoeBlockSelection::middle(1, 2).unwrap())
+                .unwrap();
+        assert_eq!(
+            topology_moe_mask_from(&middle),
+            vec![false, true, true, false]
+        );
+
+        let explicit = ModelTopologyConfig::from_profile(
+            profile,
+            MoeBlockSelection::explicit(vec![3]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            topology_moe_mask_from(&explicit),
+            vec![false, false, false, true]
+        );
+    }
+
+    #[test]
+    fn from_profile_preserves_invalid_moe_block_selection_rejection() {
+        let profile = ModelSizeProfile::moe_tiny(4).unwrap();
+
+        assert_eq!(
+            ModelTopologyConfig::from_profile(
+                profile,
+                MoeBlockSelection::alternating(4, 2).unwrap()
+            ),
+            Err(ModelConfigError::EmptyBlockSelection)
+        );
+        assert_eq!(
+            ModelTopologyConfig::from_profile(
+                profile,
+                MoeBlockSelection::explicit(vec![0, 4]).unwrap()
+            ),
+            Err(ModelConfigError::BlockSelectionIndexOutOfRange {
+                index: 4,
+                total_blocks: 4,
+            })
+        );
     }
 
     #[test]
@@ -1063,6 +1436,14 @@ mod moe {
             .iter()
             .map(MoeBlockConfig::has_moe_ffn)
             .collect())
+    }
+
+    fn topology_moe_mask_from(topology: &ModelTopologyConfig) -> Vec<bool> {
+        topology
+            .blocks()
+            .iter()
+            .map(MoeBlockConfig::has_moe_ffn)
+            .collect()
     }
 
     fn shared_sequence() -> SharedSequenceConfig {

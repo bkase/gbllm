@@ -16,14 +16,66 @@ if ! cargo fmt --check --all 2>/dev/null; then
     exit 1
 fi
 
-# Stage 2: lint (seconds)
-if ! cargo clippy --workspace --all-features -- -D warnings 2>/dev/null; then
+# Stage 2: QAT feature mutex stays enforced
+qat_mutex_output=""
+if qat_mutex_output=$(cargo build -p gbf-train --features qat,qat-ablation 2>&1); then
+    echo "pre-commit: expected qat+qat-ablation build to fail, but it succeeded."
+    exit 1
+fi
+if ! grep -q "qat and qat-ablation are mutually exclusive" <<<"$qat_mutex_output"; then
+    echo "pre-commit: qat+qat-ablation build failed without the expected diagnostic."
+    echo "$qat_mutex_output"
+    exit 1
+fi
+
+# Stage 3: lint supported feature sets
+if ! cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings 2>/dev/null; then
+    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
+    exit 1
+fi
+if ! cargo clippy -p gbf-cli --features falsify -- -D warnings 2>/dev/null; then
+    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
+    exit 1
+fi
+if ! cargo clippy -p gbf-train --features qat,burn-adapter -- -D warnings 2>/dev/null; then
+    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
+    exit 1
+fi
+if ! cargo clippy -p gbf-train --features qat-ablation,burn-adapter -- -D warnings 2>/dev/null; then
+    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
+    exit 1
+fi
+if ! cargo clippy -p gbf-experiments --no-default-features --features phase-a -- -D warnings 2>/dev/null; then
+    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
+    exit 1
+fi
+if ! cargo clippy -p gbf-experiments --no-default-features --features ablation -- -D warnings 2>/dev/null; then
     echo "pre-commit: cargo clippy found warnings. Fix them before committing."
     exit 1
 fi
 
-# Stage 3: full test suite (no escape hatch)
-if ! cargo test --workspace --all-features 2>/dev/null; then
+# Stage 4: test supported feature sets (no escape hatch)
+if ! cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features 2>/dev/null; then
+    echo "pre-commit: tests failed."
+    exit 1
+fi
+if ! cargo test -p gbf-cli --test s1_cli 2>/dev/null; then
+    echo "pre-commit: tests failed."
+    exit 1
+fi
+if ! cargo test -p gbf-train --features qat,burn-adapter 2>/dev/null; then
+    echo "pre-commit: tests failed."
+    exit 1
+fi
+if ! cargo test -p gbf-train --features qat-ablation,burn-adapter 2>/dev/null; then
+    echo "pre-commit: tests failed."
+    exit 1
+fi
+if ! cargo test -p gbf-experiments --no-default-features --features phase-a 2>/dev/null; then
+    echo "pre-commit: tests failed."
+    exit 1
+fi
+if ! cargo test -p gbf-experiments --no-default-features --features ablation 2>/dev/null; then
     echo "pre-commit: tests failed."
     exit 1
 fi

@@ -321,11 +321,22 @@ Self-hash rule:
 
 CanonicalTensorPayloadHash:
   Hash over the ordered sequence of trainable tensors sorted by tensor name.
-  For each tensor, hash:
-    tensor_name UTF-8 bytes,
-    dtype tag,
-    shape as little-endian u64 dimensions,
-    raw tensor payload bytes in row-major order.
+  The stream is explicitly framed. Hash:
+    tensor count as little-endian u64,
+    then for each tensor:
+      tensor_name byte length as little-endian u64,
+      tensor_name UTF-8 bytes,
+      dtype tag as one byte (`Float32 = 0`, `TernaryI2 = 1`, `Q8_8 = 2`),
+      rank as little-endian u64,
+      shape as little-endian u64 dimensions,
+      payload byte length as little-endian u64,
+      raw tensor payload bytes in row-major order.
+  The name length, rank, and payload length frames are normative; omitting them
+  makes variable-length field boundaries ambiguous and is forbidden.
+  Adversarial tests
+  `canonical_tensor_payload_hash_frames_tensor_count_and_payload_length` and
+  `canonical_tensor_payload_hash_frames_shape_rank_before_payload` witness the
+  post-amendment boundary-collision cases that these frames reject.
   SafeTensors container metadata is excluded from this hash.
 
 CanonicalCheckpointWrite:
