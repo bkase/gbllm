@@ -1848,10 +1848,10 @@ pub(crate) mod tests {
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationBundleSet,
         CalibrationConfidenceClass, CalibrationLayer, CompileObjective, CompileProfileSpec,
-        CompileRequest, DEFAULT_COMPILE_PROFILE_ID, MeasurementBlob, ObservabilityMode,
-        PlacementKnobBounds, PlacementProfile, RepairProposalId, RomKernelResidencyBias,
-        RomWindowKnob, RuntimeMode, ServiceLevelObjective, TraceProbeId, ValidationCode,
-        canonical_compile_profile_specs,
+        CompileRequest, CompilerFeature, DEFAULT_COMPILE_PROFILE_ID, MeasurementBlob,
+        ObservabilityMode, PlacementKnobBounds, PlacementProfile, RepairProposalId,
+        RomKernelResidencyBias, RomWindowKnob, RuntimeMode, ServiceLevelObjective, TraceProbeId,
+        ValidationCode, canonical_compile_profile_specs,
     };
     use gbf_report::{ReportOutcome, round_trip_self_hash};
     use gbf_workload::{GoldenVectorRef, WorkloadLocator, WorkloadManifest, WorkloadManifestRef};
@@ -2695,6 +2695,30 @@ pub(crate) mod tests {
 
         pub(crate) fn validation(&self) -> ValidationProduct<'_> {
             validate_artifact_and_request(self.inputs()).expect("fixture validates")
+        }
+
+        pub(crate) fn stage0_result(
+            &self,
+        ) -> Result<ValidationProduct<'_>, crate::validate::ValidationStageFailure> {
+            validate_artifact_and_request(self.inputs())
+        }
+
+        pub(crate) fn require_unsupported_stage0_compiler_feature(&mut self) {
+            self.compile_request
+                .required_features
+                .insert(CompilerFeature::StaticBudgetReport);
+        }
+
+        pub(crate) fn force_stage05_locked_placement_override(&mut self) {
+            self.compile_request.constraint_overrides = Some(CompileKnobOverrides {
+                values: CompileKnobPartialValues {
+                    placement: Some(PlacementKnob {
+                        profile: PlacementProfile::PackedExperts,
+                    }),
+                    ..CompileKnobPartialValues::default()
+                },
+                ..CompileKnobOverrides::default()
+            });
         }
 
         fn inputs(&self) -> ValidateInputs<'_> {

@@ -38,19 +38,25 @@ pub mod stages {
 
 #[cfg(test)]
 mod tests {
-    use gbf_foundation::Hash256;
+    use std::collections::BTreeSet;
+
+    use gbf_foundation::{BudgetSlotId, CompileProfileId, Hash256, TargetProfileId};
     use gbf_hw::target::dmg_mbc5_8mib_128kib;
     use gbf_policy::{
-        BRINGUP_COMPILE_PROFILE_ID, CalibrationConfidenceClass, CalibrationConfidenceRequirement,
-        DEFAULT_COMPILE_PROFILE_ID, canonical_compile_profile_specs,
+        BRINGUP_COMPILE_PROFILE_ID, BudgetSlotClass, CalibrationConfidenceClass,
+        CalibrationConfidenceRequirement, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile,
+        RomBudgetSlot, RuntimeChromeBudget, RuntimeMemoryCapSection,
+        canonical_compile_profile_specs,
     };
     use gbf_report::{ReportOutcome, canonicalize as canonicalize_report};
 
     use crate::budget::{
         BudgetInputs, QuantGraphBudgetSource, QuantGraphBudgetView, QuantGraphBudgetViewError,
+        RoutingProjection, SequenceStateProjection,
         static_budget_report as run_stage2_static_budget,
     };
-    use crate::policy::resolve_policy;
+    use crate::policy::{PolicyResolutionStageFailure, ResolvedPolicyProduct, resolve_policy};
+    use crate::validate::{ValidationProduct, ValidationStageFailure};
 
     #[test]
     fn f_b2_compile_profile_spec_bringup_accepts_none_confidence() {
@@ -116,62 +122,58 @@ mod tests {
 
     #[test]
     fn f_b2_f_b4_chunk_pipeline_runs_in_order() {
-        let mut order = Vec::new();
         let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
-
-        order.push("stage0");
-        let validation = fixture.validation();
-
-        order.push("stage0.5");
-        let policy = resolve_policy(&validation).expect("policy resolves after Stage 0");
-
-        order.push("stage1.synthetic");
-        let quant_graph = MissingBudgetQuantGraph {
-            quant_graph_hash: hash(0xe0),
-        };
-
-        order.push("stage2");
-        let target_profile = dmg_mbc5_8mib_128kib();
-        let budget = run_stage2_static_budget(BudgetInputs {
-            policy: &policy,
-            quant_graph: &quant_graph,
-            runtime_chrome_budget: None,
-            target_profile: &target_profile,
-        });
+        let mut harness = ChunkDispatchHarness::default();
+        let budget = harness
+            .run_success_path(&fixture)
+            .expect("Stage 0 -> Stage 0.5 -> synthetic Stage 1 -> Stage 2 succeeds");
 
         assert_eq!(
-            order,
+            harness.order,
             vec!["stage0", "stage0.5", "stage1.synthetic", "stage2"]
         );
-        assert_eq!(budget.report.outcome, ReportOutcome::Failed);
-        assert_eq!(
-            budget.report.body.identity.policy_resolution_self_hash,
-            policy.policy_resolution_self_hash
-        );
+        assert_eq!(budget.report.outcome, ReportOutcome::Passed);
+        assert!(budget.report.body.decision.fits);
     }
 
     #[test]
     fn f_b2_f_b4_chunk_failures_short_circuit_correctly() {
-        let stage0_failure_hash = hash(0xa0);
-        let stage0_result: Result<Hash256, Hash256> = Err(stage0_failure_hash);
-        let mut ran_after_stage0 = Vec::new();
-        if let Ok(_artifact_validation_self_hash) = stage0_result {
-            ran_after_stage0.push("stage0.5");
-        }
-        assert!(ran_after_stage0.is_empty());
+        let mut stage0_fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        stage0_fixture.require_unsupported_stage0_compiler_feature();
+        let mut stage0_harness = ChunkDispatchHarness::default();
+        let stage0_failure = stage0_harness
+            .run_until_failure(&stage0_fixture)
+            .expect_err("unsupported compiler feature fails in real Stage 0")
+            .expect_stage0("unsupported compiler feature fails in real Stage 0");
+        assert_eq!(stage0_harness.order, vec!["stage0"]);
+        assert_eq!(stage0_failure.report.outcome, ReportOutcome::Failed);
 
-        let artifact_validation_self_hash = hash(0xa1);
-        let policy_failure_hash = hash(0xa2);
-        let stage05_result: Result<Hash256, (Hash256, Hash256)> =
-            Err((artifact_validation_self_hash, policy_failure_hash));
-        let mut ran_after_stage05 = Vec::new();
-        if let Ok(_policy_resolution_self_hash) = stage05_result {
-            ran_after_stage05.push("stage2");
-        }
-        assert!(ran_after_stage05.is_empty());
+        let mut stage05_fixture = crate::policy::tests::Fixture::new(BRINGUP_COMPILE_PROFILE_ID);
+        stage05_fixture.force_stage05_locked_placement_override();
+        let upstream_validation = stage05_fixture
+            .stage0_result()
+            .expect("Stage 0 succeeds before policy failure");
+        let upstream_report = upstream_validation.report.clone();
+        let upstream_self_hash = upstream_validation.artifact_validation_self_hash;
+        let mut stage05_harness = ChunkDispatchHarness::default();
+        let stage05_failure = stage05_harness
+            .run_until_failure(&stage05_fixture)
+            .expect_err("locked placement override fails in real Stage 0.5")
+            .expect_stage05("locked placement override fails in real Stage 0.5");
+        assert_eq!(stage05_harness.order, vec!["stage0", "stage0.5"]);
         assert_eq!(
-            stage05_result.expect_err("Stage 0.5 fixture fails").0,
-            artifact_validation_self_hash
+            stage05_harness.upstream_stage0_self_hash,
+            Some(upstream_self_hash)
+        );
+        assert_eq!(stage05_failure.report.outcome, ReportOutcome::Failed);
+        assert_eq!(upstream_validation.report, upstream_report);
+        assert_eq!(
+            upstream_validation.artifact_validation_self_hash,
+            upstream_self_hash
+        );
+        assert_eq!(
+            upstream_validation.report.report_self_hash,
+            upstream_self_hash
         );
     }
 
@@ -219,6 +221,127 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct ChunkDispatchHarness {
+        order: Vec<&'static str>,
+        upstream_stage0_self_hash: Option<Hash256>,
+    }
+
+    #[derive(Debug)]
+    enum ChunkDispatchFailure {
+        Stage0(ValidationStageFailure),
+        Stage05(PolicyResolutionStageFailure),
+    }
+
+    impl ChunkDispatchFailure {
+        fn expect_stage0(self, message: &str) -> ValidationStageFailure {
+            match self {
+                Self::Stage0(failure) => failure,
+                Self::Stage05(_) => panic!("{message}: reached Stage 0.5 instead"),
+            }
+        }
+
+        fn expect_stage05(self, message: &str) -> PolicyResolutionStageFailure {
+            match self {
+                Self::Stage05(failure) => failure,
+                Self::Stage0(_) => panic!("{message}: failed in Stage 0 instead"),
+            }
+        }
+    }
+
+    impl ChunkDispatchHarness {
+        fn run_success_path(
+            &mut self,
+            fixture: &crate::policy::tests::Fixture,
+        ) -> Result<crate::budget::StaticBudgetReport, ChunkDispatchFailure> {
+            let validation = self.stage0(fixture).map_err(ChunkDispatchFailure::Stage0)?;
+            let policy = self
+                .stage05(&validation)
+                .map_err(ChunkDispatchFailure::Stage05)?;
+            let quant_graph = self.stage1_synthetic(&policy);
+            let runtime_budget = runtime_budget_fixture();
+
+            Ok(self.stage2(&policy, &quant_graph, Some(&runtime_budget)))
+        }
+
+        fn run_until_failure(
+            &mut self,
+            fixture: &crate::policy::tests::Fixture,
+        ) -> Result<crate::budget::StaticBudgetReport, ChunkDispatchFailure> {
+            let validation = self.stage0(fixture).map_err(ChunkDispatchFailure::Stage0)?;
+            let policy = self
+                .stage05(&validation)
+                .map_err(ChunkDispatchFailure::Stage05)?;
+            let quant_graph = self.stage1_synthetic(&policy);
+
+            Ok(self.stage2(&policy, &quant_graph, None))
+        }
+
+        fn stage0<'a>(
+            &mut self,
+            fixture: &'a crate::policy::tests::Fixture,
+        ) -> Result<ValidationProduct<'a>, ValidationStageFailure> {
+            self.order.push("stage0");
+            fixture.stage0_result()
+        }
+
+        fn stage05(
+            &mut self,
+            validation: &ValidationProduct<'_>,
+        ) -> Result<ResolvedPolicyProduct, PolicyResolutionStageFailure> {
+            self.order.push("stage0.5");
+            let upstream_report = validation.report.clone();
+            let upstream_self_hash = validation.artifact_validation_self_hash;
+            let result = resolve_policy(validation);
+            assert_eq!(validation.report, upstream_report);
+            assert_eq!(validation.artifact_validation_self_hash, upstream_self_hash);
+            assert_eq!(validation.report.report_self_hash, upstream_self_hash);
+            self.upstream_stage0_self_hash = Some(upstream_self_hash);
+            result
+        }
+
+        fn stage1_synthetic(&mut self, policy: &ResolvedPolicyProduct) -> BudgetViewQuantGraph {
+            self.order.push("stage1.synthetic");
+            BudgetViewQuantGraph {
+                view: empty_budget_view(policy.input_hashes.artifact_effective_core_hash),
+            }
+        }
+
+        fn stage2(
+            &mut self,
+            policy: &ResolvedPolicyProduct,
+            quant_graph: &BudgetViewQuantGraph,
+            runtime_chrome_budget: Option<&RuntimeChromeBudget>,
+        ) -> crate::budget::StaticBudgetReport {
+            self.order.push("stage2");
+            let target_profile = dmg_mbc5_8mib_128kib();
+            run_stage2_static_budget(BudgetInputs {
+                policy,
+                quant_graph,
+                runtime_chrome_budget,
+                target_profile: &target_profile,
+            })
+        }
+    }
+
+    struct BudgetViewQuantGraph {
+        view: QuantGraphBudgetView,
+    }
+
+    impl QuantGraphBudgetSource for BudgetViewQuantGraph {
+        fn quant_graph_hash(&self) -> Hash256 {
+            self.view.quant_graph_hash
+        }
+
+        fn semantic_core_hash(&self) -> Hash256 {
+            self.view.semantic_core_hash
+        }
+
+        fn to_budget_view(&self) -> Result<QuantGraphBudgetView, QuantGraphBudgetViewError> {
+            Ok(self.view.clone())
+        }
+    }
+
     struct MissingBudgetQuantGraph {
         quant_graph_hash: Hash256,
     }
@@ -239,5 +362,43 @@ mod tests {
 
     fn hash(byte: u8) -> Hash256 {
         Hash256::from_bytes([byte; 32])
+    }
+
+    fn empty_budget_view(semantic_core_hash: Hash256) -> QuantGraphBudgetView {
+        QuantGraphBudgetView {
+            semantic_core_hash,
+            quant_graph_hash: hash(0xe0),
+            layers: Vec::new(),
+            experts: Vec::new(),
+            shared_kernels: Vec::new(),
+            shared_luts: Vec::new(),
+            shared_dense_ffn: None,
+            reduction_sites: Vec::new(),
+            sequence_state: SequenceStateProjection::default(),
+            routing: RoutingProjection::default(),
+        }
+    }
+
+    fn runtime_budget_fixture() -> RuntimeChromeBudget {
+        RuntimeChromeBudget {
+            target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
+            profile: CompileProfileId::from("Bringup"),
+            runtime_nucleus_hash: hash(0x40),
+            rom_slots: vec![RomBudgetSlot {
+                id: BudgetSlotId::new(1),
+                class: BudgetSlotClass::ExpertBank,
+                usable_bytes: 1024,
+                reserved_slack: 128,
+                placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+            }],
+            memory_caps: RuntimeMemoryCapSection {
+                wram_usable_bytes: 8192,
+                sram_usable_bytes: 32768,
+                hram_usable_bytes: 127,
+                source_target_profile_hash: hash(0x09),
+            },
+            wram_reserved: 0,
+            sram_reserved: 0,
+        }
     }
 }
