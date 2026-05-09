@@ -56,13 +56,15 @@ use gbf_artifact::manifest::{
 };
 use gbf_artifact::sequence::SequenceSemanticsSpec;
 use gbf_artifact::tensor::{CanonicalTensor, CanonicalTensorPayload};
-use gbf_artifact::{ArtifactAux, ArtifactManifest, HintBundle, TargetDataLoweringArtifact};
-use gbf_foundation::{BlobCodec, BlobRef, Hash256, PackerVersion, SemVer};
+use gbf_artifact::{
+    ArtifactAux, ArtifactManifest, EvidenceScope, HintBundle, TargetDataLoweringArtifact,
+};
+use gbf_foundation::{BlobCodec, BlobRef, Hash256, LayerId, PackerVersion, SemVer};
 use gbf_hw::target::TargetProfile;
 use gbf_policy::{
     CalibrationBundle, CalibrationBundleSet, CalibrationConfidenceRequirement, CalibrationLayer,
     CompatibilityAdapterId, CompileProfileSpec, CompileRequest, DiagnosticSeverity, EvidenceRef,
-    FieldPath, ValidationCode, ValidationDetail,
+    FieldPath, TraceProbeId, ValidationCode, ValidationDetail,
     ValidationDiagnostic as PolicyValidationDiagnostic, ValidationOrigin,
 };
 use gbf_report::report_schemas::artifact_validation_v1::{
@@ -1836,6 +1838,246 @@ fn calibration_field(layer: CalibrationLayer, field: &'static str) -> FieldPath 
     FieldPath::from(format!("calibration.{}.{}", layer.as_str(), field))
 }
 
+fn validate_hint_provenance(
+    inputs: &ValidateInputs<'_>,
+    artifact: &ImportedArtifactView,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let hint_bundle_hash = artifact.hint_bundle_hash();
+    let active_layers = active_layer_ids(artifact);
+    let active_lowering = active_lowering(inputs);
+
+    for (index, entry) in artifact.hint_bundle.constraints.entries.iter().enumerate() {
+        if evidence_scope_applies_to_active_build(
+            &entry.scope,
+            inputs,
+            &active_layers,
+            active_lowering,
+        ) {
+            continue;
+        }
+
+        diagnostics.push(hint_provenance_inconsistent_diagnostic(
+            index,
+            &entry.scope,
+            hint_bundle_hash,
+        ));
+    }
+}
+
+fn evidence_scope_applies_to_active_build(
+    scope: &EvidenceScope,
+    inputs: &ValidateInputs<'_>,
+    active_layers: &BTreeSet<LayerId>,
+    active_lowering: Option<&TargetDataLoweringArtifact>,
+) -> bool {
+    match scope {
+        EvidenceScope::WholeArtifact => true,
+        EvidenceScope::LayerScoped { layer } => active_layers.contains(layer),
+        EvidenceScope::TargetFamily { family } => family == inputs.target_profile.family(),
+        EvidenceScope::WorkloadScoped { workload } => {
+            inputs.workloads.iter().any(|active| &active.id == workload)
+        }
+        EvidenceScope::LoweringScoped { shard } => active_lowering
+            .map(|lowering| lowering.shards.iter().any(|active| &active.id == shard))
+            .unwrap_or(false),
+    }
+}
+
+fn active_lowering<'a>(inputs: &'a ValidateInputs<'_>) -> Option<&'a TargetDataLoweringArtifact> {
+    let target = inputs.target_profile.id();
+    let expected_profile = expected_lowering_profile(inputs);
+    inputs.lowerings.iter().find(|lowering| {
+        lowering.target.as_str() == target.as_str() && lowering.profile == expected_profile
+    })
+}
+
+fn active_layer_ids(artifact: &ImportedArtifactView) -> BTreeSet<LayerId> {
+    artifact
+        .core
+        .tensors()
+        .iter()
+        .filter_map(|tensor| layer_id_from_artifact_path(tensor.id.as_str()))
+        .collect()
+}
+
+fn layer_id_from_artifact_path(path: &str) -> Option<LayerId> {
+    let mut segments = path.split('.');
+    while let Some(segment) = segments.next() {
+        if segment != "layer" {
+            continue;
+        }
+        let layer = segments.next()?.parse::<u16>().ok()?;
+        return Some(LayerId::new(layer));
+    }
+    None
+}
+
+fn hint_provenance_inconsistent_diagnostic(
+    index: usize,
+    scope: &EvidenceScope,
+    hint_bundle_hash: Hash256,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::HintBundle,
+        ValidationCode::HintProvenanceInconsistent {
+            fact: TraceProbeId(u16::try_from(index).unwrap_or(u16::MAX)),
+        },
+        ValidationDetail::Field {
+            field: FieldPath::from(format!("hint_bundle.constraints.entries.{index}.scope")),
+        },
+        vec![EvidenceRef {
+            kind: "hint_bundle".to_owned(),
+            reference: format!("constraints.entries.{index}.scope={scope:?}"),
+            hash: Some(hint_bundle_hash),
+        }],
+    )
+}
+
+fn validate_workload_and_golden_refs(
+    inputs: &ValidateInputs<'_>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    for workload in inputs.workloads {
+        validate_workload_ref(inputs.resolver, workload, diagnostics);
+    }
+    for vector in inputs.golden_vectors {
+        validate_golden_vector_ref(inputs.resolver, vector, diagnostics);
+    }
+}
+
+fn validate_workload_ref(
+    resolver: &dyn ArtifactResolver,
+    workload: &WorkloadManifestRef,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match resolver.resolve_workload(workload) {
+        Ok(resolved) => {
+            if resolved.manifest.id.as_str() != workload.id.as_str() {
+                diagnostics.push(workload_ref_unresolved_diagnostic(
+                    workload,
+                    ValidationDetail::Field {
+                        field: workload_ref_field(&workload.id, "id"),
+                    },
+                ));
+                return;
+            }
+            if resolved.manifest.self_hash != workload.manifest_hash {
+                diagnostics.push(workload_ref_unresolved_diagnostic(
+                    workload,
+                    ValidationDetail::HashMismatch {
+                        expected: workload.manifest_hash,
+                        observed: resolved.manifest.self_hash,
+                    },
+                ));
+            }
+        }
+        Err(ArtifactResolveError::HashMismatch {
+            expected, observed, ..
+        }) => diagnostics.push(workload_ref_unresolved_diagnostic(
+            workload,
+            ValidationDetail::HashMismatch { expected, observed },
+        )),
+        Err(ArtifactResolveError::NotFound { .. })
+        | Err(ArtifactResolveError::Unsupported { .. }) => {
+            diagnostics.push(workload_ref_unresolved_diagnostic(
+                workload,
+                ValidationDetail::Field {
+                    field: FieldPath::from(format!("workloads.{}", workload.id)),
+                },
+            ));
+        }
+    }
+}
+
+fn validate_golden_vector_ref(
+    resolver: &dyn ArtifactResolver,
+    vector: &GoldenVectorRef,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match resolver.resolve_golden_vector(vector) {
+        Ok(resolved) => {
+            let observed = sha256_hash(&resolved.bytes);
+            if observed != vector.manifest_hash {
+                diagnostics.push(golden_vector_digest_mismatch_diagnostic(
+                    vector,
+                    vector.manifest_hash,
+                    observed,
+                ));
+            }
+        }
+        Err(ArtifactResolveError::NotFound { .. })
+        | Err(ArtifactResolveError::Unsupported { .. }) => {
+            diagnostics.push(golden_vector_missing_diagnostic(vector));
+        }
+        Err(ArtifactResolveError::HashMismatch {
+            expected, observed, ..
+        }) => diagnostics.push(golden_vector_digest_mismatch_diagnostic(
+            vector, expected, observed,
+        )),
+    }
+}
+
+fn workload_ref_unresolved_diagnostic(
+    workload: &WorkloadManifestRef,
+    detail: ValidationDetail,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Workload,
+        ValidationCode::WorkloadRefUnresolved {
+            workload: workload.id.clone(),
+        },
+        detail,
+        vec![EvidenceRef {
+            kind: "workload_ref".to_owned(),
+            reference: workload.id.to_string(),
+            hash: Some(workload.manifest_hash),
+        }],
+    )
+}
+
+fn workload_ref_field(workload: &WorkloadId, field: &'static str) -> FieldPath {
+    FieldPath::from(format!("workloads.{workload}.{field}"))
+}
+
+fn golden_vector_missing_diagnostic(vector: &GoldenVectorRef) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::GoldenVector,
+        ValidationCode::GoldenVectorMissing {
+            vector: vector.id.clone(),
+        },
+        ValidationDetail::Field {
+            field: FieldPath::from(format!("golden_vectors.{}", vector.id.0)),
+        },
+        vec![golden_vector_evidence(vector)],
+    )
+}
+
+fn golden_vector_digest_mismatch_diagnostic(
+    vector: &GoldenVectorRef,
+    expected: Hash256,
+    observed: Hash256,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::hard(
+        ValidationOrigin::GoldenVector,
+        ValidationCode::GoldenVectorDigestMismatch {
+            vector: vector.id.clone(),
+            expected,
+            observed,
+        },
+        ValidationDetail::HashMismatch { expected, observed },
+        vec![golden_vector_evidence(vector)],
+    )
+}
+
+fn golden_vector_evidence(vector: &GoldenVectorRef) -> EvidenceRef {
+    EvidenceRef {
+        kind: "golden_vector_ref".to_owned(),
+        reference: vector.id.0.clone(),
+        hash: Some(vector.manifest_hash),
+    }
+}
+
 fn assembled_lowering_manifest(lowering: &TargetDataLoweringArtifact) -> LoweringManifest {
     LoweringManifest {
         shard_refs: lowering.shards.iter().map(lowering_shard_ref).collect(),
@@ -2092,6 +2334,18 @@ pub fn validate_artifact_and_request<'a>(
         ));
     }
 
+    validate_hint_provenance(&inputs, effective_artifact, &mut diagnostics);
+    validate_workload_and_golden_refs(&inputs, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(stage0_failure(
+            &inputs,
+            Some(effective_artifact),
+            Some(calibration),
+            diagnostics,
+            compatibility.compatibility_section(),
+        ));
+    }
+
     let input_hashes = compute_validated_input_hashes_for_artifact(
         &inputs,
         effective_artifact,
@@ -2313,8 +2567,10 @@ fn sha256_hash(bytes: &[u8]) -> Hash256 {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
 
+    use gbf_artifact::BuildConstraintEntry;
     use gbf_artifact::aux::{
         ArtifactAux, ConformanceEnvelopeId, ConformanceEnvelopeRef, LexicalSpecId, LexicalSpecRef,
         ReferenceObservationCacheId, ReferenceObservationCacheRef, SemanticCheckpointSchemaId,
@@ -2335,15 +2591,16 @@ mod tests {
         CanonicalTensorPayload, CanonicalTensorShape, TensorElementType,
     };
     use gbf_foundation::{
-        BlobCodec, CompileProfileId, KernelCalibrationId, PackerVersion, TargetProfileId,
+        BlobCodec, CompileProfileId, KernelCalibrationId, PackerVersion, TargetFamilyId,
+        TargetProfileId,
     };
     use gbf_hw::calibration::CalibrationSetRef;
     use gbf_hw::target::dmg_mbc5_8mib_128kib;
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationConfidenceClass,
-        CalibrationConfidenceRequirement, CompileObjective, CompilerFeature,
-        DEFAULT_COMPILE_PROFILE_ID, RiskPolicy, RuntimeMode, ServiceLevelObjective,
-        canonical_compile_profile_specs,
+        CalibrationConfidenceRequirement, CompileKnobId, CompileObjective, CompilerFeature,
+        ConstraintValue, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile, RiskPolicy, RuntimeMode,
+        ServiceLevelObjective, canonical_compile_profile_specs,
     };
     use gbf_workload::{GoldenVectorId, WorkloadLocator};
 
@@ -2595,6 +2852,138 @@ mod tests {
                 }
             )
         });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_hint_provenance_inconsistent() {
+        let mut hint_bundle = HintBundle::empty();
+        hint_bundle
+            .constraints
+            .entries
+            .push(build_constraint_with_scope(EvidenceScope::TargetFamily {
+                family: TargetFamilyId::from("cgb"),
+            }));
+        let fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::HintProvenanceInconsistent {
+                    fact: TraceProbeId(0)
+                }
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_workload_ref_unresolved() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .resolver
+            .missing_workloads
+            .insert(WorkloadId::from("workload.fixture"));
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::WorkloadRefUnresolved { workload }
+                    if workload == &WorkloadId::from("workload.fixture")
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_workload_ref_manifest_hash_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.resolver.workload_hash_mismatches.insert(
+            WorkloadId::from("workload.fixture"),
+            (hash(0x06), hash(0x60)),
+        );
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::WorkloadRefUnresolved { workload }
+                    if workload == &WorkloadId::from("workload.fixture")
+            )
+        });
+        assert!(
+            failure.diagnostics.iter().any(|diagnostic| matches!(
+                &diagnostic.detail,
+                ValidationDetail::HashMismatch {
+                    expected,
+                    observed,
+                } if *expected == hash(0x06) && *observed == hash(0x60)
+            )),
+            "diagnostics were {:#?}",
+            failure.diagnostics
+        );
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_golden_vector_missing() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .resolver
+            .missing_golden_vectors
+            .insert(GoldenVectorId("golden.fixture".to_owned()));
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::GoldenVectorMissing { vector }
+                    if vector == &GoldenVectorId("golden.fixture".to_owned())
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_golden_vector_digest_mismatch() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.resolver.golden_vector_bytes.insert(
+            GoldenVectorId("golden.fixture".to_owned()),
+            b"mutated golden vector".to_vec(),
+        );
+        let expected = golden_vector_hash();
+        let observed = sha256_hash(b"mutated golden vector");
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::GoldenVectorDigestMismatch {
+                    vector,
+                    expected: actual_expected,
+                    observed: actual_observed,
+                } if vector == &GoldenVectorId("golden.fixture".to_owned())
+                    && actual_expected == &expected
+                    && actual_observed == &observed
+            )
+        });
+    }
+
+    #[test]
+    fn f_b2_validate_workload_ref_resolution_uses_artifact_resolver_trait() {
+        let fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+
+        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+
+        assert_eq!(fixture.resolver.workload_resolve_calls.get(), 1);
+        assert_eq!(fixture.resolver.golden_vector_resolve_calls.get(), 1);
     }
 
     #[test]
@@ -3305,16 +3694,30 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_validate_defers_golden_vector_hash_mismatch_to_class9() {
+    fn f_b2_validate_resolver_reported_golden_vector_hash_mismatch_is_class9() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture.artifact.aux.golden_vectors = vec![golden_vector()];
         fixture.resolver.golden_vector_hash_mismatches.insert(
             GoldenVectorId("golden.fixture".to_owned()),
-            (hash(0x07), hash(0x70)),
+            (golden_vector_hash(), hash(0x70)),
         );
         fixture.refresh_transport_hash();
 
-        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::GoldenVectorDigestMismatch {
+                    vector,
+                    expected,
+                    observed,
+                } if vector == &GoldenVectorId("golden.fixture".to_owned())
+                    && expected == &golden_vector_hash()
+                    && observed == &hash(0x70)
+            )
+        });
     }
 
     #[test]
@@ -3378,7 +3781,7 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_validate_defers_unsupported_golden_vector_sidecar_ref_to_class9() {
+    fn f_b2_validate_unsupported_golden_vector_sidecar_ref_is_class9_missing() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture.artifact.aux.golden_vectors = vec![golden_vector()];
         fixture
@@ -3387,7 +3790,16 @@ mod tests {
             .insert(GoldenVectorId("golden.fixture".to_owned()));
         fixture.refresh_transport_hash();
 
-        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::GoldenVectorMissing { vector }
+                    if vector == &GoldenVectorId("golden.fixture".to_owned())
+            )
+        });
     }
 
     #[test]
@@ -3574,9 +3986,14 @@ mod tests {
         missing_sidecars: BTreeSet<SidecarRef>,
         sidecar_bytes: BTreeMap<SidecarRef, Vec<u8>>,
         sidecar_hash_mismatches: BTreeMap<SidecarRef, (Hash256, Hash256)>,
+        missing_workloads: BTreeSet<WorkloadId>,
+        workload_hash_mismatches: BTreeMap<WorkloadId, (Hash256, Hash256)>,
+        workload_resolve_calls: Cell<usize>,
+        golden_vector_bytes: BTreeMap<GoldenVectorId, Vec<u8>>,
         missing_golden_vectors: BTreeSet<GoldenVectorId>,
         golden_vector_hash_mismatches: BTreeMap<GoldenVectorId, (Hash256, Hash256)>,
         unsupported_golden_vectors: BTreeSet<GoldenVectorId>,
+        golden_vector_resolve_calls: Cell<usize>,
     }
 
     impl ArtifactResolver for RecordingResolver {
@@ -3626,11 +4043,33 @@ mod tests {
             &self,
             workload: &WorkloadManifestRef,
         ) -> Result<ResolvedWorkload, ArtifactResolveError> {
+            self.workload_resolve_calls
+                .set(self.workload_resolve_calls.get() + 1);
+            if self.missing_workloads.contains(&workload.id) {
+                return Err(ArtifactResolveError::not_found(format!(
+                    "workload:{}",
+                    workload.id
+                )));
+            }
+            let self_hash = if let Some((expected, observed)) =
+                self.workload_hash_mismatches.get(&workload.id)
+            {
+                if expected != &workload.manifest_hash {
+                    return Err(ArtifactResolveError::HashMismatch {
+                        reference: format!("workload:{}", workload.id),
+                        expected: *expected,
+                        observed: *observed,
+                    });
+                }
+                *observed
+            } else {
+                workload.manifest_hash
+            };
             Ok(ResolvedWorkload {
                 manifest: WorkloadManifest {
                     id: workload.id.clone(),
                     schema_version: gbf_workload::WorkloadSchemaVersion { epoch: 1, minor: 0 },
-                    self_hash: workload.manifest_hash,
+                    self_hash,
                     golden_vectors: Vec::new(),
                     future_fields: gbf_workload::WorkloadFuturePlaceholder::default(),
                 },
@@ -3641,6 +4080,8 @@ mod tests {
             &self,
             vector: &GoldenVectorRef,
         ) -> Result<ResolvedGoldenVector, ArtifactResolveError> {
+            self.golden_vector_resolve_calls
+                .set(self.golden_vector_resolve_calls.get() + 1);
             if self.missing_golden_vectors.contains(&vector.id) {
                 return Err(ArtifactResolveError::not_found(format!(
                     "golden_vector:{}",
@@ -3660,9 +4101,15 @@ mod tests {
                     vector.id.0
                 )));
             }
+            let bytes = self
+                .golden_vector_bytes
+                .get(&vector.id)
+                .cloned()
+                .unwrap_or_else(|| golden_vector_bytes().to_vec());
+            let manifest_hash = sha256_hash(&bytes);
             Ok(ResolvedGoldenVector {
-                bytes: Vec::new(),
-                manifest_hash: vector.manifest_hash,
+                bytes,
+                manifest_hash,
             })
         }
     }
@@ -3775,7 +4222,27 @@ mod tests {
     fn golden_vector() -> GoldenVectorRef {
         GoldenVectorRef {
             id: GoldenVectorId("golden.fixture".to_owned()),
-            manifest_hash: hash(0x07),
+            manifest_hash: golden_vector_hash(),
+        }
+    }
+
+    fn golden_vector_bytes() -> &'static [u8] {
+        b"golden vector fixture"
+    }
+
+    fn golden_vector_hash() -> Hash256 {
+        sha256_hash(golden_vector_bytes())
+    }
+
+    fn build_constraint_with_scope(scope: EvidenceScope) -> BuildConstraintEntry {
+        BuildConstraintEntry {
+            knob: CompileKnobId::Placement,
+            path: None,
+            value: ConstraintValue::PlacementProfile {
+                value: PlacementProfile::Budgeted,
+            },
+            evidence: Vec::new(),
+            scope,
         }
     }
 
