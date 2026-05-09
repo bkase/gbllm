@@ -90,7 +90,13 @@ pub fn resolve_policy(
 
     let mut frames = match initial_constraint_frames(validation) {
         Ok(frames) => frames,
-        Err(diagnostic) => return Err(finalized_failure(validation, diagnostic)),
+        Err(diagnostic) => {
+            return Err(finalized_failure(
+                validation,
+                diagnostic,
+                HintConsumptionSection::default(),
+            ));
+        }
     };
     frames.push(compile_request_frame(validation));
     let profile_frame_index = profile_frame_index(&frames);
@@ -102,7 +108,11 @@ pub fn resolve_policy(
             index > profile_frame_index,
             matches!(frame.source, PolicySource::CompileRequestOverride),
         ) {
-            return Err(finalized_failure(validation, diagnostic));
+            return Err(finalized_failure(
+                validation,
+                diagnostic,
+                state.hint_consumption.clone(),
+            ));
         }
     }
 
@@ -114,7 +124,11 @@ pub fn resolve_policy(
         calibration_frame_index > profile_frame_index,
         false,
     ) {
-        return Err(finalized_failure(validation, diagnostic));
+        return Err(finalized_failure(
+            validation,
+            diagnostic,
+            state.hint_consumption.clone(),
+        ));
     }
 
     let hint_consumption = state.hint_consumption.clone();
@@ -717,12 +731,13 @@ fn success_report(
 
 fn failure_report(
     validation: &ValidationProduct<'_>,
+    hint_consumption: HintConsumptionSection,
     diagnostics: Vec<ValidationDiagnostic>,
 ) -> ReportEnvelope<PolicyResolutionReportBody> {
     policy_report(
         validation,
         None,
-        HintConsumptionSection::default(),
+        hint_consumption,
         diagnostics,
         ReportOutcome::Failed,
     )
@@ -731,9 +746,10 @@ fn failure_report(
 fn finalized_failure(
     validation: &ValidationProduct<'_>,
     diagnostic: ValidationDiagnostic,
+    hint_consumption: HintConsumptionSection,
 ) -> PolicyResolutionStageFailure {
     let diagnostics = vec![diagnostic];
-    let report = failure_report(validation, diagnostics.clone());
+    let report = failure_report(validation, hint_consumption, diagnostics.clone());
     let (report, _, _) = finalize_report(report);
     PolicyResolutionStageFailure {
         report,
@@ -2223,6 +2239,75 @@ mod tests {
                 }
             )
         });
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_failure_preserves_prior_hint_constraint_consumption() {
+        let mut fixture = Fixture::new(BRINGUP_COMPILE_PROFILE_ID);
+        fixture
+            .artifact
+            .hint_bundle
+            .constraints
+            .entries
+            .push(BuildConstraintEntry {
+                provenance_id: TraceProbeId(302),
+                knob: CompileKnobId::Placement,
+                path: None,
+                value: ConstraintValue::PlacementProfile {
+                    value: PlacementProfile::StrictOnePerBank,
+                },
+                evidence: Vec::new(),
+                scope: EvidenceScope::WholeArtifact,
+            });
+        fixture
+            .artifact
+            .hint_bundle
+            .constraints
+            .entries
+            .push(BuildConstraintEntry {
+                provenance_id: TraceProbeId(303),
+                knob: CompileKnobId::Placement,
+                path: None,
+                value: ConstraintValue::PlacementProfile {
+                    value: PlacementProfile::PackedExperts,
+                },
+                evidence: Vec::new(),
+                scope: EvidenceScope::WholeArtifact,
+            });
+        fixture.refresh_transport_hash();
+
+        let failure = resolve_policy(&fixture.validation()).expect_err("later hint rejects");
+        assert_policy_failure(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::PolicyKnobLockedAndOverridden {
+                    knob: CompileKnobId::Placement
+                }
+            )
+        });
+        assert!(failure.report.body.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                ValidationCode::PolicyKnobLockedAndOverridden {
+                    knob: CompileKnobId::Placement
+                }
+            )
+        }));
+        assert_eq!(
+            failure
+                .report
+                .body
+                .hint_consumption
+                .constraints_enforced
+                .len(),
+            1
+        );
+        assert_eq!(
+            failure.report.body.hint_consumption.constraints_enforced[0]
+                .constraint
+                .as_str(),
+            "hint_bundle.constraints.entries.0"
+        );
     }
 
     #[test]
