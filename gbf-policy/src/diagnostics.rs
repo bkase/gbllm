@@ -216,6 +216,7 @@ pub enum ValidationCode {
         slot: BudgetSlotId,
         payload_bytes: u32,
         cap_bytes: u32,
+        excess_bytes: u32,
     },
     BudgetCommonBankExceedsCap {
         assigned_bytes: u32,
@@ -325,13 +326,14 @@ impl BudgetFailure {
                 slot,
                 payload_bytes,
                 cap_bytes,
-                ..
+                excess_bytes,
             } => ValidationCode::BudgetExpertExceedsSlot {
                 layer: *layer,
                 expert: *expert,
                 slot: *slot,
                 payload_bytes: *payload_bytes,
                 cap_bytes: *cap_bytes,
+                excess_bytes: *excess_bytes,
             },
             Self::CommonBankExceedsCap {
                 assigned_bytes,
@@ -930,6 +932,7 @@ mod tests {
                 slot: BudgetSlotId::new(3),
                 payload_bytes: 9000,
                 cap_bytes: 8192,
+                excess_bytes: 808,
             },
             ValidationCode::BudgetCommonBankExceedsCap {
                 assigned_bytes: 20_000,

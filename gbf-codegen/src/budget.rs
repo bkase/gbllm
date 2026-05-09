@@ -3,6 +3,7 @@
 //! This module wires the failure taxonomy, Stage 2 invocation input, and the
 //! static budget report path used by F-B4.
 
+use std::collections::BTreeSet;
 use std::num::NonZeroU8;
 
 use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, TernaryWeightPlan, WeightEncoding};
@@ -481,7 +482,9 @@ pub struct PerBankEntry {
     pub reserved_slack: u16,
     pub effective_cap_bytes: i64,
     pub assigned_bytes: u32,
+    pub residual_bytes: i32,
     pub assigned_components: Vec<BudgetComponentRef>,
+    pub placement_caps: BTreeSet<PlacementProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -819,7 +822,9 @@ fn project_budget(
             reserved_slack: slot.reserved_slack,
             effective_cap_bytes: rom_slot_effective_cap_bytes(slot),
             assigned_bytes: 0,
+            residual_bytes: residual_bytes_for_assignment(slot, 0),
             assigned_components: Vec::new(),
+            placement_caps: slot.placement_caps.clone(),
         })
         .collect::<Vec<_>>();
     per_bank_occupancy.sort_by_key(|entry| entry.slot);
@@ -972,11 +977,14 @@ fn place_experts_by_static_model(
                 per_expert_payload[payload.payload_index].assigned_slot = Some(slot.slot);
                 per_expert_payload[payload.payload_index].placement_status =
                     ExpertPlacementStatus::Assigned;
-                slot.assigned_bytes = slot.assigned_bytes.saturating_add(payload.payload_bytes);
-                slot.assigned_components.push(BudgetComponentRef::Expert {
-                    layer: payload.layer,
-                    expert: payload.expert,
-                });
+                assign_component_to_slot(
+                    slot,
+                    payload.payload_bytes,
+                    BudgetComponentRef::Expert {
+                        layer: payload.layer,
+                        expert: payload.expert,
+                    },
+                );
             }
             Err(ExpertPlacementFailure::ExceedsEligibleSlotCap { slot_index }) => {
                 let failure = expert_placement_failure(
@@ -989,11 +997,14 @@ fn place_experts_by_static_model(
                 per_expert_payload[payload.payload_index].assigned_slot = Some(slot.slot);
                 per_expert_payload[payload.payload_index].placement_status =
                     ExpertPlacementStatus::Assigned;
-                slot.assigned_bytes = slot.assigned_bytes.saturating_add(payload.payload_bytes);
-                slot.assigned_components.push(BudgetComponentRef::Expert {
-                    layer: payload.layer,
-                    expert: payload.expert,
-                });
+                assign_component_to_slot(
+                    slot,
+                    payload.payload_bytes,
+                    BudgetComponentRef::Expert {
+                        layer: payload.layer,
+                        expert: payload.expert,
+                    },
+                );
                 failures.push(failure);
             }
             Err(failure) => {
@@ -1216,15 +1227,13 @@ fn place_common_component(
             && entry_has_residual_capacity(entry, component_bytes)
     }) {
         let slot = &mut per_bank_occupancy[slot_index];
-        slot.assigned_bytes = slot.assigned_bytes.saturating_add(component_bytes);
-        slot.assigned_components.push(component);
+        assign_component_to_slot(slot, component_bytes, component);
         None
     } else if let Some(slot_index) = per_bank_occupancy.iter().position(|entry| {
         common_component_slot_eligible(runtime_chrome_budget, entry, profile, bank0_compatible)
     }) {
         let slot = &mut per_bank_occupancy[slot_index];
-        slot.assigned_bytes = slot.assigned_bytes.saturating_add(component_bytes);
-        slot.assigned_components.push(component);
+        assign_component_to_slot(slot, component_bytes, component);
         let slot_cap_bytes = u32::try_from(slot.effective_cap_bytes.max(0)).unwrap_or(u32::MAX);
         Some(BudgetFailure::CommonBankExceedsCap {
             assigned_bytes: slot.assigned_bytes,
@@ -1304,6 +1313,32 @@ fn slot_accepts_profile(
 
 fn entry_has_residual_capacity(entry: &PerBankEntry, payload_bytes: u32) -> bool {
     i64::from(entry.assigned_bytes) + i64::from(payload_bytes) <= entry.effective_cap_bytes
+}
+
+fn assign_component_to_slot(
+    slot: &mut PerBankEntry,
+    component_bytes: u32,
+    component: BudgetComponentRef,
+) {
+    slot.assigned_bytes = slot.assigned_bytes.saturating_add(component_bytes);
+    slot.residual_bytes = residual_bytes_for_entry(slot);
+    slot.assigned_components.push(component);
+}
+
+fn residual_bytes_for_entry(entry: &PerBankEntry) -> i32 {
+    residual_i32(entry.effective_cap_bytes - i64::from(entry.assigned_bytes))
+}
+
+fn residual_bytes_for_assignment(slot: &RomBudgetSlot, assigned_bytes: u32) -> i32 {
+    residual_i32(rom_slot_effective_cap_bytes(slot) - i64::from(assigned_bytes))
+}
+
+fn residual_i32(residual: i64) -> i32 {
+    i32::try_from(residual).unwrap_or(if residual.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 pub fn expert_payload_bytes(expert: &ExpertProjection) -> Result<ByteBudget, BudgetMathError> {
@@ -1958,6 +1993,61 @@ mod tests {
             runtime_chrome_budget: Some(runtime_chrome_budget),
             target_profile: &dmg_mbc5_8mib_128kib(),
         })
+    }
+
+    #[test]
+    fn f_b4_budget_per_expert_payload_covers_every_expert() {
+        let policy = policy_with_placement(PlacementProfile::Budgeted);
+        let budget = runtime_budget_with_slots(vec![
+            expert_slot(1, 20, 0, [PlacementProfile::Budgeted]),
+            common_slot(2, 64, [PlacementProfile::Budgeted]),
+            expert_slot(3, 64, 0, [PlacementProfile::Budgeted]),
+        ]);
+        let view = budget_view_with_experts(vec![
+            expert_with_payload(0, 0, 10),
+            expert_with_payload(0, 1, 11),
+        ]);
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        assert_eq!(report.report.body.projections.per_expert_payload.len(), 2);
+        assert_eq!(
+            report
+                .report
+                .body
+                .projections
+                .per_expert_payload
+                .iter()
+                .map(|entry| (entry.layer, entry.expert, entry.payload_bytes))
+                .collect::<Vec<_>>(),
+            vec![
+                (LayerId::new(0), ExpertId::new(0), 10),
+                (LayerId::new(0), ExpertId::new(1), 11),
+            ]
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy.len(),
+            budget.rom_slots.len()
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].placement_caps,
+            BTreeSet::from([PlacementProfile::Budgeted])
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].assigned_components,
+            vec![BudgetComponentRef::Expert {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(0),
+            }]
+        );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[2].assigned_components,
+            vec![BudgetComponentRef::Expert {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(1),
+            }]
+        );
     }
 
     #[test]
@@ -2990,12 +3080,73 @@ mod tests {
             report.report.body.projections.per_bank_occupancy[0].effective_cap_bytes,
             -8
         );
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].residual_bytes,
+            -14
+        );
         assert!(matches!(
             report.report.body.decision.failures[0],
             BudgetFailure::ExpertExceedsSlot { .. }
         ));
         assert_eq!(budget.rom_slots[0].usable_bytes, 8);
         assert_eq!(budget.rom_slots[0].reserved_slack, 16);
+    }
+
+    #[test]
+    fn f_b4_budget_rejects_expert_exceeds_slot() {
+        let policy = policy_with_placement(PlacementProfile::StrictOnePerBank);
+        let budget = runtime_budget_with_slots(vec![expert_slot(
+            7,
+            16,
+            0,
+            [PlacementProfile::StrictOnePerBank],
+        )]);
+        let view = budget_view_with_experts(vec![expert_with_payload(0, 0, 20)]);
+
+        let report = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            report.report.body.projections.per_bank_occupancy[0].residual_bytes,
+            -4
+        );
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::ExpertExceedsSlot {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(0),
+                slot: BudgetSlotId::new(7),
+                payload_bytes: 20,
+                cap_bytes: 16,
+                excess_bytes: 4,
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetExpertExceedsSlot {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(0),
+                slot: BudgetSlotId::new(7),
+                payload_bytes: 20,
+                cap_bytes: 16,
+                excess_bytes: 4,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&report.report.body.diagnostics[0].code)
+                .expect("diagnostic code serializes"),
+            serde_json::json!({
+                "kind": "BudgetExpertExceedsSlot",
+                "fields": {
+                    "layer": 0,
+                    "expert": 0,
+                    "slot": 7,
+                    "payload_bytes": 20,
+                    "cap_bytes": 16,
+                    "excess_bytes": 4
+                }
+            })
+        );
     }
 
     #[test]
@@ -3697,6 +3848,7 @@ mod tests {
                 slot: BudgetSlotId::new(7),
                 payload_bytes: 17_000,
                 cap_bytes: 16_128,
+                excess_bytes: 872,
             }
         );
         assert_eq!(
