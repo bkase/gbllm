@@ -3,7 +3,6 @@
 //! This module wires the failure taxonomy, Stage 2 invocation input, and the
 //! static budget report path used by F-B4.
 
-use std::collections::BTreeSet;
 use std::num::NonZeroU8;
 
 use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, TernaryWeightPlan, WeightEncoding};
@@ -15,8 +14,8 @@ use gbf_policy::{
 };
 use gbf_policy::{CompileKnobId, ReductionPlanCeiling};
 use gbf_report::{
-    ReportBody, ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report,
-    canonicalize_value, compute_self_hash,
+    ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report, canonicalize_value,
+    compute_self_hash,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,30 +26,18 @@ pub use gbf_policy::{
     budget_failure_diagnostics, budget_failure_diagnostics_with_provenance,
     budget_failure_matches_diagnostic, budget_failure_validation_code,
 };
-use gbf_report::report_schemas::static_budget_v1::{
-    decision_interpretation_matches_fits, static_fit_interpretation_for_fits,
+pub use gbf_report::report_schemas::static_budget_v1::{
+    AccumulatorBound, BudgetComponentRef, BudgetDecisionSection, BudgetIdentitySection,
+    BudgetPolicySection, BudgetProjectionSection, CommonBankFootprintSection,
+    ExpertPlacementStatus, PerBankEntry, PerExpertEntry, ProjectedSize, ProjectedSizeSection,
+    ProjectedSizeSource, ProjectedSwitchCount, ProjectedSwitchCountSection, RoutingModelSection,
+    RuntimeChromeBudgetSection, StaticBudgetReportBody, StaticPlacementModel, UnassignedBecause,
+    decision_interpretation_matches_fits,
+    runtime_chrome_budget_hash as runtime_chrome_budget_section_hash,
+    static_fit_interpretation_for_fits,
 };
 
 use crate::policy::ResolvedPolicyProduct;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum StaticPlacementModel {
-    StrictOnePerBank,
-    BudgetedFirstFit,
-    PackedExpertsFirstFitDecreasing,
-}
-
-impl StaticPlacementModel {
-    #[must_use]
-    pub fn for_profile(profile: PlacementProfile) -> Self {
-        match profile {
-            PlacementProfile::StrictOnePerBank => Self::StrictOnePerBank,
-            PlacementProfile::Budgeted => Self::BudgetedFirstFit,
-            PlacementProfile::PackedExperts => Self::PackedExpertsFirstFitDecreasing,
-        }
-    }
-}
 
 #[must_use]
 pub fn placement_model_for_profile(profile: PlacementProfile) -> StaticPlacementModel {
@@ -332,254 +319,6 @@ pub struct StaticBudgetReport {
     pub static_budget_canonical_bytes_hash: Hash256,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StaticBudgetReportBody {
-    pub identity: BudgetIdentitySection,
-    pub policy: BudgetPolicySection,
-    pub runtime_chrome_budget: Option<RuntimeChromeBudget>,
-    pub projections: BudgetProjectionSection,
-    pub decision: BudgetDecisionSection,
-    pub diagnostics: Vec<ValidationDiagnostic>,
-}
-
-impl ReportBody for StaticBudgetReportBody {
-    const REPORT_TYPE: &'static str = "StaticBudgetReport";
-    const SCHEMA_ID: &'static str = "static_budget.v1";
-    const SCHEMA_VERSION: &'static str = "1.0.0";
-
-    fn validate_semantics(&self, outcome: ReportOutcome) -> Result<(), Vec<ValidationDiagnostic>> {
-        let missing_runtime_chrome_budget_failure = BudgetFailure::MissingRuntimeChromeBudget;
-        let has_exact_missing_budget_diagnostic = self.diagnostics.len() == 1
-            && budget_failure_matches_diagnostic(
-                &missing_runtime_chrome_budget_failure,
-                &self.diagnostics[0],
-            );
-        let has_any_missing_budget_diagnostic = self.diagnostics.iter().any(|diagnostic| {
-            matches!(
-                diagnostic.code,
-                ValidationCode::BudgetMissingRuntimeChromeBudget
-            )
-        });
-        let has_exact_missing_budget_failure =
-            self.decision.failures.as_slice() == [BudgetFailure::MissingRuntimeChromeBudget];
-        let has_any_missing_budget_failure = self
-            .decision
-            .failures
-            .iter()
-            .any(|failure| matches!(failure, BudgetFailure::MissingRuntimeChromeBudget));
-        let is_missing_budget_shape = self.identity.runtime_chrome_budget_hash.is_none()
-            && self.runtime_chrome_budget.is_none();
-
-        if is_missing_budget_shape {
-            if outcome != ReportOutcome::Failed
-                || !has_exact_missing_budget_diagnostic
-                || !has_exact_missing_budget_failure
-            {
-                return Err(self.diagnostics.clone());
-            }
-        } else if has_any_missing_budget_diagnostic
-            || has_any_missing_budget_failure
-            || self.identity.runtime_chrome_budget_hash.is_none()
-            || self.runtime_chrome_budget.is_none()
-        {
-            return Err(self.diagnostics.clone());
-        }
-
-        if let (Some(runtime_chrome_budget), Some(expected_runtime_chrome_budget_hash)) = (
-            self.runtime_chrome_budget.as_ref(),
-            self.identity.runtime_chrome_budget_hash,
-        ) {
-            let observed_hash = match runtime_chrome_budget_hash(runtime_chrome_budget) {
-                Ok(hash) => hash,
-                Err(_) => return Err(self.diagnostics.clone()),
-            };
-            if observed_hash != expected_runtime_chrome_budget_hash {
-                return Err(self.diagnostics.clone());
-            }
-        }
-
-        if self.decision.fits != self.decision.failures.is_empty() {
-            return Err(self.diagnostics.clone());
-        }
-
-        if !decision_interpretation_matches_fits(self.decision.fits, self.decision.interpretation) {
-            return Err(self.diagnostics.clone());
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BudgetIdentitySection {
-    pub artifact_core_hash: Hash256,
-    pub quant_graph_hash: Hash256,
-    pub policy_resolution_self_hash: Hash256,
-    pub runtime_chrome_budget_hash: Option<Hash256>,
-    pub target_profile_hash: Hash256,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BudgetPolicySection {
-    pub placement_profile: PlacementProfile,
-    pub objective_hash: Hash256,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BudgetProjectionSection {
-    pub per_expert_payload: Vec<PerExpertEntry>,
-    pub per_bank_occupancy: Vec<PerBankEntry>,
-    pub common_bank_footprint: CommonBankFootprintSection,
-    pub accumulator_maxima: Vec<AccumulatorBound>,
-    pub projected_wram: ProjectedSizeSection,
-    pub projected_sram: ProjectedSizeSection,
-    pub projected_hram: ProjectedSizeSection,
-    pub projected_bank_switches_per_token: ProjectedSwitchCountSection,
-    pub projected_sram_page_switches_per_token: ProjectedSwitchCountSection,
-    pub routing_model: RoutingModelSection,
-}
-
-impl Default for BudgetProjectionSection {
-    fn default() -> Self {
-        Self {
-            per_expert_payload: Vec::new(),
-            per_bank_occupancy: Vec::new(),
-            common_bank_footprint: CommonBankFootprintSection::default(),
-            accumulator_maxima: Vec::new(),
-            projected_wram: ProjectedSizeSection::default(),
-            projected_sram: ProjectedSizeSection::default(),
-            projected_hram: ProjectedSizeSection::default(),
-            projected_bank_switches_per_token: ProjectedSwitchCountSection::default(),
-            projected_sram_page_switches_per_token: ProjectedSwitchCountSection::default(),
-            routing_model: RoutingModelSection {
-                kind: "not_evaluated_missing_runtime_chrome_budget".to_owned(),
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PerExpertEntry {
-    pub layer: LayerId,
-    pub expert: ExpertId,
-    pub payload_bytes: u32,
-    pub assigned_slot: Option<BudgetSlotId>,
-    pub placement_status: ExpertPlacementStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum ExpertPlacementStatus {
-    Assigned,
-    AssignedOverCap,
-    UnassignedNoEligibleSlots,
-    UnassignedStrictDistinctSlotsExhausted,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PerBankEntry {
-    pub slot: BudgetSlotId,
-    pub class: BudgetSlotClass,
-    pub usable_bytes: u32,
-    pub reserved_slack: u16,
-    pub effective_cap_bytes: i64,
-    pub assigned_bytes: u32,
-    pub residual_bytes: i32,
-    pub assigned_components: Vec<BudgetComponentRef>,
-    pub placement_caps: BTreeSet<PlacementProfile>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum BudgetComponentRef {
-    Expert { layer: LayerId, expert: ExpertId },
-    SharedKernel { id: KernelSpecId },
-    SharedLut { id: String },
-    SharedDenseFfn,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommonBankFootprintSection {
-    pub kernel_bytes: u32,
-    pub lut_bytes: u32,
-    pub shared_dense_ffn_bytes: Option<u32>,
-    pub aggregate_bytes: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccumulatorBound {
-    pub site: ReductionSiteId,
-    pub projected_max_abs: u64,
-    pub i16_safe: bool,
-    pub i32_safe: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectedSize {
-    pub peak_bytes: u32,
-    pub source: ProjectedSizeSource,
-}
-
-pub type ProjectedSizeSection = ProjectedSize;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum ProjectedSizeSource {
-    #[default]
-    StaticGraphProjection,
-    HintBundleConstraint,
-    CalibrationSamplingClosedForm,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectedSwitchCount {
-    pub upper_bound: u16,
-    pub expected_q16_16: Option<u32>,
-    pub decision_value: u16,
-    pub source: SwitchProjectionSource,
-}
-
-pub type ProjectedSwitchCountSection = ProjectedSwitchCount;
-
-impl Default for ProjectedSwitchCount {
-    fn default() -> Self {
-        Self {
-            upper_bound: 0,
-            expected_q16_16: None,
-            decision_value: 0,
-            source: SwitchProjectionSource::ConservativeStaticUpperBound,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RoutingModelSection {
-    pub kind: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BudgetDecisionSection {
-    /// True only when all Stage-2 necessary static checks pass. Later F-B10,
-    /// F-B12, F-B13, and final layout passes remain authoritative for final
-    /// deployability.
-    pub fits: bool,
-    pub interpretation: StaticFitInterpretation,
-    pub placement_model: StaticPlacementModel,
-    pub failures: Vec<BudgetFailure>,
-}
-
 pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
     inputs: BudgetInputs<'_, Q>,
 ) -> StaticBudgetReport {
@@ -593,7 +332,7 @@ pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
                     runtime_chrome_budget,
                     view.quant_graph_hash,
                     vec![failure],
-                    BudgetProjectionSection::default(),
+                    empty_projections_for_runtime_budget(runtime_chrome_budget),
                 ),
             },
             Err(error) => {
@@ -603,7 +342,7 @@ pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
                     runtime_chrome_budget,
                     quant_graph_hash,
                     vec![error.into_failure()],
-                    BudgetProjectionSection::default(),
+                    empty_projections_for_runtime_budget(runtime_chrome_budget),
                 )
             }
         },
@@ -625,9 +364,33 @@ pub fn produce_static_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
 pub fn runtime_chrome_budget_hash(
     budget: &RuntimeChromeBudget,
 ) -> Result<Hash256, serde_json::Error> {
-    let value = serde_json::to_value(budget)?;
-    let canonical = canonicalize_value(&value).expect("runtime chrome budget canonicalizes");
-    Ok(Hash256::from_bytes(Sha256::digest(canonical).into()))
+    let section = RuntimeChromeBudgetSection::from(budget);
+    runtime_chrome_budget_section_hash(&section)
+}
+
+fn empty_projections_for_runtime_budget(
+    runtime_chrome_budget: &RuntimeChromeBudget,
+) -> BudgetProjectionSection {
+    let mut per_bank_occupancy: Vec<PerBankEntry> = runtime_chrome_budget
+        .rom_slots
+        .iter()
+        .map(|slot| PerBankEntry {
+            slot: slot.id,
+            class: slot.class,
+            usable_bytes: slot.usable_bytes,
+            reserved_slack: slot.reserved_slack,
+            effective_cap_bytes: rom_slot_effective_cap_bytes(slot),
+            assigned_bytes: 0,
+            residual_bytes: residual_bytes_for_assignment(slot, 0),
+            assigned_components: Vec::new(),
+            placement_caps: slot.placement_caps.clone(),
+        })
+        .collect();
+    per_bank_occupancy.sort_by_key(|entry| entry.slot);
+    BudgetProjectionSection {
+        per_bank_occupancy,
+        ..BudgetProjectionSection::default()
+    }
 }
 
 #[must_use]
@@ -688,7 +451,7 @@ fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
                 Some(runtime_chrome_budget_hash(runtime_chrome_budget).expect("budget hashes")),
             ),
             policy: policy_section(inputs.policy),
-            runtime_chrome_budget: Some(runtime_chrome_budget.clone()),
+            runtime_chrome_budget: Some(RuntimeChromeBudgetSection::from(runtime_chrome_budget)),
             projections,
             decision: decision_section(
                 true,
@@ -723,7 +486,7 @@ fn budget_failure_report<Q: QuantGraphBudgetSource + ?Sized>(
             Some(runtime_chrome_budget_hash(runtime_chrome_budget).expect("budget hashes")),
         ),
         policy: policy_section(inputs.policy),
-        runtime_chrome_budget: Some(runtime_chrome_budget.clone()),
+        runtime_chrome_budget: Some(RuntimeChromeBudgetSection::from(runtime_chrome_budget)),
         projections,
         decision: decision_section(
             false,
@@ -851,6 +614,7 @@ fn project_budget(
             expert: expert.expert,
             payload_bytes,
             assigned_slot: None,
+            unassigned_because: Some(UnassignedBecause::NoEligibleSlots),
             placement_status: ExpertPlacementStatus::UnassignedNoEligibleSlots,
         });
         expert_payloads.push(ExpertPlacementPayload {
@@ -975,6 +739,7 @@ fn place_experts_by_static_model(
             Ok(slot_index) => {
                 let slot = &mut per_bank_occupancy[slot_index];
                 per_expert_payload[payload.payload_index].assigned_slot = Some(slot.slot);
+                per_expert_payload[payload.payload_index].unassigned_because = None;
                 per_expert_payload[payload.payload_index].placement_status =
                     ExpertPlacementStatus::Assigned;
                 assign_component_to_slot(
@@ -995,6 +760,7 @@ fn place_experts_by_static_model(
                 );
                 let slot = &mut per_bank_occupancy[slot_index];
                 per_expert_payload[payload.payload_index].assigned_slot = Some(slot.slot);
+                per_expert_payload[payload.payload_index].unassigned_because = None;
                 per_expert_payload[payload.payload_index].placement_status =
                     ExpertPlacementStatus::AssignedOverCap;
                 assign_component_to_slot(
@@ -1010,6 +776,8 @@ fn place_experts_by_static_model(
             Err(failure) => {
                 per_expert_payload[payload.payload_index].placement_status =
                     expert_unassigned_status(failure);
+                per_expert_payload[payload.payload_index].unassigned_because =
+                    expert_unassigned_because(failure);
                 failures.push(expert_placement_failure(
                     failure,
                     profile,
@@ -1082,6 +850,16 @@ const fn expert_unassigned_status(failure: ExpertPlacementFailure) -> ExpertPlac
         ExpertPlacementFailure::ExceedsEligibleSlotCap { .. } => {
             ExpertPlacementStatus::AssignedOverCap
         }
+    }
+}
+
+const fn expert_unassigned_because(failure: ExpertPlacementFailure) -> Option<UnassignedBecause> {
+    match failure {
+        ExpertPlacementFailure::NoEligibleSlots => Some(UnassignedBecause::NoEligibleSlots),
+        ExpertPlacementFailure::StrictDistinctSlotsExhausted => {
+            Some(UnassignedBecause::StrictDistinctSlotsExhausted)
+        }
+        ExpertPlacementFailure::ExceedsEligibleSlotCap { .. } => None,
     }
 }
 
@@ -1640,6 +1418,7 @@ mod tests {
         load_compile_profile_spec,
     };
     use gbf_policy::{CalibrationConfidenceRequirement, CompileObjective, ServiceLevelObjective};
+    use gbf_report::ReportBody;
     use gbf_report::ReportOutcome;
     use gbf_report::report_schemas::policy_resolution_v1::{
         ArtifactIdentitySection, CompileRequestSection, HintConsumptionSection,
@@ -3245,7 +3024,7 @@ mod tests {
         assert_eq!(report.report.outcome, ReportOutcome::Passed);
         assert_eq!(
             report.report.body.runtime_chrome_budget,
-            Some(budget.clone())
+            Some(RuntimeChromeBudgetSection::from(&budget))
         );
         assert_eq!(
             report.report.body.identity.runtime_chrome_budget_hash,
@@ -3676,6 +3455,70 @@ mod tests {
         assert_eq!(
             first.report.body.projections.per_bank_occupancy[1].assigned_bytes,
             10
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_emits_canonical_json() {
+        let policy = policy_with_placement(PlacementProfile::Budgeted);
+        let budget = runtime_budget_with_slots(vec![
+            expert_slot(1, 20, 0, [PlacementProfile::Budgeted]),
+            common_slot(2, 64, [PlacementProfile::Budgeted]),
+        ]);
+        let report = run_budget_with_policy(
+            &policy,
+            &budget,
+            budget_view_with_experts(vec![expert_with_payload(0, 0, 10)]),
+        );
+
+        let canonical = canonicalize_report(&report.report).expect("report canonicalizes");
+        let decoded: ReportEnvelope<StaticBudgetReportBody> =
+            serde_json::from_slice(&canonical).expect("canonical report decodes");
+        let value = serde_json::to_value(&decoded).expect("decoded report serializes");
+
+        assert_eq!(decoded.outcome, ReportOutcome::Passed);
+        assert_eq!(value["schema"], serde_json::json!("static_budget.v1"));
+        assert!(value["runtime_chrome_budget"].is_object());
+        assert!(
+            value["projections"]["per_expert_payload"][0]
+                .get("assigned_slot")
+                .is_some()
+        );
+        assert!(
+            value["projections"]["per_expert_payload"][0]
+                .get("unassigned_because")
+                .is_none()
+        );
+        assert_eq!(
+            Hash256::from_bytes(Sha256::digest(&canonical).into()),
+            report.static_budget_canonical_bytes_hash
+        );
+    }
+
+    #[test]
+    fn f_b4_budget_is_deterministic_for_same_inputs() {
+        let policy = policy_with_placement(PlacementProfile::PackedExperts);
+        let budget = runtime_budget_with_slots(vec![
+            expert_slot(1, 25, 0, [PlacementProfile::PackedExperts]),
+            expert_slot(2, 25, 0, [PlacementProfile::PackedExperts]),
+            common_slot(3, 64, [PlacementProfile::PackedExperts]),
+        ]);
+        let view = budget_view_with_experts(vec![
+            expert_with_payload(0, 0, 11),
+            expert_with_payload(0, 1, 10),
+        ]);
+
+        let first = run_budget_with_policy(&policy, &budget, view.clone());
+        let second = run_budget_with_policy(&policy, &budget, view);
+
+        assert_eq!(first.report, second.report);
+        assert_eq!(
+            first.static_budget_canonical_bytes_hash,
+            second.static_budget_canonical_bytes_hash
+        );
+        assert_eq!(
+            canonicalize_report(&first.report).expect("first canonicalizes"),
+            canonicalize_report(&second.report).expect("second canonicalizes")
         );
     }
 
