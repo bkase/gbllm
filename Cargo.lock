@@ -2211,11 +2211,13 @@ dependencies = [
  "gbf-policy",
  "gbf-report",
  "gbf-runtime",
+ "gbf-store",
  "gbf-verify",
  "gbf-workload",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
