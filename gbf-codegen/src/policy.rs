@@ -314,8 +314,16 @@ fn apply_bounds(
                         frame.evidence.clone(),
                     ));
                 }
+                let before_bounds = state.bounds.clone();
                 let before = state.bounds.$field;
-                state.bounds.$field = meet_bound(before, next);
+                state.bounds.$field = meet_bound(before, next).ok_or_else(|| {
+                    unsatisfiable_bound_diagnostic(
+                        $knob,
+                        before_bounds.clone(),
+                        with_bound(before_bounds.clone(), $knob, next),
+                        frame.evidence.clone(),
+                    )
+                })?;
                 if compile_request_override {
                     state.overrides.bounds.$field = Some(next);
                     push_bound_override_provenance(
@@ -843,6 +851,23 @@ fn loosened_bound_diagnostic(
             previous,
             requested,
         },
+        detail: ValidationDetail::Field {
+            field: FieldPath::from(format!("compile_knobs.bounds.{knob:?}")),
+        },
+        provenance,
+    }
+}
+
+fn unsatisfiable_bound_diagnostic(
+    knob: CompileKnobId,
+    left: CompileKnobBounds,
+    right: CompileKnobBounds,
+    provenance: Vec<EvidenceRef>,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic {
+        severity: DiagnosticSeverity::Hard,
+        origin: ValidationOrigin::PolicyResolution,
+        code: ValidationCode::PolicyConstraintUnsatisfiable { knob, left, right },
         detail: ValidationDetail::Field {
             field: FieldPath::from(format!("compile_knobs.bounds.{knob:?}")),
         },
@@ -1414,7 +1439,7 @@ fn partial_has_value(values: &CompileKnobPartialValues, knob: CompileKnobId) -> 
     }
 }
 
-fn meet_bound<T: BoundMeet>(left: T, right: T) -> T {
+fn meet_bound<T: BoundMeet>(left: T, right: T) -> Option<T> {
     left.meet(right)
 }
 
@@ -1428,77 +1453,79 @@ where
 }
 
 trait BoundMeet {
-    fn meet(self, other: Self) -> Self;
+    fn meet(self, other: Self) -> Option<Self>
+    where
+        Self: Sized;
 }
 
 impl BoundMeet for gbf_policy::PlacementKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_profile: self.max_profile.min(other.max_profile),
-        }
+        })
     }
 }
 
 impl BoundMeet for gbf_policy::ObservationKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_probe_level: self.max_probe_level.min(other.max_probe_level),
-        }
+        })
     }
 }
 
 impl BoundMeet for gbf_policy::RangeKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_reduction_ceiling: self.max_reduction_ceiling.min(other.max_reduction_ceiling),
-        }
+        })
     }
 }
 
 impl BoundMeet for gbf_policy::StorageKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_materialization: self.max_materialization.min(other.max_materialization),
-        }
+        })
     }
 }
 
 impl BoundMeet for gbf_policy::SramKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_page_aggression: self.max_page_aggression.min(other.max_page_aggression),
-        }
+        })
     }
 }
 
 impl BoundMeet for gbf_policy::RomWindowKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_kernel_residency_bias: self
                 .max_kernel_residency_bias
                 .min(other.max_kernel_residency_bias),
             max_kernel_duplication_bias: self
                 .max_kernel_duplication_bias
                 .min(other.max_kernel_duplication_bias),
-        }
+        })
     }
 }
 
 impl BoundMeet for gbf_policy::OverlayKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_promotion: self.max_promotion.min(other.max_promotion),
-        }
+        })
     }
 }
 
 impl BoundMeet for gbf_policy::ScheduleKnobBounds {
-    fn meet(self, other: Self) -> Self {
-        Self {
+    fn meet(self, other: Self) -> Option<Self> {
+        Some(Self {
             max_tile_search: self.max_tile_search.min(other.max_tile_search),
             max_slice_coarsening: self.max_slice_coarsening.min(other.max_slice_coarsening),
             max_resource_pressure: self.max_resource_pressure.min(other.max_resource_pressure),
-        }
+        })
     }
 }
 
@@ -1784,6 +1811,40 @@ mod tests {
         assert_policy_failure(&failure, |code| {
             matches!(code, ValidationCode::PolicyKnobOutOfBounds { .. })
         });
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_rejects_unsatisfiable_bound_meet() {
+        let left = canonical_default_bounds_fixture();
+        let right = with_bound(
+            left.clone(),
+            CompileKnobId::Placement,
+            PlacementKnobBounds {
+                max_profile: PlacementProfile::StrictOnePerBank,
+            },
+        );
+
+        // The current public lattice is max-only, so every supported meet is
+        // non-empty. The resolver path still carries the typed hard diagnostic
+        // for future bound shapes whose declared meet can return None.
+        assert_eq!(
+            meet_bound(left.placement, right.placement),
+            Some(PlacementKnobBounds {
+                max_profile: PlacementProfile::StrictOnePerBank,
+            })
+        );
+
+        let diagnostic =
+            unsatisfiable_bound_diagnostic(CompileKnobId::Placement, left, right, Vec::new());
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Hard);
+        assert_eq!(diagnostic.origin, ValidationOrigin::PolicyResolution);
+        assert!(matches!(
+            diagnostic.code,
+            ValidationCode::PolicyConstraintUnsatisfiable {
+                knob: CompileKnobId::Placement,
+                ..
+            }
+        ));
     }
 
     #[test]
