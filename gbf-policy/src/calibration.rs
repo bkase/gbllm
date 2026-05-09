@@ -138,7 +138,6 @@ impl<'de> Deserialize<'de> for CalibrationBundleSet {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct CalibrationBundleSetRepr {
-            #[serde(default)]
             resolved_ref: LayeredCalibrationSetRef,
             bundles: BTreeMap<String, CalibrationBundle>,
         }

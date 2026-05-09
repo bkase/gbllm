@@ -208,6 +208,17 @@ fn calibration_bundle_set_rejects_unknown_field() {
 }
 
 #[test]
+fn calibration_bundle_set_rejects_missing_resolved_ref() {
+    let value = serde_json::json!({
+        "bundles": {
+            "Platform": expected_bundle_json(CalibrationLayer::Platform)
+        }
+    });
+
+    assert!(serde_json::from_value::<CalibrationBundleSet>(value).is_err());
+}
+
+#[test]
 fn calibration_bundle_set_rejects_unknown_layer_key() {
     let value = serde_json::json!({
         "bundles": {
