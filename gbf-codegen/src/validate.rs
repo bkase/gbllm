@@ -893,8 +893,15 @@ fn serialized_forbidden_build_identity_fields<T: Serialize>(
     value: &T,
 ) -> Vec<FieldPath> {
     let value = serde_json::to_value(value).expect("Stage 0 forbidden field scan serializes");
+    raw_forbidden_build_identity_fields(root, &value)
+}
+
+pub(crate) fn raw_forbidden_build_identity_fields(
+    root: &str,
+    value: &serde_json::Value,
+) -> Vec<FieldPath> {
     let mut fields = Vec::new();
-    collect_forbidden_build_identity_fields(&value, root, &mut fields);
+    collect_forbidden_build_identity_fields(value, root, &mut fields);
     fields
 }
 
@@ -929,7 +936,7 @@ fn collect_forbidden_build_identity_fields(
     }
 }
 
-fn is_forbidden_build_identity_key(key: &str) -> bool {
+pub(crate) fn is_forbidden_build_identity_key(key: &str) -> bool {
     matches!(
         key,
         "build_identity"
@@ -4745,6 +4752,71 @@ mod tests {
                     if field == &FieldPath::from("/build_identity")
             )
         });
+    }
+
+    #[test]
+    fn f_b2_import_raw_forbidden_build_identity_field_reaches_stage0() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let mut manifest_json =
+            serde_json::to_value(&fixture.artifact.manifest).expect("manifest serializes");
+        manifest_json["build_identity"] = serde_json::json!({
+            "backend": "must not be part of frozen inputs",
+        });
+        assert!(
+            serde_json::from_value::<ArtifactManifest>(manifest_json.clone()).is_err(),
+            "raw forbidden manifest fields must be captured before typed serde rejects them",
+        );
+
+        let mut aux_json = serde_json::to_value(&fixture.artifact.aux).expect("aux serializes");
+        aux_json["backend_identity"] = serde_json::json!("late-stage-only");
+
+        let mut lowerings_json =
+            serde_json::to_value(&fixture.lowerings).expect("lowerings serialize");
+        lowerings_json[0]["shards"][0]["stage12_identity"] =
+            serde_json::json!({ "rom": "post-input identity" });
+
+        let imported = crate::import::import_artifact_view_from_raw_json(
+            crate::import::RawArtifactJsonImport {
+                core: fixture.artifact.core.clone(),
+                manifest_json,
+                aux_json,
+                lowerings_json,
+                hint_bundle: Some(fixture.artifact.hint_bundle.clone()),
+                reference: fixture.artifact.reference.clone(),
+                transport: fixture.artifact.transport.clone(),
+            },
+        )
+        .expect("raw artifact imports after forbidden fields are side-channeled");
+
+        fixture.artifact = imported.artifact;
+        fixture.lowerings = imported.lowerings;
+        fixture.refresh_transport_hash();
+
+        assert_eq!(
+            fixture.artifact.forbidden_build_identity_fields,
+            BTreeSet::from([
+                FieldPath::from("aux/backend_identity"),
+                FieldPath::from("lowerings/0/shards/0/stage12_identity"),
+                FieldPath::from("manifest/build_identity"),
+            ])
+        );
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        for expected in [
+            FieldPath::from("aux/backend_identity"),
+            FieldPath::from("lowerings/0/shards/0/stage12_identity"),
+            FieldPath::from("manifest/build_identity"),
+        ] {
+            assert_failure_code(&failure, |code| {
+                matches!(
+                    code,
+                    ValidationCode::ArtifactForbiddenBuildIdentityField { field }
+                        if field == &expected
+                )
+            });
+        }
     }
 
     #[test]
