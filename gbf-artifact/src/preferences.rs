@@ -8,11 +8,14 @@ use gbf_foundation::{ExpertId, LayerId};
 use serde::{Deserialize, Serialize};
 
 use crate::export_facts::RateQ8_8;
+use crate::hint_bundle::HintScopeProvenance;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct CompilePreferences {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     expert_slot_affinity: Vec<ExpertSlotAffinity>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    scope_provenance: Vec<HintScopeProvenance>,
 }
 
 impl<'de> Deserialize<'de> for CompilePreferences {
@@ -24,10 +27,14 @@ impl<'de> Deserialize<'de> for CompilePreferences {
         struct CompilePreferencesSerde {
             #[serde(default)]
             expert_slot_affinity: Vec<ExpertSlotAffinity>,
+            #[serde(default)]
+            scope_provenance: Vec<HintScopeProvenance>,
         }
 
         let raw = CompilePreferencesSerde::deserialize(deserializer)?;
-        Self::new(raw.expert_slot_affinity).map_err(serde::de::Error::custom)
+        Self::new(raw.expert_slot_affinity)
+            .map(|preferences| preferences.with_scope_provenance(raw.scope_provenance))
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -39,6 +46,7 @@ impl CompilePreferences {
 
         Ok(Self {
             expert_slot_affinity,
+            scope_provenance: Vec::new(),
         })
     }
 
@@ -50,6 +58,17 @@ impl CompilePreferences {
     #[must_use]
     pub fn expert_slot_affinity(&self) -> &[ExpertSlotAffinity] {
         &self.expert_slot_affinity
+    }
+
+    #[must_use]
+    pub fn scope_provenance(&self) -> &[HintScopeProvenance] {
+        &self.scope_provenance
+    }
+
+    #[must_use]
+    pub fn with_scope_provenance(mut self, scope_provenance: Vec<HintScopeProvenance>) -> Self {
+        self.scope_provenance = scope_provenance;
+        self
     }
 }
 

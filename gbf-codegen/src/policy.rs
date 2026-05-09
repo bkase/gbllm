@@ -1833,7 +1833,7 @@ mod tests {
         CalibrationConfidenceClass, CalibrationLayer, CompileObjective, CompileProfileSpec,
         CompileRequest, DEFAULT_COMPILE_PROFILE_ID, MeasurementBlob, ObservabilityMode,
         PlacementKnobBounds, PlacementProfile, RepairProposalId, RomKernelResidencyBias,
-        RomWindowKnob, RuntimeMode, ServiceLevelObjective, ValidationCode,
+        RomWindowKnob, RuntimeMode, ServiceLevelObjective, TraceProbeId, ValidationCode,
         canonical_compile_profile_specs,
     };
     use gbf_report::{ReportOutcome, round_trip_self_hash};
@@ -1884,6 +1884,7 @@ mod tests {
             .constraints
             .entries
             .push(BuildConstraintEntry {
+                provenance_id: TraceProbeId(300),
                 knob: CompileKnobId::Placement,
                 path: None,
                 value: ConstraintValue::PlacementProfile {
@@ -2202,6 +2203,7 @@ mod tests {
             .constraints
             .entries
             .push(BuildConstraintEntry {
+                provenance_id: TraceProbeId(301),
                 knob: CompileKnobId::Placement,
                 path: None,
                 value: ConstraintValue::PlacementProfile {
@@ -2232,6 +2234,7 @@ mod tests {
             .constraints
             .entries
             .push(BuildConstraintEntry {
+                provenance_id: TraceProbeId(302),
                 knob: CompileKnobId::Placement,
                 path: None,
                 value: ConstraintValue::PlacementProfile {
@@ -2267,6 +2270,7 @@ mod tests {
             .constraints
             .entries
             .push(BuildConstraintEntry {
+                provenance_id: TraceProbeId(303),
                 knob: CompileKnobId::Schedule,
                 path: None,
                 value: ConstraintValue::Bool { value: true },
@@ -2298,6 +2302,7 @@ mod tests {
             .constraints
             .entries
             .push(BuildConstraintEntry {
+                provenance_id: TraceProbeId(304),
                 knob: CompileKnobId::Observation,
                 path: None,
                 value: ConstraintValue::ObservabilityMode {

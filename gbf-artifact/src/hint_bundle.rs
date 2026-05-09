@@ -6,8 +6,9 @@
 use std::collections::BTreeMap;
 
 use gbf_foundation::{Hash256, LayerId, TargetFamilyId, WorkloadId};
+use gbf_policy::TraceProbeId;
 pub use gbf_policy::compile::ConstraintValue;
-use gbf_policy::compile::{CompileKnobId, CompileKnobPath, EvidenceRef};
+use gbf_policy::compile::{CompileKnobId, CompileKnobPath, EvidenceRef, FieldPath};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -81,10 +82,20 @@ impl BuildConstraints {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildConstraintEntry {
+    pub provenance_id: TraceProbeId,
     pub knob: CompileKnobId,
     pub path: Option<CompileKnobPath>,
     pub value: ConstraintValue,
     pub evidence: Vec<EvidenceRef>,
+    pub scope: EvidenceScope,
+}
+
+/// Stable diagnostic provenance for a scope-bearing fact or preference entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HintScopeProvenance {
+    pub provenance_id: TraceProbeId,
+    pub field: FieldPath,
     pub scope: EvidenceScope,
 }
 

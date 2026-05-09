@@ -3,6 +3,7 @@
 use gbf_artifact::export_facts::ExportFacts;
 use gbf_artifact::hint_bundle::*;
 use gbf_artifact::preferences::CompilePreferences;
+use gbf_policy::TraceProbeId;
 use gbf_policy::compile::{CompileKnobId, ConstraintValue, PlacementProfile};
 
 pub struct HintBundleBuilder {
@@ -49,6 +50,7 @@ pub fn empty_hint_bundle_fixture() -> HintBundle {
 #[must_use]
 pub fn build_constraint_entry_fixture() -> BuildConstraintEntry {
     BuildConstraintEntry {
+        provenance_id: TraceProbeId(1),
         knob: CompileKnobId::Placement,
         path: None,
         value: ConstraintValue::PlacementProfile {

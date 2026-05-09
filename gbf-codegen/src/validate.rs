@@ -57,7 +57,8 @@ use gbf_artifact::manifest::{
 use gbf_artifact::sequence::SequenceSemanticsSpec;
 use gbf_artifact::tensor::{CanonicalTensor, CanonicalTensorPayload};
 use gbf_artifact::{
-    ArtifactAux, ArtifactManifest, EvidenceScope, HintBundle, TargetDataLoweringArtifact,
+    ArtifactAux, ArtifactManifest, EvidenceScope, HintBundle, HintScopeProvenance,
+    TargetDataLoweringArtifact,
 };
 use gbf_foundation::{BlobCodec, BlobRef, Hash256, LayerId, PackerVersion, SemVer};
 use gbf_hw::target::TargetProfile;
@@ -1941,7 +1942,31 @@ fn validate_hint_provenance(
     let active_layers = active_layer_ids(artifact);
     let active_lowering = active_lowering(inputs);
 
-    for (index, entry) in artifact.hint_bundle.constraints.entries.iter().enumerate() {
+    for entry in &artifact.hint_bundle.facts.scope_provenance {
+        validate_scoped_hint_entry(
+            "facts",
+            entry,
+            inputs,
+            &active_layers,
+            active_lowering,
+            hint_bundle_hash,
+            diagnostics,
+        );
+    }
+
+    for entry in artifact.hint_bundle.preferences.scope_provenance() {
+        validate_scoped_hint_entry(
+            "preferences",
+            entry,
+            inputs,
+            &active_layers,
+            active_lowering,
+            hint_bundle_hash,
+            diagnostics,
+        );
+    }
+
+    for entry in &artifact.hint_bundle.constraints.entries {
         if evidence_scope_applies_to_active_build(
             &entry.scope,
             inputs,
@@ -1952,11 +1977,37 @@ fn validate_hint_provenance(
         }
 
         diagnostics.push(hint_provenance_inconsistent_diagnostic(
-            index,
+            entry.provenance_id,
+            FieldPath::from(format!(
+                "hint_bundle.constraints.entries[provenance_id={}].scope",
+                entry.provenance_id.0
+            )),
             &entry.scope,
             hint_bundle_hash,
         ));
     }
+}
+
+fn validate_scoped_hint_entry(
+    bucket: &'static str,
+    entry: &HintScopeProvenance,
+    inputs: &ValidateInputs<'_>,
+    active_layers: &BTreeSet<LayerId>,
+    active_lowering: Option<&TargetDataLoweringArtifact>,
+    hint_bundle_hash: Hash256,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if evidence_scope_applies_to_active_build(&entry.scope, inputs, active_layers, active_lowering)
+    {
+        return;
+    }
+
+    diagnostics.push(hint_provenance_inconsistent_diagnostic(
+        entry.provenance_id,
+        FieldPath::from(format!("hint_bundle.{bucket}.{}", entry.field)),
+        &entry.scope,
+        hint_bundle_hash,
+    ));
 }
 
 fn evidence_scope_applies_to_active_build(
@@ -2013,22 +2064,22 @@ fn layer_id_from_artifact_path(path: &str) -> Option<LayerId> {
 }
 
 fn hint_provenance_inconsistent_diagnostic(
-    index: usize,
+    provenance_id: TraceProbeId,
+    field: FieldPath,
     scope: &EvidenceScope,
     hint_bundle_hash: Hash256,
 ) -> ValidationDiagnostic {
     ValidationDiagnostic::hard(
         ValidationOrigin::HintBundle,
         ValidationCode::HintProvenanceInconsistent {
-            fact: TraceProbeId(u16::try_from(index).unwrap_or(u16::MAX)),
+            fact: provenance_id,
         },
-        ValidationDetail::Field {
-            field: FieldPath::from(format!("hint_bundle.constraints.entries.{index}.scope")),
-        },
+        ValidationDetail::Field { field },
         vec![EvidenceRef {
             kind: "hint_bundle".to_owned(),
             reference: format!(
-                "constraints.entries.{index}.scope={}",
+                "provenance_id={};scope={}",
+                provenance_id.0,
                 evidence_scope_reference(scope)
             ),
             hash: Some(hint_bundle_hash),
@@ -3011,7 +3062,7 @@ mod tests {
         CalibrationConfidenceRequirement, CompileKnobId, CompileObjective, CompilerFeature,
         ConstraintValue, DEFAULT_COMPILE_PROFILE_ID, ObjectiveRejection, PlacementProfile,
         RiskPolicy, RiskQuantileField, RuntimeMode, ServiceLevelField, ServiceLevelObjective,
-        TargetIncompatibilityReason, canonical_compile_profile_specs,
+        TargetIncompatibilityReason, TraceProbeId, canonical_compile_profile_specs,
     };
     use gbf_workload::{GoldenVectorId, WorkloadLocator};
 
@@ -3554,9 +3605,12 @@ mod tests {
         hint_bundle
             .constraints
             .entries
-            .push(build_constraint_with_scope(EvidenceScope::TargetFamily {
-                family: TargetFamilyId::from("cgb"),
-            }));
+            .push(build_constraint_with_scope(
+                TraceProbeId(401),
+                EvidenceScope::TargetFamily {
+                    family: TargetFamilyId::from("cgb"),
+                },
+            ));
         let fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
 
         let failure =
@@ -3566,7 +3620,7 @@ mod tests {
             matches!(
                 code,
                 ValidationCode::HintProvenanceInconsistent {
-                    fact: TraceProbeId(0)
+                    fact: TraceProbeId(401)
                 }
             )
         });
@@ -3575,7 +3629,7 @@ mod tests {
     #[test]
     fn f_b2_validate_accepts_hint_scope_matrix_for_active_and_broader_scopes() {
         let mut hint_bundle = HintBundle::empty();
-        for scope in [
+        for (index, scope) in [
             EvidenceScope::WholeArtifact,
             EvidenceScope::TargetFamily {
                 family: TargetFamilyId::from("dmg"),
@@ -3589,12 +3643,38 @@ mod tests {
             EvidenceScope::LayerScoped {
                 layer: LayerId::new(0),
             },
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             hint_bundle
                 .constraints
                 .entries
-                .push(build_constraint_with_scope(scope));
+                .push(build_constraint_with_scope(
+                    TraceProbeId(410 + index as u16),
+                    scope,
+                ));
         }
+        hint_bundle
+            .facts
+            .scope_provenance
+            .push(HintScopeProvenance {
+                provenance_id: TraceProbeId(420),
+                field: FieldPath::from("activation_ranges.0"),
+                scope: EvidenceScope::LayerScoped {
+                    layer: LayerId::new(0),
+                },
+            });
+        hint_bundle.preferences =
+            hint_bundle
+                .preferences
+                .with_scope_provenance(vec![HintScopeProvenance {
+                    provenance_id: TraceProbeId(421),
+                    field: FieldPath::from("expert_slot_affinity.0"),
+                    scope: EvidenceScope::WorkloadScoped {
+                        workload: WorkloadId::from("workload.fixture"),
+                    },
+                }]);
         let mut fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
         fixture.set_single_layer_tensor(0);
 
@@ -3604,7 +3684,7 @@ mod tests {
     #[test]
     fn f_b2_validate_rejects_hint_scope_matrix_for_inactive_narrower_scopes() {
         let mut hint_bundle = HintBundle::empty();
-        for scope in [
+        for (index, scope) in [
             EvidenceScope::TargetFamily {
                 family: TargetFamilyId::from("cgb"),
             },
@@ -3617,12 +3697,38 @@ mod tests {
             EvidenceScope::LayerScoped {
                 layer: LayerId::new(9),
             },
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             hint_bundle
                 .constraints
                 .entries
-                .push(build_constraint_with_scope(scope));
+                .push(build_constraint_with_scope(
+                    TraceProbeId(430 + index as u16),
+                    scope,
+                ));
         }
+        hint_bundle
+            .facts
+            .scope_provenance
+            .push(HintScopeProvenance {
+                provenance_id: TraceProbeId(440),
+                field: FieldPath::from("temporal_switch.0"),
+                scope: EvidenceScope::TargetFamily {
+                    family: TargetFamilyId::from("cgb"),
+                },
+            });
+        hint_bundle.preferences =
+            hint_bundle
+                .preferences
+                .with_scope_provenance(vec![HintScopeProvenance {
+                    provenance_id: TraceProbeId(441),
+                    field: FieldPath::from("expert_slot_affinity.0"),
+                    scope: EvidenceScope::WorkloadScoped {
+                        workload: WorkloadId::from("workload.other"),
+                    },
+                }]);
         let mut fixture = Fixture::new(Some(hint_bundle), Some(calibration()));
         fixture.set_single_layer_tensor(0);
 
@@ -3640,10 +3746,26 @@ mod tests {
             })
             .count();
         assert_eq!(
-            provenance_failures, 4,
+            provenance_failures, 6,
             "diagnostics were {:#?}",
             failure.diagnostics
         );
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::HintProvenanceInconsistent {
+                    fact: TraceProbeId(440)
+                }
+            )
+        });
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::HintProvenanceInconsistent {
+                    fact: TraceProbeId(441)
+                }
+            )
+        });
     }
 
     #[test]
@@ -5487,8 +5609,12 @@ mod tests {
         .expect("layer tensor is valid")
     }
 
-    fn build_constraint_with_scope(scope: EvidenceScope) -> BuildConstraintEntry {
+    fn build_constraint_with_scope(
+        provenance_id: TraceProbeId,
+        scope: EvidenceScope,
+    ) -> BuildConstraintEntry {
         BuildConstraintEntry {
+            provenance_id,
             knob: CompileKnobId::Placement,
             path: None,
             value: ConstraintValue::PlacementProfile {

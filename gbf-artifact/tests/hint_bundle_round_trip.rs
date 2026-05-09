@@ -1,8 +1,9 @@
 use gbf_artifact::hint_bundle::{
-    BuildConstraintEntry, BuildConstraints, EvidenceScope, HintBundle,
+    BuildConstraintEntry, BuildConstraints, EvidenceScope, HintBundle, HintScopeProvenance,
 };
 use gbf_artifact::lowerings::LoweringShardId;
 use gbf_foundation::{Hash256, LayerId, TargetFamilyId, WorkloadId};
+use gbf_policy::TraceProbeId;
 use gbf_policy::compile::{
     CompileKnobId, CompileKnobPath, ConstraintValue, EvidenceRef, FieldPath, ObservabilityMode,
     PlacementProfile, SelectorPath,
@@ -26,6 +27,7 @@ fn hash(byte: u8) -> Hash256 {
 
 fn constraint_entry(knob: CompileKnobId, value: ConstraintValue) -> BuildConstraintEntry {
     BuildConstraintEntry {
+        provenance_id: TraceProbeId(100),
         knob,
         path: None,
         value,
@@ -103,6 +105,7 @@ fn hint_bundle_non_empty_public_json_shape_is_pinned() {
                         "knob": {
                             "kind": "Placement"
                         },
+                        "provenance_id": 100,
                         "path": null,
                         "value": {
                             "kind": "PlacementProfile",
@@ -138,6 +141,7 @@ fn build_constraint_entry_round_trip() {
             selector: Some(SelectorPath("bank[0]".to_owned())),
             field: Some(FieldPath::from("profile")),
         }),
+        provenance_id: TraceProbeId(101),
         evidence: vec![EvidenceRef {
             kind: "fixture".to_owned(),
             reference: "hint-fixture".to_owned(),
@@ -150,6 +154,40 @@ fn build_constraint_entry_round_trip() {
     };
 
     assert_round_trip(&entry);
+}
+
+#[test]
+fn fact_scope_provenance_round_trip() {
+    let mut facts = HintBundle::empty().facts;
+    facts.scope_provenance.push(HintScopeProvenance {
+        provenance_id: TraceProbeId(201),
+        field: FieldPath::from("activation_ranges.0"),
+        scope: EvidenceScope::LayerScoped {
+            layer: LayerId::new(2),
+        },
+    });
+
+    assert_round_trip(&facts);
+}
+
+#[test]
+fn preference_scope_provenance_round_trip() {
+    let preferences =
+        HintBundle::empty()
+            .preferences
+            .with_scope_provenance(vec![HintScopeProvenance {
+                provenance_id: TraceProbeId(202),
+                field: FieldPath::from("expert_slot_affinity.0"),
+                scope: EvidenceScope::WorkloadScoped {
+                    workload: WorkloadId::from("smoke"),
+                },
+            }]);
+
+    assert_round_trip(&preferences);
+    assert_eq!(
+        preferences.scope_provenance()[0].provenance_id,
+        TraceProbeId(202)
+    );
 }
 
 #[test]
