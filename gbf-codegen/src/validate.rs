@@ -373,16 +373,131 @@ impl CachedValidationProduct {
         &self.report
     }
 
-    #[must_use]
-    pub fn rehydrate(&self) -> ValidationProduct<'_> {
-        ValidationProduct {
+    pub(crate) fn rehydrate_checked(
+        &self,
+    ) -> Result<ValidationProduct<'_>, CachedValidationProductRehydrateError> {
+        if self.report.report_self_hash != self.artifact_validation_self_hash {
+            return Err(
+                CachedValidationProductRehydrateError::ReportSelfHashMismatch {
+                    report_self_hash: self.report.report_self_hash,
+                    artifact_validation_self_hash: self.artifact_validation_self_hash,
+                },
+            );
+        }
+        let computed_self_hash = compute_self_hash(&self.report).map_err(|err| {
+            CachedValidationProductRehydrateError::ReportSelfHashUncomputable {
+                message: err.to_string(),
+            }
+        })?;
+        if computed_self_hash != self.artifact_validation_self_hash {
+            return Err(
+                CachedValidationProductRehydrateError::ReportSelfHashMismatch {
+                    report_self_hash: computed_self_hash,
+                    artifact_validation_self_hash: self.artifact_validation_self_hash,
+                },
+            );
+        }
+        self.report
+            .body
+            .validate_semantics(self.report.outcome)
+            .map_err(
+                |err| CachedValidationProductRehydrateError::ReportSemanticValidation {
+                    message: format!("{err:?}"),
+                },
+            )?;
+        if self.report.outcome != ReportOutcome::Passed {
+            return Err(
+                CachedValidationProductRehydrateError::UnexpectedReportOutcome {
+                    outcome: self.report.outcome,
+                },
+            );
+        }
+        if !cached_report_identity_matches_hashes(&self.report, self.validated.input_hashes) {
+            return Err(CachedValidationProductRehydrateError::InputHashMismatch);
+        }
+
+        Ok(ValidationProduct {
             validated: self.validated.as_validated_inputs(),
             report: self.report.clone(),
             artifact_validation_self_hash: self.artifact_validation_self_hash,
             artifact_validation_canonical_bytes_hash: self.artifact_validation_canonical_bytes_hash,
+        })
+    }
+}
+
+fn cached_report_identity_matches_hashes(
+    report: &ReportEnvelope<ArtifactValidationReportBody>,
+    input_hashes: ValidatedInputHashes,
+) -> bool {
+    let identity = &report.body.identity;
+    identity.artifact_source_hash == Some(input_hashes.artifact_source_hash)
+        && identity.artifact_effective_core_hash == Some(input_hashes.artifact_effective_core_hash)
+        && identity.artifact_manifest_hash == Some(input_hashes.artifact_manifest_hash)
+        && identity.semantic_core_hash == Some(input_hashes.artifact_effective_core_hash)
+        && identity.artifact_aux_hash == Some(input_hashes.artifact_aux_hash)
+        && identity.lowering_manifest_hash == Some(input_hashes.lowering_manifest_hash)
+        && identity.hint_bundle_hash == input_hashes.hint_bundle_hash
+        && identity.compile_request_hash == input_hashes.compile_request_hash
+        && identity.target_profile_hash == input_hashes.target_profile_hash
+        && identity.compile_profile_hash == input_hashes.compile_profile_hash
+        && identity.calibration_hash == Some(input_hashes.calibration_hash)
+        && identity.compatibility_adapter_hash == input_hashes.compatibility_adapter_hash
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CachedValidationProductRehydrateError {
+    ReportSelfHashMismatch {
+        report_self_hash: Hash256,
+        artifact_validation_self_hash: Hash256,
+    },
+    ReportSelfHashUncomputable {
+        message: String,
+    },
+    ReportSemanticValidation {
+        message: String,
+    },
+    UnexpectedReportOutcome {
+        outcome: ReportOutcome,
+    },
+    InputHashMismatch,
+}
+
+impl fmt::Display for CachedValidationProductRehydrateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReportSelfHashMismatch {
+                report_self_hash,
+                artifact_validation_self_hash,
+            } => write!(
+                f,
+                "cached validation report self-hash mismatch: report has {report_self_hash}, product has {artifact_validation_self_hash}"
+            ),
+            Self::ReportSelfHashUncomputable { message } => {
+                write!(
+                    f,
+                    "cached validation report self-hash is not computable: {message}"
+                )
+            }
+            Self::ReportSemanticValidation { message } => {
+                write!(
+                    f,
+                    "cached validation report is semantically invalid: {message}"
+                )
+            }
+            Self::UnexpectedReportOutcome { outcome } => {
+                write!(
+                    f,
+                    "cached validation success report has outcome {outcome:?}"
+                )
+            }
+            Self::InputHashMismatch => {
+                f.write_str("cached validation report identity does not match cached inputs")
+            }
         }
     }
 }
+
+impl Error for CachedValidationProductRehydrateError {}
 
 impl From<&ValidationProduct<'_>> for CachedValidationProduct {
     fn from(product: &ValidationProduct<'_>) -> Self {

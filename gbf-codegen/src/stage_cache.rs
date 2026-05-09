@@ -17,7 +17,10 @@ use sha2::{Digest, Sha256};
 
 use crate::budget::StaticBudgetReport;
 use crate::policy::{PolicyResolutionStageFailure, ResolvedPolicyProduct};
-use crate::validate::{CachedValidationProduct, ValidatedInputHashes, ValidationStageFailure};
+use crate::validate::{
+    CachedValidationProduct, CachedValidationProductRehydrateError, ValidatedInputHashes,
+    ValidationStageFailure,
+};
 
 pub const PASS_VERSION_VALIDATE: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_RESOLVE: SemVer = SemVer::new(1, 0, 0);
@@ -209,6 +212,7 @@ pub enum Stage2CacheCell {
 pub enum CodegenStageCacheError {
     Store(StageCacheError),
     Json(serde_json::Error),
+    CachedValidationProduct(CachedValidationProductRehydrateError),
     UnexpectedCell {
         expected: &'static str,
         observed: &'static str,
@@ -220,6 +224,7 @@ impl fmt::Display for CodegenStageCacheError {
         match self {
             Self::Store(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "stage cache payload JSON error: {err}"),
+            Self::CachedValidationProduct(err) => write!(f, "{err}"),
             Self::UnexpectedCell { expected, observed } => {
                 write!(f, "expected {expected} cache cell, observed {observed}")
             }
@@ -232,6 +237,7 @@ impl std::error::Error for CodegenStageCacheError {
         match self {
             Self::Store(err) => Some(err),
             Self::Json(err) => Some(err),
+            Self::CachedValidationProduct(err) => Some(err),
             Self::UnexpectedCell { .. } => None,
         }
     }
@@ -246,6 +252,12 @@ impl From<StageCacheError> for CodegenStageCacheError {
 impl From<serde_json::Error> for CodegenStageCacheError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
+    }
+}
+
+impl From<CachedValidationProductRehydrateError> for CodegenStageCacheError {
+    fn from(value: CachedValidationProductRehydrateError) -> Self {
+        Self::CachedValidationProduct(value)
     }
 }
 
@@ -333,8 +345,13 @@ pub fn get_stage0_success(
         return Ok(None);
     };
     let cell: Stage0CacheCell = serde_json::from_slice(&bytes)?;
-    if !matches!(cell, Stage0CacheCell::ValidationSuccess { .. }) {
-        return Err(unexpected_stage0_cell("Stage 0 validation success", &cell));
+    match &cell {
+        Stage0CacheCell::ValidationSuccess { product, .. } => {
+            product.rehydrate_checked()?;
+        }
+        Stage0CacheCell::FailureMemo { .. } => {
+            return Err(unexpected_stage0_cell("Stage 0 validation success", &cell));
+        }
     }
     Ok(Some(cell))
 }
@@ -1095,7 +1112,9 @@ mod tests {
             panic!("expected Stage 0 success product");
         };
 
-        let resumed_validation = product.rehydrate();
+        let resumed_validation = product
+            .rehydrate_checked()
+            .expect("cached Stage 0 product passes rehydration checks");
         assert_eq!(
             resumed_validation.validated.input_hashes,
             validation.validated.input_hashes
@@ -1111,6 +1130,39 @@ mod tests {
             resumed_policy.input_hashes,
             validation.validated.input_hashes
         );
+    }
+
+    #[test]
+    fn stage_cache_rejects_stage0_product_with_tampered_self_hash() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let material = Stage0CacheKeyMaterial::success(validation.validated.input_hashes, hash(11));
+        let cell = Stage0CacheCell::ValidationSuccess {
+            product: Box::new(CachedValidationProduct::from(&validation)),
+            report: CachedReportBytes {
+                report_self_hash: validation.artifact_validation_self_hash,
+                canonical_bytes: b"cached artifact validation report".to_vec(),
+            },
+        };
+        let mut value = serde_json::to_value(cell).expect("cache cell serializes");
+        value["product"]["artifact_validation_self_hash"] =
+            serde_json::to_value(hash(222)).expect("hash serializes");
+        let payload = serde_json::to_vec(&value).expect("tampered cache cell serializes");
+        cache
+            .put(
+                &stage0_validation_store_key(&material, Stage0CellKind::Success),
+                &payload,
+            )
+            .expect("put tampered Stage 0 product");
+
+        assert!(matches!(
+            get_stage0_success(&cache, &material),
+            Err(CodegenStageCacheError::CachedValidationProduct(
+                CachedValidationProductRehydrateError::ReportSelfHashMismatch { .. }
+            ))
+        ));
     }
 
     #[test]
