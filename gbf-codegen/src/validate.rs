@@ -444,6 +444,7 @@ struct SchemaCompatibilityAdapter {
 #[derive(Clone, Copy)]
 enum AdapterImplementation {
     SchemaVersionOnly,
+    #[cfg(test)]
     SemanticChangingProofFixture,
 }
 
@@ -453,6 +454,7 @@ impl SchemaCompatibilityAdapter {
         upgraded.manifest.schema_version = self.to;
         match self.implementation {
             AdapterImplementation::SchemaVersionOnly => {}
+            #[cfg(test)]
             AdapterImplementation::SemanticChangingProofFixture => {
                 upgraded.core = ArtifactCore::new(
                     source.core.tensors().to_vec(),
@@ -608,19 +610,24 @@ fn registered_schema_adapter(
 ) -> Option<SchemaCompatibilityAdapter> {
     builtin_schema_adapters()
         .into_iter()
+        .chain(test_schema_adapters())
         .find(|adapter| adapter.from == from && adapter.to == to)
 }
 
-fn builtin_schema_adapters() -> [SchemaCompatibilityAdapter; 4] {
+fn builtin_schema_adapters() -> [SchemaCompatibilityAdapter; 1] {
+    [SchemaCompatibilityAdapter {
+        id: CompatibilityAdapterId("adapter.lossless".to_owned()),
+        from: ArtifactSchemaVersion { epoch: 1, minor: 0 },
+        to: CURRENT_ARTIFACT_SCHEMA_VERSION,
+        lossless: true,
+        implementation: AdapterImplementation::SchemaVersionOnly,
+        implementation_id: "gbf-codegen.stage0.schema-v1-0-to-v1-1.lossless.v1",
+    }]
+}
+
+#[cfg(test)]
+fn test_schema_adapters() -> [SchemaCompatibilityAdapter; 3] {
     [
-        SchemaCompatibilityAdapter {
-            id: CompatibilityAdapterId("adapter.lossless".to_owned()),
-            from: ArtifactSchemaVersion { epoch: 1, minor: 0 },
-            to: CURRENT_ARTIFACT_SCHEMA_VERSION,
-            lossless: true,
-            implementation: AdapterImplementation::SchemaVersionOnly,
-            implementation_id: "gbf-codegen.stage0.schema-v1-0-to-v1-1.lossless.v1",
-        },
         SchemaCompatibilityAdapter {
             id: CompatibilityAdapterId("adapter.lossy".to_owned()),
             from: ArtifactSchemaVersion { epoch: 1, minor: 2 },
@@ -646,6 +653,11 @@ fn builtin_schema_adapters() -> [SchemaCompatibilityAdapter; 4] {
             implementation_id: "gbf-codegen.stage0.schema-v2-0-to-v1-1.forbidden.v1",
         },
     ]
+}
+
+#[cfg(not(test))]
+fn test_schema_adapters() -> std::iter::Empty<SchemaCompatibilityAdapter> {
+    std::iter::empty()
 }
 
 fn schema_semver(version: ArtifactSchemaVersion) -> SemVer {
@@ -674,7 +686,7 @@ fn schema_diagnostic(
 fn validate_semantic_core_hash(
     artifact: &ImportedArtifactView,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) {
+) -> bool {
     let recomputed = artifact.core.semantic_hash();
     let recorded = artifact.manifest.semantic_core_hash;
     if recomputed != recorded {
@@ -691,7 +703,9 @@ fn validate_semantic_core_hash(
                 hash: Some(artifact.manifest.manifest_self_hash),
             }],
         ));
+        return false;
     }
+    true
 }
 
 fn validate_transport_manifest(
@@ -1115,8 +1129,18 @@ pub fn validate_artifact_and_request<'a>(
     let effective_artifact = compatibility.artifact.as_ref();
 
     let mut diagnostics = Vec::new();
-    validate_semantic_core_hash(effective_artifact, &mut diagnostics);
+    let semantic_core_hash_matches =
+        validate_semantic_core_hash(effective_artifact, &mut diagnostics);
     validate_transport_manifest(inputs.artifact, &mut diagnostics);
+    if !semantic_core_hash_matches {
+        return Err(stage0_failure(
+            &inputs,
+            Some(effective_artifact),
+            inputs.calibration,
+            diagnostics,
+            compatibility.compatibility_section(),
+        ));
+    }
     validate_manifest_invariants(
         inputs.artifact,
         effective_artifact,
@@ -1709,6 +1733,33 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_semantic_core_hash_mismatch_short_circuits_manifest_invariants() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.manifest.semantic_core_hash = hash(0xee);
+        fixture
+            .artifact
+            .manifest
+            .components
+            .push(ManifestComponent {
+                digest: hash(0x44),
+                id: ComponentId("tensor.missing".to_owned()),
+                kind: ComponentKind::CanonicalTensor,
+            });
+        fixture.refresh_manifest_self_hash();
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::SemanticCoreHashMismatch)
+        });
+        assert_no_failure_code(&failure, |code| {
+            matches!(code, ValidationCode::ManifestInvariantViolated { .. })
+        });
+    }
+
+    #[test]
     fn f_b2_validate_rejects_manifest_invariant_violated() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture
@@ -1787,6 +1838,46 @@ mod tests {
                     if field == &FieldPath::from("/build_identity")
             )
         });
+    }
+
+    #[test]
+    fn f_b2_validate_forbidden_build_identity_walker_finds_nested_serialized_keys() {
+        let value = serde_json::json!({
+            "metadata": {
+                "compatibility_envelope": {
+                    "ignored": true
+                },
+                "items": [
+                    {
+                        "stage12_identity": "late-stage-only"
+                    }
+                ]
+            },
+            "safe": {
+                "nested": "ok"
+            }
+        });
+
+        let fields = serialized_forbidden_build_identity_fields("artifact", &value);
+
+        assert_eq!(
+            fields,
+            vec![
+                FieldPath::from("artifact/metadata/compatibility_envelope"),
+                FieldPath::from("artifact/metadata/items/0/stage12_identity"),
+            ]
+        );
+    }
+
+    #[test]
+    fn f_b2_validate_builtin_schema_adapters_excludes_test_only_proof_adapters() {
+        let adapters = builtin_schema_adapters();
+
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(
+            adapters[0].id,
+            CompatibilityAdapterId("adapter.lossless".to_owned())
+        );
     }
 
     struct Fixture {
@@ -2047,6 +2138,20 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| matches_code(&diagnostic.code)),
+            "diagnostics were {:#?}",
+            failure.diagnostics
+        );
+    }
+
+    fn assert_no_failure_code(
+        failure: &ValidationStageFailure,
+        matches_code: impl Fn(&ValidationCode) -> bool,
+    ) {
+        assert!(
+            failure
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !matches_code(&diagnostic.code)),
             "diagnostics were {:#?}",
             failure.diagnostics
         );
