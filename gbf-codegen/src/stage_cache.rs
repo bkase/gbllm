@@ -5,9 +5,9 @@ use std::fmt;
 
 use gbf_foundation::{Hash256, SemVer};
 use gbf_policy::ValidationDiagnostic;
-use gbf_report::ReportOutcome;
-use gbf_report::canonicalize_value;
 use gbf_report::report_schemas::{artifact_validation_v1, policy_resolution_v1, static_budget_v1};
+use gbf_report::{ReportBody, ReportOutcome};
+use gbf_report::{canonicalize as canonicalize_report, canonicalize_value, compute_self_hash};
 use gbf_store::stage_cache::{
     ComponentDigestSet, ComponentId, FeatureFlag, StageCache as StoreStageCache, StageCacheError,
     StageCacheKey, StageId, StageKey,
@@ -213,6 +213,7 @@ pub enum CodegenStageCacheError {
     Store(StageCacheError),
     Json(serde_json::Error),
     CachedValidationProduct(CachedValidationProductRehydrateError),
+    CachedPolicyProduct(CachedPolicyProductError),
     UnexpectedCell {
         expected: &'static str,
         observed: &'static str,
@@ -225,6 +226,7 @@ impl fmt::Display for CodegenStageCacheError {
             Self::Store(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "stage cache payload JSON error: {err}"),
             Self::CachedValidationProduct(err) => write!(f, "{err}"),
+            Self::CachedPolicyProduct(err) => write!(f, "{err}"),
             Self::UnexpectedCell { expected, observed } => {
                 write!(f, "expected {expected} cache cell, observed {observed}")
             }
@@ -238,6 +240,7 @@ impl std::error::Error for CodegenStageCacheError {
             Self::Store(err) => Some(err),
             Self::Json(err) => Some(err),
             Self::CachedValidationProduct(err) => Some(err),
+            Self::CachedPolicyProduct(err) => Some(err),
             Self::UnexpectedCell { .. } => None,
         }
     }
@@ -260,6 +263,96 @@ impl From<CachedValidationProductRehydrateError> for CodegenStageCacheError {
         Self::CachedValidationProduct(value)
     }
 }
+
+impl From<CachedPolicyProductError> for CodegenStageCacheError {
+    fn from(value: CachedPolicyProductError) -> Self {
+        Self::CachedPolicyProduct(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CachedPolicyProductError {
+    ReportSelfHashMismatch {
+        report_self_hash: Hash256,
+        policy_resolution_self_hash: Hash256,
+    },
+    CachedReportSelfHashMismatch {
+        cached_report_self_hash: Hash256,
+        policy_resolution_self_hash: Hash256,
+    },
+    ReportSelfHashUncomputable {
+        message: String,
+    },
+    ReportSemanticValidation {
+        message: String,
+    },
+    UnexpectedReportOutcome {
+        outcome: ReportOutcome,
+    },
+    CanonicalBytesUncomputable {
+        message: String,
+    },
+    CanonicalBytesHashMismatch {
+        canonical_bytes_hash: Hash256,
+        policy_resolution_canonical_bytes_hash: Hash256,
+    },
+    KeyMaterialMismatch,
+    ReportIdentityMismatch,
+}
+
+impl fmt::Display for CachedPolicyProductError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReportSelfHashMismatch {
+                report_self_hash,
+                policy_resolution_self_hash,
+            } => write!(
+                f,
+                "cached policy report self-hash mismatch: report has {report_self_hash}, product has {policy_resolution_self_hash}"
+            ),
+            Self::CachedReportSelfHashMismatch {
+                cached_report_self_hash,
+                policy_resolution_self_hash,
+            } => write!(
+                f,
+                "cached policy report bytes self-hash mismatch: report bytes have {cached_report_self_hash}, product has {policy_resolution_self_hash}"
+            ),
+            Self::ReportSelfHashUncomputable { message } => {
+                write!(
+                    f,
+                    "cached policy report self-hash is not computable: {message}"
+                )
+            }
+            Self::ReportSemanticValidation { message } => {
+                write!(f, "cached policy report is semantically invalid: {message}")
+            }
+            Self::UnexpectedReportOutcome { outcome } => {
+                write!(f, "cached policy success report has outcome {outcome:?}")
+            }
+            Self::CanonicalBytesUncomputable { message } => {
+                write!(
+                    f,
+                    "cached policy report canonical bytes are not computable: {message}"
+                )
+            }
+            Self::CanonicalBytesHashMismatch {
+                canonical_bytes_hash,
+                policy_resolution_canonical_bytes_hash,
+            } => write!(
+                f,
+                "cached policy report canonical bytes hash mismatch: report has {canonical_bytes_hash}, product has {policy_resolution_canonical_bytes_hash}"
+            ),
+            Self::KeyMaterialMismatch => {
+                f.write_str("cached policy product does not match Stage 0.5 key material")
+            }
+            Self::ReportIdentityMismatch => {
+                f.write_str("cached policy report identity does not match cached product")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CachedPolicyProductError {}
 
 #[must_use]
 pub fn stage0_validation_store_key(
@@ -445,8 +538,13 @@ pub fn get_stage05_success(
         return Ok(None);
     };
     let cell: Stage05CacheCell = serde_json::from_slice(&bytes)?;
-    if !matches!(cell, Stage05CacheCell::ResolvePolicySuccess { .. }) {
-        return Err(unexpected_stage05_cell("Stage 0.5 policy success", &cell));
+    match &cell {
+        Stage05CacheCell::ResolvePolicySuccess { product, report } => {
+            validate_cached_policy_product(product, report, material)?;
+        }
+        Stage05CacheCell::FailureMemo { .. } => {
+            return Err(unexpected_stage05_cell("Stage 0.5 policy success", &cell));
+        }
     }
     Ok(Some(cell))
 }
@@ -742,6 +840,98 @@ fn canonical_hash<T: Serialize>(domain: &str, value: &T) -> Hash256 {
     hasher.update([0]);
     hasher.update(bytes);
     Hash256::from_bytes(hasher.finalize().into())
+}
+
+fn validate_cached_policy_product(
+    product: &ResolvedPolicyProduct,
+    cached_report: &CachedReportBytes,
+    material: &Stage05CacheKeyMaterial,
+) -> Result<(), CachedPolicyProductError> {
+    if product.report.report_self_hash != product.policy_resolution_self_hash {
+        return Err(CachedPolicyProductError::ReportSelfHashMismatch {
+            report_self_hash: product.report.report_self_hash,
+            policy_resolution_self_hash: product.policy_resolution_self_hash,
+        });
+    }
+    if cached_report.report_self_hash != product.policy_resolution_self_hash {
+        return Err(CachedPolicyProductError::CachedReportSelfHashMismatch {
+            cached_report_self_hash: cached_report.report_self_hash,
+            policy_resolution_self_hash: product.policy_resolution_self_hash,
+        });
+    }
+    let computed_self_hash = compute_self_hash(&product.report).map_err(|err| {
+        CachedPolicyProductError::ReportSelfHashUncomputable {
+            message: err.to_string(),
+        }
+    })?;
+    if computed_self_hash != product.policy_resolution_self_hash {
+        return Err(CachedPolicyProductError::ReportSelfHashMismatch {
+            report_self_hash: computed_self_hash,
+            policy_resolution_self_hash: product.policy_resolution_self_hash,
+        });
+    }
+    product
+        .report
+        .body
+        .validate_semantics(product.report.outcome)
+        .map_err(|err| CachedPolicyProductError::ReportSemanticValidation {
+            message: format!("{err:?}"),
+        })?;
+    if product.report.outcome != ReportOutcome::Passed {
+        return Err(CachedPolicyProductError::UnexpectedReportOutcome {
+            outcome: product.report.outcome,
+        });
+    }
+
+    let canonical_bytes = canonicalize_report(&product.report).map_err(|err| {
+        CachedPolicyProductError::CanonicalBytesUncomputable {
+            message: err.to_string(),
+        }
+    })?;
+    let canonical_bytes_hash = Hash256::from_bytes(Sha256::digest(&canonical_bytes).into());
+    if canonical_bytes_hash != product.policy_resolution_canonical_bytes_hash {
+        return Err(CachedPolicyProductError::CanonicalBytesHashMismatch {
+            canonical_bytes_hash,
+            policy_resolution_canonical_bytes_hash: product.policy_resolution_canonical_bytes_hash,
+        });
+    }
+
+    if product.artifact_validation_self_hash != material.artifact_validation_self_hash
+        || product.input_hashes != material.input_hashes
+    {
+        return Err(CachedPolicyProductError::KeyMaterialMismatch);
+    }
+    if !cached_policy_report_identity_matches_product(product) {
+        return Err(CachedPolicyProductError::ReportIdentityMismatch);
+    }
+
+    Ok(())
+}
+
+fn cached_policy_report_identity_matches_product(product: &ResolvedPolicyProduct) -> bool {
+    let input_hashes = product.input_hashes;
+    let report = &product.report.body;
+    let Some(result) = &report.result else {
+        return false;
+    };
+
+    report.artifact_identity.artifact_core_hash == input_hashes.artifact_effective_core_hash
+        && report.artifact_identity.artifact_manifest_hash == input_hashes.artifact_manifest_hash
+        && report.artifact_identity.lowering_manifest_hash == input_hashes.lowering_manifest_hash
+        && report.artifact_identity.hint_bundle_hash == input_hashes.hint_bundle_hash
+        && report.compile_request.compile_request_hash == input_hashes.compile_request_hash
+        && report.compile_request.target_profile_hash == input_hashes.target_profile_hash
+        && report.compile_request.calibration_hash == input_hashes.calibration_hash
+        && result.provenance.hint_bundle_hash == input_hashes.hint_bundle_hash
+        && result.provenance.compile_request_hash == input_hashes.compile_request_hash
+        && result.provenance.calibration_hash == input_hashes.calibration_hash
+        && result.provenance.target_defaults == product.policy.provenance.target_defaults
+        && result.provenance.profile_defaults == product.policy.provenance.profile_defaults
+        && result.compile_knobs.global == product.policy.knobs.global
+        && result.compile_knobs.bounds == product.policy.knobs.bounds
+        && result.compile_knobs.locks == product.policy.knobs.locks
+        && result.compile_knobs.overrides == product.policy.knobs.overrides
+        && result.compile_knobs.provenance == product.policy.knobs.provenance
 }
 
 fn unexpected_stage0_cell(
@@ -1172,7 +1362,7 @@ mod tests {
         let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
         let validation = fixture.validation();
         let policy = resolve_policy(&validation).expect("policy resolves");
-        let material = stage05_material();
+        let material = stage05_material_for(&policy);
         let report_bytes = b"cached policy resolution report".to_vec();
 
         put_stage05_success(&cache, &material, &policy, report_bytes)
@@ -1214,6 +1404,40 @@ mod tests {
                 .failures
                 .contains(&BudgetFailure::MissingRuntimeChromeBudget)
         );
+    }
+
+    #[test]
+    fn stage_cache_rejects_stage05_product_with_tampered_report_self_hash() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let policy = resolve_policy(&validation).expect("policy resolves");
+        let material = stage05_material_for(&policy);
+        let cell = Stage05CacheCell::ResolvePolicySuccess {
+            product: Box::new(policy.clone()),
+            report: CachedReportBytes {
+                report_self_hash: policy.policy_resolution_self_hash,
+                canonical_bytes: b"cached policy resolution report".to_vec(),
+            },
+        };
+        let mut value = serde_json::to_value(cell).expect("cache cell serializes");
+        value["product"]["policy_resolution_self_hash"] =
+            serde_json::to_value(hash(222)).expect("hash serializes");
+        let payload = serde_json::to_vec(&value).expect("tampered cache cell serializes");
+        cache
+            .put(
+                &stage05_resolve_policy_store_key(&material, Stage05CellKind::Success),
+                &payload,
+            )
+            .expect("put tampered Stage 0.5 product");
+
+        assert!(matches!(
+            get_stage05_success(&cache, &material),
+            Err(CodegenStageCacheError::CachedPolicyProduct(
+                CachedPolicyProductError::ReportSelfHashMismatch { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -1287,6 +1511,19 @@ mod tests {
             compile_profile_hash: hash(33),
             profile_defaults_hash: hash(34),
             compile_objective_hash: hash(35),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            policy_resolution_schema_hash: policy_resolution_schema_hash(),
+        }
+    }
+
+    fn stage05_material_for(policy: &ResolvedPolicyProduct) -> Stage05CacheKeyMaterial {
+        Stage05CacheKeyMaterial {
+            artifact_validation_self_hash: policy.artifact_validation_self_hash,
+            input_hashes: policy.input_hashes,
+            target_defaults_hash: policy.policy.provenance.target_defaults,
+            compile_profile_hash: policy.input_hashes.compile_profile_hash,
+            profile_defaults_hash: policy.policy.provenance.profile_defaults,
+            compile_objective_hash: policy.policy.provenance.compile_request_hash,
             crate_feature_set_hash: crate_feature_set_hash(),
             policy_resolution_schema_hash: policy_resolution_schema_hash(),
         }
