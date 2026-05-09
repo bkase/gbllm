@@ -1043,6 +1043,9 @@ fn validate_artifact_payload(
 }
 
 fn canonical_tensor_digest_material_len(tensor: &CanonicalTensor) -> u32 {
+    // Canonical tensors are embedded in ArtifactCore, so class 4 synthesizes
+    // a BlobRef for diagnostics from the same digest material convention used
+    // by gbf-artifact's canonical tensor content hash.
     let element_bytes = match &tensor.payload {
         CanonicalTensorPayload::F32(_) => 4_u128,
         CanonicalTensorPayload::I8(_) => 1_u128,
@@ -1130,20 +1133,19 @@ fn validate_sequence_semantics_consistency(
         return;
     }
 
-    let inconsistent = matches!(
-        (
-            artifact.core.sequence_semantics(),
-            requires_linear,
-            requires_bounded
-        ),
-        (SequenceSemanticsSpec::LinearState(_), false, true)
-            | (SequenceSemanticsSpec::BoundedKv(_), true, false)
-    );
-    if inconsistent {
-        diagnostics.push(artifact_payload_malformed_diagnostic(
-            FieldPath::from("core.sequence_semantics"),
-            artifact.manifest.manifest_self_hash,
-        ));
+    match (
+        artifact.core.sequence_semantics(),
+        requires_linear,
+        requires_bounded,
+    ) {
+        (SequenceSemanticsSpec::LinearState(_), true, false)
+        | (SequenceSemanticsSpec::BoundedKv(_), false, true) => {}
+        _ => {
+            diagnostics.push(artifact_payload_malformed_diagnostic(
+                FieldPath::from("core.sequence_semantics"),
+                artifact.manifest.manifest_self_hash,
+            ));
+        }
     }
 }
 
@@ -1303,6 +1305,10 @@ fn validate_resolved_sidecar(
                     }],
                 ));
             }
+            // The current gbf-artifact aux schema exposes these sidecars as
+            // ref placeholders only. Concrete body parsing, including
+            // interaction-bundle malformed checks, belongs with the schema
+            // owner bead that introduces typed sidecar payloads.
         }
         Err(ArtifactResolveError::NotFound { .. }) => {
             diagnostics.push(artifact_aux_sidecar_missing_diagnostic(
@@ -1347,12 +1353,7 @@ fn validate_golden_vector_presence(
             artifact_aux_sidecar_missing_diagnostic(SidecarKind::GoldenVector, manifest_self_hash),
         ),
         Err(ArtifactResolveError::HashMismatch { .. })
-        | Err(ArtifactResolveError::Unsupported { .. }) => {
-            diagnostics.push(artifact_aux_malformed_diagnostic(
-                golden_vector_aux_field(&vector.id),
-                manifest_self_hash,
-            ))
-        }
+        | Err(ArtifactResolveError::Unsupported { .. }) => {}
     }
 }
 
@@ -2371,6 +2372,43 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_rejects_artifact_payload_malformed_tensor_payload() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        let tensor = CanonicalTensor {
+            id: CanonicalTensorId::new("tensor.bad").expect("tensor id"),
+            kind: CanonicalTensorKind::Bias,
+            layout: CanonicalTensorLayout::new(
+                CanonicalTensorShape::from_usize_dims(&[2]).expect("shape"),
+                TensorElementType::Float32,
+            ),
+            payload: CanonicalTensorPayload::F32(vec![1.0]),
+            content_hash: hash(0x52),
+        };
+        fixture.artifact.core = unchecked_artifact_core(
+            vec![tensor.clone()],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
+        );
+        fixture.artifact.manifest.components = vec![ManifestComponent {
+            digest: tensor.content_hash,
+            id: ComponentId("tensor.bad".to_owned()),
+            kind: ComponentKind::CanonicalTensor,
+        }];
+        fixture.refresh_core_identity();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactPayloadMalformed { field }
+                    if field == &FieldPath::from("core.tensors.tensor.bad.payload")
+            )
+        });
+    }
+
+    #[test]
     fn f_b2_validate_rejects_artifact_payload_malformed_quant_spec() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         let tensor = CanonicalTensor::new(
@@ -2409,16 +2447,56 @@ mod tests {
 
     #[test]
     fn f_b2_validate_rejects_sequence_feature_semantics_mismatch() {
+        let cases = [
+            (
+                SequenceSemanticsSpec::linear_state(1).expect("linear fixture"),
+                BTreeSet::from([ArtifactFeature::DenseI8]),
+            ),
+            (
+                SequenceSemanticsSpec::bounded_kv(16, 4).expect("bounded fixture"),
+                BTreeSet::from([ArtifactFeature::DenseI8]),
+            ),
+            (
+                SequenceSemanticsSpec::linear_state(1).expect("linear fixture"),
+                BTreeSet::from([ArtifactFeature::DenseI8, ArtifactFeature::BoundedKvSequence]),
+            ),
+            (
+                SequenceSemanticsSpec::bounded_kv(16, 4).expect("bounded fixture"),
+                BTreeSet::from([
+                    ArtifactFeature::DenseI8,
+                    ArtifactFeature::LinearStateSequence,
+                ]),
+            ),
+        ];
+
+        for (semantics, required_features) in cases {
+            let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+            fixture.artifact.core = ArtifactCore::new(Vec::new(), QuantSpec::default(), semantics)
+                .expect("fixture core is valid");
+            fixture.artifact.manifest.required_features = required_features;
+            fixture.refresh_core_identity();
+
+            let failure =
+                validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+            assert_failure_code(&failure, |code| {
+                matches!(
+                    code,
+                    ValidationCode::ArtifactPayloadMalformed { field }
+                        if field == &FieldPath::from("core.sequence_semantics")
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_both_sequence_required_features() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture
             .artifact
             .manifest
             .required_features
             .insert(ArtifactFeature::BoundedKvSequence);
-        fixture.artifact.aux.checkpoint_schema = Some(SemanticCheckpointSchemaRef {
-            id: SemanticCheckpointSchemaId("checkpoint.fixture".to_owned()),
-            hash: sha256_hash(&[]),
-        });
         fixture.refresh_manifest_self_hash();
         fixture.refresh_transport_hash();
 
@@ -2429,7 +2507,7 @@ mod tests {
             matches!(
                 code,
                 ValidationCode::ArtifactPayloadMalformed { field }
-                    if field == &FieldPath::from("core.sequence_semantics")
+                    if field == &FieldPath::from("manifest.required_features.sequence_semantics")
             )
         });
     }
@@ -2584,19 +2662,36 @@ mod tests {
             (
                 ArtifactFeature::LinearStateSequence,
                 SidecarKind::SemanticCheckpointSchema,
+                SequenceSemanticsSpec::linear_state(1).expect("linear fixture"),
             ),
             (
                 ArtifactFeature::BoundedKvSequence,
                 SidecarKind::SemanticCheckpointSchema,
+                SequenceSemanticsSpec::bounded_kv(16, 4).expect("bounded fixture"),
             ),
-            (ArtifactFeature::MoeRouting, SidecarKind::InteractionBundle),
+            (
+                ArtifactFeature::MoeRouting,
+                SidecarKind::InteractionBundle,
+                SequenceSemanticsSpec::linear_state(1).expect("linear fixture"),
+            ),
         ];
 
-        for (feature, expected_kind) in cases {
+        for (feature, expected_kind, semantics) in cases {
             let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
-            fixture.artifact.manifest.required_features.insert(feature);
-            fixture.refresh_manifest_self_hash();
-            fixture.refresh_transport_hash();
+            fixture.artifact.core = ArtifactCore::new(Vec::new(), QuantSpec::default(), semantics)
+                .expect("fixture core is valid");
+            fixture.artifact.manifest.required_features =
+                BTreeSet::from([ArtifactFeature::DenseI8, feature]);
+            if matches!(feature, ArtifactFeature::MoeRouting) {
+                fixture
+                    .artifact
+                    .manifest
+                    .required_features
+                    .insert(ArtifactFeature::LinearStateSequence);
+            } else {
+                fixture.artifact.aux.checkpoint_schema = None;
+            }
+            fixture.refresh_core_identity();
 
             let failure =
                 validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
@@ -2620,6 +2715,61 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_defers_golden_vector_hash_mismatch_to_class9() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.golden_vectors = vec![golden_vector()];
+        fixture.resolver.golden_vector_hash_mismatches.insert(
+            GoldenVectorId("golden.fixture".to_owned()),
+            (hash(0x07), hash(0x70)),
+        );
+        fixture.refresh_transport_hash();
+
+        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
+    }
+
+    #[test]
+    fn f_b2_validate_rejects_missing_golden_vector_sidecar_ref() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture.artifact.aux.golden_vectors = vec![golden_vector()];
+        fixture
+            .resolver
+            .missing_golden_vectors
+            .insert(GoldenVectorId("golden.fixture".to_owned()));
+        fixture.refresh_transport_hash();
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        assert_failure_code(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::ArtifactAuxSidecarMissing {
+                    kind: SidecarKind::GoldenVector
+                }
+            )
+        });
+        let diagnostic = failure
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::ArtifactAuxSidecarMissing {
+                        kind: SidecarKind::GoldenVector
+                    }
+                )
+            })
+            .expect("missing golden vector diagnostic");
+        assert_eq!(
+            diagnostic
+                .provenance
+                .first()
+                .and_then(|evidence| evidence.hash),
+            Some(fixture.artifact.manifest.manifest_self_hash)
+        );
+    }
+
+    #[test]
     fn f_b2_validate_rejects_duplicate_golden_vector_sidecar_refs() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture.artifact.aux.golden_vectors = vec![golden_vector(), golden_vector()];
@@ -2638,7 +2788,7 @@ mod tests {
     }
 
     #[test]
-    fn f_b2_validate_rejects_unsupported_golden_vector_sidecar_ref() {
+    fn f_b2_validate_defers_unsupported_golden_vector_sidecar_ref_to_class9() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture.artifact.aux.golden_vectors = vec![golden_vector()];
         fixture
@@ -2647,16 +2797,7 @@ mod tests {
             .insert(GoldenVectorId("golden.fixture".to_owned()));
         fixture.refresh_transport_hash();
 
-        let failure =
-            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
-
-        assert_failure_code(&failure, |code| {
-            matches!(
-                code,
-                ValidationCode::ArtifactAuxMalformed { field }
-                    if field == &FieldPath::from("aux.golden_vectors.golden.fixture")
-            )
-        });
+        validate_artifact_and_request(fixture.inputs()).expect("validation passes");
     }
 
     #[test]
@@ -2750,6 +2891,7 @@ mod tests {
         sidecar_bytes: BTreeMap<SidecarRef, Vec<u8>>,
         sidecar_hash_mismatches: BTreeMap<SidecarRef, (Hash256, Hash256)>,
         missing_golden_vectors: BTreeSet<GoldenVectorId>,
+        golden_vector_hash_mismatches: BTreeMap<GoldenVectorId, (Hash256, Hash256)>,
         unsupported_golden_vectors: BTreeSet<GoldenVectorId>,
     }
 
@@ -2821,6 +2963,13 @@ mod tests {
                     vector.id.0
                 )));
             }
+            if let Some((expected, observed)) = self.golden_vector_hash_mismatches.get(&vector.id) {
+                return Err(ArtifactResolveError::HashMismatch {
+                    reference: format!("golden_vector:{}", vector.id.0),
+                    expected: *expected,
+                    observed: *observed,
+                });
+            }
             if self.unsupported_golden_vectors.contains(&vector.id) {
                 return Err(ArtifactResolveError::unsupported(format!(
                     "unsupported golden vector {}",
@@ -2858,7 +3007,10 @@ mod tests {
 
     fn artifact_aux() -> ArtifactAux {
         ArtifactAux {
-            checkpoint_schema: None,
+            checkpoint_schema: Some(SemanticCheckpointSchemaRef {
+                id: SemanticCheckpointSchemaId("checkpoint.fixture".to_owned()),
+                hash: sha256_hash(&[]),
+            }),
             conformance_envelope: None,
             golden_vectors: Vec::new(),
             interaction_bundle: None,
@@ -2873,7 +3025,10 @@ mod tests {
             created_at: ManifestTimestamp(0),
             lineage: LineageId(hash(0x08)),
             manifest_self_hash: Hash256::ZERO,
-            required_features: BTreeSet::from([ArtifactFeature::DenseI8]),
+            required_features: BTreeSet::from([
+                ArtifactFeature::DenseI8,
+                ArtifactFeature::LinearStateSequence,
+            ]),
             schema_version: CURRENT_ARTIFACT_SCHEMA_VERSION,
             semantic_core_hash: artifact_core().semantic_hash(),
         };
