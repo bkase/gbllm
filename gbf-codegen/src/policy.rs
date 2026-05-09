@@ -264,6 +264,13 @@ fn apply_frame(
     locks_active: bool,
     compile_request_override: bool,
 ) -> Result<(), ValidationDiagnostic> {
+    if matches!(frame.source, PolicySource::RepairProposal { .. }) {
+        return Err(forbidden_policy_source_diagnostic(
+            &frame.source,
+            frame.evidence.clone(),
+        ));
+    }
+
     apply_bounds(state, frame, compile_request_override)?;
     apply_values(
         state,
@@ -893,20 +900,44 @@ fn unsupported_hint_constraint_diagnostic(
 
 fn operation_for_value_source(source: &PolicySource) -> ConstraintOperation {
     match source {
+        PolicySource::TargetDefault => ConstraintOperation::SeedDefault,
+        PolicySource::ProfileDefault => ConstraintOperation::SeedDefault,
         PolicySource::CompileRequestOverride => ConstraintOperation::ApplyOverride,
         PolicySource::HintBundle => ConstraintOperation::ApplyHardConstraint,
         PolicySource::Calibration => ConstraintOperation::ApplyCalibration,
-        _ => ConstraintOperation::SeedDefault,
+        PolicySource::RepairProposal { .. } => {
+            unreachable!("F-B2 policy resolution forbids RepairProposal provenance")
+        }
     }
 }
 
 fn operation_for_bound_source(source: &PolicySource) -> ConstraintOperation {
     match source {
         PolicySource::TargetDefault => ConstraintOperation::SeedDefault,
+        PolicySource::ProfileDefault => ConstraintOperation::TightenBound,
         PolicySource::CompileRequestOverride => ConstraintOperation::ApplyOverride,
         PolicySource::HintBundle => ConstraintOperation::ApplyHardConstraint,
         PolicySource::Calibration => ConstraintOperation::ApplyCalibration,
-        _ => ConstraintOperation::TightenBound,
+        PolicySource::RepairProposal { .. } => {
+            unreachable!("F-B2 policy resolution forbids RepairProposal provenance")
+        }
+    }
+}
+
+fn forbidden_policy_source_diagnostic(
+    source: &PolicySource,
+    provenance: Vec<EvidenceRef>,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic {
+        severity: DiagnosticSeverity::Hard,
+        origin: ValidationOrigin::PolicyResolution,
+        code: ValidationCode::ReportSemanticInvariantViolated {
+            field: FieldPath::from("compile_knobs.provenance.source"),
+        },
+        detail: ValidationDetail::Field {
+            field: FieldPath::from(format!("compile_knobs.provenance.source.{source:?}")),
+        },
+        provenance,
     }
 }
 
@@ -1623,7 +1654,7 @@ mod tests {
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationBundleSet,
         CalibrationConfidenceClass, CalibrationLayer, CompileObjective, CompileProfileSpec,
         CompileRequest, DEFAULT_COMPILE_PROFILE_ID, MeasurementBlob, PlacementKnobBounds,
-        PlacementProfile, RomKernelResidencyBias, RomWindowKnob, RuntimeMode,
+        PlacementProfile, RepairProposalId, RomKernelResidencyBias, RomWindowKnob, RuntimeMode,
         ServiceLevelObjective, ValidationCode, canonical_compile_profile_specs,
     };
     use gbf_report::{ReportOutcome, round_trip_self_hash};
@@ -2197,7 +2228,8 @@ mod tests {
     #[test]
     fn f_b2_resolve_policy_no_repair_proposal_provenance_in_chunk() {
         let fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
-        let product = resolve_policy(&fixture.validation()).expect("policy resolves");
+        let validation = fixture.validation();
+        let product = resolve_policy(&validation).expect("policy resolves");
 
         assert!(product.policy.knobs.provenance.iter().all(|entry| {
             entry
@@ -2205,16 +2237,50 @@ mod tests {
                 .iter()
                 .all(|provenance| !matches!(provenance.source, PolicySource::RepairProposal { .. }))
         }));
+
+        let mut state = ResolutionState {
+            values: conservative_target_values(),
+            bounds: canonical_default_bounds_fixture(),
+            locks: KnobLockSet::default(),
+            overrides: CompileKnobOverrides::default(),
+            provenance: BTreeMap::new(),
+            hint_consumption: HintConsumptionSection::default(),
+        };
+        let frame = ConstraintFrame {
+            source: PolicySource::RepairProposal {
+                id: RepairProposalId("future-rp-1".to_owned()),
+            },
+            evidence: Vec::new(),
+            defaults: CompileKnobPartialValues::default(),
+            hard_bounds: CompileKnobPartialBounds::default(),
+            preferences: CompileKnobPartialValues::default(),
+            locks: KnobLockSet::default(),
+        };
+
+        let diagnostic =
+            apply_frame(&mut state, &frame, false, false).expect_err("repair proposal rejects");
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Hard);
+        assert_eq!(diagnostic.origin, ValidationOrigin::PolicyResolution);
+        assert!(matches!(
+            diagnostic.code,
+            ValidationCode::ReportSemanticInvariantViolated { .. }
+        ));
     }
 
     #[test]
-    fn f_b2_resolve_policy_no_profile_relaxation_field() {
+    fn f_b2_resolve_policy_rejects_authorized_relaxation_operation() {
         let fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
         let product = resolve_policy(&fixture.validation()).expect("policy resolves");
         let encoded = serde_json::to_string(&product.report).expect("report serializes");
 
         assert!(!encoded.contains("relaxation"));
         assert!(!encoded.contains("AuthorizedRelaxation"));
+        assert!(
+            serde_json::from_value::<ConstraintOperation>(
+                serde_json::json!({"kind": "AuthorizedRelaxation"})
+            )
+            .is_err()
+        );
     }
 
     fn provenance_entry<'a>(
