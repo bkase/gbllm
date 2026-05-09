@@ -69,10 +69,11 @@ pub fn resolve_policy(
     validation: &ValidationProduct<'_>,
 ) -> Result<ResolvedPolicyProduct, PolicyResolutionStageFailure> {
     let values = conservative_target_values();
+    let bounds = canonical_default_bounds_fixture();
     let mut state = ResolutionState {
-        provenance: value_seed_provenance(&values, target_evidence(validation)),
+        provenance: target_seed_provenance(&values, &bounds, target_evidence(validation)),
         values,
-        bounds: canonical_default_bounds_fixture(),
+        bounds,
         locks: KnobLockSet::default(),
         overrides: CompileKnobOverrides::default(),
         hint_consumption: HintConsumptionSection::default(),
@@ -288,6 +289,8 @@ fn apply_frame(
             lock_path(*knob),
             ConstraintProvenance {
                 source: frame.source.clone(),
+                // F-B2 has no lock-specific operation; profile locks seed the
+                // effective lock set for later-frame enforcement.
                 operation: ConstraintOperation::SeedDefault,
                 evidence: frame.evidence.clone(),
             },
@@ -949,8 +952,9 @@ fn push_provenance_path(
     provenance.entry(path).or_default().push(entry);
 }
 
-fn value_seed_provenance(
+fn target_seed_provenance(
     values: &CompileKnobValues,
+    bounds: &CompileKnobBounds,
     evidence: EvidenceRef,
 ) -> BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>> {
     let mut provenance = BTreeMap::new();
@@ -1020,6 +1024,70 @@ fn value_seed_provenance(
         CompileKnobId::Schedule,
         values.schedule,
         values.schedule,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::Placement,
+        bounds.placement,
+        bounds.placement,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::Observation,
+        bounds.observation,
+        bounds.observation,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::Range,
+        bounds.range,
+        bounds.range,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::Storage,
+        bounds.storage,
+        bounds.storage,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::Sram,
+        bounds.sram,
+        bounds.sram,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::RomWindow,
+        bounds.rom_window,
+        bounds.rom_window,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::Overlay,
+        bounds.overlay,
+        bounds.overlay,
+        true,
+        entry.clone(),
+    );
+    push_bound_provenance(
+        &mut provenance,
+        CompileKnobId::Schedule,
+        bounds.schedule,
+        bounds.schedule,
         true,
         entry,
     );
@@ -2222,7 +2290,25 @@ mod tests {
         assert!(max_pressure.chain.iter().any(|provenance| {
             provenance.source == PolicySource::TargetDefault
                 && provenance.operation == ConstraintOperation::SeedDefault
+                && !provenance.evidence.is_empty()
         }));
+        for entry in product.policy.knobs.provenance.iter().filter(|entry| {
+            entry
+                .path
+                .field
+                .as_ref()
+                .is_some_and(|field| field.as_str().starts_with("bounds."))
+        }) {
+            assert!(
+                entry.chain.iter().any(|provenance| {
+                    provenance.source == PolicySource::TargetDefault
+                        && provenance.operation == ConstraintOperation::SeedDefault
+                        && !provenance.evidence.is_empty()
+                }),
+                "bounds path missing target evidence: {:?}",
+                entry.path
+            );
+        }
     }
 
     #[test]
