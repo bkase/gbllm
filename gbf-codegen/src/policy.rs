@@ -2840,6 +2840,7 @@ mod tests {
             source_uri: Some("fixture://artifact".to_owned()),
             transport_hash: Hash256::ZERO,
             import_tool_hash: hash(0x02),
+            manifest_metadata: None,
         }
     }
 

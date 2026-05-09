@@ -1189,7 +1189,10 @@ Stage 0 treats `artifact.core.manifest` as the only manifest of record. Any
 outer transport manifest is import metadata only. If transport metadata and
 `artifact.core.manifest` disagree on semantic core hash, schema version,
 component digest, or lineage, Stage 0 rejects the artifact with
-`ArtifactTransportManifestMismatch`.
+`ArtifactTransportManifestMismatch`. The typed transport carrier is
+`ArtifactTransportManifestMetadata`; when an importer does not provide it,
+Stage 0 still applies the source-hash identity check but cannot claim
+field-level transport/manifest agreement.
 
 | #  | Class                        | Rejects                                                                                                                                                        | Code(s)                                                                                                                                                                                       |
 | -- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

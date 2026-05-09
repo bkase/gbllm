@@ -41,7 +41,7 @@
 //! ```
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -52,7 +52,8 @@ use gbf_artifact::lowerings::{
     Pack, Unpack,
 };
 use gbf_artifact::manifest::{
-    ArtifactFeature, ArtifactSchemaVersion, ComponentKind, ManifestComponent, ManifestInvariant,
+    ArtifactFeature, ArtifactSchemaVersion, ComponentId, ComponentKind, LineageId,
+    ManifestComponent, ManifestInvariant,
 };
 use gbf_artifact::sequence::SequenceSemanticsSpec;
 use gbf_artifact::tensor::{CanonicalTensor, CanonicalTensorPayload};
@@ -177,6 +178,56 @@ pub struct ArtifactTransportIdentity {
     pub source_uri: Option<String>,
     pub transport_hash: Hash256,
     pub import_tool_hash: Hash256,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_metadata: Option<ArtifactTransportManifestMetadata>,
+}
+
+/// Typed outer transport-manifest metadata received by Stage 0 import.
+///
+/// `ArtifactManifest` remains the manifest of record. When this carrier is
+/// present, Stage 0 class 2 rejects any field-level disagreement between the
+/// transport metadata and the imported manifest. When it is absent, Stage 0 can
+/// only apply the legacy source-hash identity check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTransportManifestMetadata {
+    pub semantic_core_hash: Hash256,
+    pub schema_version: ArtifactSchemaVersion,
+    pub components: Vec<ArtifactTransportComponentMetadata>,
+    pub lineage: LineageId,
+}
+
+impl ArtifactTransportManifestMetadata {
+    #[must_use]
+    pub fn from_manifest(manifest: &ArtifactManifest) -> Self {
+        Self {
+            semantic_core_hash: manifest.semantic_core_hash,
+            schema_version: manifest.schema_version,
+            components: manifest
+                .components
+                .iter()
+                .map(ArtifactTransportComponentMetadata::from_manifest_component)
+                .collect(),
+            lineage: manifest.lineage.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTransportComponentMetadata {
+    pub id: ComponentId,
+    pub digest: Hash256,
+}
+
+impl ArtifactTransportComponentMetadata {
+    #[must_use]
+    pub fn from_manifest_component(component: &ManifestComponent) -> Self {
+        Self {
+            id: component.id.clone(),
+            digest: component.digest,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -740,6 +791,121 @@ fn validate_transport_manifest(
             }],
         ));
     }
+    if let Some(metadata) = &source.transport.manifest_metadata {
+        validate_transport_manifest_metadata(&source.manifest, metadata, diagnostics);
+    }
+}
+
+fn validate_transport_manifest_metadata(
+    manifest: &ArtifactManifest,
+    metadata: &ArtifactTransportManifestMetadata,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if metadata.semantic_core_hash != manifest.semantic_core_hash {
+        diagnostics.push(transport_manifest_hash_mismatch(
+            "manifest_metadata.semantic_core_hash",
+            manifest.semantic_core_hash,
+            metadata.semantic_core_hash,
+            manifest.manifest_self_hash,
+        ));
+    }
+    if metadata.schema_version != manifest.schema_version {
+        diagnostics.push(transport_manifest_field_mismatch(
+            "manifest_metadata.schema_version",
+            manifest.manifest_self_hash,
+        ));
+    }
+    if metadata.lineage != manifest.lineage {
+        diagnostics.push(transport_manifest_hash_mismatch(
+            "manifest_metadata.lineage",
+            manifest.lineage.0,
+            metadata.lineage.0,
+            manifest.manifest_self_hash,
+        ));
+    }
+
+    let manifest_components = manifest
+        .components
+        .iter()
+        .map(|component| (component.id.clone(), component.digest))
+        .collect::<BTreeMap<_, _>>();
+    let transport_components = metadata
+        .components
+        .iter()
+        .map(|component| (component.id.clone(), component.digest))
+        .collect::<BTreeMap<_, _>>();
+
+    for (component, expected) in &manifest_components {
+        match transport_components.get(component) {
+            Some(observed) if observed != expected => {
+                diagnostics.push(transport_manifest_hash_mismatch(
+                    format!("manifest_metadata.components.{}.digest", component.0),
+                    *expected,
+                    *observed,
+                    manifest.manifest_self_hash,
+                ));
+            }
+            Some(_) => {}
+            None => diagnostics.push(transport_manifest_field_mismatch(
+                format!("manifest_metadata.components.{}", component.0),
+                manifest.manifest_self_hash,
+            )),
+        }
+    }
+
+    for component in transport_components.keys() {
+        if !manifest_components.contains_key(component) {
+            diagnostics.push(transport_manifest_field_mismatch(
+                format!("manifest_metadata.components.{}", component.0),
+                manifest.manifest_self_hash,
+            ));
+        }
+    }
+}
+
+fn transport_manifest_hash_mismatch(
+    reference: impl Into<String>,
+    expected: Hash256,
+    observed: Hash256,
+    manifest_hash: Hash256,
+) -> ValidationDiagnostic {
+    let reference = reference.into();
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Manifest,
+        ValidationCode::ArtifactTransportManifestMismatch,
+        ValidationDetail::HashMismatch { expected, observed },
+        transport_manifest_provenance(reference, manifest_hash),
+    )
+}
+
+fn transport_manifest_field_mismatch(
+    reference: impl Into<String>,
+    manifest_hash: Hash256,
+) -> ValidationDiagnostic {
+    let reference = reference.into();
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Manifest,
+        ValidationCode::ArtifactTransportManifestMismatch,
+        ValidationDetail::Field {
+            field: FieldPath::from(reference.clone()),
+        },
+        transport_manifest_provenance(reference, manifest_hash),
+    )
+}
+
+fn transport_manifest_provenance(reference: String, manifest_hash: Hash256) -> Vec<EvidenceRef> {
+    vec![
+        EvidenceRef {
+            kind: "artifact_transport".to_owned(),
+            reference,
+            hash: Some(manifest_hash),
+        },
+        EvidenceRef {
+            kind: "artifact_manifest".to_owned(),
+            reference: "manifest_self_hash".to_owned(),
+            hash: Some(manifest_hash),
+        },
+    ]
 }
 
 fn validate_manifest_invariants(
@@ -4734,6 +4900,48 @@ mod tests {
     }
 
     #[test]
+    fn f_b2_validate_rejects_typed_transport_manifest_metadata_mismatches() {
+        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        fixture
+            .artifact
+            .manifest
+            .components
+            .push(ManifestComponent {
+                digest: hash(0x33),
+                id: ComponentId("quant.default".to_owned()),
+                kind: ComponentKind::QuantSpec,
+            });
+        fixture.refresh_manifest_self_hash();
+        fixture.refresh_transport_hash();
+        let mut metadata =
+            ArtifactTransportManifestMetadata::from_manifest(&fixture.artifact.manifest);
+        metadata.semantic_core_hash = hash(0x44);
+        metadata.schema_version = ArtifactSchemaVersion { epoch: 1, minor: 0 };
+        metadata.components[0].digest = hash(0x66);
+        metadata.lineage = LineageId(hash(0x55));
+        fixture.artifact.transport.manifest_metadata = Some(metadata);
+
+        let failure =
+            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
+
+        let mismatch_count = failure
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    ValidationCode::ArtifactTransportManifestMismatch
+                )
+            })
+            .count();
+        assert_eq!(
+            mismatch_count, 4,
+            "diagnostics were {:#?}",
+            failure.diagnostics
+        );
+    }
+
+    #[test]
     fn f_b2_validate_rejects_artifact_forbidden_build_identity_field() {
         let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
         fixture
@@ -5732,6 +5940,7 @@ mod tests {
             source_uri: Some("fixture://artifact".to_owned()),
             transport_hash: Hash256::ZERO,
             import_tool_hash: hash(0x02),
+            manifest_metadata: None,
         }
     }
 
