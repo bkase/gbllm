@@ -23,6 +23,7 @@ use gbf_report::{
     ReportEnvelope, ReportOutcome, canonicalize as canonicalize_report, compute_self_hash,
 };
 use gbf_workload::{GoldenVectorId, WorkloadId};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::validate::{ValidatedInputHashes, ValidationProduct};
@@ -48,7 +49,7 @@ struct HintPreferenceCandidate {
     provenance: Vec<ConstraintProvenance>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPolicyProduct {
     pub policy: ResolvedCompilePolicy,
     pub input_hashes: ValidatedInputHashes,
@@ -1820,7 +1821,7 @@ fn calibration_evidence(validation: &ValidationProduct<'_>) -> EvidenceRef {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
     use std::collections::BTreeSet;
 
@@ -2643,7 +2644,7 @@ mod tests {
         );
     }
 
-    struct Fixture {
+    pub(crate) struct Fixture {
         artifact: ImportedArtifactView,
         lowerings: Vec<TargetDataLoweringArtifact>,
         workloads: Vec<WorkloadManifestRef>,
@@ -2656,7 +2657,7 @@ mod tests {
     }
 
     impl Fixture {
-        fn new(profile: &str) -> Self {
+        pub(crate) fn new(profile: &str) -> Self {
             let target_profile = dmg_mbc5_8mib_128kib();
             let target_profile_hash = target_profile
                 .content_hash()
@@ -2692,7 +2693,7 @@ mod tests {
             }
         }
 
-        fn validation(&self) -> ValidationProduct<'_> {
+        pub(crate) fn validation(&self) -> ValidationProduct<'_> {
             validate_artifact_and_request(self.inputs()).expect("fixture validates")
         }
 

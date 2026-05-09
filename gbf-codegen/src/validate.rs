@@ -283,12 +283,117 @@ impl<'a> ValidatedInputs<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PrivateValidatedInputs(());
 
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachedValidatedInputs {
+    artifact: ImportedArtifactView,
+    lowerings: Vec<TargetDataLoweringArtifact>,
+    workloads: Vec<WorkloadManifestRef>,
+    golden_vectors: Vec<GoldenVectorRef>,
+    compile_request: CompileRequest,
+    target_profile: TargetProfile,
+    compile_profile: CompileProfileSpec,
+    calibration: CalibrationBundleSet,
+    input_hashes: ValidatedInputHashes,
+}
+
+impl CachedValidatedInputs {
+    #[must_use]
+    pub fn input_hashes(&self) -> ValidatedInputHashes {
+        self.input_hashes
+    }
+
+    fn as_validated_inputs(&self) -> ValidatedInputs<'_> {
+        ValidatedInputs {
+            artifact: Cow::Borrowed(&self.artifact),
+            lowerings: &self.lowerings,
+            workloads: &self.workloads,
+            golden_vectors: &self.golden_vectors,
+            compile_request: &self.compile_request,
+            target_profile: &self.target_profile,
+            compile_profile: &self.compile_profile,
+            calibration: &self.calibration,
+            input_hashes: self.input_hashes,
+            _private: PrivateValidatedInputs(()),
+        }
+    }
+}
+
+impl From<&ValidatedInputs<'_>> for CachedValidatedInputs {
+    fn from(validated: &ValidatedInputs<'_>) -> Self {
+        Self {
+            artifact: validated.artifact.as_ref().clone(),
+            lowerings: validated.lowerings.to_vec(),
+            workloads: validated.workloads.to_vec(),
+            golden_vectors: validated.golden_vectors.to_vec(),
+            compile_request: validated.compile_request.clone(),
+            target_profile: validated.target_profile.clone(),
+            compile_profile: validated.compile_profile.clone(),
+            calibration: validated.calibration.clone(),
+            input_hashes: validated.input_hashes,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidationProduct<'a> {
     pub validated: ValidatedInputs<'a>,
     pub report: ReportEnvelope<ArtifactValidationReportBody>,
     pub artifact_validation_self_hash: Hash256,
     pub artifact_validation_canonical_bytes_hash: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachedValidationProduct {
+    validated: CachedValidatedInputs,
+    report: ReportEnvelope<ArtifactValidationReportBody>,
+    artifact_validation_self_hash: Hash256,
+    artifact_validation_canonical_bytes_hash: Hash256,
+}
+
+impl CachedValidationProduct {
+    #[must_use]
+    pub fn input_hashes(&self) -> ValidatedInputHashes {
+        self.validated.input_hashes()
+    }
+
+    #[must_use]
+    pub fn artifact_validation_self_hash(&self) -> Hash256 {
+        self.artifact_validation_self_hash
+    }
+
+    #[must_use]
+    pub fn artifact_validation_canonical_bytes_hash(&self) -> Hash256 {
+        self.artifact_validation_canonical_bytes_hash
+    }
+
+    #[must_use]
+    pub fn report(&self) -> &ReportEnvelope<ArtifactValidationReportBody> {
+        &self.report
+    }
+
+    #[must_use]
+    pub fn rehydrate(&self) -> ValidationProduct<'_> {
+        ValidationProduct {
+            validated: self.validated.as_validated_inputs(),
+            report: self.report.clone(),
+            artifact_validation_self_hash: self.artifact_validation_self_hash,
+            artifact_validation_canonical_bytes_hash: self.artifact_validation_canonical_bytes_hash,
+        }
+    }
+}
+
+impl From<&ValidationProduct<'_>> for CachedValidationProduct {
+    fn from(product: &ValidationProduct<'_>) -> Self {
+        Self {
+            validated: CachedValidatedInputs::from(&product.validated),
+            report: product.report.clone(),
+            artifact_validation_self_hash: product.artifact_validation_self_hash,
+            artifact_validation_canonical_bytes_hash: product
+                .artifact_validation_canonical_bytes_hash,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

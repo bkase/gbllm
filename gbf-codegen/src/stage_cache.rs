@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::budget::StaticBudgetReport;
 use crate::policy::{PolicyResolutionStageFailure, ResolvedPolicyProduct};
-use crate::validate::{ValidatedInputHashes, ValidationProduct, ValidationStageFailure};
+use crate::validate::{CachedValidationProduct, ValidatedInputHashes, ValidationStageFailure};
 
 pub const PASS_VERSION_VALIDATE: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_RESOLVE: SemVer = SemVer::new(1, 0, 0);
@@ -166,35 +166,7 @@ pub struct CachedReportBytes {
     pub canonical_bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CachedValidationProduct {
-    pub input_hashes: ValidatedInputHashes,
-    pub artifact_validation_self_hash: Hash256,
-    pub artifact_validation_canonical_bytes_hash: Hash256,
-}
-
-impl From<&ValidationProduct<'_>> for CachedValidationProduct {
-    fn from(product: &ValidationProduct<'_>) -> Self {
-        Self {
-            input_hashes: product.validated.input_hashes,
-            artifact_validation_self_hash: product.artifact_validation_self_hash,
-            artifact_validation_canonical_bytes_hash: product
-                .artifact_validation_canonical_bytes_hash,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CachedResolvedPolicyProduct {
-    pub input_hashes: ValidatedInputHashes,
-    pub artifact_validation_self_hash: Hash256,
-    pub policy_resolution_self_hash: Hash256,
-    pub policy_resolution_canonical_bytes_hash: Hash256,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cell", deny_unknown_fields)]
 pub enum Stage0CacheCell {
     ValidationSuccess {
@@ -211,7 +183,7 @@ pub enum Stage0CacheCell {
 #[serde(tag = "cell", deny_unknown_fields)]
 pub enum Stage05CacheCell {
     ResolvePolicySuccess {
-        product: Box<CachedResolvedPolicyProduct>,
+        product: Box<ResolvedPolicyProduct>,
         report: CachedReportBytes,
     },
     FailureMemo {
@@ -395,7 +367,17 @@ pub fn put_stage0_success(
     report_bytes: Vec<u8>,
 ) -> Result<StageCacheKey, CodegenStageCacheError> {
     let product = product.into();
-    let report_self_hash = product.artifact_validation_self_hash;
+    debug_assert_eq!(
+        product.report().report_self_hash,
+        product.artifact_validation_self_hash(),
+        "CachedValidationProduct self-hash mirrors its report envelope"
+    );
+    debug_assert_eq!(
+        product.report().outcome,
+        ReportOutcome::Passed,
+        "Stage 0 success cells only store passed validation reports"
+    );
+    let report_self_hash = product.artifact_validation_self_hash();
     let cell = Stage0CacheCell::ValidationSuccess {
         product: Box::new(product),
         report: CachedReportBytes {
@@ -479,13 +461,17 @@ pub fn put_stage05_success(
     product: &ResolvedPolicyProduct,
     report_bytes: Vec<u8>,
 ) -> Result<StageCacheKey, CodegenStageCacheError> {
+    debug_assert_eq!(
+        product.report.report_self_hash, product.policy_resolution_self_hash,
+        "ResolvedPolicyProduct self-hash mirrors its report envelope"
+    );
+    debug_assert_eq!(
+        product.report.outcome,
+        ReportOutcome::Passed,
+        "Stage 0.5 success cells only store passed policy reports"
+    );
     let cell = Stage05CacheCell::ResolvePolicySuccess {
-        product: Box::new(CachedResolvedPolicyProduct {
-            input_hashes: product.input_hashes,
-            artifact_validation_self_hash: product.artifact_validation_self_hash,
-            policy_resolution_self_hash: product.policy_resolution_self_hash,
-            policy_resolution_canonical_bytes_hash: product.policy_resolution_canonical_bytes_hash,
-        }),
+        product: Box::new(product.clone()),
         report: CachedReportBytes {
             report_self_hash: product.policy_resolution_self_hash,
             canonical_bytes: report_bytes,
@@ -782,11 +768,21 @@ fn unexpected_stage2_cell(
 
 #[cfg(test)]
 mod tests {
-    use gbf_policy::{BudgetFailure, BudgetSlotClass, PlacementProfile, budget_failure_diagnostic};
+    use gbf_hw::target::dmg_mbc5_8mib_128kib;
+    use gbf_policy::{
+        BudgetFailure, BudgetSlotClass, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile,
+        budget_failure_diagnostic,
+    };
     use gbf_report::ReportEnvelope;
     use gbf_store::blob::BlobStore;
     use gbf_store::stage_cache::{StageCache, compose_key};
     use tempfile::TempDir;
+
+    use crate::budget::{
+        BudgetInputs, QuantGraphBudgetSource, QuantGraphBudgetView, QuantGraphBudgetViewError,
+        static_budget_report as run_stage2_static_budget,
+    };
+    use crate::policy::resolve_policy;
 
     use super::*;
 
@@ -1042,20 +1038,20 @@ mod tests {
         let material = stage0_material();
         let report_bytes =
             br#"{"cached":["bytes",17],"nested":{"order":"preserved"},"z":true}"#.to_vec();
-        let product = CachedValidationProduct {
-            input_hashes: input_hashes(),
-            artifact_validation_self_hash: hash(97),
-            artifact_validation_canonical_bytes_hash: hash(96),
-        };
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
 
-        put_stage0_success(&cache, &material, product, report_bytes.clone())
+        put_stage0_success(&cache, &material, &validation, report_bytes.clone())
             .expect("put success cell");
         let cell = get_stage0_success(&cache, &material)
             .expect("success lookup")
             .expect("cache hit");
         let materialized = materialize_stage0_cached_report(&cell);
 
-        assert_eq!(materialized.report_self_hash, hash(97));
+        assert_eq!(
+            materialized.report_self_hash,
+            validation.artifact_validation_self_hash
+        );
         assert_eq!(materialized.canonical_bytes, report_bytes);
 
         let budget_material = stage2_material(Some(hash(43)));
@@ -1079,6 +1075,93 @@ mod tests {
             budget_report.static_budget_self_hash
         );
         assert_eq!(materialized_budget.canonical_bytes, budget_report_bytes);
+    }
+
+    #[test]
+    fn stage_cache_hit_rehydrates_stage0_product_for_policy_resume() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let material = Stage0CacheKeyMaterial::success(validation.validated.input_hashes, hash(11));
+        let report_bytes = b"cached artifact validation report".to_vec();
+
+        put_stage0_success(&cache, &material, &validation, report_bytes)
+            .expect("put Stage 0 success product");
+        let cell = get_stage0_success(&cache, &material)
+            .expect("Stage 0 success lookup")
+            .expect("Stage 0 cache hit");
+        let Stage0CacheCell::ValidationSuccess { product, .. } = cell else {
+            panic!("expected Stage 0 success product");
+        };
+
+        let resumed_validation = product.rehydrate();
+        assert_eq!(
+            resumed_validation.validated.input_hashes,
+            validation.validated.input_hashes
+        );
+        assert_eq!(
+            resumed_validation.validated.compile_request,
+            validation.validated.compile_request
+        );
+
+        let resumed_policy = resolve_policy(&resumed_validation)
+            .expect("policy resolves from cached Stage 0 product");
+        assert_eq!(
+            resumed_policy.input_hashes,
+            validation.validated.input_hashes
+        );
+    }
+
+    #[test]
+    fn stage_cache_hit_replays_stage05_policy_product_for_budget_resume() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = fixture.validation();
+        let policy = resolve_policy(&validation).expect("policy resolves");
+        let material = stage05_material();
+        let report_bytes = b"cached policy resolution report".to_vec();
+
+        put_stage05_success(&cache, &material, &policy, report_bytes)
+            .expect("put Stage 0.5 success product");
+        let cell = get_stage05_success(&cache, &material)
+            .expect("Stage 0.5 success lookup")
+            .expect("Stage 0.5 cache hit");
+        let Stage05CacheCell::ResolvePolicySuccess { product, .. } = cell else {
+            panic!("expected Stage 0.5 success product");
+        };
+
+        assert_eq!(product.policy, policy.policy);
+        assert_eq!(
+            product.policy_resolution_self_hash,
+            policy.policy_resolution_self_hash
+        );
+
+        let quant_graph = CacheHitQuantGraph {
+            quant_graph_hash: hash(0xe0),
+        };
+        let target_profile = dmg_mbc5_8mib_128kib();
+        let budget = run_stage2_static_budget(BudgetInputs {
+            policy: &product,
+            quant_graph: &quant_graph,
+            runtime_chrome_budget: None,
+            target_profile: &target_profile,
+        });
+
+        assert_eq!(budget.report.outcome, ReportOutcome::Failed);
+        assert_eq!(
+            budget.report.body.identity.policy_resolution_self_hash,
+            policy.policy_resolution_self_hash
+        );
+        assert!(
+            budget
+                .report
+                .body
+                .decision
+                .failures
+                .contains(&BudgetFailure::MissingRuntimeChromeBudget)
+        );
     }
 
     #[test]
@@ -1280,6 +1363,24 @@ mod tests {
             compile_profile_hash: hash(29),
             calibration_hash: hash(30),
             compatibility_adapter_hash: Some(hash(31)),
+        }
+    }
+
+    struct CacheHitQuantGraph {
+        quant_graph_hash: Hash256,
+    }
+
+    impl QuantGraphBudgetSource for CacheHitQuantGraph {
+        fn quant_graph_hash(&self) -> Hash256 {
+            self.quant_graph_hash
+        }
+
+        fn semantic_core_hash(&self) -> Hash256 {
+            hash(0x02)
+        }
+
+        fn to_budget_view(&self) -> Result<QuantGraphBudgetView, QuantGraphBudgetViewError> {
+            panic!("missing runtime chrome budget must not evaluate the quant graph")
         }
     }
 
