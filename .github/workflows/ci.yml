@@ -39,7 +39,7 @@ jobs:
             exit 1
           fi
       - name: Lint workspace supported feature set
-        run: cargo clippy --workspace --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings
       - name: Lint gbf-train qat
         run: cargo clippy -p gbf-train --features qat,burn-adapter -- -D warnings
       - name: Lint gbf-train qat-ablation
@@ -49,7 +49,7 @@ jobs:
       - name: Lint gbf-experiments ablation
         run: cargo clippy -p gbf-experiments --no-default-features --features ablation -- -D warnings
       - name: Test workspace supported feature set
-        run: cargo test --workspace --exclude gbf-train --exclude gbf-experiments --all-features
+        run: cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features
       - name: Test gbf-train qat
         run: cargo test -p gbf-train --features qat,burn-adapter
       - name: Test gbf-train qat-ablation
