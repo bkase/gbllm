@@ -1279,6 +1279,7 @@ fn compose_production_report(args: &ReportArgs) -> Result<(), S1CliError> {
         dispatch.outcome,
         model_profile,
         dispatch.decision.clone(),
+        &dispatch_input,
         &baseline,
         &scores,
     );
@@ -2454,11 +2455,12 @@ fn production_report_decision_for_model_profile(
     outcome: S1Outcome,
     model_profile: ModelSizeProfile,
     dispatch_decision: S1Decision,
+    dispatch_input: &OutcomeDispatchInput,
     baseline: &BaselineReport,
     scores: &[Option<ScoreReport>],
 ) -> S1Decision {
     if outcome == S1Outcome::FailCapacity && model_profile == ModelSizeProfile::Toy1 {
-        if toy1_h2_waiver_applies(baseline, scores) {
+        if toy1_h2_waiver_applies(dispatch_input, baseline, scores) {
             S1Decision::ProceedToS2WithH2Waiver {
                 reason: S1_H2_WAIVER_REASON.to_owned(),
             }
@@ -2472,7 +2474,14 @@ fn production_report_decision_for_model_profile(
     }
 }
 
-fn toy1_h2_waiver_applies(baseline: &BaselineReport, scores: &[Option<ScoreReport>]) -> bool {
+fn toy1_h2_waiver_applies(
+    dispatch_input: &OutcomeDispatchInput,
+    baseline: &BaselineReport,
+    scores: &[Option<ScoreReport>],
+) -> bool {
+    if !toy1_h2_waiver_statuses_match(dispatch_input) {
+        return false;
+    }
     let threshold = baseline.bpc_3gram - 0.05;
     let Some(bpcs) = production_score_bpcs(scores) else {
         return false;
@@ -2489,6 +2498,16 @@ fn toy1_h2_waiver_applies(baseline: &BaselineReport, scores: &[Option<ScoreRepor
         }
     }
     misses == 1 && max_miss <= TOY1_H2_WAIVER_MAX_MISS_BPC
+}
+
+fn toy1_h2_waiver_statuses_match(dispatch_input: &OutcomeDispatchInput) -> bool {
+    matches!(dispatch_input.h1, HypothesisStatus::Confirmed)
+        && matches!(dispatch_input.h2, HypothesisStatus::Refuted)
+        && matches!(dispatch_input.h3, HypothesisStatus::Confirmed)
+        && matches!(dispatch_input.h4, HypothesisStatus::Confirmed)
+        && matches!(dispatch_input.h5, HypothesisStatus::Confirmed)
+        && !dispatch_input.any_seed_diverged
+        && !dispatch_input.suspicious_low_bpc
 }
 
 fn production_decision_justification(decision: &S1Decision) -> String {
@@ -4234,6 +4253,7 @@ mod tests {
         let default = S1Decision::Investigate {
             reason: "propose-Toy1".to_owned(),
         };
+        let waiver_input = toy1_waiver_dispatch_input();
         let baseline = baseline_report(2.6205440233457096);
         let narrow_miss_scores = score_set([
             2.4740729124186545,
@@ -4248,6 +4268,7 @@ mod tests {
                 S1Outcome::FailCapacity,
                 ModelSizeProfile::Toy0,
                 default.clone(),
+                &waiver_input,
                 &baseline,
                 &narrow_miss_scores,
             ),
@@ -4260,6 +4281,7 @@ mod tests {
             S1Decision::Investigate {
                 reason: "propose-Toy1".to_owned(),
             },
+            &waiver_input,
             &baseline,
             &narrow_miss_scores,
         );
@@ -4280,6 +4302,7 @@ mod tests {
     fn toy1_wide_h2_miss_report_still_targets_toy2_successor() {
         let baseline = baseline_report(2.6205440233457096);
         let wide_miss_scores = score_set([2.47, 2.63, 2.49, 2.48, 2.54]);
+        let waiver_input = toy1_waiver_dispatch_input();
 
         let toy1_decision = production_report_decision_for_model_profile(
             S1Outcome::FailCapacity,
@@ -4287,6 +4310,7 @@ mod tests {
             S1Decision::Investigate {
                 reason: "propose-Toy1".to_owned(),
             },
+            &waiver_input,
             &baseline,
             &wide_miss_scores,
         );
@@ -4297,6 +4321,50 @@ mod tests {
                 reason: "propose-Toy2".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn toy1_h2_waiver_requires_h3_confirmed() {
+        let baseline = baseline_report(2.6205440233457096);
+        let narrow_miss_scores = score_set([
+            2.4740729124186545,
+            2.6143710626756853,
+            2.4931229232483987,
+            2.4811665805658465,
+            2.5381613321612337,
+        ]);
+        let mut h3_refuted_input = toy1_waiver_dispatch_input();
+        h3_refuted_input.h3 = HypothesisStatus::Refuted;
+
+        let toy1_decision = production_report_decision_for_model_profile(
+            S1Outcome::FailCapacity,
+            ModelSizeProfile::Toy1,
+            S1Decision::Investigate {
+                reason: "propose-Toy1".to_owned(),
+            },
+            &h3_refuted_input,
+            &baseline,
+            &narrow_miss_scores,
+        );
+
+        assert_eq!(
+            toy1_decision,
+            S1Decision::Investigate {
+                reason: "propose-Toy2".to_owned(),
+            }
+        );
+    }
+
+    fn toy1_waiver_dispatch_input() -> OutcomeDispatchInput {
+        OutcomeDispatchInput {
+            h1: HypothesisStatus::Confirmed,
+            h2: HypothesisStatus::Refuted,
+            h3: HypothesisStatus::Confirmed,
+            h4: HypothesisStatus::Confirmed,
+            h5: HypothesisStatus::Confirmed,
+            any_seed_diverged: false,
+            suspicious_low_bpc: false,
+        }
     }
 
     #[test]
