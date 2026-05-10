@@ -1,0 +1,24 @@
+{
+  "schema": "s1_baseline.v1",
+  "corpus_train_sha": "sha256:6418d412de72888f52b5142c761ac21a582f7d1166f0bfbdb5f03ccfdec90443",
+  "corpus_val_sha": "sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d",
+  "smoothing": {
+    "alpha": 0.01,
+    "lambdas": [
+      0.6,
+      0.3,
+      0.1
+    ]
+  },
+  "bpc_3gram": 2.6205440233457096,
+  "bpc_2gram": 3.299625552872586,
+  "bpc_unigram": 4.450947711250171,
+  "counts_summary": {
+    "train_bytes": 2227753162,
+    "distinct_unigrams": 178,
+    "distinct_bigrams": 4002,
+    "distinct_trigrams": 31110
+  },
+  "counts_blob_sha256": "sha256:4852c115d8abcff2e6a3be42f9dcc90baf65e1caa6cf7c8b973ed463780c342b",
+  "baseline_self_hash": "sha256:ab10244caffbdedf7727b08a17edc970f392f258a05c8b2de486b1a20d8e731c"
+}
