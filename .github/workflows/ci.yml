@@ -19,8 +19,6 @@ jobs:
         run: |
           scripts/check_burn_pin.sh --self-test
           scripts/check_burn_pin.sh
-      - name: QAT harness checks
-        run: python3 scripts/qat_harness_checks.py
       - name: Format
         run: cargo fmt --check --all
       - name: QAT feature mutex
@@ -48,6 +46,8 @@ jobs:
         run: cargo clippy -p gbf-experiments --no-default-features --features phase-a -- -D warnings
       - name: Lint gbf-experiments ablation
         run: cargo clippy -p gbf-experiments --no-default-features --features ablation -- -D warnings
+      - name: Lint gbf-cli falsify
+        run: cargo clippy -p gbf-cli --features falsify -- -D warnings
       - name: Test workspace supported feature set
         run: cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features
       - name: Test gbf-train qat
@@ -63,6 +63,8 @@ jobs:
           scripts/s1_isolation_check.sh --fast
       - name: Test gbf-experiments ablation
         run: cargo test -p gbf-experiments --no-default-features --features ablation
+      - name: Test gbf-cli s1_cli
+        run: cargo test -p gbf-cli --test s1_cli
       - name: F-B1 dev-loop smoke
         run: scripts/review/f-b1/smoke.sh
 

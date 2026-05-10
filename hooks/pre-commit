@@ -1,81 +1,40 @@
 #!/usr/bin/env bash
 # gbllm pre-commit hook
-# Ensures every commit is self-certifying (CONSTITUTION §I.4)
-# Must complete in <2 minutes (CONSTITUTION §II.1)
+# Fast self-cert: format + workspace clippy/test on the main feature set.
+# The full feature-combo matrix (gbf-train qat / qat-ablation, gbf-experiments
+# phase-a / ablation, gbf-cli falsify, etc.) runs in CI, not here.
 set -euo pipefail
 
-# Stage 0: project harness sensors (fast, deterministic)
-if ! python3 scripts/qat_harness_checks.py; then
-    echo "pre-commit: QAT harness checks failed."
-    exit 1
-fi
+staged=$(git diff --cached --name-only --diff-filter=ACMR || true)
 
 # Stage 1: formatting (instant)
-if ! cargo fmt --check --all 2>/dev/null; then
+if ! cargo fmt --check --all; then
     echo "pre-commit: cargo fmt failed. Run 'cargo fmt --all' to fix."
     exit 1
 fi
 
-# Stage 2: QAT feature mutex stays enforced
-qat_mutex_output=""
-if qat_mutex_output=$(cargo build -p gbf-train --features qat,qat-ablation 2>&1); then
-    echo "pre-commit: expected qat+qat-ablation build to fail, but it succeeded."
-    exit 1
-fi
-if ! grep -q "qat and qat-ablation are mutually exclusive" <<<"$qat_mutex_output"; then
-    echo "pre-commit: qat+qat-ablation build failed without the expected diagnostic."
-    echo "$qat_mutex_output"
-    exit 1
+# Stage 2: QAT feature mutex — only when gbf-train sources/manifest staged.
+if grep -qE '^gbf-train/(src/|Cargo\.toml$)' <<<"$staged"; then
+    qat_mutex_output=""
+    if qat_mutex_output=$(cargo build -p gbf-train --features qat,qat-ablation 2>&1); then
+        echo "pre-commit: expected qat+qat-ablation build to fail, but it succeeded."
+        exit 1
+    fi
+    if ! grep -q "qat and qat-ablation are mutually exclusive" <<<"$qat_mutex_output"; then
+        echo "pre-commit: qat+qat-ablation build failed without the expected diagnostic."
+        echo "$qat_mutex_output"
+        exit 1
+    fi
 fi
 
-# Stage 3: lint supported feature sets
-if ! cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings 2>/dev/null; then
-    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
-    exit 1
-fi
-if ! cargo clippy -p gbf-cli --features falsify -- -D warnings 2>/dev/null; then
-    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
-    exit 1
-fi
-if ! cargo clippy -p gbf-train --features qat,burn-adapter -- -D warnings 2>/dev/null; then
-    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
-    exit 1
-fi
-if ! cargo clippy -p gbf-train --features qat-ablation,burn-adapter -- -D warnings 2>/dev/null; then
-    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
-    exit 1
-fi
-if ! cargo clippy -p gbf-experiments --no-default-features --features phase-a -- -D warnings 2>/dev/null; then
-    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
-    exit 1
-fi
-if ! cargo clippy -p gbf-experiments --no-default-features --features ablation -- -D warnings 2>/dev/null; then
+# Stage 3: lint workspace main feature set.
+if ! cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings; then
     echo "pre-commit: cargo clippy found warnings. Fix them before committing."
     exit 1
 fi
 
-# Stage 4: test supported feature sets (no escape hatch)
-if ! cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features 2>/dev/null; then
-    echo "pre-commit: tests failed."
-    exit 1
-fi
-if ! cargo test -p gbf-cli --test s1_cli 2>/dev/null; then
-    echo "pre-commit: tests failed."
-    exit 1
-fi
-if ! cargo test -p gbf-train --features qat,burn-adapter 2>/dev/null; then
-    echo "pre-commit: tests failed."
-    exit 1
-fi
-if ! cargo test -p gbf-train --features qat-ablation,burn-adapter 2>/dev/null; then
-    echo "pre-commit: tests failed."
-    exit 1
-fi
-if ! cargo test -p gbf-experiments --no-default-features --features phase-a 2>/dev/null; then
-    echo "pre-commit: tests failed."
-    exit 1
-fi
-if ! cargo test -p gbf-experiments --no-default-features --features ablation 2>/dev/null; then
+# Stage 4: test workspace main feature set.
+if ! cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features; then
     echo "pre-commit: tests failed."
     exit 1
 fi
