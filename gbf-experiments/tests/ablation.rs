@@ -215,7 +215,8 @@ fn normative_ablation_seed_must_be_zero_even_when_both_sides_match() {
 fn metadata_mismatch_matrix_is_typed_error_before_payload_compare() {
     let tensors = vec![f32_tensor("toy0.weight", vec![1.0])];
 
-    let cases: [(&str, fn(&mut CheckpointMetadata)); 6] = [
+    type MetadataMutation = (&'static str, fn(&mut CheckpointMetadata));
+    let cases: [MetadataMutation; 6] = [
         ("corpus_train_sha", |metadata: &mut CheckpointMetadata| {
             metadata.corpus_train_sha = hash(90)
         }),

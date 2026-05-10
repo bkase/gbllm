@@ -20,7 +20,7 @@ fn reset_context_bpc_rejects_empty_validation() {
 
 #[test]
 fn single_byte_scores_from_empty_context() {
-    let product = reset_context_bpc(&UniformScorer, &[b'a']).expect("score");
+    let product = reset_context_bpc(&UniformScorer, b"a").expect("score");
 
     assert_eq!(product.token_count, 1);
     assert_eq!(product.log2_sum, 8.0);

@@ -2945,10 +2945,10 @@ mod tests {
             .unwrap_or_default();
         serde_json::to_string(&json!({
             "fields": fields,
-            "level": event.get("level").cloned().unwrap_or_else(|| json!(null)),
+            "level": event.get("level").cloned().unwrap_or(serde_json::Value::Null),
             "span": span,
             "spans": spans,
-            "target": event.get("target").cloned().unwrap_or_else(|| json!(null)),
+            "target": event.get("target").cloned().unwrap_or(serde_json::Value::Null),
         }))
         .unwrap()
     }

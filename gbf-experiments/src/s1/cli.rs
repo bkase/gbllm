@@ -4171,7 +4171,7 @@ mod tests {
         assert_eq!(input.h1, HypothesisStatus::Confirmed);
         assert_eq!(input.h2, HypothesisStatus::Refuted);
         assert_eq!(input.h3, HypothesisStatus::Confirmed);
-        assert_eq!(input.suspicious_low_bpc, false);
+        assert!(!input.suspicious_low_bpc);
 
         let observation = production_h2_observation(&baseline, &scores);
         assert!(observation.contains("seed 4"));
@@ -4381,8 +4381,8 @@ mod tests {
         )
         .expect("production dispatch input");
 
-        assert_eq!(
-            input.suspicious_low_bpc, false,
+        assert!(
+            !input.suspicious_low_bpc,
             "one low outlier is not a median-low sentinel"
         );
 
@@ -4397,7 +4397,7 @@ mod tests {
         )
         .expect("production dispatch input");
 
-        assert_eq!(input.suspicious_low_bpc, true);
+        assert!(input.suspicious_low_bpc);
     }
 
     #[test]
