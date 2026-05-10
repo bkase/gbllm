@@ -346,7 +346,7 @@ fn default_expert_matrix_byte_cost(rows: u32, cols: u32) -> ByteCost {
 }
 
 fn ceil_div(lhs: u128, rhs: u128) -> u128 {
-    lhs / rhs + u128::from(lhs % rhs != 0)
+    lhs.div_ceil(rhs)
 }
 
 fn saturating_u64(value: u128) -> u64 {

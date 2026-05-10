@@ -6,7 +6,8 @@ use gbf_workload::manifest::{
 
 const HASH_04: &str = "sha256:0404040404040404040404040404040404040404040404040404040404040404";
 const HASH_08: &str = "sha256:0808080808080808080808080808080808080808080808080808080808080808";
-const BLOB_HASH_0B: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+const BLOB_HASH_0B: &str =
+    "sha256:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
 
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
