@@ -1189,7 +1189,10 @@ Stage 0 treats `artifact.core.manifest` as the only manifest of record. Any
 outer transport manifest is import metadata only. If transport metadata and
 `artifact.core.manifest` disagree on semantic core hash, schema version,
 component digest, or lineage, Stage 0 rejects the artifact with
-`ArtifactTransportManifestMismatch`.
+`ArtifactTransportManifestMismatch`. The typed transport carrier is
+`ArtifactTransportManifestMetadata`; when an importer does not provide it,
+Stage 0 still applies the source-hash identity check but cannot claim
+field-level transport/manifest agreement.
 
 | #  | Class                        | Rejects                                                                                                                                                        | Code(s)                                                                                                                                                                                       |
 | -- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1674,6 +1677,12 @@ Stage 2 emits `BudgetQuantGraphViewMalformed` and no generic string error.
 Expert payload byte math is owned by F-B4, not trusted from the QuantGraph
 producer.
 
+`gbf-artifact::TernaryWeightPlan::compute_byte_cost` remains scoped to
+target-independent artifact/model diagnostics. It is not the canonical deployed
+F-B4 payload formula because it uses the historical flattened-element
+`PerGroup` scale count, has no target-profile override for `Pow2` scale widths,
+does not include Stage 2 metadata bytes, and saturates into `ByteCost`.
+
 ```text
 weight_count = rows * cols        // checked u64
 
@@ -1844,13 +1853,27 @@ pub enum BudgetFailure {
         cap_bytes: u32,
         excess_bytes: u32,
     },
-    CommonBankExceedsCap { excess_bytes: u32 },
+    CommonBankExceedsCap {
+        assigned_bytes: u32,
+        cap_bytes: u32,
+        excess_bytes: u32,
+    },
     WramPeakExceedsCap { peak: u32, cap: u32 },
     SramPeakExceedsCap { peak: u32, cap: u32 },
     HramPeakExceedsCap { peak: u32, cap: u32 },
     AccumulatorExceedsI32 { site: ReductionSiteId, projected_max_abs: u64 },
-    BankSwitchesPerTokenOverCap { projected: u16, cap: u16 },
-    SramPageSwitchesPerTokenOverCap { projected: u16, cap: u16 },
+    BankSwitchesPerTokenOverCap {
+        decision_value: u16,
+        upper_bound: u16,
+        cap: u16,
+        source: SwitchProjectionSource,
+    },
+    SramPageSwitchesPerTokenOverCap {
+        decision_value: u16,
+        upper_bound: u16,
+        cap: u16,
+        source: SwitchProjectionSource,
+    },
     PlacementProfileInfeasible { profile: PlacementProfile, reason: PlacementInfeasibilityReason },
 }
 ```
@@ -3099,7 +3122,7 @@ walk the JSONL log and link work back to the design.
 | Calibration confidence rules vary by kernel set                                                | `CalibrationBundleSet` carries per-layer confidence; Stage 0 validates per layer, not as a single scalar  |
 | Floating-point in `static_budget.json` leaks non-determinism                                   | Forbid floats in v1; encode routing expectations as fixed-point integers such as `expected_q16_16`       |
 | Cycle-budget temptation in Stage 2                                                             | Stage 2 reports only static counts; cycles live in F-B14's `schedule_cost.json`                           |
-| `bd-w80` model-side byte math drifts from F-B4 byte math                                       | T-B4.2 absorbs `bd-w80` and reuses its tests; the full multi-expert StaticBudgetReport stays here         |
+| `bd-w80` model-side byte math drifts from F-B4 byte math                                       | Stage 2 `expert_payload_bytes` is the canonical deployed-byte owner. `TernaryWeightPlan::compute_byte_cost` remains artifact/model diagnostic math and has an explicit divergence regression. |
 | Bringup builds quietly accept stale or weak calibration                                        | No profile-time relaxation: Bringup uses an explicit `BootstrapCalibrationBundle` with declared `CalibrationConfidenceClass::None`; same `CalibrationConfidenceTooLow` gate fires for every other profile (§2.8, §2.13) |
 | StageCache key includes too much / too little                                                  | Pin key inputs in `stage_cache.rs`; explicit regression tests for key stability                           |
 | Reviewers cannot tell what a knob's source is                                                  | Per-knob `ConstraintProvenance` is mandatory in `compile_knobs.provenance`                                |
@@ -3130,7 +3153,7 @@ walk the JSONL log and link work back to the design.
 | Should profiles carry a relaxation surface at all?                          | No. Bringup is a profile selection that pairs with explicit `BootstrapCalibrationBundle` and `bringup-*.chrome_budget.json` inputs; no profile-time latitude exists in F-B2/F-B4 (§2.13). |
 | Should F-B4 consume a real `QuantGraph` before F-B3 lands?                   | No. F-B4 consumes the `QuantGraphBudgetSource` trait yielding a `QuantGraphBudgetView`; F-B3 lands the impl. |
 | Should `policy_resolution.json` include runtime knobs?                       | No. Runtime knobs (yield quantum, scheduler profile) live in F-B1's `realism_report.v1.json`.           |
-| Should `bd-w80`'s model-side byte math be reused?                            | Yes. T-B4.2 absorbs `bd-w80`'s expert byte math and extends to multi-expert + bank occupancy.           |
+| Should `bd-w80`'s model-side byte math be reused?                            | Only as a target-independent artifact/model diagnostic. F-B4 deployed payload sizing uses Stage 2 `expert_payload_bytes`; future bd-w80 references should point there for canonical fit decisions. |
 | Should the chunk introduce a new crate?                                      | No. All code lives in existing crates per `planv0.md` line 142–206.                                     |
 | Is missing calibration ever a passing build state?                           | No. Passing Stage 0 always has a `CalibrationBundleSet`; Bringup uses an explicit `BootstrapCalibrationBundle`. |
 | Is `CalibrationConfidenceClass::None` the same thing as no confidence requirement? | No. Bundle confidence `None` is distinct from profile requirement `NoMinimumConfidence`. |

@@ -3,10 +3,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A SHA-256-sized digest used for stable cross-crate identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Hash256([u8; 32]);
 
 impl Hash256 {
@@ -50,11 +50,25 @@ impl fmt::Display for Hash256 {
     }
 }
 
+impl Serialize for Hash256 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("sha256:{self}"))
+    }
+}
+
+impl<'de> Deserialize<'de> for Hash256 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 impl FromStr for Hash256 {
     type Err = Hash256ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let hex = s.strip_prefix("0x").unwrap_or(s);
+        let prefixed = s.strip_prefix("sha256:").unwrap_or(s);
+        let hex = prefixed.strip_prefix("0x").unwrap_or(prefixed);
         if hex.len() != 64 {
             return Err(Hash256ParseError::InvalidLength {
                 expected: 64,
@@ -154,5 +168,9 @@ mod tests {
 
         assert_eq!(decoded, hash);
         assert_eq!(decoded.as_bytes(), &[7; 32]);
+        assert_eq!(
+            encoded,
+            "\"sha256:0707070707070707070707070707070707070707070707070707070707070707\""
+        );
     }
 }

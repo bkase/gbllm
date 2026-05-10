@@ -1,0 +1,80 @@
+id = "Default"
+defaults_hash = "sha256:79037ff3533cf7db007fa589e495099b412ebbe5af49dbab6c0b4d3db9992a47"
+observability = { kind = "Flexible" }
+
+[trace_budget]
+max_events_per_slice = 256
+max_bytes_per_frame = 4096
+drop_policy = { kind = "DropOldest" }
+
+[repair_policy]
+max_refinement_iters = 4
+allow_placement_profile_fallback = true
+allow_trace_demotion = true
+allow_overlay_promotion = true
+allow_recompute_promotion = true
+
+[risk_policy]
+cycle_quantile = 95
+switch_quantile = 99
+calibration_confidence_requirement = { kind = "AtLeast", class = { kind = "Transferred" } }
+fallback_profile = "Recovery"
+fallback_runtime_mode = { kind = "Safe" }
+
+[knob_defaults.placement]
+profile = { kind = "Budgeted" }
+
+[knob_defaults.observation]
+observability = { kind = "Flexible" }
+probe_level = { kind = "Operational" }
+
+[knob_defaults.range]
+reduction_ceiling = { kind = "Conservative" }
+
+[knob_defaults.storage]
+materialization = { kind = "RecomputePureValues" }
+
+[knob_defaults.sram]
+page_aggression = { kind = "PackCold" }
+
+[knob_defaults.rom_window]
+kernel_residency_bias = { kind = "PreferExpertBank" }
+kernel_duplication_bias = { kind = "DuplicateHot" }
+
+[knob_defaults.overlay]
+promotion = { kind = "TinyLuts" }
+
+[knob_defaults.schedule]
+tile_search = { kind = "Local" }
+slice_coarsening = { kind = "Balanced" }
+resource_pressure = { kind = "Balanced" }
+
+[knob_bounds.placement]
+max_profile = { kind = "PackedExperts" }
+
+[knob_bounds.observation]
+max_probe_level = { kind = "Verbose" }
+
+[knob_bounds.range]
+max_reduction_ceiling = { kind = "Adaptive" }
+
+[knob_bounds.storage]
+max_materialization = { kind = "SpillColdValues" }
+
+[knob_bounds.sram]
+max_page_aggression = { kind = "MinimizeResident" }
+
+[knob_bounds.rom_window]
+max_kernel_residency_bias = { kind = "PreferWramOverlay" }
+max_kernel_duplication_bias = { kind = "DuplicateAllFit" }
+
+[knob_bounds.overlay]
+max_promotion = { kind = "EligibleKernels" }
+
+[knob_bounds.schedule]
+max_tile_search = { kind = "ProfileGuided" }
+max_slice_coarsening = { kind = "Coarse" }
+max_resource_pressure = { kind = "FitFirst" }
+
+[locks]
+locked = []

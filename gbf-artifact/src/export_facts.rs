@@ -6,6 +6,7 @@ use std::fmt;
 use gbf_foundation::{ExpertId, LayerId};
 use serde::{Deserialize, Serialize};
 
+use crate::hint_bundle::HintScopeProvenance;
 use crate::ids::{ArtifactPath, ArtifactPathError};
 use crate::quant::{ActivationEvalModeSpec, ActivationQuantFormatSpec, ActivationRangeSpec};
 use crate::sequence::SequenceExportFacts;
@@ -16,6 +17,8 @@ const Q8_8_ONE: u16 = 256;
 pub struct ExportFacts {
     pub activation_ranges: Vec<RangeDigest>,
     pub sequence: SequenceExportFacts,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_provenance: Vec<HintScopeProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub temporal_switch: Vec<TemporalSwitchDigest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -29,6 +32,7 @@ impl ExportFacts {
         Self {
             activation_ranges,
             sequence,
+            scope_provenance: Vec::new(),
             temporal_switch: Vec::new(),
             clip_saturation: Vec::new(),
             expert_payloads: Vec::new(),

@@ -1,0 +1,57 @@
+{
+  "resolved_ref": {
+    "platform": "platform.bootstrap-dmg-mbc5",
+    "kernel": "kernel.bootstrap-dmg-mbc5",
+    "runtime": "runtime.bootstrap-dmg-mbc5"
+  },
+  "bundles": {
+    "Kernel": {
+      "layer": {
+        "kind": "Kernel"
+      },
+      "target_profile_hash": "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7",
+      "kernel_set_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "packer_version": "1.0.0",
+      "calibration_schema_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "validity_envelope": {
+        "future_fields": {}
+      },
+      "confidence": {
+        "kind": "None"
+      },
+      "measurements": null
+    },
+    "Platform": {
+      "layer": {
+        "kind": "Platform"
+      },
+      "target_profile_hash": "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7",
+      "kernel_set_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "packer_version": "1.0.0",
+      "calibration_schema_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "validity_envelope": {
+        "future_fields": {}
+      },
+      "confidence": {
+        "kind": "None"
+      },
+      "measurements": null
+    },
+    "Runtime": {
+      "layer": {
+        "kind": "Runtime"
+      },
+      "target_profile_hash": "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7",
+      "kernel_set_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "packer_version": "1.0.0",
+      "calibration_schema_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "validity_envelope": {
+        "future_fields": {}
+      },
+      "confidence": {
+        "kind": "None"
+      },
+      "measurements": null
+    }
+  }
+}

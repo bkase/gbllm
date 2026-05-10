@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A simple `major.minor.patch` semantic version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -68,6 +68,36 @@ impl fmt::Display for SemVerParseError {
 
 impl std::error::Error for SemVerParseError {}
 
+/// Version of the target-data packer used to prepare calibration-bound inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PackerVersion(pub SemVer);
+
+impl PackerVersion {
+    #[must_use]
+    pub const fn new(major: u64, minor: u64, patch: u64) -> Self {
+        Self(SemVer::new(major, minor, patch))
+    }
+}
+
+impl Serialize for PackerVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for PackerVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map(Self).map_err(serde::de::Error::custom)
+    }
+}
+
 fn parse_component(component: Option<&str>, name: &'static str) -> Result<u64, SemVerParseError> {
     component
         .ok_or(SemVerParseError::InvalidFormat)?
@@ -106,5 +136,16 @@ mod tests {
         let decoded: SemVer = serde_json::from_str(&encoded).expect("semver deserializes");
 
         assert_eq!(decoded, SemVer::new(2, 0, 1));
+    }
+
+    #[test]
+    fn packer_version_round_trips_as_semver_string() {
+        let version = PackerVersion::new(1, 2, 3);
+        let encoded = serde_json::to_string(&version).expect("packer version serializes");
+        let decoded: PackerVersion =
+            serde_json::from_str(&encoded).expect("packer version deserializes");
+
+        assert_eq!(encoded, "\"1.2.3\"");
+        assert_eq!(decoded, version);
     }
 }

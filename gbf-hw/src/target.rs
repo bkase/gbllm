@@ -2,14 +2,23 @@
 
 use std::fmt;
 
-use gbf_foundation::{TargetFamilyId, TargetProfileId};
+use gbf_foundation::{Hash256, TargetFamilyId, TargetProfileId};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::cartridge_header::{MbcType, RamSize, RomSize};
 use crate::timing::{TimingProfile, dmg_timing};
 
 pub const BRINGUP_TARGET_PROFILE_ID: &str = "dmg-mbc5-8mib-128kib";
 pub const DMG_TARGET_FAMILY_ID: &str = "dmg";
+
+/// RFC-shaped domain separator for canonical `TargetProfile` content hashes.
+///
+/// The preimage is this byte string followed by canonical JSON for the full
+/// public `TargetProfile` representation. The NUL suffix prevents accidental
+/// concatenation ambiguity with the first JSON byte.
+pub const TARGET_PROFILE_CONTENT_HASH_DOMAIN: &[u8] =
+    b"gbf:gbf-hw:TargetProfile:content_hash:1.0.0\0";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "TargetProfileRepr")]
@@ -123,6 +132,72 @@ impl TargetProfile {
     pub const fn capabilities(&self) -> CapabilitySet {
         self.capabilities
     }
+
+    /// Return the deterministic content hash for this target profile.
+    ///
+    /// The hash is SHA-256 over [`TARGET_PROFILE_CONTENT_HASH_DOMAIN`] followed
+    /// by sorted-key canonical JSON for the full public `TargetProfile` shape.
+    pub fn content_hash(&self) -> Result<Hash256, serde_json::Error> {
+        target_profile_content_hash(self)
+    }
+}
+
+/// Return the deterministic content hash for a target profile.
+///
+/// See [`TARGET_PROFILE_CONTENT_HASH_DOMAIN`] for the domain-separated preimage
+/// contract.
+pub fn target_profile_content_hash(profile: &TargetProfile) -> Result<Hash256, serde_json::Error> {
+    let value = serde_json::to_value(profile)?;
+    let mut canonical_bytes = Vec::new();
+    write_canonical_json_value(&value, &mut canonical_bytes)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(TARGET_PROFILE_CONTENT_HASH_DOMAIN);
+    hasher.update(canonical_bytes);
+    Ok(Hash256::from_bytes(hasher.finalize().into()))
+}
+
+fn write_canonical_json_value(
+    value: &serde_json::Value,
+    out: &mut Vec<u8>,
+) -> Result<(), serde_json::Error> {
+    // TODO(F-B2-F-B4/bd-1irp): This intentionally mirrors
+    // `gbf_report::canonical_json`, but `gbf-hw` sits below `gbf-report` in the
+    // crate graph and cannot depend on it. RFC §2.5 makes duplicated canonical
+    // JSON emitters a contract risk; keep the cross-crate parity proof in
+    // `gbf-codegen` until canonicalization moves to a lower shared crate.
+    match value {
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => serde_json::to_writer(out, value)?,
+        serde_json::Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    out.push(b',');
+                }
+                write_canonical_json_value(item, out)?;
+            }
+            out.push(b']');
+        }
+        serde_json::Value::Object(entries) => {
+            out.push(b'{');
+            let mut keys = entries.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key)?;
+                out.push(b':');
+                write_canonical_json_value(&entries[key], out)?;
+            }
+            out.push(b'}');
+        }
+    }
+
+    Ok(())
 }
 
 #[must_use]
@@ -657,6 +732,67 @@ mod tests {
         );
 
         assert_ne!(canonical, retimed);
+    }
+
+    #[test]
+    fn target_profile_content_hash_is_domain_separated_and_pinned() {
+        assert_eq!(
+            TARGET_PROFILE_CONTENT_HASH_DOMAIN,
+            b"gbf:gbf-hw:TargetProfile:content_hash:1.0.0\0"
+        );
+
+        let profile = dmg_mbc5_8mib_128kib();
+        let hash = profile.content_hash().expect("target profile hashes");
+        assert_eq!(
+            hash.to_string(),
+            "64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7"
+        );
+
+        let value = serde_json::to_value(&profile).expect("profile serializes");
+        let mut canonical_bytes = Vec::new();
+        write_canonical_json_value(&value, &mut canonical_bytes).expect("canonical JSON emits");
+        let canonical_json =
+            std::str::from_utf8(&canonical_bytes).expect("canonical JSON is UTF-8");
+        assert!(
+            canonical_json.starts_with(r#"{"capabilities":{"double_speed_mode":false"#),
+            "top-level and nested object keys must be lexicographically ordered"
+        );
+
+        let no_domain_digest = Sha256::digest(canonical_bytes);
+        assert_ne!(
+            hash,
+            Hash256::from_bytes(no_domain_digest.into()),
+            "content_hash must include the explicit TargetProfile domain separator"
+        );
+        assert_ne!(
+            target_profile_content_hash(
+                &TargetProfile::try_new(
+                    TargetProfileId::from(canonical_target_profile_id(
+                        ConsoleModel::Cgb,
+                        profile.cartridge(),
+                        TimingProfile::try_new(4_194_304, 2, 70_224, 4_560).unwrap(),
+                        CapabilitySet {
+                            double_speed_mode: true,
+                            vram_dma: true,
+                            rtc_present: false,
+                        },
+                    )),
+                    TargetFamilyId::from("cgb"),
+                    ConsoleModel::Cgb,
+                    *profile.cartridge(),
+                    TimingProfile::try_new(4_194_304, 2, 70_224, 4_560).unwrap(),
+                    CapabilitySet {
+                        double_speed_mode: true,
+                        vram_dma: true,
+                        rtc_present: false,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            hash,
+            "target-relevant content changes must change the content hash"
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use gbf_asm::builder::Builder;
 use gbf_asm::effect::MachineEffectKind;
 use gbf_asm::section::{Section, SectionId};
 use gbf_asm::symbols::SymbolName;
-use gbf_foundation::Hash256;
+use gbf_foundation::{Hash256, PackerVersion};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,7 @@ pub mod video_commit;
 pub use gbf_abi::RuntimeShellModule as RuntimeModule;
 
 pub const RUNTIME_NUCLEUS_HASH_DOMAIN: &[u8] = b"gbf-runtime/v1/bank0-nucleus";
+pub const RUNTIME_PACKER_VERSION: PackerVersion = PackerVersion::new(1, 0, 0);
 pub const FUTURE_PERSISTENCE_ROM_BYTES_BANK0: usize = 768;
 pub const FUTURE_TRACE_ROM_BYTES_BANK0: usize = 256;
 pub const FUTURE_HARNESS_ROM_BYTES_BANK0: usize = 384;

@@ -1,0 +1,20 @@
+# F-B2 Stage 0 review fixture.
+#
+# This tiny fixture describes the generated success and failure reports in this
+# directory. These fields intentionally mirror the F-B2 Stage 0 report identity
+# sections so reviewers can read the whole fixture in one screen.
+
+[success]
+profile = "Bringup"
+target = "dmg-mbc5-8mib-128kib"
+artifact_schema = "1.1.0"
+artifact_feature = "DenseI8"
+workload_ref = "workload.f-b2.review"
+golden_vector_ref = "golden.f-b2.review"
+diagnostics = []
+
+[failure]
+case = "unsupported_schema_epoch"
+artifact_schema = "2.0.0"
+expected_outcome = "Failed"
+expected_hard_diagnostic = "SchemaEpochUnsupported"

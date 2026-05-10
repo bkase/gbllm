@@ -1,0 +1,23 @@
+# F-B4 Stage 2 review fixture.
+#
+# The success case is a tiny synthetic QuantGraph-budget projection that fits
+# a runtime chrome budget. The failure case models the RFC §7.7 missing-budget
+# short circuit: Stage 2 records no view-derived payload and emits both the
+# Hard diagnostic and BudgetFailure marker.
+
+[success]
+profile = "Bringup"
+target = "dmg-mbc5-8mib-128kib"
+placement_profile = "Budgeted"
+quant_graph_hash = "2323232323232323232323232323232323232323232323232323232323232323"
+runtime_chrome_budget = "present"
+expert_payload_bytes = 64
+assigned_slot = 1
+diagnostics = []
+
+[failure]
+case = "missing_runtime_chrome_budget"
+expected_outcome = "Failed"
+expected_hard_diagnostic = "BudgetMissingRuntimeChromeBudget"
+expected_budget_failure = "BudgetFailure::MissingRuntimeChromeBudget"
+runtime_chrome_budget = "null"

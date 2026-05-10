@@ -6,7 +6,7 @@ use gbf_foundation::{
     CalibrationCohortId, Hash256, KernelCalibrationId, KernelSpecId, PlatformCalibrationId,
     RuntimeCalibrationId, SemVer, TargetFamilyId, TargetProfileId,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const STRONG_CONFIDENCE_MIN_SAMPLES: u32 = 1_000;
 pub const REASONABLE_CONFIDENCE_MIN_SAMPLES: u32 = 100;
@@ -74,18 +74,84 @@ impl TryFrom<CycleDistributionRepr> for CycleDistribution {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(u8)]
 pub enum CalibrationConfidenceClass {
-    Weak = 0,
-    Reasonable = 1,
-    Strong = 2,
+    None = 0,
+    Transferred = 1,
+    Weak = 2,
+    Reasonable = 3,
+    Strong = 4,
 }
 
 impl CalibrationConfidenceClass {
     #[must_use]
     pub const fn rank(self) -> u8 {
         self as u8
+    }
+}
+
+impl Serialize for CalibrationConfidenceClass {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(rename_all = "PascalCase")]
+        enum CalibrationConfidenceClassTag {
+            None,
+            Transferred,
+            Weak,
+            Reasonable,
+            Strong,
+        }
+
+        #[derive(Serialize)]
+        struct TaggedCalibrationConfidenceClass {
+            kind: CalibrationConfidenceClassTag,
+        }
+
+        let kind = match self {
+            Self::None => CalibrationConfidenceClassTag::None,
+            Self::Transferred => CalibrationConfidenceClassTag::Transferred,
+            Self::Weak => CalibrationConfidenceClassTag::Weak,
+            Self::Reasonable => CalibrationConfidenceClassTag::Reasonable,
+            Self::Strong => CalibrationConfidenceClassTag::Strong,
+        };
+        TaggedCalibrationConfidenceClass { kind }.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CalibrationConfidenceClass {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        enum CalibrationConfidenceClassTag {
+            None,
+            Transferred,
+            Weak,
+            Reasonable,
+            Strong,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TaggedCalibrationConfidenceClass {
+            kind: CalibrationConfidenceClassTag,
+        }
+
+        Ok(
+            match TaggedCalibrationConfidenceClass::deserialize(deserializer)?.kind {
+                CalibrationConfidenceClassTag::None => Self::None,
+                CalibrationConfidenceClassTag::Transferred => Self::Transferred,
+                CalibrationConfidenceClassTag::Weak => Self::Weak,
+                CalibrationConfidenceClassTag::Reasonable => Self::Reasonable,
+                CalibrationConfidenceClassTag::Strong => Self::Strong,
+            },
+        )
     }
 }
 
@@ -901,6 +967,8 @@ mod tests {
     fn confidence_class_ordering() {
         assert!(CalibrationConfidenceClass::Strong > CalibrationConfidenceClass::Reasonable);
         assert!(CalibrationConfidenceClass::Reasonable > CalibrationConfidenceClass::Weak);
+        assert!(CalibrationConfidenceClass::Weak > CalibrationConfidenceClass::Transferred);
+        assert!(CalibrationConfidenceClass::Transferred > CalibrationConfidenceClass::None);
     }
 
     #[test]
