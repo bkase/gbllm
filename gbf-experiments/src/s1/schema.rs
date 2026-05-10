@@ -252,6 +252,12 @@ pub enum S1Decision {
     /// Proceed to S2 with the T12.5 prerequisite.
     #[serde(rename = "ProceedToS2-with-T12.5-prereq")]
     ProceedToS2WithT125Prereq,
+    /// Proceed to S2 with an explicitly documented H2 capacity waiver.
+    #[serde(rename = "ProceedToS2-with-H2-waiver")]
+    ProceedToS2WithH2Waiver {
+        /// Waiver reason tag.
+        reason: String,
+    },
     /// Investigation is required before S1 can close.
     #[serde(rename = "Investigate")]
     Investigate {

@@ -21,6 +21,9 @@ const REPORT_HASH_DOMAIN_PREFIX: &[u8] = b"gbf:gbf-experiments:ReportFile:s1_rep
 const REPORT_OUTPUT_PATH: &str = "docs/experiments/S1-report.md";
 const REQUIRED_SEEDS: [u64; 5] = [0, 1, 2, 3, 4];
 
+/// Canonical reason tag for the human-approved Toy1 H2 narrow-miss waiver.
+pub const S1_H2_WAIVER_REASON: &str = "toy1-narrow-h2-miss";
+
 /// Binary verdict used by S1 hypothesis dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -685,7 +688,9 @@ fn render_report_body(input: &ReportInput) -> String {
 
 fn validate_decision(front_matter: &ReportFrontMatter) -> Result<(), ReportValidationError> {
     let expected = decision_for_outcome(front_matter.s1_outcome);
-    if front_matter.decision == expected || is_registered_capacity_successor_decision(front_matter)
+    if front_matter.decision == expected
+        || is_registered_capacity_successor_decision(front_matter)
+        || is_registered_capacity_waiver_decision(front_matter)
     {
         Ok(())
     } else {
@@ -695,6 +700,16 @@ fn validate_decision(front_matter: &ReportFrontMatter) -> Result<(), ReportValid
             actual: front_matter.decision.clone(),
         })
     }
+}
+
+fn is_registered_capacity_waiver_decision(front_matter: &ReportFrontMatter) -> bool {
+    matches!(
+        (&front_matter.s1_outcome, &front_matter.decision),
+        (
+            S1Outcome::FailCapacity,
+            S1Decision::ProceedToS2WithH2Waiver { reason }
+        ) if reason == S1_H2_WAIVER_REASON
+    )
 }
 
 fn is_registered_capacity_successor_decision(front_matter: &ReportFrontMatter) -> bool {
@@ -863,7 +878,9 @@ fn validate_all_hypotheses(
 fn is_closure_decision(decision: &S1Decision) -> bool {
     matches!(
         decision,
-        S1Decision::ProceedToS2 | S1Decision::ProceedToS2WithT125Prereq
+        S1Decision::ProceedToS2
+            | S1Decision::ProceedToS2WithT125Prereq
+            | S1Decision::ProceedToS2WithH2Waiver { .. }
     )
 }
 
@@ -1035,6 +1052,9 @@ impl fmt::Display for S1Decision {
         match self {
             Self::ProceedToS2 => f.write_str("ProceedToS2"),
             Self::ProceedToS2WithT125Prereq => f.write_str("ProceedToS2-with-T12.5-prereq"),
+            Self::ProceedToS2WithH2Waiver { reason } => {
+                write!(f, "ProceedToS2-with-H2-waiver({reason})")
+            }
             Self::Investigate { reason } => write!(f, "Investigate({reason})"),
             Self::Halt { reason } => write!(f, "Halt({reason})"),
         }

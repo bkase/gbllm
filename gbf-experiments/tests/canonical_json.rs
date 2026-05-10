@@ -567,6 +567,26 @@ fn report_front_matter_canonical_round_trip_and_self_hash() {
         })
     );
 
+    let mut waiver = artifact.clone();
+    waiver.s1_outcome = S1Outcome::FailCapacity;
+    waiver.decision = S1Decision::ProceedToS2WithH2Waiver {
+        reason: "toy1-narrow-h2-miss".to_owned(),
+    };
+    assert_eq!(
+        json_value(&waiver)["decision"],
+        json!({
+            "kind": "ProceedToS2-with-H2-waiver",
+            "reason": "toy1-narrow-h2-miss",
+        })
+    );
+    assert!(
+        String::from_utf8(waiver.canonical_json_bytes().expect("waiver report bytes"))
+            .expect("canonical report bytes are utf8")
+            .contains(
+                r#""decision":{"kind":"ProceedToS2-with-H2-waiver","reason":"toy1-narrow-h2-miss"}"#
+            )
+    );
+
     let mut mutated = artifact.clone();
     mutated.s1_outcome = S1Outcome::PassWithWarning;
     assert_ne!(
@@ -1079,6 +1099,7 @@ fn arb_report_front_matter() -> impl Strategy<Value = ReportFrontMatter> {
         prop_oneof![
             Just(S1Decision::ProceedToS2),
             Just(S1Decision::ProceedToS2WithT125Prereq),
+            "[a-z_]{1,16}".prop_map(|reason| S1Decision::ProceedToS2WithH2Waiver { reason }),
             "[a-z_]{1,16}".prop_map(|reason| S1Decision::Investigate { reason }),
             "[a-z_]{1,16}".prop_map(|reason| S1Decision::Halt { reason }),
         ],

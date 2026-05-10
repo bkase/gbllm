@@ -85,8 +85,9 @@ scripts/s1_preregistration_check.sh \
 - [ ] H4 is computed from seed-0 canonical tensor payload hash equality.
 - [ ] H5 is computed from `metric_oracle_passed`.
 - [ ] The F-S1.19 dispatcher is the only source of `S1Outcome` and `Decision`.
-- [ ] `Decision` is exactly one of `ProceedToS2` or
-      `ProceedToS2-with-T12.5-prereq`.
+- [ ] `Decision` is exactly one of `ProceedToS2`,
+      `ProceedToS2-with-T12.5-prereq`, or
+      `ProceedToS2-with-H2-waiver(toy1-narrow-h2-miss)`.
 - [ ] If `Decision = ProceedToS2-with-T12.5-prereq`, the `bd-1xqf <- bd-1y1s`
       dependency edge has been added.
 

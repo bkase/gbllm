@@ -1095,6 +1095,36 @@ If A1-H2 is also Refuted, the successor report remains `Fail-capacity` but its
 investigation target becomes `propose-Toy2` because the `Toy1` successor has
 already been executed.
 
+## 8.2 Amendment A2: Toy1 narrow H2 waiver
+
+This amendment is activated by the committed Toy1 result and the human
+decision recorded on 2026-05-10: "that's narrow enough, we can just move ahead
+then." The Toy1 report must not relabel H2 as Confirmed. It records
+`S1Outcome = Fail-capacity`, `H2 = Refuted`, and a closure decision of
+`ProceedToS2-with-H2-waiver(toy1-narrow-h2-miss)`.
+
+The waiver is valid only for this exact Toy1 result class:
+
+```text
+  model_config = ModelSizeProfile::Toy1
+  H1, H3, H4, H5 are Confirmed
+  all five seeds Completed
+  all five seeds have val_bpc < bpc_3gram
+  exactly one seed misses val_bpc < bpc_3gram - 0.05
+  that miss is <= 0.05 bpc beyond the H2 threshold
+```
+
+The committed Toy1 result satisfies the waiver predicate: seed 1 observed
+`val_bpc = 2.6143710626756853` against H2 threshold
+`2.5705440233457097`, while the 3-gram baseline itself was
+`2.6205440233457096`. The miss beyond the preregistered margin is
+`0.0438270393299756` bpc, and every seed still beats the 3-gram baseline.
+
+This waiver is not a future general relaxation of H2. Wider Toy1 failures,
+multiple margin misses, any seed at or above the 3-gram baseline, or any
+non-Toy1 capacity failure still dispatch to `Investigate(propose-Toy2)` or the
+applicable §8 failure decision.
+
 A1 artifact history is scoped to `artifact_dir` plus `report_path`. Existing
 Toy0 artifacts under `experiments/S1/` and the original
 `docs/experiments/S1-report.md` are not prior Toy1 result artifacts. The first
@@ -1448,7 +1478,8 @@ Why this matters:
 S1 closure (bd-12pl) requires:
   1. All 5 seed runs Completed (D9).
   2. s1_report.v1 emitted with R-Predictions verified by git history.
-  3. Decision ∈ {ProceedToS2, ProceedToS2-with-T12.5-prereq}.
+  3. Decision ∈ {ProceedToS2, ProceedToS2-with-T12.5-prereq,
+     ProceedToS2-with-H2-waiver(toy1-narrow-h2-miss)}.
   4. baseline_self_hash and per_seed_artifacts recorded in front-matter.
   5. H5 measurement-oracle checks recorded with metric_oracle_passed = true.
      The trained-model shuffle delta for seed 0 is recorded and participates
@@ -1561,7 +1592,8 @@ O9  Per-seed isolation
 
 O10 Closure gate
     bd-12pl close is reachable iff Decision ∈ {ProceedToS2,
-    ProceedToS2-with-T12.5-prereq}.
+    ProceedToS2-with-T12.5-prereq,
+    ProceedToS2-with-H2-waiver(toy1-narrow-h2-miss)}.
 ```
 
 ---
@@ -2021,8 +2053,9 @@ F-S1 First Pulse is correct when:
     before the first checkpoint commit, and concludes with exactly one
     Decision value chosen by §8 dispatch.
 
-6.  Decision is one of {ProceedToS2, ProceedToS2-with-T12.5-prereq};
-    any other Decision blocks bd-12pl closure.
+6.  Decision is one of {ProceedToS2, ProceedToS2-with-T12.5-prereq,
+    ProceedToS2-with-H2-waiver(toy1-narrow-h2-miss)}; any other Decision
+    blocks bd-12pl closure.
 
 7.  Every JSON artifact
     (s1_checkpoint metadata, s1_run_log, s1_score, s1_negative_test,

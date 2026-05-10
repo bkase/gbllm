@@ -219,7 +219,8 @@ fn closure_checklist_forbids_fixture_or_dummy_final_evidence() {
         "`predictions_commit` is a strict ancestor of `first_result_commit`.",
         "No final report field uses fixture-only constants, zero hashes, null",
         "The F-S1.19 dispatcher is the only source of `S1Outcome` and `Decision`.",
-        "`Decision` is exactly one of `ProceedToS2` or",
+        "`Decision` is exactly one of `ProceedToS2`,",
+        "`ProceedToS2-with-H2-waiver(toy1-narrow-h2-miss)`.",
         "s1_report.v1` R-Decision, R-AllSeeds, R-ClosureArtifacts,",
         "Any checkpoint metadata has `budget_profile = \"integration_fixture\"`.",
         "The final report relies on fixture goldens, dummy commit ids, placeholder",
@@ -265,6 +266,47 @@ fn r_decision_accepts_registered_capacity_successor_decision() {
         "{}",
         report.body
     );
+}
+
+#[test]
+fn r_decision_accepts_registered_h2_waiver_decision() {
+    let mut input = fixture_input(S1Outcome::FailCapacity);
+    input.front_matter.decision = S1Decision::ProceedToS2WithH2Waiver {
+        reason: "toy1-narrow-h2-miss".to_owned(),
+    };
+    for row in &mut input.front_matter.per_seed_artifacts {
+        row.checkpoint_self_hash = Some(hash(10 + row.seed as u8));
+        row.run_log_self_hash = Some(hash(20 + row.seed as u8));
+        row.score_self_hash = Some(hash(30 + row.seed as u8));
+        if row.seed == 0 {
+            row.negative_self_hash = Some(hash(40));
+            row.ablation_self_hash = Some(hash(41));
+        }
+    }
+
+    let report = emit_report(&input).expect("H2 waiver capacity decision is valid");
+    assert!(
+        report
+            .body
+            .contains("`ProceedToS2-with-H2-waiver(toy1-narrow-h2-miss)`."),
+        "{}",
+        report.body
+    );
+}
+
+#[test]
+fn r_decision_rejects_unregistered_h2_waiver_reason() {
+    let mut input = fixture_input(S1Outcome::FailCapacity);
+    input.front_matter.decision = S1Decision::ProceedToS2WithH2Waiver {
+        reason: "too-wide".to_owned(),
+    };
+
+    assert!(matches!(
+        emit_report(&input),
+        Err(ReportError::Validation(
+            ReportValidationError::DecisionMismatch { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -321,6 +363,30 @@ fn r_closure_artifacts_rejects_missing_required_hashes_for_proceed_decisions() {
             ReportValidationError::MissingClosureArtifact {
                 seed: 0,
                 field: "negative_self_hash",
+            }
+        ))
+    ));
+
+    let mut h2_waiver_missing_score = fixture_input(S1Outcome::FailCapacity);
+    h2_waiver_missing_score.front_matter.decision = S1Decision::ProceedToS2WithH2Waiver {
+        reason: "toy1-narrow-h2-miss".to_owned(),
+    };
+    for row in &mut h2_waiver_missing_score.front_matter.per_seed_artifacts {
+        row.checkpoint_self_hash = Some(hash(10 + row.seed as u8));
+        row.run_log_self_hash = Some(hash(20 + row.seed as u8));
+        row.score_self_hash = Some(hash(30 + row.seed as u8));
+        if row.seed == 0 {
+            row.negative_self_hash = Some(hash(40));
+            row.ablation_self_hash = Some(hash(41));
+        }
+    }
+    h2_waiver_missing_score.front_matter.per_seed_artifacts[2].score_self_hash = None;
+    assert!(matches!(
+        emit_report(&h2_waiver_missing_score),
+        Err(ReportError::Validation(
+            ReportValidationError::MissingClosureArtifact {
+                seed: 2,
+                field: "score_self_hash",
             }
         ))
     ));
@@ -499,7 +565,9 @@ fn fixture_input(outcome: S1Outcome) -> ReportInput {
         .collect::<Vec<_>>();
     if !matches!(
         decision,
-        S1Decision::ProceedToS2 | S1Decision::ProceedToS2WithT125Prereq
+        S1Decision::ProceedToS2
+            | S1Decision::ProceedToS2WithT125Prereq
+            | S1Decision::ProceedToS2WithH2Waiver { .. }
     ) {
         for row in &mut per_seed_artifacts {
             if row.seed != 0 {

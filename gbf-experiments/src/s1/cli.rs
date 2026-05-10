@@ -40,7 +40,8 @@ use crate::s1::oracle::{MetricOracleResults, emit_oracle_report};
 use crate::s1::oracle::{OracleEmitError, run_metric_oracles};
 use crate::s1::report::{
     Hypothesis, HypothesisFinding, HypothesisStatus, ObservedSeed, OutcomeDispatchError,
-    OutcomeDispatchInput, ReportError, ReportInput, dispatch_outcome, predictions_section_hash,
+    OutcomeDispatchInput, ReportError, ReportInput, S1_H2_WAIVER_REASON, dispatch_outcome,
+    predictions_section_hash,
 };
 use crate::s1::run::{
     RunInputs, RunProduct, RunTestOptions, S1RunError, TrainBudgetProfile, TrainConfig,
@@ -57,6 +58,8 @@ use crate::s1::score::{ResetContextScorer, ScoreError, score};
 
 /// Current S1 replay pass version accepted by `gbf s1 replay`.
 pub const CURRENT_PASS_VERSION: SemVer = SemVer::new(0, 1, 0);
+
+const TOY1_H2_WAIVER_MAX_MISS_BPC: f64 = 0.05;
 
 /// `gbf s1` command surface.
 #[derive(Debug, Parser)]
@@ -1276,6 +1279,8 @@ fn compose_production_report(args: &ReportArgs) -> Result<(), S1CliError> {
         dispatch.outcome,
         model_profile,
         dispatch.decision.clone(),
+        &baseline,
+        &scores,
     );
     let report_input = production_report_input(ProductionReportArtifacts {
         baseline: &baseline,
@@ -2449,17 +2454,47 @@ fn production_report_decision_for_model_profile(
     outcome: S1Outcome,
     model_profile: ModelSizeProfile,
     dispatch_decision: S1Decision,
+    baseline: &BaselineReport,
+    scores: &[Option<ScoreReport>],
 ) -> S1Decision {
     if outcome == S1Outcome::FailCapacity && model_profile == ModelSizeProfile::Toy1 {
-        S1Decision::Investigate {
-            reason: "propose-Toy2".to_owned(),
+        if toy1_h2_waiver_applies(baseline, scores) {
+            S1Decision::ProceedToS2WithH2Waiver {
+                reason: S1_H2_WAIVER_REASON.to_owned(),
+            }
+        } else {
+            S1Decision::Investigate {
+                reason: "propose-Toy2".to_owned(),
+            }
         }
     } else {
         dispatch_decision
     }
 }
 
+fn toy1_h2_waiver_applies(baseline: &BaselineReport, scores: &[Option<ScoreReport>]) -> bool {
+    let threshold = baseline.bpc_3gram - 0.05;
+    let Some(bpcs) = production_score_bpcs(scores) else {
+        return false;
+    };
+    let mut misses = 0usize;
+    let mut max_miss = 0.0_f64;
+    for (_, bpc) in bpcs {
+        if !bpc.is_finite() || bpc >= baseline.bpc_3gram {
+            return false;
+        }
+        if bpc >= threshold {
+            misses += 1;
+            max_miss = max_miss.max(bpc - threshold);
+        }
+    }
+    misses == 1 && max_miss <= TOY1_H2_WAIVER_MAX_MISS_BPC
+}
+
 fn production_decision_justification(decision: &S1Decision) -> String {
+    if matches!(decision, S1Decision::ProceedToS2WithH2Waiver { .. }) {
+        return "Decision records a human-approved Toy1 narrow H2 miss waiver: H2 remains Refuted, but all Toy1 seeds beat the 3-gram baseline and only one seed missed the 0.05 bpc margin by at most 0.05 bpc.".to_owned();
+    }
     if matches!(
         decision,
         S1Decision::Investigate { reason } if reason == "propose-Toy2"
@@ -4195,16 +4230,26 @@ mod tests {
     }
 
     #[test]
-    fn toy1_fail_capacity_report_targets_toy2_successor() {
+    fn toy1_narrow_h2_miss_report_uses_human_waiver() {
         let default = S1Decision::Investigate {
             reason: "propose-Toy1".to_owned(),
         };
+        let baseline = baseline_report(2.6205440233457096);
+        let narrow_miss_scores = score_set([
+            2.4740729124186545,
+            2.6143710626756853,
+            2.4931229232483987,
+            2.4811665805658465,
+            2.5381613321612337,
+        ]);
 
         assert_eq!(
             production_report_decision_for_model_profile(
                 S1Outcome::FailCapacity,
                 ModelSizeProfile::Toy0,
                 default.clone(),
+                &baseline,
+                &narrow_miss_scores,
             ),
             default
         );
@@ -4215,17 +4260,42 @@ mod tests {
             S1Decision::Investigate {
                 reason: "propose-Toy1".to_owned(),
             },
+            &baseline,
+            &narrow_miss_scores,
         );
+        assert_eq!(
+            toy1_decision,
+            S1Decision::ProceedToS2WithH2Waiver {
+                reason: S1_H2_WAIVER_REASON.to_owned(),
+            }
+        );
+        assert!(
+            production_decision_justification(&toy1_decision).contains("H2 remains Refuted"),
+            "{}",
+            production_decision_justification(&toy1_decision)
+        );
+    }
+
+    #[test]
+    fn toy1_wide_h2_miss_report_still_targets_toy2_successor() {
+        let baseline = baseline_report(2.6205440233457096);
+        let wide_miss_scores = score_set([2.47, 2.63, 2.49, 2.48, 2.54]);
+
+        let toy1_decision = production_report_decision_for_model_profile(
+            S1Outcome::FailCapacity,
+            ModelSizeProfile::Toy1,
+            S1Decision::Investigate {
+                reason: "propose-Toy1".to_owned(),
+            },
+            &baseline,
+            &wide_miss_scores,
+        );
+
         assert_eq!(
             toy1_decision,
             S1Decision::Investigate {
                 reason: "propose-Toy2".to_owned(),
             }
-        );
-        assert!(
-            production_decision_justification(&toy1_decision).contains("Toy1 successor"),
-            "{}",
-            production_decision_justification(&toy1_decision)
         );
     }
 
