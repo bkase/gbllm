@@ -1,79 +1,7 @@
 ---
-{
-  "schema": "s1_report.v1",
-  "s1_outcome": null,
-  "decision": "NotYetRun",
-  "baseline_self_hash": null,
-  "per_seed_artifacts": [
-    {
-      "seed": 0,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 1,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 2,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 3,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    },
-    {
-      "seed": 4,
-      "completion": {
-        "kind": "not_reached"
-      },
-      "checkpoint_self_hash": null,
-      "run_log_self_hash": null,
-      "score_self_hash": null,
-      "negative_self_hash": null,
-      "ablation_self_hash": null
-    }
-  ],
-  "generated_at": "2026-05-10T00:00:00Z",
-  "rfc_revision": "92b6cb53a489558e9f39e36a05d160e45750e190",
-  "predictions_section_hash": "sha256:a2a1f33df69e97b3296f592fefd311503f29e75bff10036cd81855cc96964e1e",
-  "predictions_commit": null,
-  "first_result_commit": null,
-  "report_self_hash": "sha256:419cc61e052accfe2da05cc4c5b7202dacfb0754b0756438b10dcacc11ed1eda"
-}
+{"baseline_self_hash":"sha256:ab10244caffbdedf7727b08a17edc970f392f258a05c8b2de486b1a20d8e731c","decision":{"kind":"Investigate","reason":"propose-Toy2"},"first_result_commit":"6ccde91e69df039e9399e63aaf72196ccd4d7ce0","generated_at":"2026-05-10T18:12:04Z","per_seed_artifacts":[{"ablation_self_hash":"sha256:1bffbb8ec4d8c47579366474e2edbbb19b842844c84f117d8558b86ad74d5a7b","checkpoint_self_hash":"sha256:00c9a068576eb851e1297cf172db872ab53274ec074f468491e4d3ec10345978","completion":{"kind":"completed"},"negative_self_hash":"sha256:b5f402e02e4d8f1fa78c891608af7085b147805c8d90c2a18a0949d86071f2f0","run_log_self_hash":"sha256:4aa91c97999fc3dee98f13feea656ef0ced50866a1bfa80983b708ad9026e10a","score_self_hash":"sha256:bf3be861da68da4fa7fd1be6be3b77449e114f49611866fa296f361c4aed58aa","seed":0},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:f7921a8e941a81942ce2fd43c69e51ba1704f2853ab187e53dce2d7af9ce6d55","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:d1e5bc208db49afbf7204eae6a3415ae8b5792c00f05c991cf6937b05086a2ea","score_self_hash":"sha256:a30e43a566fb7f5f2dadc0d491ba537ab158723297322c0c190622a0f11c7592","seed":1},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:e1ad975d58b1b43ad51b1ac54fee0aca352e23fcf1857aad63b5e4d43bd3afa0","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:2862ff0b04cd09e897f21d232228f3028895880a4a3f1d56de5a567ee5682250","score_self_hash":"sha256:2ca2f3ff331fd22f2551c96b890f16d26a630f6b5daa99a8346b13803c7e19f9","seed":2},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:48cc66009ba5a2fdb6bd0c9d7311dbc162d4059304e14fe56a618ce5d9b7f9c2","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:c8e16ba672f064cb5820055ced73e8e8c44b9408fe8b606be99ea87361e5d51a","score_self_hash":"sha256:de9b0dbb2d362f05e90f2a52e7172a0bce80b2f073bc1b53862f915f6deb8c99","seed":3},{"ablation_self_hash":null,"checkpoint_self_hash":"sha256:abd36611d0537530eddf31c256292e969a9554dc4527c948107735ba76afdf5b","completion":{"kind":"completed"},"negative_self_hash":null,"run_log_self_hash":"sha256:8de783399846e982b6e8ed6418a50752ea592ba49f719355f9e987bfab394c0d","score_self_hash":"sha256:deba3db548f7b3d35dc3b1ffc7e830e2a319b1c7c8dfb43cd99093c8591a1a77","seed":4}],"predictions_commit":"8814daef35d688db4edb5cb0efa63d358afa2814","predictions_section_hash":"sha256:a2a1f33df69e97b3296f592fefd311503f29e75bff10036cd81855cc96964e1e","report_self_hash":"sha256:dfad8097b5b647f486f30532502596abbe32043f333d1b62e852d130dbfa4354","rfc_revision":"d0ab558e294d00b19030429d2a8a786620e435ca","s1_outcome":"Fail-capacity","schema":"s1_report.v1"}
 ---
-# S1 Toy1 Successor Report
-
-This report is the pre-result registration for the `bd-2ibf` Toy1 successor
-run created after the committed Toy0 `Fail-capacity` result. It does not
-rewrite `docs/experiments/S1-report.md`.
+# S1 Report
 
 ## Pre-registered predictions
 
@@ -206,31 +134,40 @@ Artifact isolation rule:
 
 ## Observed
 
-Toy1 has not run yet. No Toy1 result artifacts are claimed by this report.
+| seed | completion | val_bpc | neg_test_delta | ablation_eq |
+| --- | --- | --- | --- | --- |
+| 0 | Completed | 2.474073 | 8.499022 | true |
+| 1 | Completed | 2.614371 | NA | NA |
+| 2 | Completed | 2.493123 | NA | NA |
+| 3 | Completed | 2.481167 | NA | NA |
+| 4 | Completed | 2.538161 | NA | NA |
 
 ## Hypothesis verdicts
 
 | hypothesis | status | observation |
 | --- | --- | --- |
-| H1 | NotEvaluatedDueToPriorGate(Toy1 not yet run) | No Toy1 run logs exist yet |
-| H2 | NotEvaluatedDueToPriorGate(Toy1 not yet run) | No Toy1 scores exist yet |
-| H3 | NotEvaluatedDueToPriorGate(Toy1 not yet run) | No Toy1 negative-test artifact exists yet |
-| H4 | NotEvaluatedDueToPriorGate(Toy1 not yet run) | No Toy1 ablation artifact exists yet |
-| H5 | NotEvaluatedDueToPriorGate(Toy1 runtime support pending) | No Toy1 oracle/report input has been bound yet |
+| H1 | Confirmed | Production seeds 0..4 completed; minimum H1 loss-window drop was 2.442829 and final grad norms were finite, nonnegative, and nonzero |
+| H2 | Refuted | Production seed 1 val_bpc 2.614371 failed H2 threshold 2.570544; best=2.474073 median=2.493123 worst=2.614371 |
+| H3 | Confirmed | Production all-seed val_bpc beat H3 unigram threshold 3.950948; best=2.474073 median=2.493123 worst=2.614371; negative delta 8.499022 sensitive=true |
+| H4 | Confirmed | Production ablation phase_a_eq_ablation=true |
+| H5 | Confirmed | Production oracle metric_oracle_passed=true failed_ids=[] |
 
 ## Falsification analysis
 
-No Toy1 falsification result exists yet.
+Production S1 CLI report collected canonical TinyStories artifacts from disk.
+H2 falsification: Production seed 1 val_bpc 2.614371 failed H2 threshold 2.570544; best=2.474073 median=2.493123 worst=2.614371
 
 ## Surprises
 
-None yet.
+- bpc_3gram_baseline 2.620544 was outside preregistered sanity range [1.7, 2.0]; this range miss is reported as a Surprise, not a verdict change.
+- median(val_bpc) 2.493123 was outside preregistered sanity range [1.4, 1.8]; this range miss is reported as a Surprise, not a verdict change.
 
 ## Decision
 
-Not run.
+`Investigate(propose-Toy2)`. Decision follows RFC section 8 Fail-capacity dispatch; because this report is the Toy1 successor, the follow-up target is Toy2.
 
 ## Reproducibility statement
 
-- preregistration: `scripts/s1_preregistration_check.sh --report docs/experiments/S1-Toy1-report.md --artifact-dir experiments/S1-toy1`
-- artifact directory: `experiments/S1-toy1`
+- command: `gbf s1 replay --manifest fixtures/corpora/tinystories.toml --seed-list 0,1,2,3,4`
+- pass_version: `0.1.0`
+- manifests: train_sha=sha256:6418d412de72888f52b5142c761ac21a582f7d1166f0bfbdb5f03ccfdec90443 val_sha=sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d
