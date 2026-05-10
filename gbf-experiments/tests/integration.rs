@@ -65,7 +65,7 @@ fn tiny_fixture_replay_writes_self_hashed_artifacts_for_five_seeds() {
                 n_seeds: 5,
             })
             .expect("integration smoke start event");
-        let output = run_gbf(
+        run_gbf(
             &gbf_bin,
             &[
                 "s1",
@@ -84,8 +84,7 @@ fn tiny_fixture_replay_writes_self_hashed_artifacts_for_five_seeds() {
                 "--out-dir",
                 out_dir.to_str().expect("utf8 path"),
             ],
-        );
-        output
+        )
     });
     let summary: Value = serde_json::from_slice(&output).expect("replay JSON summary");
     assert_eq!(summary["budget_profile"], "IntegrationFixture");

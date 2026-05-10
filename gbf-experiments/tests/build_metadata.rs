@@ -21,7 +21,7 @@ const EXPECTED_QAT_ACTIVE: bool = false;
 fn build_kind_matches_selected_s1_build() {
     assert_eq!(BUILD_KIND, EXPECTED_BUILD_KIND);
     assert_eq!(QAT_ACTIVE, EXPECTED_QAT_ACTIVE);
-    assert!(!FALSIFY_ENABLED, "S1-build-A/B must not enable falsify");
+    const { assert!(!FALSIFY_ENABLED, "S1-build-A/B must not enable falsify") };
 
     let metadata = build_metadata();
     assert_eq!(metadata.build_kind, EXPECTED_BUILD_KIND);

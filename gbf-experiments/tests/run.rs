@@ -360,16 +360,19 @@ fn production_effective_budget_override_is_rejected_in_normal_builds() {
     inputs.train_config = TrainConfig::pinned();
     inputs.budget_profile = TrainBudgetProfile::Production;
 
-    let result = s1_train_run_with_environment_and_options(
-        inputs,
-        canonical_env(),
-        RunTestOptions {
-            effective_optimizer_steps: Some(2),
-            effective_eval_every_steps: Some(1),
-            effective_eval_subset_size: Some(1),
-            ..RunTestOptions::default()
-        },
-    );
+    let options = RunTestOptions {
+        #[cfg(feature = "falsify")]
+        inject_non_finite_loss_at_step: None,
+        #[cfg(feature = "falsify")]
+        inject_non_finite_grad_norm_at_step: None,
+        #[cfg(feature = "falsify")]
+        zero_gradients: false,
+        effective_optimizer_steps: Some(2),
+        effective_eval_every_steps: Some(1),
+        effective_eval_subset_size: Some(1),
+    };
+
+    let result = s1_train_run_with_environment_and_options(inputs, canonical_env(), options);
 
     #[cfg(not(feature = "falsify"))]
     assert!(matches!(
