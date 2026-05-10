@@ -132,6 +132,7 @@ git push                # Push to remote
   Tested review commands:
   - Gemini: `bunx acpx@latest --agent 'gemini --skip-trust -m gemini-3.1-pro-preview --acp' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<prompt>"`.
   - Claude: `bunx acpx@latest --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 claude exec "<prompt>"`.
+  - Codex: current local `codex` does not expose a native `--acp` flag. Use the Zed Codex ACP adapter with Codex yolo/search-equivalent config overrides: `bunx acpx@latest --agent 'npx -y @zed-industries/codex-acp -c sandbox_mode=danger-full-access -c approval_policy=never -c web_search_mode=live' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<prompt>"`.
 - For PR bodies with Markdown, always use `gh pr edit/create --body-file - <<'EOF'`.
 
 ### Training Loss Beads
