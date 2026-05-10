@@ -198,6 +198,35 @@ The S1 CI workflows call the current owner scripts:
 on-demand workflows are allowed to surface current production blockers; they
 must not paper over missing full-run support.
 
+## Toy1 Successor Run
+
+The committed Toy0 production report ended in `FailCapacity` /
+`InvestigateProposeToy1`. The Toy1 follow-up is a successor run, not a rewrite
+of [S1-report.md](../../docs/experiments/S1-report.md). Keep the Toy0 report
+and artifacts as predecessor evidence, then pre-register and run Toy1 through
+its own paths:
+
+```sh
+S1_TOY1_REPORT=docs/experiments/S1-Toy1-report.md
+S1_TOY1_ARTIFACT_DIR=experiments/S1-toy1
+scripts/s1_preregistration_check.sh \
+  --report "$S1_TOY1_REPORT" \
+  --artifact-dir "$S1_TOY1_ARTIFACT_DIR"
+```
+
+Until Rust runtime/CLI support accepts `ModelSizeProfile::Toy1` for the S1 run
+surface, stop after the preregistration check. When that support lands, every
+Toy1-producing command must select Toy1 explicitly and write all generated
+baseline, checkpoint, score, negative-test, ablation, oracle, and report inputs
+under `experiments/S1-toy1`. Do not mix Toy0 `experiments/S1` artifacts into
+the Toy1 report, even for the model-independent baseline; regenerate or copy
+with a Toy1 result commit so the successor `first_result_commit` is auditable.
+
+The Toy1 report uses the same H1, H3, H4, and H5 rules as Toy0. Its H2 capacity
+gate substitutes the registered `ModelSizeProfile::Toy1` profile
+(`d_model=32`, `d_ff=64`, `n_blocks=2`) for Toy0 and keeps the exact same
+per-seed threshold: `val_bpc(seed) < bpc_3gram - 0.05` for seeds 0 through 4.
+
 ## Extending Schemas
 
 Create `s1_*.v2` only when the RFC contract changes or a backward-incompatible

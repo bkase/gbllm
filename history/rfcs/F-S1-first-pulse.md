@@ -1047,6 +1047,59 @@ Fail-suspicious    → Decision::Halt(audit-split-and-bpc)
 `Halt` blocks bd-12pl closure unconditionally. `Investigate` creates a
 follow-up bead and may extend this RFC's scope or seed list.
 
+## 8.1 Amendment A1: Toy1 successor run
+
+This amendment is activated by the committed Toy0 result:
+`S1Outcome = Fail-capacity` and `Decision = Investigate(propose-Toy1)`.
+The Toy0 report remains immutable evidence for that falsification. The Toy1
+successor run is a new pre-registered run identity in the same F-S1 PR, not an
+edit of the Toy0 predictions or result history.
+
+```text
+Successor identity:
+  model_config:  ModelSizeProfile::Toy1
+                 d_model = 32
+                 d_ff = 64
+                 n_blocks = 2
+                 vocab = 256
+  report_path:   docs/experiments/S1-Toy1-report.md
+  artifact_dir:  experiments/S1-toy1/
+
+Preregistration gate:
+  scripts/s1_preregistration_check.sh \
+    --report docs/experiments/S1-Toy1-report.md \
+    --artifact-dir experiments/S1-toy1
+```
+
+For A1 only, §5 `RunInputs.model_config` and S1-Pre-2 are amended from
+`Toy0` to `Toy1`. All other D1..D10 decisions remain unchanged: raw bytes,
+seed list `[0, 1, 2, 3, 4]`, train budget, optimizer, deterministic sampling,
+baseline math, split, strict per-seed pass criterion, measurement oracles, and
+phase-A cleanliness rules are identical to the Toy0 run.
+
+The A1 H2 hypothesis is:
+
+```text
+Toy1 (d_model=32, d_ff=64, n_blocks=2, vocab=256) has enough
+representational power to model TinyStories n-gram structure better than the
+fixed 3-gram baseline by a margin strictly greater than 0.05 bpc for every
+seed.
+```
+
+H1, H3, H4, and H5 retain their original meanings with `Toy1` substituted for
+`Toy0` where the model identity appears. The A1 successor report may support
+bd-12pl closure only if H1, A1-H2, H4, and H5 are Confirmed under the Toy1
+artifacts. The original Toy0 `Fail-capacity` report must still be cited as
+predecessor evidence and must not be rewritten to look like a Toy1 result.
+
+A1 artifact history is scoped to `artifact_dir` plus `report_path`. Existing
+Toy0 artifacts under `experiments/S1/` and the original
+`docs/experiments/S1-report.md` are not prior Toy1 result artifacts. The first
+committed Toy1 artifact hash under `experiments/S1-toy1/`, or the first Toy1
+report commit containing a populated `checkpoint_self_hash`,
+`score_self_hash`, `negative_self_hash`, `ablation_self_hash`, or
+`baseline_self_hash`, is the A1 `first_result_commit`.
+
 ---
 
 # 9. Artifact schemas

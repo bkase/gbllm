@@ -9,3 +9,4 @@
 # lives under docs/experiments/S1-report.md and is intentionally not ignored.
 /experiments/S1/
 /experiments/S1-production-local/
+/experiments/S1-toy1/

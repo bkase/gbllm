@@ -435,9 +435,10 @@ fn run_preconditions_return_typed_errors() {
     ));
 
     invalid_seed.seed = 0;
-    invalid_seed.model_config = ModelSizeProfile::toy1();
+    invalid_seed.model_config =
+        ModelSizeProfile::moe_tiny(2).expect("MoeTiny is a registered non-S1 profile");
     let error = s1_train_run_with_environment(invalid_seed.clone(), canonical_env())
-        .expect_err("non-Toy0 model is rejected");
+        .expect_err("non-S1 production model is rejected");
     assert!(matches!(
         error,
         S1RunError::InvalidModelConfig {

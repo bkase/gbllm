@@ -132,24 +132,6 @@ expect_fail() {
   grep -F "$expected" "$TMPDIR/$label.err" >/dev/null
 }
 
-set_report_checkpoint_hash() {
-  local report="$1"
-  python3 - "$report" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-text = path.read_text()
-front_raw, body = text[4:].split("\n---\n", 1)
-front = json.loads(front_raw)
-front["per_seed_artifacts"][0]["checkpoint_self_hash"] = (
-    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-)
-path.write_text("---\n" + json.dumps(front, indent=2) + "\n---\n" + body)
-PY
-}
-
 git_init
 
 write_report null null
@@ -239,21 +221,36 @@ expect_fail not_ancestor "predictions commit not an ancestor of first result"
 
 git_init custom-report-repo
 
+mkdir -p experiments/S1/checkpoints/seed-0
+cat >experiments/S1/checkpoints/seed-0/metadata.json <<'JSON'
+{
+  "schema": "s1_checkpoint.v1",
+  "checkpoint_self_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+JSON
+git add experiments/S1/checkpoints/seed-0/metadata.json
+git commit -q -m "existing toy0 result history"
+
 custom_report="reports/S1/custom-report.md"
 REPORT_PATH="$custom_report" write_report null null
 git add "$custom_report"
 git commit -q -m "custom pre-register predictions"
 custom_predictions_commit="$(git rev-parse HEAD)"
 
-REPORT_PATH="$custom_report" write_report "$custom_predictions_commit" null
-set_report_checkpoint_hash "$custom_report"
-git add "$custom_report"
+mkdir -p experiments/S1-toy1/checkpoints/seed-0
+cat >experiments/S1-toy1/checkpoints/seed-0/metadata.json <<'JSON'
+{
+  "schema": "s1_checkpoint.v1",
+  "checkpoint_self_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+JSON
+git add experiments/S1-toy1/checkpoints/seed-0/metadata.json
 git commit -q -m "custom report first result"
 custom_first_result_commit="$(git rev-parse HEAD)"
 
 REPORT_PATH="$custom_report" write_report "$custom_predictions_commit" "$custom_first_result_commit"
 git add "$custom_report"
 git commit -q -m "custom report records result commit"
-"$SCRIPT" --report "$custom_report" >/dev/null
+"$SCRIPT" --report "$custom_report" --artifact-dir experiments/S1-toy1 >/dev/null
 
 echo "[PREREG TEST] all preregistration check scenarios passed"

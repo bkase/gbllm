@@ -14,8 +14,8 @@ use gbf_experiments::s1::run::{
     CheckpointMetadata as CheckpointWriterMetadata, canonical_checkpoint_bytes,
 };
 use gbf_experiments::s1::schema::{
-    BaselineReport, CheckpointMetadata, CountsSummary, GradNormSummary, OracleReport, RunLog,
-    S1BuildKind, S1CanonicalJson, S1Completion, ScoreReport, SmoothingScheme,
+    BaselineReport, CheckpointMetadata, CountsSummary, DomainHash, GradNormSummary, OracleReport,
+    RunLog, S1BuildKind, S1CanonicalJson, S1Completion, ScoreReport, SmoothingScheme,
 };
 use gbf_experiments::s1::score::RESET_CONTEXT_CHUNK_SIZE;
 use gbf_foundation::{Hash256, SemVer, sha256};
@@ -106,6 +106,17 @@ fn print_config_emits_resolved_s1_contract() {
             .and(predicate::str::contains("\"build_kind\""))
             .and(predicate::str::contains("\"device_profile\""))
             .and(predicate::str::contains("\"burn-cpu-lockfile-pinned\"")),
+    );
+}
+
+#[test]
+fn print_config_accepts_toy1_model_profile() {
+    let mut command = gbf();
+    command.args(["s1", "print-config", "--model-profile", "toy1"]);
+
+    command.assert().success().stdout(
+        predicate::str::contains("\"model_config\": \"Toy1\"")
+            .and(predicate::str::contains("\"model_config_hash\"")),
     );
 }
 
@@ -220,6 +231,42 @@ fn replay_smoke_writes_tiny_fixture_artifacts() {
     );
     assert!(out_dir.join("checkpoints/seed-0/metadata.json").exists());
     assert!(out_dir.join("runs/seed-0/run_log.json").exists());
+}
+
+#[test]
+fn replay_smoke_writes_toy1_fixture_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let out_dir = temp.path().join("S1-toy1");
+    let mut command = deterministic_gbf();
+    command.args([
+        "s1",
+        "replay",
+        "--manifest",
+        manifest_path().to_str().expect("utf-8 path"),
+        "--pass-version",
+        "0.1.0",
+        "--seed-list",
+        "0",
+        "--device-profile",
+        "S1CpuDeterministic",
+        "--budget-profile",
+        "integration-fixture",
+        "--allow-noncanonical-integration-fixture",
+        "--model-profile",
+        "toy1",
+        "--out-dir",
+        out_dir.to_str().expect("utf-8 path"),
+    ]);
+
+    command
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"completion\": \"completed\""));
+    let metadata: CheckpointMetadata = read_json(&out_dir.join("checkpoints/seed-0/metadata.json"));
+    assert_eq!(
+        metadata.model_config_hash,
+        model_config_hash(ModelSizeProfile::toy1())
+    );
 }
 
 #[test]
@@ -884,7 +931,7 @@ fn write_production_checkpoint(
         seed,
         corpus_train_sha: manifest.train_sha256,
         corpus_val_sha: manifest.val_sha256,
-        model_config_hash: Hash256::ZERO,
+        model_config_hash: model_config_hash(ModelSizeProfile::toy0()),
         train_config_hash: Hash256::ZERO,
         build_kind,
         build_config_hash: Hash256::ZERO,
@@ -942,6 +989,17 @@ fn production_tensors() -> Vec<CanonicalTensor> {
     ]
 }
 
+fn model_config_hash(profile: ModelSizeProfile) -> Hash256 {
+    DomainHash::new(
+        "gbf-policy",
+        "ModelSizeProfile",
+        "model_size_profile.v1",
+        "1",
+    )
+    .hash(&profile)
+    .expect("model config hash")
+}
+
 fn production_tensor(name: &str, shape: &[usize]) -> CanonicalTensor {
     let element_count = shape.iter().product();
     CanonicalTensor::new(
@@ -965,6 +1023,10 @@ fn write_s1_json<T: serde::Serialize>(path: &Path, value: &T) {
         S1CanonicalJson::to_vec(value).expect("canonical json"),
     )
     .expect("json write");
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> T {
+    serde_json::from_slice(&fs::read(path).expect("json read")).expect("json parse")
 }
 
 fn manifest_path() -> PathBuf {

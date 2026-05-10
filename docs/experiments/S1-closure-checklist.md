@@ -13,6 +13,14 @@ bind `S1Outcome = Fail-capacity` and `Decision = Investigate(propose-Toy1)`.
 The report is still blocked from final CLI emission by missing real
 `predictions_commit` and `first_result_commit` history values.
 
+Toy1 successor status: `bd-2ibf` extends the closure path with a separate
+pre-registered report at `docs/experiments/S1-Toy1-report.md` and a separate
+artifact tree at `experiments/S1-toy1`. Use this checklist against the Toy1
+paths after runtime/CLI support can actually produce `ModelSizeProfile::Toy1`
+S1 artifacts; substitute `experiments/S1-toy1` for `experiments/S1` in the
+production-input paths below. The original Toy0 report remains predecessor
+evidence and must not be rewritten as if it were the Toy1 run.
+
 ## Required Production Inputs
 
 - [ ] `bd-1ehz` is closed with five completed TinyStories Production seed runs.
@@ -56,6 +64,15 @@ The report is still blocked from final CLI emission by missing real
       matter.
 - [ ] No final report field uses fixture-only constants, zero hashes, null
       closure hashes, IntegrationFixture report output, or dummy commit ids.
+
+For the Toy1 successor report, run the preregistration gate with the successor
+artifact directory so Toy0 result history does not count as Toy1 history:
+
+```sh
+scripts/s1_preregistration_check.sh \
+  --report docs/experiments/S1-Toy1-report.md \
+  --artifact-dir experiments/S1-toy1
+```
 
 ## Hypothesis And Decision Checks
 

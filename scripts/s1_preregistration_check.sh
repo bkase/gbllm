@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 REPORT_DEFAULT = "docs/experiments/S1-report.md"
+ARTIFACT_DEFAULT = "experiments/S1"
 RESULT_HASH_RE = re.compile(
     rb'"(?:checkpoint|score|negative|ablation|baseline)_self_hash"\s*:\s*"sha256:[0-9a-f]{64}"'
 )
@@ -37,11 +38,23 @@ def main() -> int:
         action="store_true",
         help="emit a single JSON status object on stdout",
     )
+    parser.add_argument(
+        "--artifact-dir",
+        action="append",
+        dest="artifact_dirs",
+        default=None,
+        help=(
+            "repo-relative S1 result artifact directory to scan for "
+            "first_result_commit; repeat or comma-separate for multiple "
+            "directories (default: experiments/S1)"
+        ),
+    )
     args = parser.parse_args(sys.argv[1:])
 
     try:
         repo = git(["rev-parse", "--show-toplevel"], text=True).strip()
         report_path = args.report
+        artifact_dirs = normalize_artifact_dirs(args.artifact_dirs)
         current = Path(repo, report_path).read_text(encoding="utf-8")
         front, body = parse_report(current)
         section = predictions_section(body)
@@ -74,7 +87,7 @@ def main() -> int:
         else:
             ok("predictions_commit is not set yet; pre-result mode")
 
-        earliest_result = earliest_result_commit(report_path)
+        earliest_result = earliest_result_commit(report_path, artifact_dirs)
         if first_result_commit is None:
             if earliest_result is not None:
                 raise PreregError(
@@ -169,33 +182,73 @@ def predictions_hash(section: str) -> str:
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
-def earliest_result_commit(report_path: str):
-    paths = result_scan_paths(report_path)
+def earliest_result_commit(report_path: str, artifact_dirs: list[str]):
+    paths = result_scan_paths(report_path, artifact_dirs)
     commits = git(
         ["rev-list", "--reverse", "HEAD", "--", *paths],
         text=True,
     ).splitlines()
     for commit in commits:
-        for path in tracked_files_at(commit, report_path):
+        for path in tracked_files_at(commit, report_path, artifact_dirs):
             payload = git_show_bytes(commit, path)
             if RESULT_HASH_RE.search(payload):
                 return commit
     return None
 
 
-def result_scan_paths(report_path: str):
-    paths = ["experiments/S1", report_path]
-    if report_path != REPORT_DEFAULT:
-        paths.append(REPORT_DEFAULT)
-    return paths
+def result_scan_paths(report_path: str, artifact_dirs: list[str]):
+    paths = [*artifact_dirs, report_path]
+    return list(dict.fromkeys(paths))
 
 
-def tracked_files_at(commit: str, report_path: str):
+def tracked_files_at(commit: str, report_path: str, artifact_dirs: list[str]):
     paths = git(
-        ["ls-tree", "-r", "--name-only", commit, "--", "experiments/S1", report_path],
+        [
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+            "--",
+            *result_scan_paths(report_path, artifact_dirs),
+        ],
         text=True,
     ).splitlines()
-    return [path for path in paths if path == report_path or path.startswith("experiments/S1/")]
+    return [
+        path
+        for path in paths
+        if path == report_path
+        or any(
+            path == artifact_dir or path.startswith(f"{artifact_dir}/")
+            for artifact_dir in artifact_dirs
+        )
+    ]
+
+
+def normalize_artifact_dirs(values) -> list[str]:
+    if values is None:
+        values = [ARTIFACT_DEFAULT]
+    result = []
+    for value in values:
+        for raw in value.split(","):
+            path = normalize_repo_path(raw, "--artifact-dir")
+            if path == ".":
+                raise PreregError("--artifact-dir must not be the repository root")
+            if path not in result:
+                result.append(path)
+    return result
+
+
+def normalize_repo_path(value: str, field: str) -> str:
+    raw = value.strip().replace("\\", "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    raw = raw.rstrip("/")
+    if not raw:
+        raise PreregError(f"{field} cannot be empty")
+    path = Path(raw)
+    if path.is_absolute() or ".." in path.parts:
+        raise PreregError(f"{field} must be a repo-relative path without '..'")
+    return raw
 
 
 def expect_hash(value, field: str) -> str:

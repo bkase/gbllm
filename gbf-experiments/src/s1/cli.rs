@@ -134,6 +134,9 @@ pub struct DiffCheckpointsArgs {
 /// Print-config command arguments.
 #[derive(Debug, Clone, Args)]
 pub struct PrintConfigArgs {
+    /// Model profile resolved into the S1 model-config hash.
+    #[arg(long, value_enum, default_value_t = CliModelProfile::Toy0)]
+    pub model_profile: CliModelProfile,
     /// Emit machine-readable JSON. The default output is already JSON.
     #[arg(long)]
     pub json: bool,
@@ -171,6 +174,9 @@ pub struct ReplayArgs {
     /// Training budget profile. Production is the normative default.
     #[arg(long, value_enum, default_value_t = CliBudgetProfile::Production)]
     pub budget_profile: CliBudgetProfile,
+    /// Model profile for the S1 dense production runner.
+    #[arg(long, value_enum, default_value_t = CliModelProfile::Toy0)]
+    pub model_profile: CliModelProfile,
     /// Explicitly opt into the non-canonical integration fixture budget.
     #[arg(long)]
     pub allow_noncanonical_integration_fixture: bool,
@@ -206,6 +212,9 @@ pub struct VerifyDeterminismArgs {
     /// Training budget profile. Production is the normative default.
     #[arg(long, value_enum, default_value_t = CliBudgetProfile::Production)]
     pub budget_profile: CliBudgetProfile,
+    /// Model profile for the S1 dense production runner.
+    #[arg(long, value_enum, default_value_t = CliModelProfile::Toy0)]
+    pub model_profile: CliModelProfile,
     /// Explicitly opt into the non-canonical integration fixture budget.
     #[arg(long)]
     pub allow_noncanonical_integration_fixture: bool,
@@ -232,6 +241,9 @@ pub struct ScoreArgs {
     /// Production checkpoint metadata sidecar to validate before loading checkpoint bytes.
     #[arg(long)]
     pub checkpoint_metadata: Option<PathBuf>,
+    /// Model profile expected in production checkpoint metadata and tensor names.
+    #[arg(long, value_enum, default_value_t = CliModelProfile::Toy0)]
+    pub model_profile: CliModelProfile,
     /// Use the deterministic uniform-logits fixture scorer.
     #[arg(long)]
     pub fixture_uniform_scorer: bool,
@@ -280,6 +292,9 @@ pub struct AblationArgs {
     /// Seed-0 ablation production checkpoint metadata sidecar.
     #[arg(long)]
     pub ablation_metadata: Option<PathBuf>,
+    /// Model profile expected in production checkpoint metadata and tensor names.
+    #[arg(long, value_enum, default_value_t = CliModelProfile::Toy0)]
+    pub model_profile: CliModelProfile,
     /// Test-only tensor mismatch substitute. Hidden and compiled only with `falsify`.
     #[cfg(feature = "falsify")]
     #[arg(long, hide = true)]
@@ -316,6 +331,9 @@ pub struct ReportArgs {
     /// File containing the exact pre-registered predictions markdown section.
     #[arg(long)]
     pub predictions_section_file: Option<PathBuf>,
+    /// Model profile expected across production checkpoint metadata.
+    #[arg(long, value_enum, default_value_t = CliModelProfile::Toy0)]
+    pub model_profile: CliModelProfile,
     /// RFC3339 timestamp for production report front matter.
     #[arg(long, default_value = "1970-01-01T00:00:00Z")]
     pub generated_at: String,
@@ -355,6 +373,24 @@ impl fmt::Display for CliE2eScenario {
             Self::FailMetricModuloShuffle => "fail_metric_modulo_shuffle",
         };
         f.write_str(value)
+    }
+}
+
+/// CLI-selectable model profile for S1 dense production runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+pub enum CliModelProfile {
+    /// Original F-S1 Toy0 reference profile.
+    Toy0,
+    /// F-S1 follow-up profile proposed after Toy0 Fail-capacity.
+    Toy1,
+}
+
+impl CliModelProfile {
+    const fn model_size_profile(self) -> ModelSizeProfile {
+        match self {
+            Self::Toy0 => ModelSizeProfile::Toy0,
+            Self::Toy1 => ModelSizeProfile::Toy1,
+        }
     }
 }
 
@@ -553,9 +589,9 @@ fn print_config(args: PrintConfigArgs) -> Result<(), S1CliError> {
     with_diagnostic_logging("print-config", || print_config_impl(args))
 }
 
-fn print_config_impl(_args: PrintConfigArgs) -> Result<(), S1CliError> {
+fn print_config_impl(args: PrintConfigArgs) -> Result<(), S1CliError> {
     let train_config = TrainConfig::pinned();
-    let model_config = ModelSizeProfile::toy0();
+    let model_config = args.model_profile.model_size_profile();
     let build_metadata = build_metadata();
     let device_profile = S1CpuDeterministic::canonical();
     let summary = PrintConfigSummary {
@@ -589,6 +625,7 @@ fn replay(args: ReplayArgs) -> Result<(), S1CliError> {
         args.budget_profile,
         args.allow_noncanonical_integration_fixture,
     )?;
+    let model_config = args.model_profile.model_size_profile();
     let run_options = replay_run_options(&args);
     let mut products = Vec::new();
 
@@ -597,7 +634,7 @@ fn replay(args: ReplayArgs) -> Result<(), S1CliError> {
             RunInputs {
                 corpus_train: train.clone(),
                 corpus_val: val.clone(),
-                model_config: ModelSizeProfile::toy0(),
+                model_config,
                 train_config: budget_profile.train_config(),
                 seed,
                 budget_profile,
@@ -698,10 +735,11 @@ fn verify_determinism(args: VerifyDeterminismArgs) -> Result<(), S1CliError> {
         args.budget_profile,
         args.allow_noncanonical_integration_fixture,
     )?;
+    let model_config = args.model_profile.model_size_profile();
     let inputs = || RunInputs {
         corpus_train: train.clone(),
         corpus_val: val.clone(),
-        model_config: ModelSizeProfile::toy0(),
+        model_config,
         train_config: budget_profile.train_config(),
         seed: args.seed,
         budget_profile,
@@ -795,6 +833,7 @@ fn score_command(args: ScoreArgs) -> Result<(), S1CliError> {
         "gbf s1 score production mode requires --checkpoint-metadata",
     )?;
     let (checkpoint_sha, tensors) = read_checkpoint_tensors_and_sha(checkpoint)?;
+    let model_profile = args.model_profile.model_size_profile();
     let metadata = load_validated_production_metadata(
         metadata,
         &manifest,
@@ -802,8 +841,9 @@ fn score_command(args: ScoreArgs) -> Result<(), S1CliError> {
         S1BuildKind::PhaseA,
         true,
         Some(checkpoint_sha),
+        model_profile,
     )?;
-    let scorer = ProductionCheckpointScorer::from_tensors(&tensors)?;
+    let scorer = ProductionCheckpointScorer::from_tensors(model_profile, &tensors)?;
     let report = score(
         &scorer,
         metadata.seed,
@@ -879,6 +919,7 @@ fn negative_test(args: ScoreArgs) -> Result<(), S1CliError> {
         "gbf s1 negative-test production mode requires --checkpoint-metadata",
     )?;
     let (checkpoint_sha, tensors) = read_checkpoint_tensors_and_sha(checkpoint)?;
+    let model_profile = args.model_profile.model_size_profile();
     let metadata = load_validated_production_metadata(
         metadata,
         &manifest,
@@ -886,8 +927,9 @@ fn negative_test(args: ScoreArgs) -> Result<(), S1CliError> {
         S1BuildKind::PhaseA,
         true,
         Some(checkpoint_sha),
+        model_profile,
     )?;
-    let scorer = ProductionCheckpointScorer::from_tensors(&tensors)?;
+    let scorer = ProductionCheckpointScorer::from_tensors(model_profile, &tensors)?;
     let report = run_negative_test(
         &scorer,
         metadata.seed,
@@ -953,6 +995,7 @@ fn ablation(args: AblationArgs) -> Result<(), S1CliError> {
     let (phase_a_checkpoint_sha, tensors) = read_checkpoint_tensors_and_sha(phase_a_checkpoint)?;
     let (ablation_checkpoint_sha, ablation_tensors) =
         read_checkpoint_tensors_and_sha(ablation_checkpoint)?;
+    let model_profile = args.model_profile.model_size_profile();
     let phase_a = load_validated_production_metadata(
         phase_a_metadata,
         &manifest,
@@ -960,6 +1003,7 @@ fn ablation(args: AblationArgs) -> Result<(), S1CliError> {
         S1BuildKind::PhaseA,
         true,
         Some(phase_a_checkpoint_sha),
+        model_profile,
     )?;
     let ablation = load_validated_production_metadata(
         ablation_metadata,
@@ -968,6 +1012,7 @@ fn ablation(args: AblationArgs) -> Result<(), S1CliError> {
         S1BuildKind::Ablation,
         true,
         Some(ablation_checkpoint_sha),
+        model_profile,
     )?;
     let report = compare(
         AblationCheckpoint {
@@ -1081,6 +1126,7 @@ fn compose_production_report(args: &ReportArgs) -> Result<(), S1CliError> {
     )?;
     let predictions_markdown = fs::read_to_string(predictions_file)?.trim().to_owned();
     let manifest = read_tinystories_manifest(&args.manifest)?;
+    let model_profile = args.model_profile.model_size_profile();
 
     let baseline: BaselineReport = read_json_artifact_candidate(
         production_candidates(
@@ -1154,6 +1200,7 @@ fn compose_production_report(args: &ReportArgs) -> Result<(), S1CliError> {
             S1BuildKind::PhaseA,
             true,
             Some(checkpoint_sha),
+            model_profile,
         )?;
         let run_log: RunLog = read_json_artifact_candidate(
             production_candidates(artifact_dir, &[&format!("runs/seed-{seed}/run_log.json")]),
@@ -1320,6 +1367,7 @@ fn load_validated_production_metadata(
     build_kind: S1BuildKind,
     require_completed: bool,
     checkpoint_sha: Option<Hash256>,
+    model_config: ModelSizeProfile,
 ) -> Result<CheckpointMetadata, S1CliError> {
     let metadata: CheckpointMetadata = read_json_artifact(path.to_path_buf())?;
     validate_production_metadata(
@@ -1329,6 +1377,7 @@ fn load_validated_production_metadata(
         build_kind,
         require_completed,
         checkpoint_sha,
+        model_config,
     )?;
     Ok(metadata)
 }
@@ -1340,6 +1389,7 @@ fn validate_production_metadata(
     build_kind: S1BuildKind,
     require_completed: bool,
     checkpoint_sha: Option<Hash256>,
+    model_config: ModelSizeProfile,
 ) -> Result<(), S1CliError> {
     let computed = metadata.computed_self_hash()?;
     if computed != metadata.checkpoint_self_hash {
@@ -1373,6 +1423,13 @@ fn validate_production_metadata(
             expected: CURRENT_PASS_VERSION,
             observed: metadata.pass_version,
         });
+    }
+    let expected_model_config_hash = cli_model_config_hash(&model_config)?;
+    if metadata.model_config_hash != expected_model_config_hash {
+        return Err(S1CliError::InvalidArtifact(format!(
+            "production checkpoint metadata model_config_hash mismatch: expected {expected_model_config_hash}, observed {}",
+            metadata.model_config_hash
+        )));
     }
     if metadata.budget_profile != "production" {
         return Err(S1CliError::InvalidArtifact(format!(
@@ -1612,7 +1669,6 @@ impl ResetContextScorer for UniformScorer {
     fn consume(&self, _state: &mut Self::State, _byte: u8) {}
 }
 
-const PRODUCTION_STATE_SLOTS: usize = 4;
 const PRODUCTION_STATE_DECAY: f64 = 0.5;
 const PRODUCTION_VOCAB_SIZE: usize = 256;
 const PREREGISTERED_BPC_3GRAM_BASELINE_MIN: f64 = 1.7;
@@ -1620,77 +1676,168 @@ const PREREGISTERED_BPC_3GRAM_BASELINE_MAX: f64 = 2.0;
 const PREREGISTERED_MEDIAN_VAL_BPC_MIN: f64 = 1.4;
 const PREREGISTERED_MEDIAN_VAL_BPC_MAX: f64 = 1.8;
 
+fn production_state_slots(profile: ModelSizeProfile) -> Result<usize, S1CliError> {
+    match profile {
+        ModelSizeProfile::Toy0 => Ok(4),
+        ModelSizeProfile::Toy1 => Ok(8),
+        _ => Err(S1CliError::InvalidArtifact(
+            "S1 production artifact consumers accept only Toy0 or Toy1 model profiles".to_owned(),
+        )),
+    }
+}
+
+fn production_block_count(profile: ModelSizeProfile) -> Result<usize, S1CliError> {
+    match profile {
+        ModelSizeProfile::Toy0 => Ok(1),
+        ModelSizeProfile::Toy1 => Ok(usize::from(ModelSizeProfile::TOY1_N_BLOCKS)),
+        _ => Err(S1CliError::InvalidArtifact(
+            "S1 production artifact consumers accept only Toy0 or Toy1 model profiles".to_owned(),
+        )),
+    }
+}
+
+fn production_profile_prefix(profile: ModelSizeProfile) -> Result<&'static str, S1CliError> {
+    match profile {
+        ModelSizeProfile::Toy0 => Ok("toy0"),
+        ModelSizeProfile::Toy1 => Ok("toy1"),
+        _ => Err(S1CliError::InvalidArtifact(
+            "S1 production artifact consumers accept only Toy0 or Toy1 model profiles".to_owned(),
+        )),
+    }
+}
+
+fn production_tensor_id(profile: ModelSizeProfile, suffix: &str) -> Result<String, S1CliError> {
+    Ok(format!(
+        "{}.production.{suffix}",
+        production_profile_prefix(profile)?
+    ))
+}
+
 #[derive(Debug, Clone)]
-struct ProductionCheckpointScorer {
-    d_model: usize,
-    d_ff: usize,
-    embedding: Vec<f64>,
+struct ProductionCheckpointBlock {
     input_to_state: Vec<f64>,
     state_to_output: Vec<f64>,
     dense_up: Vec<f64>,
     dense_down: Vec<f64>,
 }
 
-impl ProductionCheckpointScorer {
-    fn from_tensors(tensors: &[CanonicalTensor]) -> Result<Self, S1CliError> {
-        let d_model = usize::from(ModelSizeProfile::toy0().d_model());
-        let d_ff = usize::from(ModelSizeProfile::toy0().d_ff());
+fn production_block_tensor_id(
+    profile: ModelSizeProfile,
+    block_index: usize,
+    suffix: &str,
+) -> Result<String, S1CliError> {
+    if production_block_count(profile)? == 1 {
+        production_tensor_id(profile, suffix)
+    } else {
+        production_tensor_id(profile, &format!("blocks.{block_index}.{suffix}"))
+    }
+}
+
+impl ProductionCheckpointBlock {
+    fn from_tensors(
+        profile: ModelSizeProfile,
+        block_index: usize,
+        tensors: &[CanonicalTensor],
+        d_model: usize,
+        state_slots: usize,
+        d_ff: usize,
+    ) -> Result<Self, S1CliError> {
         Ok(Self {
-            d_model,
-            d_ff,
-            embedding: production_f32_tensor(
-                tensors,
-                "toy0.production.embedding_tied.weight",
-                &[PRODUCTION_VOCAB_SIZE, d_model],
-            )?,
             input_to_state: production_f32_tensor(
                 tensors,
-                "toy0.production.linear_state.input_to_state.weight",
-                &[d_model, PRODUCTION_STATE_SLOTS],
+                &production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.input_to_state.weight",
+                )?,
+                &[d_model, state_slots],
             )?,
             state_to_output: production_f32_tensor(
                 tensors,
-                "toy0.production.linear_state.state_to_output.weight",
-                &[PRODUCTION_STATE_SLOTS, d_model],
+                &production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.state_to_output.weight",
+                )?,
+                &[state_slots, d_model],
             )?,
             dense_up: production_f32_tensor(
                 tensors,
-                "toy0.production.dense_ffn.up.weight",
+                &production_block_tensor_id(profile, block_index, "dense_ffn.up.weight")?,
                 &[d_model, d_ff],
             )?,
             dense_down: production_f32_tensor(
                 tensors,
-                "toy0.production.dense_ffn.down.weight",
+                &production_block_tensor_id(profile, block_index, "dense_ffn.down.weight")?,
                 &[d_ff, d_model],
             )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProductionCheckpointScorer {
+    d_model: usize,
+    state_slots: usize,
+    state_decay: f64,
+    d_ff: usize,
+    embedding: Vec<f64>,
+    blocks: Vec<ProductionCheckpointBlock>,
+}
+
+impl ProductionCheckpointScorer {
+    fn from_tensors(
+        profile: ModelSizeProfile,
+        tensors: &[CanonicalTensor],
+    ) -> Result<Self, S1CliError> {
+        let d_model = usize::from(profile.d_model());
+        let state_slots = production_state_slots(profile)?;
+        let block_count = production_block_count(profile)?;
+        let d_ff = usize::from(profile.d_ff());
+        let blocks = (0..block_count)
+            .map(|block_index| {
+                ProductionCheckpointBlock::from_tensors(
+                    profile,
+                    block_index,
+                    tensors,
+                    d_model,
+                    state_slots,
+                    d_ff,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            d_model,
+            state_slots,
+            state_decay: PRODUCTION_STATE_DECAY,
+            d_ff,
+            embedding: production_f32_tensor(
+                tensors,
+                &production_tensor_id(profile, "embedding_tied.weight")?,
+                &[PRODUCTION_VOCAB_SIZE, d_model],
+            )?,
+            blocks,
         })
     }
 
     fn dense_row_major(values: &[f64], row: usize, col: usize, cols: usize) -> f64 {
         values[row * cols + col]
     }
-}
 
-impl ResetContextScorer for ProductionCheckpointScorer {
-    type State = Vec<f64>;
-
-    fn fresh_state(&self) -> Self::State {
-        vec![0.0; PRODUCTION_STATE_SLOTS]
-    }
-
-    fn logits(&self, state: &Self::State) -> Vec<f64> {
+    fn block_hidden(&self, block: &ProductionCheckpointBlock, state: &[f64]) -> Vec<f64> {
         let mut hidden = vec![0.0; self.d_model];
-        for (slot, state_value) in state.iter().enumerate().take(PRODUCTION_STATE_SLOTS) {
+        for (slot, state_value) in state.iter().enumerate().take(self.state_slots) {
             for (dim, value) in hidden.iter_mut().enumerate() {
                 *value += *state_value
-                    * Self::dense_row_major(&self.state_to_output, slot, dim, self.d_model);
+                    * Self::dense_row_major(&block.state_to_output, slot, dim, self.d_model);
             }
         }
 
         let mut up = vec![0.0; self.d_ff];
         for (ff, value) in up.iter_mut().enumerate() {
             for (dim, hidden_value) in hidden.iter().enumerate() {
-                *value += *hidden_value * Self::dense_row_major(&self.dense_up, dim, ff, self.d_ff);
+                *value +=
+                    *hidden_value * Self::dense_row_major(&block.dense_up, dim, ff, self.d_ff);
             }
             *value = (*value).max(0.0);
         }
@@ -1699,12 +1846,33 @@ impl ResetContextScorer for ProductionCheckpointScorer {
         for (dim, value) in ffn.iter_mut().enumerate() {
             for (ff, up_value) in up.iter().enumerate() {
                 *value +=
-                    *up_value * Self::dense_row_major(&self.dense_down, ff, dim, self.d_model);
+                    *up_value * Self::dense_row_major(&block.dense_down, ff, dim, self.d_model);
             }
         }
 
         for (dim, value) in hidden.iter_mut().enumerate() {
             *value += ffn[dim];
+        }
+        hidden
+    }
+}
+
+impl ResetContextScorer for ProductionCheckpointScorer {
+    type State = Vec<f64>;
+
+    fn fresh_state(&self) -> Self::State {
+        vec![0.0; self.blocks.len() * self.state_slots]
+    }
+
+    fn logits(&self, state: &Self::State) -> Vec<f64> {
+        let mut hidden = vec![0.0; self.d_model];
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let state_offset = block_index * self.state_slots;
+            let block_hidden =
+                self.block_hidden(block, &state[state_offset..state_offset + self.state_slots]);
+            for (value, block_value) in hidden.iter_mut().zip(block_hidden) {
+                *value += block_value;
+            }
         }
 
         let mut logits = vec![0.0; PRODUCTION_VOCAB_SIZE];
@@ -1719,21 +1887,21 @@ impl ResetContextScorer for ProductionCheckpointScorer {
 
     fn consume(&self, state: &mut Self::State, byte: u8) {
         let token = usize::from(byte);
-        let mut delta = [0.0_f64; PRODUCTION_STATE_SLOTS];
-        for dim in 0..self.d_model {
-            let embedding_value = Self::dense_row_major(&self.embedding, token, dim, self.d_model);
-            for (slot, value) in delta.iter_mut().enumerate() {
-                *value += embedding_value
-                    * Self::dense_row_major(
-                        &self.input_to_state,
-                        dim,
-                        slot,
-                        PRODUCTION_STATE_SLOTS,
-                    );
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let mut delta = vec![0.0_f64; self.state_slots];
+            for dim in 0..self.d_model {
+                let embedding_value =
+                    Self::dense_row_major(&self.embedding, token, dim, self.d_model);
+                for (slot, value) in delta.iter_mut().enumerate() {
+                    *value += embedding_value
+                        * Self::dense_row_major(&block.input_to_state, dim, slot, self.state_slots);
+                }
             }
-        }
-        for slot in 0..PRODUCTION_STATE_SLOTS {
-            state[slot] = state[slot] * PRODUCTION_STATE_DECAY + delta[slot];
+            let state_offset = block_index * self.state_slots;
+            for (slot, delta_value) in delta.iter().enumerate().take(self.state_slots) {
+                let state_index = state_offset + slot;
+                state[state_index] = state[state_index] * self.state_decay + *delta_value;
+            }
         }
     }
 }
@@ -3770,7 +3938,8 @@ impl From<serde_json::Error> for S1CliError {
 mod tests {
     use super::*;
     use crate::s1::run::{
-        TrainConfig, production_loss_nats_per_byte_for_tensors, s1_train_run_with_environment,
+        TrainConfig, production_loss_nats_per_byte_for_profile_tensors,
+        production_loss_nats_per_byte_for_tensors, s1_train_run_with_environment,
     };
     use crate::s1::schema::{CountsSummary, GradNormSummary, SmoothingScheme};
     use crate::s1::score::reset_context_bpc;
@@ -4104,12 +4273,35 @@ mod tests {
         let tensors = fixed_production_tensors();
         let sequence = [3_u8, 7, 3, 11, 5, 19];
 
-        let scorer = ProductionCheckpointScorer::from_tensors(&tensors).expect("production scorer");
+        let scorer = ProductionCheckpointScorer::from_tensors(ModelSizeProfile::toy0(), &tensors)
+            .expect("production scorer");
         let score_bpc = reset_context_bpc(&scorer, &sequence)
             .expect("score path")
             .bpc;
         let burn_nats =
             production_loss_nats_per_byte_for_tensors(&tensors, &sequence).expect("burn forward");
+        let burn_bpc = f64::from(burn_nats) / std::f64::consts::LN_2;
+
+        assert!(
+            (score_bpc - burn_bpc).abs() < 1.0e-5,
+            "score path bpc={score_bpc:.10} burn path bpc={burn_bpc:.10}"
+        );
+    }
+
+    #[test]
+    fn production_checkpoint_scorer_accepts_toy1_tensor_contract() {
+        let profile = ModelSizeProfile::toy1();
+        let tensors = fixed_production_tensors_for(profile);
+        let sequence = [3_u8, 7, 3, 11, 5, 19];
+
+        let scorer =
+            ProductionCheckpointScorer::from_tensors(profile, &tensors).expect("production scorer");
+        let score_bpc = reset_context_bpc(&scorer, &sequence)
+            .expect("score path")
+            .bpc;
+        let burn_nats =
+            production_loss_nats_per_byte_for_profile_tensors(profile, &tensors, &sequence)
+                .expect("burn forward");
         let burn_bpc = f64::from(burn_nats) / std::f64::consts::LN_2;
 
         assert!(
@@ -4202,35 +4394,55 @@ mod tests {
     }
 
     fn fixed_production_tensors() -> Vec<CanonicalTensor> {
-        let d_model = usize::from(ModelSizeProfile::toy0().d_model());
-        let d_ff = usize::from(ModelSizeProfile::toy0().d_ff());
-        vec![
-            f32_cli_tensor(
-                "toy0.production.embedding_tied.weight",
-                &[PRODUCTION_VOCAB_SIZE, d_model],
-                production_values(PRODUCTION_VOCAB_SIZE * d_model, 1),
-            ),
-            f32_cli_tensor(
-                "toy0.production.linear_state.input_to_state.weight",
-                &[d_model, PRODUCTION_STATE_SLOTS],
-                production_values(d_model * PRODUCTION_STATE_SLOTS, 2),
-            ),
-            f32_cli_tensor(
-                "toy0.production.linear_state.state_to_output.weight",
-                &[PRODUCTION_STATE_SLOTS, d_model],
-                production_values(PRODUCTION_STATE_SLOTS * d_model, 3),
-            ),
-            f32_cli_tensor(
-                "toy0.production.dense_ffn.up.weight",
+        fixed_production_tensors_for(ModelSizeProfile::toy0())
+    }
+
+    fn fixed_production_tensors_for(profile: ModelSizeProfile) -> Vec<CanonicalTensor> {
+        let d_model = usize::from(profile.d_model());
+        let state_slots = production_state_slots(profile).expect("state slots");
+        let block_count = production_block_count(profile).expect("block count");
+        let d_ff = usize::from(profile.d_ff());
+        let mut tensors = vec![f32_cli_tensor(
+            &production_tensor_id(profile, "embedding_tied.weight").expect("tensor id"),
+            &[PRODUCTION_VOCAB_SIZE, d_model],
+            production_values(PRODUCTION_VOCAB_SIZE * d_model, 1),
+        )];
+        for block_index in 0..block_count {
+            let salt = block_index * 4;
+            tensors.push(f32_cli_tensor(
+                &production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.input_to_state.weight",
+                )
+                .expect("tensor id"),
+                &[d_model, state_slots],
+                production_values(d_model * state_slots, 2 + salt),
+            ));
+            tensors.push(f32_cli_tensor(
+                &production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.state_to_output.weight",
+                )
+                .expect("tensor id"),
+                &[state_slots, d_model],
+                production_values(state_slots * d_model, 3 + salt),
+            ));
+            tensors.push(f32_cli_tensor(
+                &production_block_tensor_id(profile, block_index, "dense_ffn.up.weight")
+                    .expect("tensor id"),
                 &[d_model, d_ff],
-                production_values(d_model * d_ff, 4),
-            ),
-            f32_cli_tensor(
-                "toy0.production.dense_ffn.down.weight",
+                production_values(d_model * d_ff, 4 + salt),
+            ));
+            tensors.push(f32_cli_tensor(
+                &production_block_tensor_id(profile, block_index, "dense_ffn.down.weight")
+                    .expect("tensor id"),
                 &[d_ff, d_model],
-                production_values(d_ff * d_model, 5),
-            ),
-        ]
+                production_values(d_ff * d_model, 5 + salt),
+            ));
+        }
+        tensors
     }
 
     fn production_values(len: usize, salt: usize) -> Vec<f32> {

@@ -57,8 +57,56 @@ pub const S1_INTEGRATION_EVAL_EVERY_STEPS: u64 = 25;
 /// Integration-only eval subset size in 32-byte sequences.
 pub const S1_INTEGRATION_EVAL_SUBSET_SIZE: u64 = 8;
 const S1_BYTE_VOCAB_SIZE: usize = 256;
-const S1_TOY0_STATE_SLOTS: usize = 4;
-const S1_TOY0_STATE_DECAY: f32 = 0.5;
+const S1_DENSE_STATE_DECAY: f32 = 0.5;
+
+fn s1_dense_state_slots(profile: ModelSizeProfile) -> Result<usize, S1RunError> {
+    match profile {
+        ModelSizeProfile::Toy0 => Ok(4),
+        ModelSizeProfile::Toy1 => Ok(8),
+        _ => Err(S1RunError::InvalidModelConfig {
+            field: "model_config",
+        }),
+    }
+}
+
+fn s1_dense_block_count(profile: ModelSizeProfile) -> Result<usize, S1RunError> {
+    match profile {
+        ModelSizeProfile::Toy0 => Ok(1),
+        ModelSizeProfile::Toy1 => Ok(usize::from(ModelSizeProfile::TOY1_N_BLOCKS)),
+        _ => Err(S1RunError::InvalidModelConfig {
+            field: "model_config",
+        }),
+    }
+}
+
+fn s1_profile_prefix(profile: ModelSizeProfile) -> Result<&'static str, S1RunError> {
+    match profile {
+        ModelSizeProfile::Toy0 => Ok("toy0"),
+        ModelSizeProfile::Toy1 => Ok("toy1"),
+        _ => Err(S1RunError::InvalidModelConfig {
+            field: "model_config",
+        }),
+    }
+}
+
+fn s1_production_tensor_id(profile: ModelSizeProfile, suffix: &str) -> Result<String, S1RunError> {
+    Ok(format!(
+        "{}.production.{suffix}",
+        s1_profile_prefix(profile)?
+    ))
+}
+
+fn s1_production_block_tensor_id(
+    profile: ModelSizeProfile,
+    block_index: usize,
+    suffix: &str,
+) -> Result<String, S1RunError> {
+    if s1_dense_block_count(profile)? == 1 {
+        s1_production_tensor_id(profile, suffix)
+    } else {
+        s1_production_tensor_id(profile, &format!("blocks.{block_index}.{suffix}"))
+    }
+}
 
 /// Deterministic inputs to one S1 run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +115,8 @@ pub struct RunInputs {
     pub corpus_train: ByteSeq,
     /// Raw validation split bytes verified against the TinyStories manifest.
     pub corpus_val: ByteSeq,
-    /// Registered model profile. S1 production runners require Toy0 exactly.
+    /// Registered model profile. S1 production runners accept Toy0 and the
+    /// Toy1 follow-up profile only.
     pub model_config: ModelSizeProfile,
     /// RFC-pinned train configuration.
     pub train_config: TrainConfig,
@@ -612,7 +661,7 @@ impl RunTestOptions {
 /// Errors returned before an S1 run product can be produced.
 #[derive(Debug)]
 pub enum S1RunError {
-    /// S1-Pre-2: model profile must be Toy0.
+    /// S1-Pre-2: model profile must be Toy0 or Toy1.
     InvalidModelConfig {
         /// Field name.
         field: &'static str,
@@ -677,7 +726,7 @@ impl fmt::Display for S1RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidModelConfig { field } => {
-                write!(f, "S1-Pre-2 failed: {field} must equal Toy0")
+                write!(f, "S1-Pre-2 failed: {field} must equal Toy0 or Toy1")
             }
             Self::InvalidTrainConfig {
                 field,
@@ -979,11 +1028,7 @@ fn integration_fixture_train_run(
 }
 
 fn validate_preconditions(inputs: &RunInputs) -> Result<(), S1RunError> {
-    if inputs.model_config != ModelSizeProfile::toy0() {
-        return Err(S1RunError::InvalidModelConfig {
-            field: "model_config",
-        });
-    }
+    s1_profile_prefix(inputs.model_config)?;
     if inputs.train_config != inputs.budget_profile.train_config() {
         return Err(S1RunError::InvalidTrainConfig {
             field: "train_config",
@@ -1085,13 +1130,14 @@ where
     B: BurnAutodiffBackend,
 {
     let device = BurnDevice::<B>::default();
-    let mut model = ProductionToy0Model::<B>::initialize(inputs.seed, &device)?;
+    let mut model =
+        ProductionDenseModel::<B>::initialize(inputs.model_config, inputs.seed, &device)?;
     let mut optimizer = adamw_config()
         .with_beta_1(inputs.train_config.optimizer.beta1)
         .with_beta_2(inputs.train_config.optimizer.beta2)
         .with_epsilon(inputs.train_config.optimizer.eps)
         .with_weight_decay(inputs.train_config.optimizer.weight_decay)
-        .init::<B, ProductionToy0Model<B>>();
+        .init::<B, ProductionDenseModel<B>>();
     let mut sampler = BatchSampler::new(&inputs.corpus_train, &inputs.train_config, inputs.seed)?;
     let train_config_hash = train_config_hash(&inputs.train_config)?;
     let mut losses = Vec::with_capacity(effective_budget.optimizer_steps as usize);
@@ -1507,60 +1553,37 @@ fn fixture_step_loss(model: &IntegrationFixtureModel, batch: &[Sequence], step: 
 }
 
 #[derive(BurnModule, Debug)]
-struct ProductionToy0Model<B: BurnBackend> {
-    #[module(skip)]
-    vocab_size: usize,
-    #[module(skip)]
-    d_model: usize,
-    #[module(skip)]
-    state_slots: usize,
-    #[module(skip)]
-    d_ff: usize,
-    token_embedding: BurnParam<BurnFloatTensor<B, 2>>,
+struct ProductionDenseBlock<B: BurnBackend> {
     input_to_state: BurnParam<BurnFloatTensor<B, 2>>,
     state_to_output: BurnParam<BurnFloatTensor<B, 2>>,
     dense_up: BurnParam<BurnFloatTensor<B, 2>>,
     dense_down: BurnParam<BurnFloatTensor<B, 2>>,
 }
 
-impl<B: BurnAutodiffBackend> ProductionToy0Model<B> {
-    fn initialize(seed: u64, device: &BurnDevice<B>) -> Result<Self, S1RunError> {
-        let d_model = usize::from(ModelSizeProfile::toy0().d_model());
-        let d_ff = usize::from(ModelSizeProfile::toy0().d_ff());
-        let mut rng = InitRng::new(seed);
-
+impl<B: BurnAutodiffBackend> ProductionDenseBlock<B> {
+    fn initialize(
+        rng: &mut InitRng,
+        d_model: usize,
+        state_slots: usize,
+        d_ff: usize,
+        device: &BurnDevice<B>,
+    ) -> Result<Self, S1RunError> {
         Ok(Self {
-            vocab_size: S1_BYTE_VOCAB_SIZE,
-            d_model,
-            state_slots: S1_TOY0_STATE_SLOTS,
-            d_ff,
-            token_embedding: BurnParam::from_tensor(init_weight_matrix(
-                &mut rng,
-                S1_BYTE_VOCAB_SIZE,
-                d_model,
-                device,
-            )?),
             input_to_state: BurnParam::from_tensor(init_weight_matrix(
-                &mut rng,
+                rng,
                 d_model,
-                S1_TOY0_STATE_SLOTS,
+                state_slots,
                 device,
             )?),
             state_to_output: BurnParam::from_tensor(init_weight_matrix(
-                &mut rng,
-                S1_TOY0_STATE_SLOTS,
+                rng,
+                state_slots,
                 d_model,
                 device,
             )?),
-            dense_up: BurnParam::from_tensor(init_weight_matrix(&mut rng, d_model, d_ff, device)?),
-            dense_down: BurnParam::from_tensor(init_weight_matrix(
-                &mut rng, d_ff, d_model, device,
-            )?),
+            dense_up: BurnParam::from_tensor(init_weight_matrix(rng, d_model, d_ff, device)?),
+            dense_down: BurnParam::from_tensor(init_weight_matrix(rng, d_ff, d_model, device)?),
         })
-    }
-
-    fn token_embedding(&self) -> BurnFloatTensor<B, 2> {
-        self.token_embedding.val()
     }
 
     fn input_to_state(&self) -> BurnFloatTensor<B, 2> {
@@ -1579,34 +1602,181 @@ impl<B: BurnAutodiffBackend> ProductionToy0Model<B> {
         self.dense_down.val()
     }
 
+    fn push_tensors(
+        &self,
+        profile: ModelSizeProfile,
+        block_index: usize,
+        d_model: usize,
+        state_slots: usize,
+        d_ff: usize,
+        tensors: &mut Vec<CanonicalTensor>,
+    ) -> Result<(), S1RunError> {
+        tensors.push(canonical_f32_tensor(
+            &s1_production_block_tensor_id(
+                profile,
+                block_index,
+                "linear_state.input_to_state.weight",
+            )?,
+            &[d_model, state_slots],
+            float_tensor_into_vec(self.input_to_state().detach())?,
+        )?);
+        tensors.push(canonical_f32_tensor(
+            &s1_production_block_tensor_id(
+                profile,
+                block_index,
+                "linear_state.state_to_output.weight",
+            )?,
+            &[state_slots, d_model],
+            float_tensor_into_vec(self.state_to_output().detach())?,
+        )?);
+        tensors.push(canonical_f32_tensor(
+            &s1_production_block_tensor_id(profile, block_index, "dense_ffn.up.weight")?,
+            &[d_model, d_ff],
+            float_tensor_into_vec(self.dense_up().detach())?,
+        )?);
+        tensors.push(canonical_f32_tensor(
+            &s1_production_block_tensor_id(profile, block_index, "dense_ffn.down.weight")?,
+            &[d_ff, d_model],
+            float_tensor_into_vec(self.dense_down().detach())?,
+        )?);
+        Ok(())
+    }
+
+    fn accumulate_grad_norm(
+        &self,
+        block_name: &'static str,
+        gradients: &B::Gradients,
+        sum_sq: &mut f64,
+    ) -> Result<(), S1RunError> {
+        accumulate_grad_norm(
+            block_parameter_name(block_name, "input_to_state"),
+            self.input_to_state().grad(gradients),
+            sum_sq,
+        )?;
+        accumulate_grad_norm(
+            block_parameter_name(block_name, "state_to_output"),
+            self.state_to_output().grad(gradients),
+            sum_sq,
+        )?;
+        accumulate_grad_norm(
+            block_parameter_name(block_name, "dense_up"),
+            self.dense_up().grad(gradients),
+            sum_sq,
+        )?;
+        accumulate_grad_norm(
+            block_parameter_name(block_name, "dense_down"),
+            self.dense_down().grad(gradients),
+            sum_sq,
+        )
+    }
+}
+
+fn block_parameter_name(block_name: &'static str, parameter: &'static str) -> &'static str {
+    match (block_name, parameter) {
+        ("block0", "input_to_state") => "block0.input_to_state",
+        ("block0", "state_to_output") => "block0.state_to_output",
+        ("block0", "dense_up") => "block0.dense_up",
+        ("block0", "dense_down") => "block0.dense_down",
+        ("block1", "input_to_state") => "block1.input_to_state",
+        ("block1", "state_to_output") => "block1.state_to_output",
+        ("block1", "dense_up") => "block1.dense_up",
+        ("block1", "dense_down") => "block1.dense_down",
+        _ => parameter,
+    }
+}
+
+#[derive(BurnModule, Debug)]
+struct ProductionDenseModel<B: BurnBackend> {
+    #[module(skip)]
+    profile: ModelSizeProfile,
+    #[module(skip)]
+    vocab_size: usize,
+    #[module(skip)]
+    d_model: usize,
+    #[module(skip)]
+    state_slots: usize,
+    #[module(skip)]
+    state_decay: f32,
+    #[module(skip)]
+    d_ff: usize,
+    token_embedding: BurnParam<BurnFloatTensor<B, 2>>,
+    block0: ProductionDenseBlock<B>,
+    block1: Option<ProductionDenseBlock<B>>,
+}
+
+impl<B: BurnAutodiffBackend> ProductionDenseModel<B> {
+    fn initialize(
+        profile: ModelSizeProfile,
+        seed: u64,
+        device: &BurnDevice<B>,
+    ) -> Result<Self, S1RunError> {
+        let d_model = usize::from(profile.d_model());
+        let state_slots = s1_dense_state_slots(profile)?;
+        let block_count = s1_dense_block_count(profile)?;
+        let d_ff = usize::from(profile.d_ff());
+        let mut rng = InitRng::new(seed);
+        let token_embedding = BurnParam::from_tensor(init_weight_matrix(
+            &mut rng,
+            S1_BYTE_VOCAB_SIZE,
+            d_model,
+            device,
+        )?);
+        let block0 =
+            ProductionDenseBlock::initialize(&mut rng, d_model, state_slots, d_ff, device)?;
+        let block1 = if block_count == 2 {
+            Some(ProductionDenseBlock::initialize(
+                &mut rng,
+                d_model,
+                state_slots,
+                d_ff,
+                device,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            profile,
+            vocab_size: S1_BYTE_VOCAB_SIZE,
+            d_model,
+            state_slots,
+            state_decay: S1_DENSE_STATE_DECAY,
+            d_ff,
+            token_embedding,
+            block0,
+            block1,
+        })
+    }
+
+    fn token_embedding(&self) -> BurnFloatTensor<B, 2> {
+        self.token_embedding.val()
+    }
+
     fn tensors(&self) -> Result<Vec<CanonicalTensor>, S1RunError> {
-        Ok(vec![
-            canonical_f32_tensor(
-                "toy0.production.embedding_tied.weight",
-                &[self.vocab_size, self.d_model],
-                float_tensor_into_vec(self.token_embedding().detach())?,
-            )?,
-            canonical_f32_tensor(
-                "toy0.production.linear_state.input_to_state.weight",
-                &[self.d_model, self.state_slots],
-                float_tensor_into_vec(self.input_to_state().detach())?,
-            )?,
-            canonical_f32_tensor(
-                "toy0.production.linear_state.state_to_output.weight",
-                &[self.state_slots, self.d_model],
-                float_tensor_into_vec(self.state_to_output().detach())?,
-            )?,
-            canonical_f32_tensor(
-                "toy0.production.dense_ffn.up.weight",
-                &[self.d_model, self.d_ff],
-                float_tensor_into_vec(self.dense_up().detach())?,
-            )?,
-            canonical_f32_tensor(
-                "toy0.production.dense_ffn.down.weight",
-                &[self.d_ff, self.d_model],
-                float_tensor_into_vec(self.dense_down().detach())?,
-            )?,
-        ])
+        let mut tensors = vec![canonical_f32_tensor(
+            &s1_production_tensor_id(self.profile, "embedding_tied.weight")?,
+            &[self.vocab_size, self.d_model],
+            float_tensor_into_vec(self.token_embedding().detach())?,
+        )?];
+        self.block0.push_tensors(
+            self.profile,
+            0,
+            self.d_model,
+            self.state_slots,
+            self.d_ff,
+            &mut tensors,
+        )?;
+        if let Some(block1) = &self.block1 {
+            block1.push_tensors(
+                self.profile,
+                1,
+                self.d_model,
+                self.state_slots,
+                self.d_ff,
+                &mut tensors,
+            )?;
+        }
+        Ok(tensors)
     }
 
     fn weight_stats(&self, step: u64) -> Result<WeightStatsPoint, S1RunError> {
@@ -1637,18 +1807,11 @@ impl<B: BurnAutodiffBackend> ProductionToy0Model<B> {
             self.token_embedding().grad(gradients),
             &mut sum_sq,
         )?;
-        accumulate_grad_norm(
-            "input_to_state",
-            self.input_to_state().grad(gradients),
-            &mut sum_sq,
-        )?;
-        accumulate_grad_norm(
-            "state_to_output",
-            self.state_to_output().grad(gradients),
-            &mut sum_sq,
-        )?;
-        accumulate_grad_norm("dense_up", self.dense_up().grad(gradients), &mut sum_sq)?;
-        accumulate_grad_norm("dense_down", self.dense_down().grad(gradients), &mut sum_sq)?;
+        self.block0
+            .accumulate_grad_norm("block0", gradients, &mut sum_sq)?;
+        if let Some(block1) = &self.block1 {
+            block1.accumulate_grad_norm("block1", gradients, &mut sum_sq)?;
+        }
         let norm = sum_sq.sqrt();
         if norm.is_finite() && norm <= f64::from(f32::MAX) {
             Ok(norm as f32)
@@ -1691,37 +1854,38 @@ fn canonical_f32_tensor(
 }
 
 fn production_loss_nats_per_byte<B: BurnAutodiffBackend>(
-    model: &ProductionToy0Model<B>,
+    model: &ProductionDenseModel<B>,
     sequences: &[&[u8]],
     device: &BurnDevice<B>,
 ) -> Result<BurnFloatTensor<B, 1>, S1RunError> {
     let batch_size = sequences.len();
     let sequence_length = sequences.first().map_or(0, |sequence| sequence.len());
-    let mut state = float_tensor_from_vec(
+    let mut state0 = float_tensor_from_vec(
         vec![0.0; batch_size * model.state_slots],
         [batch_size, model.state_slots],
         device,
     )?;
+    let mut state1 = if model.block1.is_some() {
+        Some(float_tensor_from_vec(
+            vec![0.0; batch_size * model.state_slots],
+            [batch_size, model.state_slots],
+            device,
+        )?)
+    } else {
+        None
+    };
     let mut total_loss = None;
 
     for position in 0..sequence_length {
         let target = one_hot_targets(sequences, position, device)?;
-        let hidden = burn_linear(
-            state.clone(),
-            model.state_to_output(),
-            None::<BurnFloatTensor<B, 1>>,
-        );
-        let ffn = burn_linear(
-            burn_relu(burn_linear(
-                hidden.clone(),
-                model.dense_up(),
-                None::<BurnFloatTensor<B, 1>>,
-            )),
-            model.dense_down(),
-            None::<BurnFloatTensor<B, 1>>,
-        );
+        let hidden0 = production_block_output(&model.block0, state0.clone());
+        let hidden = if let (Some(block1), Some(block1_state)) = (&model.block1, &state1) {
+            hidden0 + production_block_output(block1, block1_state.clone())
+        } else {
+            hidden0
+        };
         let logits = burn_linear(
-            hidden + ffn,
+            hidden,
             model.token_embedding().transpose(),
             None::<BurnFloatTensor<B, 1>>,
         );
@@ -1738,15 +1902,44 @@ fn production_loss_nats_per_byte<B: BurnAutodiffBackend>(
             None::<BurnFloatTensor<B, 1>>,
         );
         let delta = burn_linear(
-            token_embedding,
-            model.input_to_state(),
+            token_embedding.clone(),
+            model.block0.input_to_state(),
             None::<BurnFloatTensor<B, 1>>,
         );
-        state = state * S1_TOY0_STATE_DECAY + delta;
+        state0 = state0 * model.state_decay + delta;
+        if let (Some(block1), Some(block1_state)) = (&model.block1, &mut state1) {
+            let delta = burn_linear(
+                token_embedding,
+                block1.input_to_state(),
+                None::<BurnFloatTensor<B, 1>>,
+            );
+            *block1_state = block1_state.clone() * model.state_decay + delta;
+        }
     }
 
     let denominator = (batch_size * sequence_length) as f32;
     Ok(total_loss.expect("S1 preconditions ensure non-empty training sequences") / denominator)
+}
+
+fn production_block_output<B: BurnAutodiffBackend>(
+    block: &ProductionDenseBlock<B>,
+    state: BurnFloatTensor<B, 2>,
+) -> BurnFloatTensor<B, 2> {
+    let hidden = burn_linear(
+        state,
+        block.state_to_output(),
+        None::<BurnFloatTensor<B, 1>>,
+    );
+    let ffn = burn_linear(
+        burn_relu(burn_linear(
+            hidden.clone(),
+            block.dense_up(),
+            None::<BurnFloatTensor<B, 1>>,
+        )),
+        block.dense_down(),
+        None::<BurnFloatTensor<B, 1>>,
+    );
+    hidden + ffn
 }
 
 fn one_hot_targets<B: BurnAutodiffBackend>(
@@ -1776,62 +1969,112 @@ pub(crate) fn production_loss_nats_per_byte_for_tensors(
     tensors: &[CanonicalTensor],
     sequence: &[u8],
 ) -> Result<f32, S1RunError> {
+    production_loss_nats_per_byte_for_profile_tensors(ModelSizeProfile::toy0(), tensors, sequence)
+}
+
+#[cfg(test)]
+pub(crate) fn production_loss_nats_per_byte_for_profile_tensors(
+    profile: ModelSizeProfile,
+    tensors: &[CanonicalTensor],
+    sequence: &[u8],
+) -> Result<f32, S1RunError> {
     let device = BurnDevice::<BurnNdArrayAutodiffBackend>::default();
-    let d_model = usize::from(ModelSizeProfile::toy0().d_model());
-    let d_ff = usize::from(ModelSizeProfile::toy0().d_ff());
-    let model = ProductionToy0Model::<BurnNdArrayAutodiffBackend> {
+    let d_model = usize::from(profile.d_model());
+    let state_slots = s1_dense_state_slots(profile)?;
+    let d_ff = usize::from(profile.d_ff());
+    let block0 = production_test_block(profile, 0, tensors, d_model, state_slots, d_ff, &device)?;
+    let block1 = if s1_dense_block_count(profile)? == 2 {
+        Some(production_test_block(
+            profile,
+            1,
+            tensors,
+            d_model,
+            state_slots,
+            d_ff,
+            &device,
+        )?)
+    } else {
+        None
+    };
+    let model = ProductionDenseModel::<BurnNdArrayAutodiffBackend> {
+        profile,
         vocab_size: S1_BYTE_VOCAB_SIZE,
         d_model,
-        state_slots: S1_TOY0_STATE_SLOTS,
+        state_slots,
+        state_decay: S1_DENSE_STATE_DECAY,
         d_ff,
         token_embedding: BurnParam::from_tensor(float_tensor_from_vec(
             production_test_tensor(
                 tensors,
-                "toy0.production.embedding_tied.weight",
+                &s1_production_tensor_id(profile, "embedding_tied.weight")?,
                 &[S1_BYTE_VOCAB_SIZE, d_model],
             )?,
             [S1_BYTE_VOCAB_SIZE, d_model],
             &device,
         )?),
+        block0,
+        block1,
+    };
+    let loss = production_loss_nats_per_byte(&model, &[sequence], &device)?;
+    scalar_tensor_value(loss)
+}
+
+#[cfg(test)]
+fn production_test_block(
+    profile: ModelSizeProfile,
+    block_index: usize,
+    tensors: &[CanonicalTensor],
+    d_model: usize,
+    state_slots: usize,
+    d_ff: usize,
+    device: &BurnDevice<BurnNdArrayAutodiffBackend>,
+) -> Result<ProductionDenseBlock<BurnNdArrayAutodiffBackend>, S1RunError> {
+    Ok(ProductionDenseBlock {
         input_to_state: BurnParam::from_tensor(float_tensor_from_vec(
             production_test_tensor(
                 tensors,
-                "toy0.production.linear_state.input_to_state.weight",
-                &[d_model, S1_TOY0_STATE_SLOTS],
+                &s1_production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.input_to_state.weight",
+                )?,
+                &[d_model, state_slots],
             )?,
-            [d_model, S1_TOY0_STATE_SLOTS],
-            &device,
+            [d_model, state_slots],
+            device,
         )?),
         state_to_output: BurnParam::from_tensor(float_tensor_from_vec(
             production_test_tensor(
                 tensors,
-                "toy0.production.linear_state.state_to_output.weight",
-                &[S1_TOY0_STATE_SLOTS, d_model],
+                &s1_production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.state_to_output.weight",
+                )?,
+                &[state_slots, d_model],
             )?,
-            [S1_TOY0_STATE_SLOTS, d_model],
-            &device,
+            [state_slots, d_model],
+            device,
         )?),
         dense_up: BurnParam::from_tensor(float_tensor_from_vec(
             production_test_tensor(
                 tensors,
-                "toy0.production.dense_ffn.up.weight",
+                &s1_production_block_tensor_id(profile, block_index, "dense_ffn.up.weight")?,
                 &[d_model, d_ff],
             )?,
             [d_model, d_ff],
-            &device,
+            device,
         )?),
         dense_down: BurnParam::from_tensor(float_tensor_from_vec(
             production_test_tensor(
                 tensors,
-                "toy0.production.dense_ffn.down.weight",
+                &s1_production_block_tensor_id(profile, block_index, "dense_ffn.down.weight")?,
                 &[d_ff, d_model],
             )?,
             [d_ff, d_model],
-            &device,
+            device,
         )?),
-    };
-    let loss = production_loss_nats_per_byte(&model, &[sequence], &device)?;
-    scalar_tensor_value(loss)
+    })
 }
 
 #[cfg(test)]
@@ -1891,7 +2134,7 @@ fn accumulate_grad_norm<B: BurnBackend>(
 }
 
 fn evaluate_production_bpc<B: BurnAutodiffBackend>(
-    model: &ProductionToy0Model<B>,
+    model: &ProductionDenseModel<B>,
     inputs: &RunInputs,
     effective_budget: EffectiveTrainBudget,
     _device: &BurnDevice<B>,
@@ -1902,53 +2145,102 @@ fn evaluate_production_bpc<B: BurnAutodiffBackend>(
         .saturating_mul(effective_budget.eval_subset_size as usize);
     let eval_bytes = &inputs.corpus_val[..inputs.corpus_val.len().min(max_len)];
     let tensors = model.tensors()?;
-    let scorer = ProductionEvalScorer::from_tensors(&tensors)?;
+    let scorer = ProductionEvalScorer::from_tensors(inputs.model_config, &tensors)?;
     scorer.bpc(eval_bytes, inputs.train_config.sequence_length)
 }
 
 #[derive(Debug, Clone)]
-struct ProductionEvalScorer {
-    d_model: usize,
-    d_ff: usize,
-    embedding: Vec<f64>,
+struct ProductionEvalBlock {
     input_to_state: Vec<f64>,
     state_to_output: Vec<f64>,
     dense_up: Vec<f64>,
     dense_down: Vec<f64>,
 }
 
-impl ProductionEvalScorer {
-    fn from_tensors(tensors: &[CanonicalTensor]) -> Result<Self, S1RunError> {
-        let d_model = usize::from(ModelSizeProfile::toy0().d_model());
-        let d_ff = usize::from(ModelSizeProfile::toy0().d_ff());
+impl ProductionEvalBlock {
+    fn from_tensors(
+        profile: ModelSizeProfile,
+        block_index: usize,
+        tensors: &[CanonicalTensor],
+        d_model: usize,
+        state_slots: usize,
+        d_ff: usize,
+    ) -> Result<Self, S1RunError> {
         Ok(Self {
-            d_model,
-            d_ff,
-            embedding: production_eval_tensor(
-                tensors,
-                "toy0.production.embedding_tied.weight",
-                &[S1_BYTE_VOCAB_SIZE, d_model],
-            )?,
             input_to_state: production_eval_tensor(
                 tensors,
-                "toy0.production.linear_state.input_to_state.weight",
-                &[d_model, S1_TOY0_STATE_SLOTS],
+                &s1_production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.input_to_state.weight",
+                )?,
+                &[d_model, state_slots],
             )?,
             state_to_output: production_eval_tensor(
                 tensors,
-                "toy0.production.linear_state.state_to_output.weight",
-                &[S1_TOY0_STATE_SLOTS, d_model],
+                &s1_production_block_tensor_id(
+                    profile,
+                    block_index,
+                    "linear_state.state_to_output.weight",
+                )?,
+                &[state_slots, d_model],
             )?,
             dense_up: production_eval_tensor(
                 tensors,
-                "toy0.production.dense_ffn.up.weight",
+                &s1_production_block_tensor_id(profile, block_index, "dense_ffn.up.weight")?,
                 &[d_model, d_ff],
             )?,
             dense_down: production_eval_tensor(
                 tensors,
-                "toy0.production.dense_ffn.down.weight",
+                &s1_production_block_tensor_id(profile, block_index, "dense_ffn.down.weight")?,
                 &[d_ff, d_model],
             )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProductionEvalScorer {
+    d_model: usize,
+    state_slots: usize,
+    state_decay: f64,
+    d_ff: usize,
+    embedding: Vec<f64>,
+    blocks: Vec<ProductionEvalBlock>,
+}
+
+impl ProductionEvalScorer {
+    fn from_tensors(
+        profile: ModelSizeProfile,
+        tensors: &[CanonicalTensor],
+    ) -> Result<Self, S1RunError> {
+        let d_model = usize::from(profile.d_model());
+        let state_slots = s1_dense_state_slots(profile)?;
+        let block_count = s1_dense_block_count(profile)?;
+        let d_ff = usize::from(profile.d_ff());
+        let blocks = (0..block_count)
+            .map(|block_index| {
+                ProductionEvalBlock::from_tensors(
+                    profile,
+                    block_index,
+                    tensors,
+                    d_model,
+                    state_slots,
+                    d_ff,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            d_model,
+            state_slots,
+            state_decay: f64::from(S1_DENSE_STATE_DECAY),
+            d_ff,
+            embedding: production_eval_tensor(
+                tensors,
+                &s1_production_tensor_id(profile, "embedding_tied.weight")?,
+                &[S1_BYTE_VOCAB_SIZE, d_model],
+            )?,
+            blocks,
         })
     }
 
@@ -1957,7 +2249,7 @@ impl ProductionEvalScorer {
         let mut token_count = 0usize;
 
         for chunk in bytes.chunks(reset_context_len) {
-            let mut state = vec![0.0; S1_TOY0_STATE_SLOTS];
+            let mut state = vec![0.0; self.blocks.len() * self.state_slots];
             for &byte in chunk {
                 let logits = self.logits(&state);
                 log2_sum += negative_log2_probability(&logits, byte)?;
@@ -1975,29 +2267,13 @@ impl ProductionEvalScorer {
 
     fn logits(&self, state: &[f64]) -> Vec<f64> {
         let mut hidden = vec![0.0; self.d_model];
-        for (slot, state_value) in state.iter().enumerate().take(S1_TOY0_STATE_SLOTS) {
-            for (dim, value) in hidden.iter_mut().enumerate() {
-                *value += *state_value * row_major(&self.state_to_output, slot, dim, self.d_model);
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let state_offset = block_index * self.state_slots;
+            let block_hidden =
+                self.block_hidden(block, &state[state_offset..state_offset + self.state_slots]);
+            for (value, block_value) in hidden.iter_mut().zip(block_hidden) {
+                *value += block_value;
             }
-        }
-
-        let mut up = vec![0.0; self.d_ff];
-        for (ff, value) in up.iter_mut().enumerate() {
-            for (dim, hidden_value) in hidden.iter().enumerate() {
-                *value += *hidden_value * row_major(&self.dense_up, dim, ff, self.d_ff);
-            }
-            *value = (*value).max(0.0);
-        }
-
-        let mut ffn = vec![0.0; self.d_model];
-        for (dim, value) in ffn.iter_mut().enumerate() {
-            for (ff, up_value) in up.iter().enumerate() {
-                *value += *up_value * row_major(&self.dense_down, ff, dim, self.d_model);
-            }
-        }
-
-        for (dim, value) in hidden.iter_mut().enumerate() {
-            *value += ffn[dim];
         }
 
         let mut logits = vec![0.0; S1_BYTE_VOCAB_SIZE];
@@ -2011,17 +2287,50 @@ impl ProductionEvalScorer {
 
     fn consume(&self, state: &mut [f64], byte: u8) {
         let token = usize::from(byte);
-        let mut delta = [0.0_f64; S1_TOY0_STATE_SLOTS];
-        for dim in 0..self.d_model {
-            let embedding_value = row_major(&self.embedding, token, dim, self.d_model);
-            for (slot, value) in delta.iter_mut().enumerate() {
-                *value += embedding_value
-                    * row_major(&self.input_to_state, dim, slot, S1_TOY0_STATE_SLOTS);
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let mut delta = vec![0.0_f64; self.state_slots];
+            for dim in 0..self.d_model {
+                let embedding_value = row_major(&self.embedding, token, dim, self.d_model);
+                for (slot, value) in delta.iter_mut().enumerate() {
+                    *value += embedding_value
+                        * row_major(&block.input_to_state, dim, slot, self.state_slots);
+                }
+            }
+            let state_offset = block_index * self.state_slots;
+            for (slot, delta_value) in delta.iter().enumerate().take(self.state_slots) {
+                let state_index = state_offset + slot;
+                state[state_index] = state[state_index] * self.state_decay + *delta_value;
             }
         }
-        for slot in 0..S1_TOY0_STATE_SLOTS {
-            state[slot] = state[slot] * f64::from(S1_TOY0_STATE_DECAY) + delta[slot];
+    }
+
+    fn block_hidden(&self, block: &ProductionEvalBlock, state: &[f64]) -> Vec<f64> {
+        let mut hidden = vec![0.0; self.d_model];
+        for (slot, state_value) in state.iter().enumerate().take(self.state_slots) {
+            for (dim, value) in hidden.iter_mut().enumerate() {
+                *value += *state_value * row_major(&block.state_to_output, slot, dim, self.d_model);
+            }
         }
+
+        let mut up = vec![0.0; self.d_ff];
+        for (ff, value) in up.iter_mut().enumerate() {
+            for (dim, hidden_value) in hidden.iter().enumerate() {
+                *value += *hidden_value * row_major(&block.dense_up, dim, ff, self.d_ff);
+            }
+            *value = (*value).max(0.0);
+        }
+
+        let mut ffn = vec![0.0; self.d_model];
+        for (dim, value) in ffn.iter_mut().enumerate() {
+            for (ff, up_value) in up.iter().enumerate() {
+                *value += *up_value * row_major(&block.dense_down, ff, dim, self.d_model);
+            }
+        }
+
+        for (dim, value) in hidden.iter_mut().enumerate() {
+            *value += ffn[dim];
+        }
+        hidden
     }
 }
 
@@ -2417,7 +2726,8 @@ mod tests {
         let tensors = fixed_production_tensors();
         let sequence = [3_u8, 7, 3, 11, 5, 19];
 
-        let scorer = ProductionEvalScorer::from_tensors(&tensors).expect("eval scorer");
+        let scorer = ProductionEvalScorer::from_tensors(ModelSizeProfile::toy0(), &tensors)
+            .expect("eval scorer");
         let eval_bpc = scorer.bpc(&sequence, S1_SEQUENCE_LENGTH).expect("eval bpc");
         let burn_nats =
             production_loss_nats_per_byte_for_tensors(&tensors, &sequence).expect("burn forward");
@@ -2430,31 +2740,35 @@ mod tests {
     }
 
     fn fixed_production_tensors() -> Vec<CanonicalTensor> {
-        let d_model = usize::from(ModelSizeProfile::toy0().d_model());
-        let d_ff = usize::from(ModelSizeProfile::toy0().d_ff());
+        let profile = ModelSizeProfile::toy0();
+        let d_model = usize::from(profile.d_model());
+        let state_slots = s1_dense_state_slots(profile).expect("state slots");
+        let d_ff = usize::from(profile.d_ff());
         vec![
             f32_tensor(
-                "toy0.production.embedding_tied.weight",
+                &s1_production_tensor_id(profile, "embedding_tied.weight").expect("tensor id"),
                 &[S1_BYTE_VOCAB_SIZE, d_model],
                 production_values(S1_BYTE_VOCAB_SIZE * d_model, 1),
             ),
             f32_tensor(
-                "toy0.production.linear_state.input_to_state.weight",
-                &[d_model, S1_TOY0_STATE_SLOTS],
-                production_values(d_model * S1_TOY0_STATE_SLOTS, 2),
+                &s1_production_tensor_id(profile, "linear_state.input_to_state.weight")
+                    .expect("tensor id"),
+                &[d_model, state_slots],
+                production_values(d_model * state_slots, 2),
             ),
             f32_tensor(
-                "toy0.production.linear_state.state_to_output.weight",
-                &[S1_TOY0_STATE_SLOTS, d_model],
-                production_values(S1_TOY0_STATE_SLOTS * d_model, 3),
+                &s1_production_tensor_id(profile, "linear_state.state_to_output.weight")
+                    .expect("tensor id"),
+                &[state_slots, d_model],
+                production_values(state_slots * d_model, 3),
             ),
             f32_tensor(
-                "toy0.production.dense_ffn.up.weight",
+                &s1_production_tensor_id(profile, "dense_ffn.up.weight").expect("tensor id"),
                 &[d_model, d_ff],
                 production_values(d_model * d_ff, 4),
             ),
             f32_tensor(
-                "toy0.production.dense_ffn.down.weight",
+                &s1_production_tensor_id(profile, "dense_ffn.down.weight").expect("tensor id"),
                 &[d_ff, d_model],
                 production_values(d_ff * d_model, 5),
             ),
