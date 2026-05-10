@@ -685,7 +685,8 @@ fn render_report_body(input: &ReportInput) -> String {
 
 fn validate_decision(front_matter: &ReportFrontMatter) -> Result<(), ReportValidationError> {
     let expected = decision_for_outcome(front_matter.s1_outcome);
-    if front_matter.decision == expected {
+    if front_matter.decision == expected || is_registered_capacity_successor_decision(front_matter)
+    {
         Ok(())
     } else {
         Err(ReportValidationError::DecisionMismatch {
@@ -694,6 +695,16 @@ fn validate_decision(front_matter: &ReportFrontMatter) -> Result<(), ReportValid
             actual: front_matter.decision.clone(),
         })
     }
+}
+
+fn is_registered_capacity_successor_decision(front_matter: &ReportFrontMatter) -> bool {
+    matches!(
+        (&front_matter.s1_outcome, &front_matter.decision),
+        (
+            S1Outcome::FailCapacity,
+            S1Decision::Investigate { reason }
+        ) if reason == "propose-Toy2"
+    )
 }
 
 fn validate_all_seeds(

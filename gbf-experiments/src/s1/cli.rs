@@ -49,7 +49,7 @@ use crate::s1::run::{
 use crate::s1::schema::{
     AblationReport, BaselineReport, CheckpointMetadata, DomainHash, GitCommitId,
     NegativeTestReport, OracleReport, PerSeedArtifacts, ReportFrontMatter, RfcRevisionRef, RunLog,
-    S1BuildKind, S1Completion, S1Decision, ScoreReport,
+    S1BuildKind, S1Completion, S1Decision, S1Outcome, ScoreReport,
 };
 #[cfg(feature = "falsify")]
 use crate::s1::score::RESET_CONTEXT_CHUNK_SIZE;
@@ -1272,6 +1272,11 @@ fn compose_production_report(args: &ReportArgs) -> Result<(), S1CliError> {
         &baseline, &oracle, &negative, &ablation, &metadata, &run_logs, &scores,
     )?;
     let dispatch = dispatch_outcome(&dispatch_input)?;
+    let report_decision = production_report_decision_for_model_profile(
+        dispatch.outcome,
+        model_profile,
+        dispatch.decision.clone(),
+    );
     let report_input = production_report_input(ProductionReportArtifacts {
         baseline: &baseline,
         oracle: &oracle,
@@ -1281,7 +1286,7 @@ fn compose_production_report(args: &ReportArgs) -> Result<(), S1CliError> {
         run_logs: &run_logs,
         scores: &scores,
         dispatch_input,
-        decision: dispatch.decision.clone(),
+        decision: report_decision,
         generated_at: args.generated_at.clone(),
         rfc_revision,
         predictions_markdown,
@@ -1294,7 +1299,7 @@ fn compose_production_report(args: &ReportArgs) -> Result<(), S1CliError> {
     print_json(&ReportProductionSummary {
         mode: "production",
         outcome: dispatch.outcome.to_string(),
-        decision: dispatch.decision.to_string(),
+        decision: report.front_matter.decision.to_string(),
         report_self_hash: report.front_matter.report_self_hash.to_string(),
         output_path: report_path.display().to_string(),
     })
@@ -2274,7 +2279,7 @@ fn fixture_report_input(artifacts: FixtureReportArtifacts<'_>) -> Result<ReportI
         front_matter: ReportFrontMatter {
             schema: "s1_report.v1".to_owned(),
             s1_outcome: outcome,
-            decision,
+            decision: decision.clone(),
             baseline_self_hash: baseline.baseline_self_hash,
             per_seed_artifacts,
             generated_at: "2026-05-09T12:00:00Z".to_owned(),
@@ -2389,7 +2394,7 @@ fn production_report_input(
         front_matter: ReportFrontMatter {
             schema: "s1_report.v1".to_owned(),
             s1_outcome: outcome,
-            decision,
+            decision: decision.clone(),
             baseline_self_hash: baseline.baseline_self_hash,
             per_seed_artifacts,
             generated_at,
@@ -2428,7 +2433,7 @@ fn production_report_input(
             scores,
         ),
         surprises: production_surprises(baseline, scores, suspicious_low_bpc),
-        decision_justification: "Decision follows RFC section 8 dispatch.".to_owned(),
+        decision_justification: production_decision_justification(&decision),
         replay_command:
             "gbf s1 replay --manifest fixtures/corpora/tinystories.toml --seed-list 0,1,2,3,4"
                 .to_owned(),
@@ -2438,6 +2443,31 @@ fn production_report_input(
         ),
         pass_version: CURRENT_PASS_VERSION.to_string(),
     })
+}
+
+fn production_report_decision_for_model_profile(
+    outcome: S1Outcome,
+    model_profile: ModelSizeProfile,
+    dispatch_decision: S1Decision,
+) -> S1Decision {
+    if outcome == S1Outcome::FailCapacity && model_profile == ModelSizeProfile::Toy1 {
+        S1Decision::Investigate {
+            reason: "propose-Toy2".to_owned(),
+        }
+    } else {
+        dispatch_decision
+    }
+}
+
+fn production_decision_justification(decision: &S1Decision) -> String {
+    if matches!(
+        decision,
+        S1Decision::Investigate { reason } if reason == "propose-Toy2"
+    ) {
+        "Decision follows RFC section 8 Fail-capacity dispatch; because this report is the Toy1 successor, the follow-up target is Toy2.".to_owned()
+    } else {
+        "Decision follows RFC section 8 dispatch.".to_owned()
+    }
 }
 
 fn completion_for_report(
@@ -4161,6 +4191,41 @@ mod tests {
         assert_eq!(
             report.front_matter.s1_outcome,
             crate::s1::schema::S1Outcome::FailCapacity
+        );
+    }
+
+    #[test]
+    fn toy1_fail_capacity_report_targets_toy2_successor() {
+        let default = S1Decision::Investigate {
+            reason: "propose-Toy1".to_owned(),
+        };
+
+        assert_eq!(
+            production_report_decision_for_model_profile(
+                S1Outcome::FailCapacity,
+                ModelSizeProfile::Toy0,
+                default.clone(),
+            ),
+            default
+        );
+
+        let toy1_decision = production_report_decision_for_model_profile(
+            S1Outcome::FailCapacity,
+            ModelSizeProfile::Toy1,
+            S1Decision::Investigate {
+                reason: "propose-Toy1".to_owned(),
+            },
+        );
+        assert_eq!(
+            toy1_decision,
+            S1Decision::Investigate {
+                reason: "propose-Toy2".to_owned(),
+            }
+        );
+        assert!(
+            production_decision_justification(&toy1_decision).contains("Toy1 successor"),
+            "{}",
+            production_decision_justification(&toy1_decision)
         );
     }
 

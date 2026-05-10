@@ -1091,6 +1091,9 @@ H1, H3, H4, and H5 retain their original meanings with `Toy1` substituted for
 bd-12pl closure only if H1, A1-H2, H4, and H5 are Confirmed under the Toy1
 artifacts. The original Toy0 `Fail-capacity` report must still be cited as
 predecessor evidence and must not be rewritten to look like a Toy1 result.
+If A1-H2 is also Refuted, the successor report remains `Fail-capacity` but its
+investigation target becomes `propose-Toy2` because the `Toy1` successor has
+already been executed.
 
 A1 artifact history is scoped to `artifact_dir` plus `report_path`. Existing
 Toy0 artifacts under `experiments/S1/` and the original

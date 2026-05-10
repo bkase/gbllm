@@ -253,6 +253,21 @@ fn r_decision_rejects_outcome_decision_mismatch() {
 }
 
 #[test]
+fn r_decision_accepts_registered_capacity_successor_decision() {
+    let mut input = fixture_input(S1Outcome::FailCapacity);
+    input.front_matter.decision = S1Decision::Investigate {
+        reason: "propose-Toy2".to_owned(),
+    };
+
+    let report = emit_report(&input).expect("Toy1 successor capacity decision is valid");
+    assert!(
+        report.body.contains("`Investigate(propose-Toy2)`."),
+        "{}",
+        report.body
+    );
+}
+
+#[test]
 fn r_all_seeds_rejects_missing_seed_in_front_matter_or_observed_rows() {
     let mut missing_artifact_seed = fixture_input(S1Outcome::PassClean);
     missing_artifact_seed
