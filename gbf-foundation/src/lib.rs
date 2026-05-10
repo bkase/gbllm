@@ -9,7 +9,7 @@ pub mod semver;
 
 pub use blob::{BlobCodec, BlobRef};
 pub use cost::ByteCost;
-pub use hash::{Hash256, Hash256ParseError};
+pub use hash::{Hash256, Hash256ParseError, sha256};
 pub use ids::{
     BudgetSlotId, CalibrationCohortId, CheckpointId, CompileProfileId, ExpertId, FieldPath,
     KernelCalibrationId, KernelImplId, KernelSpecId, LayerId, PlatformCalibrationId,

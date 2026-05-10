@@ -16,7 +16,7 @@ mod blob {
         let encoded = serde_json::to_string(&blob_ref).expect("blob ref serializes");
         assert_eq!(
             encoded,
-            "{\"hash\":\"abababababababababababababababababababababababababababababababab\",\"len\":1234,\"codec\":\"zstd\"}"
+            "{\"hash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"len\":1234,\"codec\":\"zstd\"}"
         );
         let decoded: BlobRef = serde_json::from_str(&encoded).expect("blob ref deserializes");
 

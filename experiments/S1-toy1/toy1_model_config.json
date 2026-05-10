@@ -1,0 +1,65 @@
+{
+  "command": "print-config",
+  "pass_version": "0.1.0",
+  "train_config_hash": "sha256:07639571ba33135c61f917c024ce2b89041ab63da18787accaf9c5f3f9aac8b7",
+  "model_config_hash": "sha256:a58d417fdec598ddd02fd48b0dbbbbe136587f5be8807528e01546ce98d68ba4",
+  "build_config_hash": "sha256:35f10d18d00907c3f83965a7fabb471d977fcceff08843aab40b21db1caca58b",
+  "dependency_lockfile_sha": "sha256:3f1e82176b240a452919751d295d4066ee0a79f1adbb9dfa8cacecabc66eff19",
+  "rust_toolchain_hash": "sha256:8feaaf738fcd97fa498466573823a73cfeefdbf8c3302525c306e8c37a62a541",
+  "active_features": [
+    "phase-a"
+  ],
+  "build_metadata": {
+    "build_kind": "phase_a",
+    "qat_active": true,
+    "gbf_experiments_sha": "8814daef35d688db4edb5cb0efa63d358afa2814",
+    "gbf_train_sha": "8814daef35d688db4edb5cb0efa63d358afa2814"
+  },
+  "train_config": {
+    "optimizer_steps": 10000,
+    "batch_size": 32,
+    "sequence_length": 128,
+    "eval_every_steps": 1000,
+    "eval_subset_size": 4096,
+    "optimizer": {
+      "lr": 0.001,
+      "beta1": 0.9,
+      "beta2": 0.999,
+      "eps": 1e-8,
+      "weight_decay": 0.0
+    },
+    "phase": "a",
+    "rng_kind": "pcg64_mcg",
+    "device_profile": {
+      "backend": "burn-cpu-lockfile-pinned",
+      "thread_count": 1,
+      "deterministic_reductions": true,
+      "gpu_allowed": false,
+      "network_allowed": false,
+      "host_clock_allowed_for_training_artifacts": false,
+      "env_exact": {
+        "BURN_DETERMINISTIC": "1",
+        "BURN_NDARRAY_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "RAYON_NUM_THREADS": "1"
+      },
+      "env_forbidden_unless_listed": true
+    }
+  },
+  "model_config": "Toy1",
+  "device_profile": {
+    "backend": "burn-cpu-lockfile-pinned",
+    "thread_count": 1,
+    "deterministic_reductions": true,
+    "gpu_allowed": false,
+    "network_allowed": false,
+    "host_clock_allowed_for_training_artifacts": false,
+    "env_exact": {
+      "BURN_DETERMINISTIC": "1",
+      "BURN_NDARRAY_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "RAYON_NUM_THREADS": "1"
+    },
+    "env_forbidden_unless_listed": true
+  }
+}

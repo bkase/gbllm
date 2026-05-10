@@ -1,0 +1,41 @@
+schema = "tinystories_manifest.v1"
+schema_version = "1.0.0"
+corpus_id = "s1-tiny-fixture"
+dataset_version = "fixture-v1"
+source_name = "synthetic-tiny-fixture"
+source_url = "https://example.invalid/gbllm/s1-tiny-fixture"
+train_path = "train.bytes"
+val_path = "val.bytes"
+train_sha256 = "sha256:b9373820fc2c6959bfdeb648b732f82f6781f1aef2a4f2db08ed817650e5e37f"
+val_sha256 = "sha256:30a987e41df83b5d02817d662760e59e27788f1235a17737ad048637a6deaaf4"
+val_shuffle_deadeef_sha256 = "sha256:494850f839225dbcc5fabb1496b3655e98ccc9844c31b017b55916a4fb91bed2"
+raw_root = "."
+raw_byte_policy = "post-decompression bytes; no normalization. The literal ASCII string <|endoftext|> is included once at train byte offset 1024 and is treated as ordinary input bytes."
+story_separator = "<|endoftext|>"
+s1_policy = "S1 treats this fixture as raw bytes; separator bytes are ordinary input bytes."
+deferred_scope = []
+
+[source]
+name = "synthetic-tiny-fixture"
+url = "https://example.invalid/gbllm/s1-tiny-fixture"
+dataset_card_url = "https://example.invalid/gbllm/s1-tiny-fixture-card"
+license = "CC0-1.0"
+license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+downloaded_at = "2026-05-09"
+decompression = "none"
+
+[splits.train]
+role = "train"
+url = "file://train.bytes"
+local_filename = "train.bytes"
+sha256 = "sha256:b9373820fc2c6959bfdeb648b732f82f6781f1aef2a4f2db08ed817650e5e37f"
+byte_length = 16384
+story_count = 2
+
+[splits.validation]
+role = "validation"
+url = "file://val.bytes"
+local_filename = "val.bytes"
+sha256 = "sha256:30a987e41df83b5d02817d662760e59e27788f1235a17737ad048637a6deaaf4"
+byte_length = 4096
+story_count = 1

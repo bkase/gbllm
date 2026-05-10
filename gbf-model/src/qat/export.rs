@@ -878,7 +878,7 @@ mod tests {
 
         assert_eq!(
             export.artifact_core_hash().to_string(),
-            "c523e698a2dbe9db334d41a72b2c0f0621edc3992d5db0d61276e614226399f0"
+            "sha256:c523e698a2dbe9db334d41a72b2c0f0621edc3992d5db0d61276e614226399f0"
         );
         assert_eq!(export.core.tensors().len(), 16);
         assert_eq!(export.facts.activation_ranges.len(), 2);

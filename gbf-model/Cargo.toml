@@ -9,6 +9,7 @@ publish = false
 gbf-artifact = { path = "../gbf-artifact" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
+gbf-policy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

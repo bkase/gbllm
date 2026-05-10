@@ -745,7 +745,7 @@ mod tests {
         let hash = profile.content_hash().expect("target profile hashes");
         assert_eq!(
             hash.to_string(),
-            "64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7"
+            "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7"
         );
 
         let value = serde_json::to_value(&profile).expect("profile serializes");

@@ -1,0 +1,36 @@
+{
+  "pass_version": "0.1.0",
+  "budget_profile": "Production",
+  "products": [
+    {
+      "seed": 0,
+      "completion": "completed",
+      "checkpoint_sha": "sha256:94c6117cb1d3c74813e77700522058e4d9f0aa02c39b3cbc82451a83e49ae9bf",
+      "run_log_self_hash": "sha256:4aa91c97999fc3dee98f13feea656ef0ced50866a1bfa80983b708ad9026e10a"
+    },
+    {
+      "seed": 1,
+      "completion": "completed",
+      "checkpoint_sha": "sha256:6416286161d43d60e5f648631f8a16a6892b87574a17bd197bc41bb2c49d1df1",
+      "run_log_self_hash": "sha256:d1e5bc208db49afbf7204eae6a3415ae8b5792c00f05c991cf6937b05086a2ea"
+    },
+    {
+      "seed": 2,
+      "completion": "completed",
+      "checkpoint_sha": "sha256:64838dc660ed12d8869c0d1aa622ee9771a3c9e77ef4b0c9bb670613a2eaa017",
+      "run_log_self_hash": "sha256:2862ff0b04cd09e897f21d232228f3028895880a4a3f1d56de5a567ee5682250"
+    },
+    {
+      "seed": 3,
+      "completion": "completed",
+      "checkpoint_sha": "sha256:d1bb747f0fc8d8e6b4cc2143dd16b85f470550f40d607ad02435f6e13ef8eceb",
+      "run_log_self_hash": "sha256:c8e16ba672f064cb5820055ced73e8e8c44b9408fe8b606be99ea87361e5d51a"
+    },
+    {
+      "seed": 4,
+      "completion": "completed",
+      "checkpoint_sha": "sha256:4501a829bf2a85ae582f22df557f706d12b5b1a1ab280f36b42755a9d6f83b9d",
+      "run_log_self_hash": "sha256:8de783399846e982b6e8ed6418a50752ea592ba49f719355f9e987bfab394c0d"
+    }
+  ]
+}

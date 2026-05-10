@@ -23,10 +23,46 @@ jobs:
         run: python3 scripts/qat_harness_checks.py
       - name: Format
         run: cargo fmt --check --all
-      - name: Lint
-        run: cargo clippy --workspace --all-features -- -D warnings
-      - name: Test
-        run: cargo test --workspace --all-features
+      - name: QAT feature mutex
+        run: |
+          set +e
+          output=$(cargo build -p gbf-train --features qat,qat-ablation 2>&1)
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "expected qat+qat-ablation build to fail, but it succeeded"
+            exit 1
+          fi
+          if ! grep -q "qat and qat-ablation are mutually exclusive" <<<"$output"; then
+            echo "qat+qat-ablation build failed without the expected diagnostic"
+            echo "$output"
+            exit 1
+          fi
+      - name: Lint workspace supported feature set
+        run: cargo clippy --workspace --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings
+      - name: Lint gbf-train qat
+        run: cargo clippy -p gbf-train --features qat,burn-adapter -- -D warnings
+      - name: Lint gbf-train qat-ablation
+        run: cargo clippy -p gbf-train --features qat-ablation,burn-adapter -- -D warnings
+      - name: Lint gbf-experiments phase-a
+        run: cargo clippy -p gbf-experiments --no-default-features --features phase-a -- -D warnings
+      - name: Lint gbf-experiments ablation
+        run: cargo clippy -p gbf-experiments --no-default-features --features ablation -- -D warnings
+      - name: Test workspace supported feature set
+        run: cargo test --workspace --exclude gbf-train --exclude gbf-experiments --all-features
+      - name: Test gbf-train qat
+        run: cargo test -p gbf-train --features qat,burn-adapter
+      - name: Test gbf-train qat-ablation
+        run: cargo test -p gbf-train --features qat-ablation,burn-adapter
+      - name: Test gbf-experiments phase-a
+        run: cargo test -p gbf-experiments --no-default-features --features phase-a
+      - name: S1 tiny-fixture O2/O9 smoke
+        run: |
+          cargo test -p gbf-experiments --test integration
+          scripts/s1_determinism_check.sh --fast
+          scripts/s1_isolation_check.sh --fast
+      - name: Test gbf-experiments ablation
+        run: cargo test -p gbf-experiments --no-default-features --features ablation
       - name: F-B1 dev-loop smoke
         run: scripts/review/f-b1/smoke.sh
 
@@ -38,3 +74,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify F-B1 review packet
         run: scripts/review/f-b1/verify-packet.sh
+
+  s1-canonical-o-metric-4:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify canonical TinyStories O-metric-4
+        run: scripts/s1_canonical_o_metric_4_check.sh

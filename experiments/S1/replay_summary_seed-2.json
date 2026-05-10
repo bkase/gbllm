@@ -1,0 +1,12 @@
+{
+  "pass_version": "0.1.0",
+  "budget_profile": "Production",
+  "products": [
+    {
+      "seed": 2,
+      "completion": "completed",
+      "checkpoint_sha": "sha256:cb74286b00cc9d86c1fbfb06dd00153c3a69194f69ff3fc08b11e5d6f86a76cb",
+      "run_log_self_hash": "sha256:5e01d095310ea9307106d15575902346262c9a2c6453f67e192b8e49a1273e5d"
+    }
+  ]
+}

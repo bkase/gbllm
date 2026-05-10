@@ -151,7 +151,7 @@ mod blob {
         let (_dir, store) = store();
         let hash = store.put(b"path").expect("put");
         let path = store.path_for(hash);
-        let hex = hash.to_string();
+        let hex = hash.to_hex();
 
         assert!(path.ends_with(format!("{}/{}", &hex[..2], hex)));
     }

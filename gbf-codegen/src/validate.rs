@@ -3645,7 +3645,7 @@ mod tests {
                 &value,
             )
             .to_string(),
-            "4dac1a04bf8464cc8239fa0a1feb1fa1dfa7b112599272d999ebc8634fcf6962"
+            "sha256:4dac1a04bf8464cc8239fa0a1feb1fa1dfa7b112599272d999ebc8634fcf6962"
         );
     }
 

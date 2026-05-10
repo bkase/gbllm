@@ -1,0 +1,22 @@
+corpus = "ababa"
+alpha = 0.01
+vocab_size = 256
+lambdas = [0.6, 0.3, 0.1]
+
+[counts]
+train_bytes = 5
+unigram_a = 3
+unigram_b = 2
+bigram_ab = 2
+bigram_ba = 2
+trigram_aba = 2
+trigram_bab = 1
+
+[probabilities]
+p1_a = 0.39814814814814814
+p1_b = 0.26587301587301587
+p2_b_given_a = 0.44078947368421045
+p2_a_given_b = 0.4407894736842105
+p3_a_given_ab = 0.4407894736842105
+p3_interp_a_after_ab = 0.4365253411306042
+bpc_trigram_on_aba = 1.2549134813562748

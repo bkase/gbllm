@@ -1,0 +1,13 @@
+{
+  "schema": "s1_negative_test.v1",
+  "seed": 0,
+  "checkpoint_sha": "sha256:cac875014c4cd1a7d9b7da95784dfaa323223d70690f192f5e750007078cf8ca",
+  "corpus_val_sha": "sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d",
+  "shuffle_seed": 3735928559,
+  "bpc_original": 3.111780227970472,
+  "bpc_shuffled": 10.540665685825866,
+  "shuffled_val_sha256": "sha256:33ab115b5d230b6286fd39347e7e542bb7663ed148d80e16fc3de1a866f60388",
+  "delta": 7.428885457855394,
+  "sensitive": true,
+  "negative_self_hash": "sha256:f33ca53e3f4e387b0b5c802b12a98555f56b2521cb742fa2268e21fe6b1fdc9a"
+}

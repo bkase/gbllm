@@ -4,6 +4,9 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
+
+const SHA256_PREFIX: &str = "sha256:";
 
 /// A SHA-256-sized digest used for stable cross-crate identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -27,6 +30,22 @@ impl Hash256 {
     pub const fn to_bytes(self) -> [u8; 32] {
         self.0
     }
+
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in self.0 {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        hex
+    }
+}
+
+/// Compute a SHA-256 digest and wrap it in the project's canonical hash type.
+#[must_use]
+pub fn sha256(bytes: impl AsRef<[u8]>) -> Hash256 {
+    Hash256::from_bytes(Sha256::digest(bytes.as_ref()).into())
 }
 
 impl From<[u8; 32]> for Hash256 {
@@ -43,23 +62,9 @@ impl From<Hash256> for [u8; 32] {
 
 impl fmt::Display for Hash256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
+        f.write_str(SHA256_PREFIX)?;
+        f.write_str(&self.to_hex())?;
         Ok(())
-    }
-}
-
-impl Serialize for Hash256 {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format!("sha256:{self}"))
-    }
-}
-
-impl<'de> Deserialize<'de> for Hash256 {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -67,8 +72,9 @@ impl FromStr for Hash256 {
     type Err = Hash256ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let prefixed = s.strip_prefix("sha256:").unwrap_or(s);
-        let hex = prefixed.strip_prefix("0x").unwrap_or(prefixed);
+        let hex = s
+            .strip_prefix(SHA256_PREFIX)
+            .ok_or(Hash256ParseError::InvalidPrefix)?;
         if hex.len() != 64 {
             return Err(Hash256ParseError::InvalidLength {
                 expected: 64,
@@ -93,8 +99,29 @@ impl FromStr for Hash256 {
     }
 }
 
+impl Serialize for Hash256 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Hash256 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Hash256ParseError {
+    InvalidPrefix,
     InvalidLength { expected: usize, actual: usize },
     InvalidHex { index: usize, byte: u8 },
 }
@@ -102,6 +129,7 @@ pub enum Hash256ParseError {
 impl fmt::Display for Hash256ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidPrefix => write!(f, "expected sha256: prefix"),
             Self::InvalidLength { expected, actual } => {
                 write!(f, "expected {expected} hex characters, got {actual}")
             }
@@ -118,7 +146,6 @@ fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
 }
@@ -133,26 +160,35 @@ mod tests {
 
         assert_eq!(
             hash.to_string(),
-            "abababababababababababababababababababababababababababababababab"
+            "sha256:abababababababababababababababababababababababababababababababab"
         );
         assert_eq!(hash.to_string().parse::<Hash256>(), Ok(hash));
-        assert_eq!(
-            "0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB".parse::<Hash256>(),
-            Ok(hash)
-        );
     }
 
     #[test]
     fn hash256_rejects_bad_hex_contracts() {
         assert_eq!(
             "abc".parse::<Hash256>(),
+            Err(Hash256ParseError::InvalidPrefix)
+        );
+        assert_eq!(
+            "sha256:abc".parse::<Hash256>(),
             Err(Hash256ParseError::InvalidLength {
                 expected: 64,
                 actual: 3,
             })
         );
         assert_eq!(
-            "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg".parse::<Hash256>(),
+            "sha256:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+                .parse::<Hash256>(),
+            Err(Hash256ParseError::InvalidHex {
+                index: 0,
+                byte: b'A',
+            })
+        );
+        assert_eq!(
+            "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+                .parse::<Hash256>(),
             Err(Hash256ParseError::InvalidHex {
                 index: 0,
                 byte: b'g',
@@ -166,11 +202,19 @@ mod tests {
         let encoded = serde_json::to_string(&hash).expect("hash serializes");
         let decoded: Hash256 = serde_json::from_str(&encoded).expect("hash deserializes");
 
-        assert_eq!(decoded, hash);
-        assert_eq!(decoded.as_bytes(), &[7; 32]);
         assert_eq!(
             encoded,
             "\"sha256:0707070707070707070707070707070707070707070707070707070707070707\""
+        );
+        assert_eq!(decoded, hash);
+        assert_eq!(decoded.as_bytes(), &[7; 32]);
+    }
+
+    #[test]
+    fn sha256_helper_returns_prefixed_hash() {
+        assert_eq!(
+            sha256(b"abc").to_string(),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 }

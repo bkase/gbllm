@@ -1,0 +1,54 @@
+{
+  "command": "doctor",
+  "ok": true,
+  "checks": [
+    {
+      "name": "device_profile_enforce",
+      "description": "F-S1.04 enforce(S1CpuDeterministic) over current env",
+      "status": "pass",
+      "detail": "sha256:24a3f310d912f21f542d3eba8f42120fd835e964683c64dadc2515652888845d"
+    },
+    {
+      "name": "manifest_train_sha256",
+      "description": "train split bytes match manifest sha256",
+      "status": "pass",
+      "detail": "2227753162 bytes sha256:6418d412de72888f52b5142c761ac21a582f7d1166f0bfbdb5f03ccfdec90443"
+    },
+    {
+      "name": "manifest_val_sha256",
+      "description": "validation split bytes match manifest sha256",
+      "status": "pass",
+      "detail": "22502601 bytes sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d"
+    },
+    {
+      "name": "dependency_lockfile_sha",
+      "description": "runtime Cargo.lock sha matches compile-time lock hash",
+      "status": "pass",
+      "detail": "sha256:3f1e82176b240a452919751d295d4066ee0a79f1adbb9dfa8cacecabc66eff19"
+    },
+    {
+      "name": "rust_toolchain_hash",
+      "description": "compiled rust/toolchain identity hash is recorded; no runtime expected-vs-observed check is available in current build metadata",
+      "status": "pass",
+      "detail": "sha256:8feaaf738fcd97fa498466573823a73cfeefdbf8c3302525c306e8c37a62a541"
+    },
+    {
+      "name": "burn_version_pin",
+      "description": "workspace Burn dependency is pinned with =",
+      "status": "pass",
+      "detail": "burn = { version = \"=0.21.0-pre.3\", default-features = false, features = [\"std\"] }"
+    },
+    {
+      "name": "gpu_absence",
+      "description": "S1CpuDeterministic forbids GPU selection and no CUDA env is active",
+      "status": "pass",
+      "detail": "gpu_allowed=false and no active CUDA/HIP visibility env"
+    },
+    {
+      "name": "disk_space",
+      "description": "output root has more than 1 GiB available",
+      "status": "pass",
+      "detail": "5251039232 bytes available at /Users/bkase/.codex/worktrees/d11b/gbllm/experiments/S1-toy1"
+    }
+  ]
+}

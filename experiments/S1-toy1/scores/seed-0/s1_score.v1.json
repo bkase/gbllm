@@ -1,0 +1,11 @@
+{
+  "schema": "s1_score.v1",
+  "seed": 0,
+  "checkpoint_sha": "sha256:94c6117cb1d3c74813e77700522058e4d9f0aa02c39b3cbc82451a83e49ae9bf",
+  "corpus_val_sha": "sha256:6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d",
+  "chunk_size": 128,
+  "token_count": 22502601,
+  "log2_sum": 55673075.59306493,
+  "bpc": 2.4740729124186545,
+  "score_self_hash": "sha256:bf3be861da68da4fa7fd1be6be3b77449e114f49611866fa296f361c4aed58aa"
+}

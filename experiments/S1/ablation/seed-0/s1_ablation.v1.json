@@ -1,0 +1,11 @@
+{
+  "schema": "s1_ablation.v1",
+  "seed": 0,
+  "phase_a_checkpoint_sha": "sha256:cac875014c4cd1a7d9b7da95784dfaa323223d70690f192f5e750007078cf8ca",
+  "ablation_checkpoint_sha": "sha256:cac875014c4cd1a7d9b7da95784dfaa323223d70690f192f5e750007078cf8ca",
+  "phase_a_tensor_payload_sha": "sha256:2787db9e69fbe000f57415d0331df06f95295d4fbf88273429920c5265164e61",
+  "ablation_tensor_payload_sha": "sha256:2787db9e69fbe000f57415d0331df06f95295d4fbf88273429920c5265164e61",
+  "phase_a_eq_ablation": true,
+  "first_mismatch": null,
+  "ablation_self_hash": "sha256:57229bbaeae60c19057c00eacaf1f2079c200be14f1c17c77eaaa57139733898"
+}
