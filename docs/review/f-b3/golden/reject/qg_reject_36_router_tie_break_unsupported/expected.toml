@@ -1,0 +1,4 @@
+qg_reject = 36
+diagnostic_code = "QuantGraphRouterTieBreakUnsupported"
+severity = "Hard"
+clause = "8.1 / RouterSemantics"

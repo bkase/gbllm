@@ -16,6 +16,8 @@ pub mod range;
 pub mod reachability;
 pub mod report;
 pub mod rom;
+pub mod s1;
+pub mod s3;
 pub mod schedule;
 pub mod stage_cache;
 pub mod storage;

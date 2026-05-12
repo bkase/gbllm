@@ -1,0 +1,5 @@
+qg_reject = 11
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_expert_section_weight_missing_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes the FFN down tensor for the dense expert section"

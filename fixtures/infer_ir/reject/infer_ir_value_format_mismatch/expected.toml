@@ -1,0 +1,4 @@
+schema = "infer_ir.reject_expected.v1"
+reject_id = 10
+code = "InferIrValueFormatMismatch"
+severity = "Hard"

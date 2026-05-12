@@ -1,0 +1,5 @@
+qg_reject = 21
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_required_feature_unsupported_inputs"
+base_fixture = "dense_toy0"
+mutation = "marks a required feature as unsupported by the target capability set"

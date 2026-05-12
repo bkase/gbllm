@@ -1,0 +1,4 @@
+schema = "infer_ir.fixture_input.v1"
+name = "mixed_topology"
+kind = "mixed"
+source = "gbf-codegen::s3::infer_ir::tests"

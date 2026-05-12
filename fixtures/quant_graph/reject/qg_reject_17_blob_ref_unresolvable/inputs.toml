@@ -1,0 +1,5 @@
+qg_reject = 17
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_blob_ref_unresolvable_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes the embedding blob from the prebuilt ResolvedBlobIndex"

@@ -1,0 +1,4 @@
+qg_reject = 35
+diagnostic_code = "QuantGraphBitExactMidReductionSaturationForbidden"
+severity = "Hard"
+clause = "2.10"

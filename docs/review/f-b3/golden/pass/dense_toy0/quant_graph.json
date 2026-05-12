@@ -1,0 +1,9 @@
+{
+  "schema": "f-b3.review.quant_graph_golden.v1",
+  "fixture": "dense_toy0",
+  "description": "minimal single-layer dense FFN",
+  "builder": "gbf-codegen::s1::quant_graph::tests::dense_toy0_inputs",
+  "quant_graph_self_hash": "sha256:252ca7705c96cc33e093c00e6e8018e5c7254cf656e10c750b55e0173450883a",
+  "quant_graph_canonical_bytes_hash": "sha256:e2417abd44701796b7d18cea04a62264134367409c9f378f1ce69b6cb31fa039",
+  "report_self_hash": "sha256:748829a4408196e797691ab3ed28323ecc4e313872bfd12137daa2a80df204de"
+}

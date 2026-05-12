@@ -1,0 +1,5 @@
+qg_reject = 34
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_routing_expert_coverage_extra_inputs"
+base_fixture = "dense_toy0"
+mutation = "adds an out-of-range dense expert section"

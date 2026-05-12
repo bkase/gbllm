@@ -1,0 +1,4 @@
+qg_reject = 6
+diagnostic_code = "QuantGraphTensorIdNotUnique"
+severity = "Hard"
+clause = "8.5 SC-1"

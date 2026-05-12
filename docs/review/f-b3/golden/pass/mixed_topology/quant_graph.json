@@ -1,0 +1,9 @@
+{
+  "schema": "f-b3.review.quant_graph_golden.v1",
+  "fixture": "mixed_topology",
+  "description": "one dense layer and one routed layer",
+  "builder": "gbf-codegen::s1::quant_graph::tests::mixed_topology_inputs",
+  "quant_graph_self_hash": "sha256:6dc62d1d13266ae5b4b39f79004b7a300fa71b44d39788c61eb3c17a2794e4f5",
+  "quant_graph_canonical_bytes_hash": "sha256:35ad10ee1fca6662be7a4b1643ca713b6239bd1cc3fc4c767d41ecefa91d5e94",
+  "report_self_hash": "sha256:1adaa96a6e3fdffced8815c29dc2485e23d7d00598e2369982a5e60118d14abb"
+}

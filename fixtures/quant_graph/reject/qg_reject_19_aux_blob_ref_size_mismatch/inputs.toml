@@ -1,0 +1,5 @@
+qg_reject = 19
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_aux_blob_ref_size_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "changes an expert scale aux blob metadata decoded size"

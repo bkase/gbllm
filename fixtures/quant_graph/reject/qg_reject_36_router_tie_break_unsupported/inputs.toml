@@ -1,0 +1,5 @@
+qg_reject = 36
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_router_tie_break_unsupported_inputs"
+base_fixture = "dense_toy0"
+mutation = "uses an unsupported router tie-break semantics tag"

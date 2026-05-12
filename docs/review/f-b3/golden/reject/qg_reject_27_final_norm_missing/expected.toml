@@ -1,0 +1,4 @@
+qg_reject = 27
+diagnostic_code = "QuantGraphFinalNormMissing"
+severity = "Hard"
+clause = "8.5 SC-20"

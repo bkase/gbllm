@@ -1,0 +1,5 @@
+schema = "infer_ir.reject_input.v1"
+reject_id = 24
+class = "infer_ir_reduction_site_missing"
+base_fixture = "dense_toy0"
+mutation = "infer_ir_reduction_site_missing"

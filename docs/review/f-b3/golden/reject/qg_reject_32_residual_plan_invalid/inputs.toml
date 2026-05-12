@@ -1,0 +1,5 @@
+qg_reject = 32
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_residual_plan_invalid_inputs"
+base_fixture = "dense_toy0"
+mutation = "uses a ternary residual activation format outside the activation set"

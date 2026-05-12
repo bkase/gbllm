@@ -1,0 +1,4 @@
+name = "dense_toy0"
+kind = "pass"
+description = "minimal single-layer dense FFN"
+builder = "gbf-codegen::s1::quant_graph::tests::dense_toy0_inputs"

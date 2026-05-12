@@ -1,0 +1,9 @@
+{
+  "schema": "f-b3.review.quant_graph_golden.v1",
+  "fixture": "routed_basic_one",
+  "description": "single routed layer with unit router gate weight",
+  "builder": "gbf-codegen::s1::quant_graph::tests::routed_basic_one_inputs",
+  "quant_graph_self_hash": "sha256:d1a991e9cadcaafb1a63bb0110e39cea30cec76795919b37dc2802c08addfa2d",
+  "quant_graph_canonical_bytes_hash": "sha256:1daea51cb6401cc3ccc91b3589ee913b1c5854f9320da2f6c186054d4d9bdcd1",
+  "report_self_hash": "sha256:67bbeb072d7fccce330d4f2dedc491bde0a607a5daa8ce668a49b0b351b2473f"
+}

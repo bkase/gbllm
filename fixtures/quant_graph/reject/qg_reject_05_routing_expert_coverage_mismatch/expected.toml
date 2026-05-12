@@ -1,0 +1,4 @@
+qg_reject = 5
+diagnostic_code = "QuantGraphRoutingExpertCoverageMismatch"
+severity = "Hard"
+clause = "2.11"

@@ -21,7 +21,14 @@ gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+semantic_equivalence_check = []
 
 [dev-dependencies]
 gbf-verify = { path = "../gbf-verify" }
+proptest.workspace = true
 tempfile.workspace = true
+tracing-subscriber.workspace = true

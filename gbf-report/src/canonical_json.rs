@@ -27,7 +27,9 @@ const ENVELOPE_FIELDS: [&str; 4] = [
 ];
 
 const ARTIFACT_VALIDATION_SCHEMA: &str = "artifact_validation.v1";
+const INFER_IR_SCHEMA: &str = "infer_ir.v1";
 const POLICY_RESOLUTION_SCHEMA: &str = "policy_resolution.v1";
+const QUANT_GRAPH_SCHEMA: &str = "quant_graph.v1";
 const STATIC_BUDGET_SCHEMA: &str = "static_budget.v1";
 
 /// Report schema identifier carried by every F-B2/F-B4 report envelope.
@@ -1193,7 +1195,10 @@ fn validate_json_value(schema: &str, value: &Value, path: &str) -> Result<(), Ca
             }
         }
         Value::Number(number) => {
-            if number.as_i64().is_none() && number.as_u64().is_none() {
+            if number.as_i64().is_none()
+                && number.as_u64().is_none()
+                && !is_allowed_float_path(schema, path)
+            {
                 return Err(CanonicalJsonError::FloatingPointValue {
                     path: path.to_owned(),
                 });
@@ -1268,6 +1273,12 @@ fn is_canonical_sha256_string(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+fn is_allowed_float_path(schema: &str, path: &str) -> bool {
+    schema == QUANT_GRAPH_SCHEMA
+        && path.starts_with("result.product.norm_plans[")
+        && path.contains(".plan.")
+}
+
 fn is_allowed_null_path(schema: &str, path: &str) -> bool {
     match schema {
         ARTIFACT_VALIDATION_SCHEMA => matches!(
@@ -1300,6 +1311,14 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
                 || path.ends_with(".fallback_runtime_mode")
                 || path.contains(".constraint_overrides.")
                 || path.contains(".overrides.")
+        }
+        INFER_IR_SCHEMA => path == "result",
+        QUANT_GRAPH_SCHEMA => {
+            path == "result"
+                || path == "result.product.routing_table"
+                || path == "result.product.classify_head.bias"
+                || (path.starts_with("result.product.routing_table.layers[")
+                    && path.ends_with(".router_bias"))
         }
         STATIC_BUDGET_SCHEMA => {
             matches!(

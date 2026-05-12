@@ -1,0 +1,46 @@
+{
+  "schema": "chunk2.review.golden_manifest.v1",
+  "current_pipeline_mode": "exported_feature_goldens_plus_driver_gates",
+  "passing_quant_graph_fixture_count": 6,
+  "passing_infer_ir_fixture_count": 3,
+  "quant_graph_reject_fixture_count": 36,
+  "infer_ir_reject_fixture_count": 36,
+  "pipeline_script": "scripts/e2e/chunk2_pipeline.sh",
+  "reject_script": "scripts/e2e/chunk2_reject_classes.sh",
+  "logging_schema": "docs/review/chunk2/logging-schema.md",
+  "chunk2_owned_golden_files": [
+    "manifest.json"
+  ],
+  "delegated_golden_roots": [
+    "docs/review/f-b3/golden",
+    "docs/review/f-b5/golden"
+  ],
+  "executable_gates": [
+    "scripts/review/f-b3/verify.sh",
+    "scripts/review/f-b5/verify.sh",
+    "scripts/e2e/quant_graph_fixtures.sh",
+    "scripts/e2e/stage3.sh"
+  ],
+  "delegated_gate_evidence": [
+    {
+      "gate": "stage1_cache_hit_byte_identical",
+      "command": "cargo test -p gbf-codegen --lib fixture_quant_graph_cache_hit_byte_identical_product -- --test-threads=1"
+    },
+    {
+      "gate": "stage3_cache_hit_audit_rewrap",
+      "command": "cargo test -p gbf-codegen --lib s3::infer_ir::tests::run_stage3_cache_hit_replays_with_audit_rewrap -- --test-threads=1"
+    },
+    {
+      "gate": "stage3_semantic_equivalence_bit_exact",
+      "command": "cargo test -p gbf-codegen --features semantic_equivalence_check --lib fixture_infer_ir_fixture_semantic_equivalence_bit_exact -- --test-threads=1"
+    },
+    {
+      "gate": "infer_ir_reject_taxonomy",
+      "command": "cargo test -p gbf-codegen --lib fixture_infer_ir_every_reject_class_typed_diagnostic -- --test-threads=1"
+    },
+    {
+      "gate": "quant_graph_reject_taxonomy",
+      "command": "cargo test -p gbf-codegen --lib s1::quant_graph::tests::fixture_quant_graph_every_reject_class_has_typed_diagnostic -- --test-threads=1"
+    }
+  ]
+}

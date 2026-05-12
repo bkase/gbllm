@@ -1,0 +1,5 @@
+schema = "infer_ir.reject_input.v1"
+reject_id = 6
+class = "infer_ir_semantic_checkpoint_emitted_here"
+base_fixture = "dense_toy0"
+mutation = "infer_ir_semantic_checkpoint_emitted_here"

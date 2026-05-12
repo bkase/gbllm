@@ -1,0 +1,5 @@
+qg_reject = 5
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_routing_expert_coverage_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "sets router n_experts different from the model summary"

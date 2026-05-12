@@ -1,0 +1,4 @@
+qg_reject = 32
+diagnostic_code = "QuantGraphResidualPlanInvalid"
+severity = "Hard"
+clause = "8.5 SC-23"

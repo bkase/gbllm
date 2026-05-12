@@ -1,0 +1,10 @@
+schema = "f_b5.review_golden_hashes.v1"
+fixture = "mixed_topology"
+source_fixture = "fixtures/infer_ir/mixed_topology"
+infer_ir_json = "golden/mixed_topology/infer_ir.json"
+infer_ir_self_hash = "sha256:e35d886f4d93aee31b7c458cf8c344a6bd6bf3064ea1794b3007cd961cffd27d"
+infer_ir_canonical_bytes_hash = "sha256:c7f6a5069eda19049a4863cf3875d9b40f9c9f9ecb7a13ccfcf0feae32d2c00d"
+topological_order_hash = "sha256:7446809c6dc45d3cd36417bd1811c37bb44b76bc91404f9b618c3464aab955e4"
+report_self_hash = "sha256:225d1966979e9d3adca4a0a5f08a51b2afc143fee65b90606483974ca5768672"
+anchor_count = 24
+driver_product_report_status = "exported"

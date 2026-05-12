@@ -2344,10 +2344,13 @@ dependencies = [
  "gbf-store",
  "gbf-verify",
  "gbf-workload",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2551,6 +2554,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,13 @@
+schema = "f_b5.stage3_driver_evidence.v1"
+stage3_driver_gate = "scripts/e2e/stage3.sh"
+build_core_tests = "s3::infer_ir::tests::build_infer_ir_core"
+run_stage3_tests = "s3::infer_ir::tests::run_stage3"
+driver_report_emission_test = "s3::infer_ir::tests::run_stage3_emits_report_and_writes_cache"
+driver_cache_rewrap_test = "s3::infer_ir::tests::run_stage3_cache_hit_replays_with_audit_rewrap"
+driver_product_report_status = "exported"
+fixture_export_status = "exported"
+product_reports = [
+  "golden/dense_toy0/infer_ir.json",
+  "golden/routed_basic/infer_ir.json",
+  "golden/mixed_topology/infer_ir.json",
+]

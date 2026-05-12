@@ -1,0 +1,5 @@
+qg_reject = 31
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_router_gate_weight_semantics_unsupported_inputs"
+base_fixture = "dense_toy0"
+mutation = "uses an unsupported router gate-weight semantics tag"

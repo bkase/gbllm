@@ -1,0 +1,5 @@
+schema = "infer_ir.reject_input.v1"
+reject_id = 16
+class = "infer_ir_disconnected_component"
+base_fixture = "dense_toy0"
+mutation = "infer_ir_disconnected_component"

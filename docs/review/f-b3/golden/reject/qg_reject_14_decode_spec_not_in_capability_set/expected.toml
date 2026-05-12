@@ -1,0 +1,4 @@
+qg_reject = 14
+diagnostic_code = "QuantGraphDecodeSpecNotInCapabilitySet"
+severity = "Hard"
+clause = "8.5 SC-8"

@@ -1,0 +1,5 @@
+qg_reject = 3
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_routing_missing_for_routed_layer_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes the router layer from a routed fixture"

@@ -1,0 +1,5 @@
+qg_reject = 22
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_forbidden_storage_metadata_inputs"
+base_fixture = "dense_toy0"
+mutation = "marks upstream artifact facts as leaking storage metadata into QuantGraph construction"

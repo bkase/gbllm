@@ -1,0 +1,5 @@
+qg_reject = 26
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_layer_norms_incomplete_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes the layer FFN norm binding"

@@ -1,0 +1,4 @@
+qg_reject = 12
+diagnostic_code = "QuantGraphClassifyHeadTiedMismatch"
+severity = "Hard"
+clause = "8.5 SC-7"

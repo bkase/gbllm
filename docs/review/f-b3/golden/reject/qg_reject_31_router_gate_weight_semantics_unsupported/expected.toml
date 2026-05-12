@@ -1,0 +1,4 @@
+qg_reject = 31
+diagnostic_code = "QuantGraphRouterGateWeightSemanticsUnsupported"
+severity = "Hard"
+clause = "8.1"

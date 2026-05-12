@@ -1,0 +1,4 @@
+qg_reject = 2
+diagnostic_code = "QuantGraphRoleFormatMismatch"
+severity = "Hard"
+clause = "8.6"

@@ -1,0 +1,5 @@
+qg_reject = 2
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_role_format_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "changes the embedding tensor to a Binary1 expert-only format"

@@ -1,0 +1,5 @@
+qg_reject = 7
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_identity_hash_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "changes semantic_core_hash away from the validated effective core hash"

@@ -1,0 +1,5 @@
+qg_reject = 27
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_final_norm_missing_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes the final norm binding"

@@ -1,0 +1,4 @@
+qg_reject = 29
+diagnostic_code = "QuantGraphAuxBlobKindMismatch"
+severity = "Hard"
+clause = "8.5 SC-21"

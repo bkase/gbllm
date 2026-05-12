@@ -1,0 +1,4 @@
+qg_reject = 30
+diagnostic_code = "QuantGraphDecodeRequiresRngMismatch"
+severity = "Hard"
+clause = "8.5 SC-22"

@@ -1,0 +1,5 @@
+qg_reject = 35
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_bit_exact_mid_reduction_saturation_forbidden_inputs"
+base_fixture = "dense_toy0"
+mutation = "marks BitExact mid-reduction saturation as present"

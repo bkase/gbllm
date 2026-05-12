@@ -1,0 +1,4 @@
+qg_reject = 28
+diagnostic_code = "QuantGraphNormSiteDuplicate"
+severity = "Hard"
+clause = "8.5 SC-20"

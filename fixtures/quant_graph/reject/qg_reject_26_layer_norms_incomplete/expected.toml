@@ -1,0 +1,4 @@
+qg_reject = 26
+diagnostic_code = "QuantGraphLayerNormsIncomplete"
+severity = "Hard"
+clause = "8.5 SC-18"

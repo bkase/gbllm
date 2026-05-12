@@ -1,0 +1,71 @@
+schema = "f_b5.review_anchor_ids.v1"
+fixture = "dense_toy0"
+status = "exported"
+source = "golden/dense_toy0/infer_ir.json.result.product.anchors"
+anchor_count = 11
+
+[[anchors]]
+node_id = 0
+op_tag = "Embedding"
+anchor_id = "sha256:a6a7c8017c9a2af8b62543759d17fc3124c96d090352215cd19725284a156c46"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 1
+op_tag = "Norm"
+anchor_id = "sha256:ebcf60806b30cb106724294dd88bc47fe2bd1f63c3ecc2583cda6ba15a68cf31"
+reduction_site = "norm.0"
+
+[[anchors]]
+node_id = 2
+op_tag = "CombineResidual"
+anchor_id = "sha256:39d251bd257b0ddf5e7f4b9bb058b48479e1a079c8fc59325902652b994efc97"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 3
+op_tag = "Norm"
+anchor_id = "sha256:390aeeea8419227df7a283a829b42fc1e7a710d890e9d9b1251fd01d0eab96bf"
+reduction_site = "norm.1"
+
+[[anchors]]
+node_id = 4
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:cac2a0432b55cb2a3af03801fb2533c3990665a5f5f9b11dd9df40c31b95831f"
+reduction_site = "expert.0.0.up"
+
+[[anchors]]
+node_id = 5
+op_tag = "FfnActivation"
+anchor_id = "sha256:fc8d73467a16b62372aeebb6c3a76f87b1f922366a4a0dd1766d15aee5376b54"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 6
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:2a02f244f3d4d1a31549ac0e53bce123291024253620c126964be69872f80097"
+reduction_site = "expert.0.0.down"
+
+[[anchors]]
+node_id = 7
+op_tag = "CombineResidual"
+anchor_id = "sha256:3c648d043e2a20a8b30602c692e138843652318500cb00564cb2677d7f17b54f"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 8
+op_tag = "Norm"
+anchor_id = "sha256:b548fdb3e7f829e0c15c134cb818527c5a5bb8296e88f5880594decc73c98691"
+reduction_site = "norm.2"
+
+[[anchors]]
+node_id = 9
+op_tag = "Classify"
+anchor_id = "sha256:e41ff671458c86eb88d616a77ba03a877fe3ac780c007c1bd9b57d74b77097d8"
+reduction_site = "classify"
+
+[[anchors]]
+node_id = 10
+op_tag = "DecodeToken"
+anchor_id = "sha256:734ca9f3a49801b04c8abf5ddfd2a0ae3484c4197ecfb0b111f60833f414d53f"
+reduction_site = "none"

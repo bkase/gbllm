@@ -1,0 +1,10 @@
+schema = "f_b5.review_golden_hashes.v1"
+fixture = "routed_basic"
+source_fixture = "fixtures/infer_ir/routed_basic"
+infer_ir_json = "golden/routed_basic/infer_ir.json"
+infer_ir_self_hash = "sha256:fa6437611f341bd4b59dd6e7a1c28c33bbde6a856fc0cd80c68bf0bca2f1d68e"
+infer_ir_canonical_bytes_hash = "sha256:145ab41985f7b4498d58b8c062f8b9a35063f379ee7b76d233b87594be1e6401"
+topological_order_hash = "sha256:89a15db53783fb722058a97a342dfb27d9017976812a2b716426578a1df5cf8b"
+report_self_hash = "sha256:1468085049891aa4aff32ab694fb3f1d25f081033725e89d65f05ca662fb7ed9"
+anchor_count = 17
+driver_product_report_status = "exported"

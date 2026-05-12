@@ -1,0 +1,37 @@
+qg_reject	fixture	diagnostic_code	severity	clause	counterexample
+1	qg_reject_01_training_residue	QuantGraphTrainingResidue	Hard	2.16	gbf-codegen::s1::quant_graph::tests::reject_training_residue_inputs
+2	qg_reject_02_role_format_mismatch	QuantGraphRoleFormatMismatch	Hard	8.6	gbf-codegen::s1::quant_graph::tests::reject_role_format_mismatch_inputs
+3	qg_reject_03_routing_missing_for_routed_layer	QuantGraphRoutingMissingForRoutedLayer	Hard	2.11	gbf-codegen::s1::quant_graph::tests::reject_routing_missing_for_routed_layer_inputs
+4	qg_reject_04_routing_present_for_dense_layer	QuantGraphRoutingPresentForDenseLayer	Hard	2.11	gbf-codegen::s1::quant_graph::tests::reject_routing_present_for_dense_layer_inputs
+5	qg_reject_05_routing_expert_coverage_mismatch	QuantGraphRoutingExpertCoverageMismatch	Hard	2.11	gbf-codegen::s1::quant_graph::tests::reject_routing_expert_coverage_mismatch_inputs
+6	qg_reject_06_tensor_id_not_unique	QuantGraphTensorIdNotUnique	Hard	8.5 SC-1	gbf-codegen::s1::quant_graph::tests::reject_tensor_id_not_unique_inputs
+7	qg_reject_07_identity_hash_mismatch	QuantGraphIdentityHashMismatch	Hard	QG-Ok-4	gbf-codegen::s1::quant_graph::tests::reject_identity_hash_mismatch_inputs
+8	qg_reject_08_export_provenance_missing	QuantGraphExportProvenanceMissing	Hard	8.5 SC-2 / 2.8	gbf-codegen::s1::quant_graph::tests::reject_export_provenance_missing_inputs
+9	qg_reject_09_provenance_image_not_injective	QuantGraphProvenanceImageNotInjective	Hard	8.5 SC-2	gbf-codegen::s1::quant_graph::tests::reject_provenance_image_not_injective_inputs
+10	qg_reject_10_norm_plan_reference_unresolved	QuantGraphNormPlanReferenceUnresolved	Hard	8.5 SC-3	gbf-codegen::s1::quant_graph::tests::reject_norm_plan_reference_unresolved_inputs
+11	qg_reject_11_expert_section_weight_missing	QuantGraphExpertSectionWeightMissing	Hard	8.5 SC-5	gbf-codegen::s1::quant_graph::tests::reject_expert_section_weight_missing_inputs
+12	qg_reject_12_classify_head_tied_mismatch	QuantGraphClassifyHeadTiedMismatch	Hard	8.5 SC-7	gbf-codegen::s1::quant_graph::tests::reject_classify_head_tied_mismatch_inputs
+13	qg_reject_13_classify_head_format_mismatch	QuantGraphClassifyHeadFormatMismatch	Hard	8.5 SC-15	gbf-codegen::s1::quant_graph::tests::reject_classify_head_format_mismatch_inputs
+14	qg_reject_14_decode_spec_not_in_capability_set	QuantGraphDecodeSpecNotInCapabilitySet	Hard	8.5 SC-8	gbf-codegen::s1::quant_graph::tests::reject_decode_spec_not_in_capability_set_inputs
+15	qg_reject_15_sequence_semantics_tensor_mismatch	QuantGraphSequenceSemanticsTensorMismatch	Hard	8.5 SC-11	gbf-codegen::s1::quant_graph::tests::reject_sequence_semantics_tensor_mismatch_inputs
+16	qg_reject_16_layout_inconsistent_with_model_spec	QuantGraphLayoutInconsistentWithModelSpec	Hard	8.5 SC-9	gbf-codegen::s1::quant_graph::tests::reject_layout_inconsistent_with_model_spec_inputs
+17	qg_reject_17_blob_ref_unresolvable	QuantGraphBlobRefUnresolvable	Hard	8.5 SC-13	gbf-codegen::s1::quant_graph::tests::reject_blob_ref_unresolvable_inputs
+18	qg_reject_18_blob_ref_size_mismatch	QuantGraphBlobRefSizeMismatch	Hard	8.5 SC-13	gbf-codegen::s1::quant_graph::tests::reject_blob_ref_size_mismatch_inputs
+19	qg_reject_19_aux_blob_ref_size_mismatch	QuantGraphAuxBlobRefSizeMismatch	Hard	8.5 SC-13	gbf-codegen::s1::quant_graph::tests::reject_aux_blob_ref_size_mismatch_inputs
+20	qg_reject_20_determinism_requires_enforced_reduction_order	QuantGraphDeterminismRequiresEnforcedReductionOrder	Hard	2.10	gbf-codegen::s1::quant_graph::tests::reject_determinism_requires_enforced_reduction_order_inputs
+21	qg_reject_21_required_feature_unsupported	QuantGraphRequiredFeatureUnsupported	Hard	8.5 SC-12	gbf-codegen::s1::quant_graph::tests::reject_required_feature_unsupported_inputs
+22	qg_reject_22_forbidden_storage_metadata	QuantGraphForbiddenStorageMetadata	Hard	2.3	gbf-codegen::s1::quant_graph::tests::reject_forbidden_storage_metadata_inputs
+23	qg_reject_23_embedding_missing	QuantGraphEmbeddingMissing	Hard	8.5 SC-14	gbf-codegen::s1::quant_graph::tests::reject_embedding_missing_inputs
+24	qg_reject_24_embedding_not_unique	QuantGraphEmbeddingNotUnique	Hard	8.5 SC-14	gbf-codegen::s1::quant_graph::tests::reject_embedding_not_unique_inputs
+25	qg_reject_25_ffn_gate_presence_mismatch	QuantGraphFfnGatePresenceMismatch	Hard	8.5 SC-17	gbf-codegen::s1::quant_graph::tests::reject_ffn_gate_presence_mismatch_inputs
+26	qg_reject_26_layer_norms_incomplete	QuantGraphLayerNormsIncomplete	Hard	8.5 SC-18	gbf-codegen::s1::quant_graph::tests::reject_layer_norms_incomplete_inputs
+27	qg_reject_27_final_norm_missing	QuantGraphFinalNormMissing	Hard	8.5 SC-20	gbf-codegen::s1::quant_graph::tests::reject_final_norm_missing_inputs
+28	qg_reject_28_norm_site_duplicate	QuantGraphNormSiteDuplicate	Hard	8.5 SC-20	gbf-codegen::s1::quant_graph::tests::reject_norm_site_duplicate_inputs
+29	qg_reject_29_aux_blob_kind_mismatch	QuantGraphAuxBlobKindMismatch	Hard	8.5 SC-21	gbf-codegen::s1::quant_graph::tests::reject_aux_blob_kind_mismatch_inputs
+30	qg_reject_30_decode_requires_rng_mismatch	QuantGraphDecodeRequiresRngMismatch	Hard	8.5 SC-22	gbf-codegen::s1::quant_graph::tests::reject_decode_requires_rng_mismatch_inputs
+31	qg_reject_31_router_gate_weight_semantics_unsupported	QuantGraphRouterGateWeightSemanticsUnsupported	Hard	8.1	gbf-codegen::s1::quant_graph::tests::reject_router_gate_weight_semantics_unsupported_inputs
+32	qg_reject_32_residual_plan_invalid	QuantGraphResidualPlanInvalid	Hard	8.5 SC-23	gbf-codegen::s1::quant_graph::tests::reject_residual_plan_invalid_inputs
+33	qg_reject_33_routing_expert_coverage_gap	QuantGraphRoutingExpertCoverageGap	Hard	8.5 SC-4 missing	gbf-codegen::s1::quant_graph::tests::reject_routing_expert_coverage_gap_inputs
+34	qg_reject_34_routing_expert_coverage_extra	QuantGraphRoutingExpertCoverageExtra	Hard	8.5 SC-4 extra/out-of-range	gbf-codegen::s1::quant_graph::tests::reject_routing_expert_coverage_extra_inputs
+35	qg_reject_35_bit_exact_mid_reduction_saturation_forbidden	QuantGraphBitExactMidReductionSaturationForbidden	Hard	2.10	gbf-codegen::s1::quant_graph::tests::reject_bit_exact_mid_reduction_saturation_forbidden_inputs
+36	qg_reject_36_router_tie_break_unsupported	QuantGraphRouterTieBreakUnsupported	Hard	8.1 / RouterSemantics	gbf-codegen::s1::quant_graph::tests::reject_router_tie_break_unsupported_inputs

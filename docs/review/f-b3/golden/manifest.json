@@ -1,0 +1,7 @@
+{
+  "schema": "f-b3.review.golden_manifest.v1",
+  "passing_fixture_count": 6,
+  "reject_fixture_count": 36,
+  "source": "fixtures/quant_graph",
+  "pipeline_gate": "cargo test -q -p gbf-codegen --lib s1::quant_graph::tests::fixture_quant_graph -- --test-threads=1"
+}

@@ -1,0 +1,149 @@
+schema = "f_b5.review_anchor_ids.v1"
+fixture = "mixed_topology"
+status = "exported"
+source = "golden/mixed_topology/infer_ir.json.result.product.anchors"
+anchor_count = 24
+
+[[anchors]]
+node_id = 0
+op_tag = "Embedding"
+anchor_id = "sha256:a6a7c8017c9a2af8b62543759d17fc3124c96d090352215cd19725284a156c46"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 1
+op_tag = "Norm"
+anchor_id = "sha256:ebcf60806b30cb106724294dd88bc47fe2bd1f63c3ecc2583cda6ba15a68cf31"
+reduction_site = "norm.0"
+
+[[anchors]]
+node_id = 2
+op_tag = "CombineResidual"
+anchor_id = "sha256:39d251bd257b0ddf5e7f4b9bb058b48479e1a079c8fc59325902652b994efc97"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 3
+op_tag = "Norm"
+anchor_id = "sha256:390aeeea8419227df7a283a829b42fc1e7a710d890e9d9b1251fd01d0eab96bf"
+reduction_site = "norm.1"
+
+[[anchors]]
+node_id = 4
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:cac2a0432b55cb2a3af03801fb2533c3990665a5f5f9b11dd9df40c31b95831f"
+reduction_site = "expert.0.0.up"
+
+[[anchors]]
+node_id = 5
+op_tag = "FfnActivation"
+anchor_id = "sha256:fc8d73467a16b62372aeebb6c3a76f87b1f922366a4a0dd1766d15aee5376b54"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 6
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:2a02f244f3d4d1a31549ac0e53bce123291024253620c126964be69872f80097"
+reduction_site = "expert.0.0.down"
+
+[[anchors]]
+node_id = 7
+op_tag = "CombineResidual"
+anchor_id = "sha256:3c648d043e2a20a8b30602c692e138843652318500cb00564cb2677d7f17b54f"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 8
+op_tag = "Norm"
+anchor_id = "sha256:106e998c36fdff6e260bbf64ac3e1f5419730d9fb1f3ee16a88a479085fddf6c"
+reduction_site = "norm.2"
+
+[[anchors]]
+node_id = 9
+op_tag = "CombineResidual"
+anchor_id = "sha256:a73dd9d4a2671e32262a01f9dbb5274d294056943c8d147ada0a753a651ca482"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 10
+op_tag = "Norm"
+anchor_id = "sha256:51b3be4f22e79b0c020bddbe5d28dd77419fce05175320eec1d182df40006520"
+reduction_site = "norm.3"
+
+[[anchors]]
+node_id = 11
+op_tag = "RouterMatVec"
+anchor_id = "sha256:9f40687a0d3eedf043eacdee8c69e4934ea8b499587cdde165eb632a504899fd"
+reduction_site = "router.1"
+
+[[anchors]]
+node_id = 12
+op_tag = "RouteTop1"
+anchor_id = "sha256:531e60a736291e2110180344a341a89e7aac3635eb6a7d01b06b2e0e41d19fbf"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 13
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:fbcdf53082add0a0ea70320e9ccda1a46955ca33bc1c5d0517377eff7cb1710d"
+reduction_site = "expert.1.0.up"
+
+[[anchors]]
+node_id = 14
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:0e4e5fc83ac87dd007f5513760c04791d2e7d0db810eccc78e1f0906894331a2"
+reduction_site = "expert.1.1.up"
+
+[[anchors]]
+node_id = 15
+op_tag = "FfnActivation"
+anchor_id = "sha256:a94c5f1bf4611b61a02b7c5e0c8abbf83210f37185aaf3223fc379ef95fb5124"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 16
+op_tag = "FfnActivation"
+anchor_id = "sha256:a5b140b118d484716c7480c100c3581c20d956839d331df2e3863aeeb5223bfe"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 17
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:0e2062f562b784877410a9a85f56d0de4efbe62d0bf2c73052d37829705ee11a"
+reduction_site = "expert.1.0.down"
+
+[[anchors]]
+node_id = 18
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:24395f37cbc1b8c31e619e8e5939b152629660fd40a5c50c17cde82aa29c747c"
+reduction_site = "expert.1.1.down"
+
+[[anchors]]
+node_id = 19
+op_tag = "SelectExpertTop1"
+anchor_id = "sha256:5ae39333d94cde24b1d44832a116feb577411cc335be55a9a5d6f67c2165cdf3"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 20
+op_tag = "CombineResidual"
+anchor_id = "sha256:6999d05229499b128588a7efec501bcce1936f11e5293d1120e0d5816a5be574"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 21
+op_tag = "Norm"
+anchor_id = "sha256:c1b7140bb43cd63e261c98ca9004a5d9fdc3d6fe0948d8e215cfade74c09a566"
+reduction_site = "norm.4"
+
+[[anchors]]
+node_id = 22
+op_tag = "Classify"
+anchor_id = "sha256:fa7a179123deeb60fa4b8bad3795975a0e7c5600bfd3c24a220e448e309db0e9"
+reduction_site = "classify"
+
+[[anchors]]
+node_id = 23
+op_tag = "DecodeToken"
+anchor_id = "sha256:a0d41b630b82e845811b2ea2dc9af5b7eb0bd5aea06f80533f88eead722942fb"
+reduction_site = "none"

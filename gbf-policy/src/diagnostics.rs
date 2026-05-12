@@ -238,6 +238,129 @@ pub enum ValidationCode {
         site: ReductionSiteId,
         projected_max_abs: u64,
     },
+    InferIrRouterPresentForDenseLayer {
+        layer: LayerId,
+    },
+    InferIrRouterMatVecMissingForRoutedLayer {
+        layer: LayerId,
+    },
+    InferIrSequenceSemanticsUnsupportedV1 {
+        field: FieldPath,
+    },
+    InferIrEmbeddingNotUnique {
+        field: FieldPath,
+    },
+    InferIrDecodeNotUnique {
+        field: FieldPath,
+    },
+    InferIrClassifyNotUnique {
+        field: FieldPath,
+    },
+    InferIrExpertCoverageMismatch {
+        layer: LayerId,
+        expert: ExpertId,
+    },
+    InferIrRouteCoverageMismatch {
+        layer: LayerId,
+    },
+    InferIrSemanticCheckpointEmittedHere {
+        field: FieldPath,
+    },
+    InferIrEffectChainNotLinear {
+        field: FieldPath,
+    },
+    InferIrEffectIdEdgeTokenViolation {
+        field: FieldPath,
+    },
+    InferIrTopologicalOrderMismatch {
+        field: FieldPath,
+    },
+    InferIrValueProducerMissing {
+        value_id: u32,
+    },
+    InferIrValueFormatMismatch {
+        field: FieldPath,
+    },
+    InferIrNormFormatMismatch {
+        field: FieldPath,
+    },
+    InferIrExpertSectionRoleMismatch {
+        layer: LayerId,
+        expert: ExpertId,
+    },
+    InferIrNonV1RouterSemantics {
+        layer: LayerId,
+    },
+    InferIrDenseRoutedShapeMismatch {
+        layer: LayerId,
+    },
+    InferIrDecodePlanMismatch {
+        field: FieldPath,
+    },
+    InferIrDecodeRngBindingMismatch {
+        field: FieldPath,
+    },
+    InferIrUnexpectedRngEffectOnPureOp {
+        field: FieldPath,
+    },
+    InferIrSequenceSlotCoverageMismatch {
+        layer: LayerId,
+    },
+    InferIrOpHistogramTotalMismatch {
+        field: FieldPath,
+    },
+    InferIrFaultBoundaryEmittedV1Forbidden {
+        field: FieldPath,
+    },
+    InferIrResidualBoundaryMismatch {
+        field: FieldPath,
+    },
+    InferIrTokenIngressAmbiguous {
+        field: FieldPath,
+    },
+    InferIrSemanticEquivalenceFailed {
+        field: FieldPath,
+    },
+    InferIrCycleDetected {
+        field: FieldPath,
+    },
+    InferIrUnreachableNode {
+        field: FieldPath,
+    },
+    InferIrDisconnectedComponent {
+        field: FieldPath,
+    },
+    InferIrForbiddenStorageMetadata {
+        field: FieldPath,
+    },
+    InferIrSemanticAnchorMissing {
+        field: FieldPath,
+    },
+    InferIrFfnActivationMissing {
+        layer: LayerId,
+        expert: ExpertId,
+    },
+    InferIrExpertSelectionMissing {
+        layer: LayerId,
+    },
+    InferIrGateWeightNotConsumed {
+        field: FieldPath,
+    },
+    InferIrInputTokenValueIdMismatch {
+        field: FieldPath,
+    },
+    InferIrReductionSiteMissing {
+        field: FieldPath,
+    },
+    InferIrOpSignatureMismatch {
+        field: FieldPath,
+    },
+    InferIrRouterScoreOrphaned {
+        field: FieldPath,
+    },
+    InferIrSequenceStateNextOrphaned {
+        field: FieldPath,
+    },
     BudgetSwitchesPerTokenOverCap {
         decision_value: u16,
         upper_bound: u16,
@@ -965,6 +1088,127 @@ mod tests {
                 site: ReductionSiteId("ffn.0.acc".to_owned()),
                 projected_max_abs: i32::MAX as u64 + 1,
             },
+            ValidationCode::InferIrRouterPresentForDenseLayer {
+                layer: LayerId::new(1),
+            },
+            ValidationCode::InferIrRouterMatVecMissingForRoutedLayer {
+                layer: LayerId::new(2),
+            },
+            ValidationCode::InferIrSequenceSemanticsUnsupportedV1 {
+                field: FieldPath::from("sequence_semantics.state_slots"),
+            },
+            ValidationCode::InferIrEmbeddingNotUnique {
+                field: FieldPath::from("nodes.embedding"),
+            },
+            ValidationCode::InferIrDecodeNotUnique {
+                field: FieldPath::from("nodes.decode"),
+            },
+            ValidationCode::InferIrClassifyNotUnique {
+                field: FieldPath::from("nodes.classify"),
+            },
+            ValidationCode::InferIrExpertCoverageMismatch {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(1),
+            },
+            ValidationCode::InferIrRouteCoverageMismatch {
+                layer: LayerId::new(0),
+            },
+            ValidationCode::InferIrSemanticCheckpointEmittedHere {
+                field: FieldPath::from("anchors.semantic_checkpoint"),
+            },
+            ValidationCode::InferIrEffectChainNotLinear {
+                field: FieldPath::from("effects"),
+            },
+            ValidationCode::InferIrEffectIdEdgeTokenViolation {
+                field: FieldPath::from("effects"),
+            },
+            ValidationCode::InferIrTopologicalOrderMismatch {
+                field: FieldPath::from("nodes"),
+            },
+            ValidationCode::InferIrValueProducerMissing { value_id: 7 },
+            ValidationCode::InferIrValueFormatMismatch {
+                field: FieldPath::from("values.format"),
+            },
+            ValidationCode::InferIrNormFormatMismatch {
+                field: FieldPath::from("nodes.norm"),
+            },
+            ValidationCode::InferIrExpertSectionRoleMismatch {
+                layer: LayerId::new(3),
+                expert: ExpertId::new(4),
+            },
+            ValidationCode::InferIrNonV1RouterSemantics {
+                layer: LayerId::new(5),
+            },
+            ValidationCode::InferIrDenseRoutedShapeMismatch {
+                layer: LayerId::new(6),
+            },
+            ValidationCode::InferIrDecodePlanMismatch {
+                field: FieldPath::from("nodes.decode.plan"),
+            },
+            ValidationCode::InferIrDecodeRngBindingMismatch {
+                field: FieldPath::from("nodes.decode.effects"),
+            },
+            ValidationCode::InferIrUnexpectedRngEffectOnPureOp {
+                field: FieldPath::from("nodes.classify.effects"),
+            },
+            ValidationCode::InferIrSequenceSlotCoverageMismatch {
+                layer: LayerId::new(7),
+            },
+            ValidationCode::InferIrOpHistogramTotalMismatch {
+                field: FieldPath::from("result.op_histogram"),
+            },
+            ValidationCode::InferIrFaultBoundaryEmittedV1Forbidden {
+                field: FieldPath::from("effects"),
+            },
+            ValidationCode::InferIrResidualBoundaryMismatch {
+                field: FieldPath::from("nodes.combine_residual"),
+            },
+            ValidationCode::InferIrTokenIngressAmbiguous {
+                field: FieldPath::from("token_inputs"),
+            },
+            ValidationCode::InferIrSemanticEquivalenceFailed {
+                field: FieldPath::from("semantic_equivalence.fixture"),
+            },
+            ValidationCode::InferIrCycleDetected {
+                field: FieldPath::from("nodes"),
+            },
+            ValidationCode::InferIrUnreachableNode {
+                field: FieldPath::from("nodes"),
+            },
+            ValidationCode::InferIrDisconnectedComponent {
+                field: FieldPath::from("nodes"),
+            },
+            ValidationCode::InferIrForbiddenStorageMetadata {
+                field: FieldPath::from("values.layout"),
+            },
+            ValidationCode::InferIrSemanticAnchorMissing {
+                field: FieldPath::from("anchors"),
+            },
+            ValidationCode::InferIrFfnActivationMissing {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(0),
+            },
+            ValidationCode::InferIrExpertSelectionMissing {
+                layer: LayerId::new(0),
+            },
+            ValidationCode::InferIrGateWeightNotConsumed {
+                field: FieldPath::from("values.gate_weight"),
+            },
+            ValidationCode::InferIrInputTokenValueIdMismatch {
+                field: FieldPath::from("token_inputs.value_id"),
+            },
+            ValidationCode::InferIrReductionSiteMissing {
+                field: FieldPath::from("nodes.reduction_site"),
+            },
+            ValidationCode::InferIrOpSignatureMismatch {
+                field: FieldPath::from("nodes.signature"),
+            },
+            ValidationCode::InferIrRouterScoreOrphaned {
+                field: FieldPath::from("values.router_score"),
+            },
+            ValidationCode::InferIrSequenceStateNextOrphaned {
+                field: FieldPath::from("values.sequence_state_next"),
+            },
             ValidationCode::BudgetSwitchesPerTokenOverCap {
                 decision_value: 7,
                 upper_bound: 9,
@@ -1010,6 +1254,17 @@ mod tests {
                     "expected": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
                     "observed": "sha256:0606060606060606060606060606060606060606060606060606060606060606"
                 }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::InferIrRouterPresentForDenseLayer {
+                layer: LayerId::new(7),
+            })
+            .expect("iir router diagnostic serializes"),
+            serde_json::json!({
+                "kind": "InferIrRouterPresentForDenseLayer",
+                "fields": { "layer": 7 }
             })
         );
 

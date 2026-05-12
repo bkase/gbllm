@@ -1,0 +1,5 @@
+qg_reject = 8
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_export_provenance_missing_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes one tensor export provenance entry"

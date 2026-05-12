@@ -1,0 +1,5 @@
+qg_reject = 20
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_determinism_requires_enforced_reduction_order_inputs"
+base_fixture = "dense_toy0"
+mutation = "marks BitExact reduction order policy as not enforced"

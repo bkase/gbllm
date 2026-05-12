@@ -1,0 +1,107 @@
+schema = "f_b5.review_anchor_ids.v1"
+fixture = "routed_basic"
+status = "exported"
+source = "golden/routed_basic/infer_ir.json.result.product.anchors"
+anchor_count = 17
+
+[[anchors]]
+node_id = 0
+op_tag = "Embedding"
+anchor_id = "sha256:a6a7c8017c9a2af8b62543759d17fc3124c96d090352215cd19725284a156c46"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 1
+op_tag = "Norm"
+anchor_id = "sha256:ebcf60806b30cb106724294dd88bc47fe2bd1f63c3ecc2583cda6ba15a68cf31"
+reduction_site = "norm.0"
+
+[[anchors]]
+node_id = 2
+op_tag = "CombineResidual"
+anchor_id = "sha256:39d251bd257b0ddf5e7f4b9bb058b48479e1a079c8fc59325902652b994efc97"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 3
+op_tag = "Norm"
+anchor_id = "sha256:390aeeea8419227df7a283a829b42fc1e7a710d890e9d9b1251fd01d0eab96bf"
+reduction_site = "norm.1"
+
+[[anchors]]
+node_id = 4
+op_tag = "RouterMatVec"
+anchor_id = "sha256:bfa817fe31ca1260ce535d7aa48ba1ac4dd6733868a8f6df4d780422b9d7fd5f"
+reduction_site = "router.0"
+
+[[anchors]]
+node_id = 5
+op_tag = "RouteTop1"
+anchor_id = "sha256:c2f1b7b99660549ccb00f46209ac3acd73f4966dfb8b92849b6324d14f955a8d"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 6
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:74c765cc776c4101eaf606cf5d6dfa8b7ab1ad32ab43cf7a4b84521de23e6e6c"
+reduction_site = "expert.0.0.up"
+
+[[anchors]]
+node_id = 7
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:179fcaf6f4b31d857223050ddf5b888ec7d2aa271d9151a913d129d2256a01b1"
+reduction_site = "expert.0.1.up"
+
+[[anchors]]
+node_id = 8
+op_tag = "FfnActivation"
+anchor_id = "sha256:30d064e435ad339ca5733818f668d82e6d8a9c9e2903a2a2678ecb75375b7335"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 9
+op_tag = "FfnActivation"
+anchor_id = "sha256:9e610af0d00895d33bc7bee652998167fbade8b94cd9bebaee37b51277a8ff1c"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 10
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:21a452b8d9d86720e9bb0cdc0a3d79f0268cfdc1719ae38fdedc7f42a538fb37"
+reduction_site = "expert.0.0.down"
+
+[[anchors]]
+node_id = 11
+op_tag = "ExpertMatVec"
+anchor_id = "sha256:aeba70609a4b0da72586c4c90361c5b81b8f3e07187b9731b89330fcd91a596e"
+reduction_site = "expert.0.1.down"
+
+[[anchors]]
+node_id = 12
+op_tag = "SelectExpertTop1"
+anchor_id = "sha256:078b1e4c0aa11a872698c5319e8b51b06ddaf5521c389bbdb76042cb0c95b27f"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 13
+op_tag = "CombineResidual"
+anchor_id = "sha256:84adf8bbef9d666f916b687062db78b6fd233c52f9d52dcf946521415cb83da4"
+reduction_site = "none"
+
+[[anchors]]
+node_id = 14
+op_tag = "Norm"
+anchor_id = "sha256:265e6e62761b8d6ab8697e5816f1d7761141ddc6f110d8383e45179167cb05fb"
+reduction_site = "norm.2"
+
+[[anchors]]
+node_id = 15
+op_tag = "Classify"
+anchor_id = "sha256:4177e1cb3f6e723f4dab09e74a3678c3acc48098b233508315e6ca3efaff18f3"
+reduction_site = "classify"
+
+[[anchors]]
+node_id = 16
+op_tag = "DecodeToken"
+anchor_id = "sha256:4a475e093891f600ba712af7f97df5dbefc2d1194d02164c541a3048265fc485"
+reduction_site = "none"

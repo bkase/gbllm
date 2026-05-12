@@ -1,0 +1,4 @@
+qg_reject = 22
+diagnostic_code = "QuantGraphForbiddenStorageMetadata"
+severity = "Hard"
+clause = "2.3"

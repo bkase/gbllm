@@ -1,0 +1,4 @@
+qg_reject = 19
+diagnostic_code = "QuantGraphAuxBlobRefSizeMismatch"
+severity = "Hard"
+clause = "8.5 SC-13"
