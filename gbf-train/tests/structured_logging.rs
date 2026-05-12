@@ -14,8 +14,8 @@ use gbf_train::logging::{
 };
 use gbf_train::preflight::ExpertBudgetPreflightReport;
 use gbf_train::teacher::{
-    DenseTeacherModel, TeacherFreezeMetadata, TeacherStorageFingerprint, TeacherWeightFingerprint,
-    freeze_teacher_with_logging,
+    DenseTeacherModel, TeacherFreezeMetadata, TeacherStorageFingerprint, TeacherStorageIdentity,
+    TeacherWeightFingerprint, freeze_teacher_with_logging,
 };
 use tracing_subscriber::prelude::*;
 
@@ -430,7 +430,16 @@ impl DenseTeacherModel for LoggingTeacherModel {
     }
 
     fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
-        TeacherStorageFingerprint::new((self.weights.as_ptr() as usize).to_le_bytes()).unwrap()
+        let mut bytes = Vec::from("structured-logging-teacher:f32:weights:");
+        bytes.extend_from_slice(&self.weights.len().to_le_bytes());
+        for weight in &self.weights {
+            bytes.extend_from_slice(&weight.to_le_bytes());
+        }
+        TeacherStorageFingerprint::new(bytes).unwrap()
+    }
+
+    fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+        TeacherStorageIdentity::new((self.weights.as_ptr() as usize).to_le_bytes()).unwrap()
     }
 
     fn teacher_requires_grad(&self) -> bool {

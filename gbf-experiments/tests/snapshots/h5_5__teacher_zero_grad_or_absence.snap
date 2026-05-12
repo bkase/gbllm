@@ -1,0 +1,21 @@
+---
+source: gbf-experiments/tests/loss_grad_flow_s2/h5_5.rs
+expression: "serde_json::to_string_pretty(&fixture).expect(\"snapshot JSON\")"
+---
+{
+  "sub_hypothesis": "H5.5",
+  "loss_term": "lambda_distill",
+  "in_scope_grad_norms": {
+    "student_logits": 0.05330018
+  },
+  "stop_gradient_grad_norms": {
+    "teacher_logits": 0.0
+  },
+  "non_default_value_used": true,
+  "numerical_stability_passed": true,
+  "diagnostic_subchecks": [],
+  "detached_grad_absence": {
+    "teacher_logits": true
+  },
+  "sub_passed": true
+}

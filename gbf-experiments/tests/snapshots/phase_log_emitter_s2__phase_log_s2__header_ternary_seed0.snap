@@ -1,0 +1,5 @@
+---
+source: gbf-experiments/tests/phase_log_emitter_s2.rs
+expression: "String::from_utf8(gbf_experiments::s1::schema::S1CanonicalJson::to_vec(&header).unwrap()).unwrap()"
+---
+{"build_kind":"s2-ternary-full","executed_checkpoint_steps":[4000,5000,8000,10000],"full_s2_phase_boundaries":[4000,5000,8000,10000],"hardness_ramp_id":"PhaseCRampD2+PhaseDRampD2","optimizer_steps":10000,"phase_log_self_hash":"sha256:ed7b3dcedbb534afec58d33b09050277ab0907659e740a45bf03cbfdde5bc87e","schema":"s2_phase_log.v1","seed":0,"teacher_freeze_step":4000,"train_config_hash":"sha256:0101010101010101010101010101010101010101010101010101010101010101"}

@@ -1,0 +1,14 @@
+---
+source: gbf-experiments/tests/preregistration_check_s2.rs
+expression: fixture.redact_known_commits(&result.stderr)
+---
+{"description":"extract section + hash","event":"prereg_stage_start","stage":1}
+{"event":"prereg_section_hash_compare","expected":"sha256:7f096e20ccd869b3542d8bbe471818b09823e9f1a794b56c38849684348c9a61","matches":true,"observed":"sha256:7f096e20ccd869b3542d8bbe471818b09823e9f1a794b56c38849684348c9a61"}
+{"event":"prereg_section_hash_compare","expected":"sha256:7f096e20ccd869b3542d8bbe471818b09823e9f1a794b56c38849684348c9a61","matches":true,"observed":"sha256:7f096e20ccd869b3542d8bbe471818b09823e9f1a794b56c38849684348c9a61"}
+{"description":"strict ancestor check","event":"prereg_stage_start","stage":2}
+{"event":"prereg_ancestor_check","first_result_commit":"<first_result_commit>","is_strict_ancestor":true,"predictions_commit":"<predictions_commit>"}
+{"description":"non-null result scan","event":"prereg_stage_start","stage":3}
+{"commit":"<template_commit>","event":"prereg_commit_scanned","introduces_non_null_result":false}
+{"commit":"<first_result_commit>","event":"prereg_commit_scanned","introduces_non_null_result":true}
+{"commit":"<final_report_commit>","event":"prereg_commit_scanned","introduces_non_null_result":false}
+{"event":"prereg_done","exit_code":0,"passed":true}

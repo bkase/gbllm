@@ -17,6 +17,8 @@ gbf-report = { path = "../gbf-report" }
 default = ["phase-a"]
 phase-a = ["gbf-experiments/phase-a"]
 ablation = ["gbf-experiments/ablation"]
+s2-full = ["gbf-experiments/s2-full"]
+s2-ablation = ["gbf-experiments/s2-ablation"]
 falsify = ["phase-a", "gbf-experiments/falsify"]
 
 [dev-dependencies]

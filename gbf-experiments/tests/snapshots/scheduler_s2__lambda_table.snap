@@ -1,0 +1,55 @@
+---
+source: gbf-experiments/tests/lambdas_s2.rs
+expression: pretty_json(&json!(rows))
+---
+[
+  {
+    "build_kind": "s2_ternary_full",
+    "lambda_distill": 0.0,
+    "lambda_range": 0.0,
+    "lambda_zero": 0.0,
+    "step": 5000
+  },
+  {
+    "build_kind": "s2_ternary_full",
+    "lambda_distill": 1.0,
+    "lambda_range": 0.0,
+    "lambda_zero": 0.00009999999747378752,
+    "step": 5001
+  },
+  {
+    "build_kind": "s2_ternary_full",
+    "lambda_distill": 1.0,
+    "lambda_range": 0.0,
+    "lambda_zero": 0.00009999999747378752,
+    "step": 8500
+  },
+  {
+    "build_kind": "s2_ternary_full",
+    "lambda_distill": 1.0,
+    "lambda_range": 0.009999999776482582,
+    "lambda_zero": 0.00009999999747378752,
+    "step": 8501
+  },
+  {
+    "build_kind": "s2_fp_full",
+    "lambda_distill": 1.0,
+    "lambda_range": 0.0,
+    "lambda_zero": 0.0,
+    "step": 8501
+  },
+  {
+    "build_kind": "s2_ternary_nodistill",
+    "lambda_distill": 0.0,
+    "lambda_range": 0.0,
+    "lambda_zero": 0.00009999999747378752,
+    "step": 5001
+  },
+  {
+    "build_kind": "s2_ablation",
+    "lambda_distill": 0.0,
+    "lambda_range": 0.0,
+    "lambda_zero": 0.0,
+    "step": 4000
+  }
+]

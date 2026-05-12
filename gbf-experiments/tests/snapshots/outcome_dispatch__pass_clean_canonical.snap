@@ -1,0 +1,10 @@
+---
+source: gbf-experiments/tests/outcome_dispatch_s2.rs
+expression: "serde_json::to_string_pretty(&json!({\n    \"outcome\": outcome, \"decision\": decision_for_outcome(outcome),\n})).unwrap()"
+---
+{
+  "decision": {
+    "kind": "ProceedToS3"
+  },
+  "outcome": "Pass-clean"
+}

@@ -1,0 +1,52 @@
+---
+source: gbf-experiments/tests/inert_discipline_s2.rs
+expression: pretty_json(&report)
+---
+{
+  "build_kind": "s2_ternary_nodistill",
+  "eval_points": {
+    "balance": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "distill": {
+      "class": "computed_disabled",
+      "raw": 2.5,
+      "weighted": 0.0
+    },
+    "overflow": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "range": {
+      "class": "enabled",
+      "raw": 0.30000001192092896,
+      "weighted": 0.003000000026077032
+    },
+    "shape": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "switch": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "zero": {
+      "class": "enabled",
+      "raw": 0.20000000298023224,
+      "weighted": 0.000019999999494757503
+    },
+    "zrouter": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    }
+  },
+  "phase": "PhaseC",
+  "topology": "toy0",
+  "total_loss": 0.5030199885368347
+}

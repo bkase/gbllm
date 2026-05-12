@@ -9,7 +9,9 @@ publish = false
 default = ["phase-a"]
 phase-a = ["gbf-train/qat", "gbf-train/burn-adapter"]
 ablation = ["gbf-train/qat-ablation", "gbf-train/burn-adapter"]
-falsify = ["gbf-policy/falsify"]
+s2-full = ["gbf-train/qat", "gbf-train/burn-adapter"]
+s2-ablation = ["gbf-train/qat-ablation", "gbf-train/burn-adapter"]
+falsify = ["s2-full", "gbf-policy/falsify"]
 
 [dependencies]
 clap = { version = "=4.6.1", features = ["derive"] }

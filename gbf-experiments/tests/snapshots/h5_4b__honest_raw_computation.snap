@@ -1,0 +1,12 @@
+---
+source: gbf-experiments/tests/loss_grad_flow_s2/h5_4b.rs
+expression: "serde_json::to_string_pretty(&subcheck).expect(\"snapshot JSON\")"
+---
+{
+  "name": "lambda_zero_raw_honesty_at_zero_weight",
+  "lambda_value": 0.0,
+  "raw_loss_computed": true,
+  "raw_loss_finite": true,
+  "weighted_loss_value": 0.0,
+  "passed": true
+}

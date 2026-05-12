@@ -234,6 +234,7 @@ impl PhaseTransitionPlan {
 pub struct PhaseControls {
     position: PhasePosition,
     soft_progress: f32,
+    threshold_schedule_progress: UnitIntervalProgress,
 }
 
 impl PhaseControls {
@@ -241,6 +242,7 @@ impl PhaseControls {
         Self {
             position,
             soft_progress: position.progress_fraction(),
+            threshold_schedule_progress: UnitIntervalProgress::from_phase_position(position),
         }
     }
 
@@ -285,14 +287,83 @@ impl PhaseControls {
     }
 
     #[must_use]
-    pub const fn threshold_schedule_progress(self) -> f32 {
-        match self.phase().kind() {
-            TrainPhaseKind::DenseTeacherWarmup | TrainPhaseKind::RouterWarmup => 0.0,
-            TrainPhaseKind::ExpertTernaryQat => self.soft_progress,
-            TrainPhaseKind::FullNumericQat | TrainPhaseKind::HardenAndSelect => 1.0,
-        }
+    pub const fn threshold_schedule_progress(self) -> UnitIntervalProgress {
+        self.threshold_schedule_progress
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnitIntervalProgress {
+    value: f32,
+}
+
+impl UnitIntervalProgress {
+    pub fn new(value: f32) -> Result<Self, UnitIntervalProgressError> {
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
+            Ok(Self { value })
+        } else {
+            Err(UnitIntervalProgressError { value })
+        }
+    }
+
+    #[must_use]
+    pub const fn start() -> Self {
+        Self { value: 0.0 }
+    }
+
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self { value: 1.0 }
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f32 {
+        self.value
+    }
+
+    fn from_phase_position(position: PhasePosition) -> Self {
+        match position.phase().kind() {
+            TrainPhaseKind::DenseTeacherWarmup | TrainPhaseKind::RouterWarmup => Self::start(),
+            TrainPhaseKind::ExpertTernaryQat => Self::from_bounded_phase_fraction(position),
+            TrainPhaseKind::FullNumericQat | TrainPhaseKind::HardenAndSelect => Self::complete(),
+        }
+    }
+
+    fn from_bounded_phase_fraction(position: PhasePosition) -> Self {
+        if position.total_steps() <= 1 {
+            return Self::complete();
+        }
+        let denominator = position.total_steps() - 1;
+        debug_assert!(position.offset_steps() <= denominator);
+        let value = (position.offset_steps() as f64 / denominator as f64) as f32;
+        debug_assert!(value.is_finite() && (0.0..=1.0).contains(&value));
+        Self { value }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnitIntervalProgressError {
+    value: f32,
+}
+
+impl UnitIntervalProgressError {
+    #[must_use]
+    pub const fn value(self) -> f32 {
+        self.value
+    }
+}
+
+impl fmt::Display for UnitIntervalProgressError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unit interval progress must be finite and in [0, 1], got {}",
+            self.value
+        )
+    }
+}
+
+impl Error for UnitIntervalProgressError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhasePosition {
@@ -506,26 +577,48 @@ mod tests {
 
         let before = PhaseControls::from_position(scheduler.phase_position(10).unwrap());
         assert_eq!(before.phase().kind(), TrainPhaseKind::RouterWarmup);
-        assert_eq!(before.threshold_schedule_progress(), 0.0);
+        assert_eq!(before.threshold_schedule_progress().value(), 0.0);
 
         let start = PhaseControls::from_position(scheduler.phase_position(20).unwrap());
         assert_eq!(start.phase().kind(), TrainPhaseKind::ExpertTernaryQat);
-        assert_eq!(start.threshold_schedule_progress(), 0.0);
+        assert_eq!(start.threshold_schedule_progress().value(), 0.0);
 
         let middle = PhaseControls::from_position(scheduler.phase_position(24).unwrap());
-        assert!(middle.threshold_schedule_progress() > 0.44);
-        assert!(middle.threshold_schedule_progress() < 0.45);
+        assert!(middle.threshold_schedule_progress().value() > 0.44);
+        assert!(middle.threshold_schedule_progress().value() < 0.45);
 
         let end = PhaseControls::from_position(scheduler.phase_position(29).unwrap());
-        assert_eq!(end.threshold_schedule_progress(), 1.0);
+        assert_eq!(end.threshold_schedule_progress().value(), 1.0);
 
         let full_numeric = PhaseControls::from_position(scheduler.phase_position(30).unwrap());
         assert_eq!(full_numeric.phase().kind(), TrainPhaseKind::FullNumericQat);
-        assert_eq!(full_numeric.threshold_schedule_progress(), 1.0);
+        assert_eq!(full_numeric.threshold_schedule_progress().value(), 1.0);
 
         let harden = PhaseControls::from_position(scheduler.phase_position(40).unwrap());
         assert_eq!(harden.phase().kind(), TrainPhaseKind::HardenAndSelect);
-        assert_eq!(harden.threshold_schedule_progress(), 1.0);
+        assert_eq!(harden.threshold_schedule_progress().value(), 1.0);
+    }
+
+    #[test]
+    fn scheduler_phase_controls_threshold_progress_is_typed_unit_interval() {
+        let scheduler = scheduler();
+
+        for step in 0..50 {
+            let controls = PhaseControls::from_position(scheduler.phase_position(step).unwrap());
+            let progress = controls.threshold_schedule_progress();
+            assert!(
+                progress.value().is_finite(),
+                "threshold progress at step {step} must be finite"
+            );
+            assert!(
+                (0.0..=1.0).contains(&progress.value()),
+                "threshold progress at step {step} must stay in [0, 1]"
+            );
+        }
+
+        assert!(UnitIntervalProgress::new(f32::NAN).is_err());
+        assert!(UnitIntervalProgress::new(-0.1).is_err());
+        assert!(UnitIntervalProgress::new(1.1).is_err());
     }
 
     #[test]

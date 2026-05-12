@@ -1,0 +1,108 @@
+name: S2 PR Gates
+
+on:
+  pull_request:
+    paths:
+      - "gbf-experiments/**"
+      - "gbf-train/**"
+      - "gbf-policy/**"
+      - "gbf-data/**"
+      - "gbf-artifact/**"
+      - "gbf-foundation/**"
+      - "gbf-model/**"
+      - "gbf-test/**"
+      - "gbf-cli/**"
+      - "scripts/s2_*.sh"
+      - "history/rfcs/F-S2-qat-survives.md"
+      - ".github/workflows/s2-*.yml"
+
+concurrency:
+  group: s2-pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  s2-pr:
+    name: S2 PR gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: s2-pr-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            s2-pr-cargo-${{ runner.os }}-
+
+      - name: Run S2 PR gate suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/s2-pr
+
+          # bd-30fu owns the measured <60s integration_s2 budget; this job timeout
+          # is a hang guard, not a runtime-budget acceptance claim.
+          run_capture_log() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s2-pr/${name}.stdout") \
+              2> >(tee "artifacts/s2-pr/${name}.stderr.log" >&2)
+          }
+
+          run_capture_ndjson() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s2-pr/${name}.stdout") \
+              2> >(tee "artifacts/s2-pr/${name}.ndjson" >&2)
+          }
+
+          run_capture_log cargo-fmt cargo fmt --check --all
+          run_capture_log cargo-clippy-workspace-supported cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings
+          run_capture_log cargo-clippy-gbf-train-qat cargo clippy -p gbf-train --features qat,burn-adapter -- -D warnings
+          run_capture_log cargo-clippy-gbf-train-qat-ablation cargo clippy -p gbf-train --features qat-ablation,burn-adapter -- -D warnings
+          run_capture_log cargo-clippy-gbf-experiments-s2-full cargo clippy -p gbf-experiments --no-default-features --features s2-full -- -D warnings
+          run_capture_log cargo-clippy-gbf-experiments-s2-ablation cargo clippy -p gbf-experiments --no-default-features --features s2-ablation -- -D warnings
+          run_capture_log cargo-clippy-gbf-cli-s2-full cargo clippy -p gbf-cli --no-default-features --features s2-full -- -D warnings
+          run_capture_log gbf-experiments-s2-full cargo test -p gbf-experiments --features s2-full
+          run_capture_log falsification-s2 cargo test -p gbf-experiments --features falsify --test falsification
+          run_capture_log loss-grad-flow-s2 cargo test -p gbf-experiments --test loss_grad_flow_s2
+          run_capture_log linearstate-smoke-s2 cargo test -p gbf-experiments --test linearstate_smoke_s2
+          run_capture_log phase-transition-integ-s2 cargo test -p gbf-experiments --test phase_transition_integ_s2
+          run_capture_log canonical-json-s2 cargo test -p gbf-experiments --test canonical_json_s2
+          run_capture_log integration-s2 cargo test -p gbf-experiments --test integration_s2
+          run_capture_log oracle-re-run-s2 cargo test -p gbf-experiments --test oracle_re_run_s2
+          run_capture_log outcome-totality-s2 cargo test -p gbf-experiments --test outcome_totality_s2
+          run_capture_log gbf-train-burn-s2 cargo test -p gbf-train --features burn-adapter -- linear_state::gradient phase::linear_state_hardness distillation loss::config teacher::freeze
+          run_capture_log gbf-experiments-build-s2-full cargo build -p gbf-experiments --features s2-full
+          run_capture_log gbf-experiments-build-s2-ablation cargo build -p gbf-experiments --no-default-features --features s2-ablation
+          run_capture_ndjson s2-preregistration scripts/s2_preregistration_check.sh
+          run_capture_ndjson s2-determinism scripts/s2_determinism_check.sh
+          run_capture_ndjson s2-isolation scripts/s2_isolation_check.sh
+          run_capture_ndjson s2-api-drift scripts/s2_api_drift_check.sh
+          run_capture_ndjson s2-distill-determinism scripts/s2_distill_determinism_check.sh
+
+      - name: Upload S2 PR artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-pr-artifacts
+          path: |
+            artifacts/s2-pr/**/*.stdout
+            artifacts/s2-pr/**/*.stderr.log
+            artifacts/s2-pr/**/*.ndjson
+            /tmp/s2-*.json
+            experiments/S2/**
+          if-no-files-found: warn
+          retention-days: 14

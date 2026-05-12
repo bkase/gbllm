@@ -20,6 +20,10 @@ pub mod assertions {
         assert_eq!(a, b, "canonical JSON bytes differ");
     }
 
+    pub fn canonical_json_byte_eq(a: &[u8], b: &[u8]) {
+        assert_canonical_json_byte_eq(a, b);
+    }
+
     pub fn assert_self_hash_excludes_field(
         value: &Value,
         excluded_field: &str,
@@ -39,6 +43,38 @@ pub mod assertions {
             hash_without_field(value, excluded_field),
             hash_without_field(&changed, excluded_field),
             "self hash changed after mutating excluded field {excluded_field:?}"
+        );
+    }
+
+    pub fn self_hash_excludes_field(value: &Value, excluded_field: &str, replacement: Value) {
+        assert_self_hash_excludes_field(value, excluded_field, replacement);
+    }
+
+    pub fn phase_entry_invariants_assert(
+        value: &Value,
+        expected_from: Option<&str>,
+        expected_to: &str,
+    ) {
+        let object = value
+            .as_object()
+            .expect("phase entry invariant helper expects a JSON object");
+        assert_eq!(
+            object.get("event").and_then(Value::as_str),
+            Some("phase_transition")
+        );
+        assert_eq!(object.get("to").and_then(Value::as_str), Some(expected_to));
+        assert_eq!(
+            object.get("from").and_then(Value::as_str),
+            expected_from,
+            "phase transition source differed"
+        );
+        let step = object
+            .get("step")
+            .and_then(Value::as_u64)
+            .expect("phase entry must carry a numeric step");
+        assert!(
+            step < u64::MAX,
+            "phase step must leave room for later events"
         );
     }
 
@@ -129,11 +165,21 @@ pub mod fixtures {
     use std::collections::BTreeMap;
     use std::sync::OnceLock;
 
+    use gbf_model::qat::{RouterForwardOptions, RouterShape, Top1RouterQat};
+
     #[derive(Debug, Eq, PartialEq)]
     pub struct TinyCorpus {
         pub name: &'static str,
         pub bytes: &'static [u8],
         pub token_count: usize,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    pub struct TinyCorpusS2 {
+        pub inherited_s1: &'static TinyCorpus,
+        pub train_stub: TinyCorpus,
+        pub eval_stub: TinyCorpus,
+        pub manifest_path: &'static str,
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -205,6 +251,376 @@ pub mod fixtures {
             0
         }
     }
+
+    pub fn tiny_corpus_s2() -> &'static TinyCorpus {
+        &tiny_corpus_s2_fixture().train_stub
+    }
+
+    pub fn tiny_corpus_s2_fixture() -> &'static TinyCorpusS2 {
+        static CORPUS: OnceLock<TinyCorpus> = OnceLock::new();
+        static FIXTURE: OnceLock<TinyCorpusS2> = OnceLock::new();
+        let train_stub = CORPUS.get_or_init(|| {
+            tracing::debug!(
+                event_name = "fixture_loaded",
+                name = "s2-tinystories-stub-with-eval-split",
+                path = "gbf-experiments/tests/fixtures/tiny_corpus_s2/manifest.toml",
+                expected_bytes_sha = "fixture-local"
+            );
+            TinyCorpus {
+                name: "s2-tinystories-stub-with-eval-split",
+                bytes: b"Once upon a byte.\nEval bytes follow.\n",
+                token_count: 37,
+            }
+        });
+        FIXTURE.get_or_init(|| TinyCorpusS2 {
+            inherited_s1: tiny_corpus(),
+            train_stub: TinyCorpus {
+                name: train_stub.name,
+                bytes: b"Once upon a byte.\n",
+                token_count: 18,
+            },
+            eval_stub: TinyCorpus {
+                name: "s2-tinystories-eval-stub",
+                bytes: b"Eval bytes follow.\n",
+                token_count: 19,
+            },
+            manifest_path: "gbf-experiments/tests/fixtures/tiny_corpus_s2/manifest.toml",
+        })
+    }
+
+    pub mod synthetic_router {
+        use super::*;
+
+        #[derive(Clone, Debug)]
+        pub struct SyntheticRouterFixture {
+            pub router: Top1RouterQat,
+            pub input: Vec<f32>,
+            pub previous_distribution: Option<Vec<f32>>,
+            pub options: RouterForwardOptions,
+        }
+
+        pub fn four_experts() -> SyntheticRouterFixture {
+            let shape = RouterShape::new(2, 4, 1).expect("four-expert router shape is valid");
+            let router = Top1RouterQat::new(
+                shape,
+                vec![1.0, -1.0],
+                None,
+                vec![0.4, 0.2, -0.1, -0.3],
+                None,
+            )
+            .expect("four-expert router fixture is valid");
+            SyntheticRouterFixture {
+                router,
+                input: vec![0.5, -0.25],
+                previous_distribution: Some(vec![0.25, 0.25, 0.25, 0.25]),
+                options: RouterForwardOptions::hard_top1(4),
+            }
+        }
+
+        pub fn soft_top1_dispatch() -> SyntheticRouterFixture {
+            let mut fixture = four_experts();
+            fixture.options = RouterForwardOptions::soft_top1(4);
+            fixture
+        }
+    }
+}
+
+pub mod helpers {
+    pub mod phase_log_capture {
+        use serde::{Deserialize, Serialize};
+        use serde_json::Value;
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        pub struct PhaseLogEntry {
+            pub event: String,
+            pub from: Option<String>,
+            pub to: String,
+            pub step: u64,
+        }
+
+        #[derive(Clone, Debug, Default, PartialEq, Eq)]
+        pub struct PhaseLogCapture {
+            entries: Vec<PhaseLogEntry>,
+        }
+
+        impl PhaseLogCapture {
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            pub fn push_transition(&mut self, from: Option<&str>, to: &str, step: u64) {
+                self.entries.push(PhaseLogEntry {
+                    event: "phase_transition".to_owned(),
+                    from: from.map(str::to_owned),
+                    to: to.to_owned(),
+                    step,
+                });
+            }
+
+            pub fn entries(&self) -> &[PhaseLogEntry] {
+                &self.entries
+            }
+
+            pub fn to_values(&self) -> Vec<Value> {
+                self.entries
+                    .iter()
+                    .map(|entry| serde_json::to_value(entry).expect("phase entry encodes"))
+                    .collect()
+            }
+
+            pub fn to_ndjson(&self) -> Vec<u8> {
+                let mut bytes = Vec::new();
+                for entry in &self.entries {
+                    serde_json::to_writer(&mut bytes, entry).expect("phase entry encodes");
+                    bytes.push(b'\n');
+                }
+                bytes
+            }
+        }
+    }
+
+    pub mod gradient_capture {
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct TensorGradNorm {
+            pub name: String,
+            pub l2_norm: f32,
+        }
+
+        pub fn capture_explicit_grad_norm(
+            name: impl Into<String>,
+            gradient: &[f32],
+        ) -> TensorGradNorm {
+            let squared_sum = gradient.iter().map(|value| value * value).sum::<f32>();
+            TensorGradNorm {
+                name: name.into(),
+                l2_norm: squared_sum.sqrt(),
+            }
+        }
+
+        #[cfg(any(
+            feature = "phase-a",
+            feature = "ablation",
+            feature = "s2-full",
+            feature = "s2-ablation"
+        ))]
+        pub fn capture_trivial_burn_grad_norms() -> Vec<TensorGradNorm> {
+            use gbf_train::adapter::burn::{
+                BurnDevice, BurnNdArrayAutodiffBackend, float_tensor_from_vec,
+                float_tensor_into_vec,
+            };
+
+            type B = BurnNdArrayAutodiffBackend;
+            let device = BurnDevice::<B>::default();
+            let input = float_tensor_from_vec::<B, 1>(vec![2.0, -3.0], [2], &device)
+                .expect("trivial autodiff tensor builds")
+                .require_grad();
+            let loss = (input.clone() * input.clone()).sum();
+            let gradients = loss.backward();
+            let grad = input.grad(&gradients).expect("input receives gradients");
+            let grad_values = float_tensor_into_vec(grad).expect("gradient reads back");
+
+            vec![capture_explicit_grad_norm("input", &grad_values)]
+        }
+    }
+
+    pub mod scripted_falsify_runner {
+        use std::cell::RefCell;
+        use std::panic::{RefUnwindSafe, UnwindSafe};
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum BrokenS2Kind {
+            F1PhaseBSkipsTernary,
+            F2PhaseDUnfreezesTeacher,
+            F3DistillTempInverted,
+            F4ThresholdPerWeight,
+            F5ZeroLossShortCircuit,
+            F6LinearStateGradDead,
+        }
+
+        thread_local! {
+            static ACTIVE_BROKEN_KIND: RefCell<Option<BrokenS2Kind>> = const { RefCell::new(None) };
+        }
+
+        #[derive(Debug)]
+        pub struct ScriptedFalsifyGuard {
+            previous: Option<BrokenS2Kind>,
+        }
+
+        impl ScriptedFalsifyGuard {
+            pub fn activate(kind: BrokenS2Kind) -> Self {
+                tracing::debug!(
+                    event_name = "scripted_falsify_active",
+                    broken_kind = ?kind
+                );
+                let previous = ACTIVE_BROKEN_KIND.with(|active| active.replace(Some(kind)));
+                Self { previous }
+            }
+        }
+
+        impl Drop for ScriptedFalsifyGuard {
+            fn drop(&mut self) {
+                ACTIVE_BROKEN_KIND.with(|active| {
+                    active.replace(self.previous);
+                });
+            }
+        }
+
+        pub fn active_broken_kind() -> Option<BrokenS2Kind> {
+            ACTIVE_BROKEN_KIND.with(|active| *active.borrow())
+        }
+
+        pub fn run_with_broken_kind<R>(
+            kind: BrokenS2Kind,
+            f: impl FnOnce() -> R + UnwindSafe + RefUnwindSafe,
+        ) -> R {
+            let _guard = ScriptedFalsifyGuard::activate(kind);
+            f()
+        }
+    }
+
+    pub mod tiny_model_s2 {
+        use gbf_train::phase::{TrainPhaseKind, TrainingPhaseSchedule};
+        use gbf_train::scheduler::{PhaseControlledModel, PhaseControls};
+
+        pub type PhaseKindFixture = TrainPhaseKind;
+
+        #[derive(Clone, Debug, Default)]
+        pub struct TinyModelS2 {
+            applied: Vec<PhaseControls>,
+        }
+
+        impl TinyModelS2 {
+            pub fn applied_controls(&self) -> &[PhaseControls] {
+                &self.applied
+            }
+
+            pub fn applied_kinds(&self) -> Vec<PhaseKindFixture> {
+                self.applied
+                    .iter()
+                    .map(|controls| controls.phase().kind())
+                    .collect()
+            }
+        }
+
+        impl PhaseControlledModel for TinyModelS2 {
+            fn apply_phase_controls(&mut self, controls: PhaseControls) {
+                self.applied.push(controls);
+            }
+        }
+
+        pub fn five_phase_schedule_fixture(steps_per_phase: u64) -> TrainingPhaseSchedule {
+            TrainingPhaseSchedule::default_five_phase(steps_per_phase)
+                .expect("fixture schedule is canonical five-phase")
+        }
+
+        pub fn five_phase_fixture() -> (TinyModelS2, TrainingPhaseSchedule) {
+            (TinyModelS2::default(), five_phase_schedule_fixture(2))
+        }
+    }
+
+    pub mod tracing_capture_s2 {
+        use crate::common::tracing_capture::{
+            TraceCapture, TracingEvent, captured_events, with_trace_capture,
+        };
+
+        pub type S2TraceCapture = TraceCapture;
+
+        pub fn capture_events<R>(f: impl FnOnce() -> R) -> (R, Vec<TracingEvent>) {
+            let capture = S2TraceCapture::default();
+            let result = with_trace_capture(&capture, f);
+            (result, captured_events(&capture))
+        }
+
+        pub fn events_to_ndjson(events: &[TracingEvent]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for event in events {
+                serde_json::to_writer(&mut bytes, &event_to_json(event))
+                    .expect("trace event encodes as JSON");
+                bytes.push(b'\n');
+            }
+            bytes
+        }
+
+        pub fn assert_event_emitted(events: &[TracingEvent], name: &str) {
+            assert!(
+                events.iter().any(|event| event.name == name),
+                "expected event {name:?} to be emitted; saw {:?}",
+                events.iter().map(|event| &event.name).collect::<Vec<_>>()
+            );
+        }
+
+        pub fn assert_no_event(events: &[TracingEvent], name: &str) {
+            assert!(
+                events.iter().all(|event| event.name != name),
+                "event {name:?} was unexpectedly emitted"
+            );
+        }
+
+        fn event_to_json(event: &TracingEvent) -> serde_json::Value {
+            serde_json::json!({
+                "name": event.name,
+                "level": event.level,
+                "fields": event.fields,
+            })
+        }
+    }
+
+    pub mod structured_log_assert {
+        use crate::common::tracing_capture::TracingEvent;
+        use serde_json::Value;
+
+        pub fn assert_log_sequence(events: &[TracingEvent], sequence: &[(&str, &str)]) {
+            let mut cursor = 0;
+            for (field, expected) in sequence {
+                let Some((offset, _)) = events[cursor..]
+                    .iter()
+                    .enumerate()
+                    .find(|(_, event)| field_matches(event, field, expected))
+                else {
+                    panic!("missing ordered log field {field:?}={expected:?}");
+                };
+                cursor += offset + 1;
+            }
+        }
+
+        fn field_matches(event: &TracingEvent, field: &str, expected: &str) -> bool {
+            if field == "event" || field == "name" {
+                return event.name == expected;
+            }
+            match event.fields.get(field) {
+                Some(Value::String(value)) => value == expected,
+                Some(Value::Bool(value)) => value.to_string() == expected,
+                Some(Value::Number(value)) => value.to_string() == expected,
+                Some(Value::Null) | Some(Value::Array(_)) | Some(Value::Object(_)) | None => false,
+            }
+        }
+    }
+}
+
+pub mod proptest_strategies;
+
+#[macro_export]
+macro_rules! assert_event_emitted {
+    ($events:expr, name = $name:expr $(,)?) => {
+        $crate::common::helpers::tracing_capture_s2::assert_event_emitted($events, $name)
+    };
+}
+
+#[macro_export]
+macro_rules! assert_no_event {
+    ($events:expr, name = $name:expr $(,)?) => {
+        $crate::common::helpers::tracing_capture_s2::assert_no_event($events, $name)
+    };
+}
+
+#[macro_export]
+macro_rules! assert_log_sequence {
+    ($events:expr, [$($entry:expr),* $(,)?] $(,)?) => {
+        $crate::common::helpers::structured_log_assert::assert_log_sequence(
+            $events,
+            &[$($entry),*],
+        )
+    };
 }
 
 pub mod injectable_rng {
@@ -387,6 +803,7 @@ pub mod tracing_capture {
 
     static ACTIVE_TRACE_CAPTURES: Mutex<Vec<ActiveTraceSink>> = Mutex::new(Vec::new());
     static GLOBAL_TRACE_CAPTURE_INIT: Once = Once::new();
+    static TRACE_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct TracingEvent {
@@ -436,8 +853,6 @@ pub mod tracing_capture {
     }
 
     pub fn with_trace_capture<R>(capture: &TraceCapture, f: impl FnOnce() -> R) -> R {
-        static TRACE_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
-
         ensure_global_trace_capture();
         let _guard = TRACE_CAPTURE_LOCK
             .lock()

@@ -10,12 +10,20 @@ pub const BUILD_KIND: &str = "phase_a";
 #[cfg(all(feature = "ablation", not(feature = "phase-a")))]
 pub const BUILD_KIND: &str = "ablation";
 
+/// S1 build kind when compiling S2 without an active S1 build identity.
+#[cfg(not(any(feature = "phase-a", feature = "ablation")))]
+pub const BUILD_KIND: &str = "s1_unselected";
+
 /// Whether QAT code paths are active for the selected S1 build.
 #[cfg(all(feature = "phase-a", not(feature = "ablation")))]
 pub const QAT_ACTIVE: bool = true;
 
 /// Whether QAT code paths are active for the selected S1 build.
 #[cfg(all(feature = "ablation", not(feature = "phase-a")))]
+pub const QAT_ACTIVE: bool = false;
+
+/// Whether QAT code paths are active when no S1 build identity is selected.
+#[cfg(not(any(feature = "phase-a", feature = "ablation")))]
 pub const QAT_ACTIVE: bool = false;
 
 /// Whether the test-only falsification substitutes are compiled in.

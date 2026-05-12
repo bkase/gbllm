@@ -1,0 +1,63 @@
+---
+source: gbf-experiments/tests/composer_s2.rs
+expression: pretty_json(&report)
+---
+{
+  "eval_points": {
+    "balance": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "distill": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "overflow": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "range": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "shape": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "switch": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "zero": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    },
+    "zrouter": {
+      "class": "structurally_inert",
+      "raw": null,
+      "weighted": null
+    }
+  },
+  "lm_loss_next_byte_nats": 0.5,
+  "phase": "PhaseA",
+  "step": 0,
+  "total_loss": 0.5,
+  "unit": "nats",
+  "weighted": {
+    "balance": null,
+    "distill": null,
+    "overflow": null,
+    "range": null,
+    "shape": null,
+    "switch": null,
+    "zero": null,
+    "zrouter": null
+  }
+}

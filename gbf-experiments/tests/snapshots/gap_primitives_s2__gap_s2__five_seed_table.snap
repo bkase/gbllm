@@ -1,0 +1,15 @@
+---
+source: gbf-experiments/tests/gap_primitives_s2.rs
+expression: "serde_json::to_string_pretty(&decoded).expect(\"pretty JSON\")"
+---
+{
+  "build": "nodistill_vs_fp",
+  "gap_bpc": [
+    0.25,
+    0.3125,
+    0.375,
+    0.4375,
+    0.5
+  ],
+  "schema": "s2_report.v1"
+}

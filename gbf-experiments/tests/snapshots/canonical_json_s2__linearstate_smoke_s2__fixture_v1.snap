@@ -1,0 +1,5 @@
+---
+source: gbf-experiments/tests/canonical_json_s2.rs
+expression: "String::from_utf8(linear.canonical_json_bytes().expect(\"linear canonical JSON\")).unwrap()"
+---
+{"determinism_byte_equal":true,"fixture_batch":1,"fixture_hidden_dim":4,"fixture_id":"FIXTURE_V1","fixture_seq_len":8,"forward_finite":true,"input_grad_norm":0.75,"param_grad_norms":{"linear_state.input":0.5,"linear_state.recurrent":0.25},"schema":"s2_linearstate_grad_smoke.v1","smoke_passed":true}

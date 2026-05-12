@@ -1,0 +1,5 @@
+---
+source: gbf-experiments/tests/canonical_json_s2.rs
+expression: "String::from_utf8(S1CanonicalJson::to_vec(&ablation).expect(\"ablation canonical JSON\")).expect(\"utf8 JSON\")"
+---
+{"ablation_self_hash":"sha256:27bedcbdac36939c7cb9500020af5141f00be346aa3812bc1cecda7da46c7075","first_mismatch":null,"phase_a_eq_ablation":true,"s2_ablation_phase_a_checkpoint_sha":"sha256:0202020202020202020202020202020202020202020202020202020202020202","s2_ablation_tensor_payload_sha":"sha256:0303030303030303030303030303030303030303030303030303030303030303","s2_ternary_phase_a_checkpoint_sha":"sha256:0101010101010101010101010101010101010101010101010101010101010101","s2_ternary_tensor_payload_sha":"sha256:0303030303030303030303030303030303030303030303030303030303030303","schema":"s2_ablation.v1","seed":0}
