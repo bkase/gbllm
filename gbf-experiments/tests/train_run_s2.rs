@@ -142,8 +142,10 @@ fn tiny_ternary_seed0_run_completes_with_artifact_hashes_and_logs() {
                 .copied()
                 .collect::<Vec<_>>(),
             "final_checkpoint_sha": product.final_checkpoint_sha,
-            "phase_log_self_hash": product.phase_log_self_hash,
-            "distill_log_self_hash": product.distill_log_self_hash,
+            "phase_log_train_config_hash_nonzero": product.phase_log.train_config_hash != Hash256::ZERO,
+            "phase_log_self_hash_nonzero": product.phase_log_self_hash != Hash256::ZERO,
+            "distill_log_self_hash_nonzero": product.distill_log_self_hash != Hash256::ZERO,
+            "distill_log_links_phase_log": product.distillation_log.phase_log_self_hash == product.phase_log_self_hash,
             "score_self_hash": product.score_self_hash,
             "teacher_weight_fingerprint": product.teacher_weight_fingerprint,
             "teacher_storage_fingerprint": product.teacher_storage_fingerprint,
