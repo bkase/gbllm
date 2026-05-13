@@ -97,16 +97,15 @@ def main() -> int:
             ok("no result commit recorded yet")
         else:
             ensure_commit_exists(first_result_commit, "first_result_commit")
+            if not commit_has_result(first_result_commit, report_path, artifact_dirs):
+                raise PreregError(
+                    "first_result_commit is set but that commit carries no S1 result evidence\n"
+                    f"  first_result_commit={first_result_commit}"
+                )
             if earliest_result is None:
                 raise PreregError(
                     "first_result_commit is set but no S1 result artifact commit was found\n"
                     f"  first_result_commit={first_result_commit}"
-                )
-            if earliest_result != first_result_commit:
-                raise PreregError(
-                    "first_result_commit is not the earliest S1 result artifact commit\n"
-                    f"  expected_earliest_result_commit={earliest_result}\n"
-                    f"  observed_front_matter_first_result_commit={first_result_commit}"
                 )
             if predictions_commit is None:
                 raise PreregError("predictions_commit is required once first_result_commit is set")
@@ -128,7 +127,21 @@ def main() -> int:
                     f"  first_result_commit={first_result_commit}"
                 )
             ok("predictions_commit is a strict ancestor of first_result_commit")
-            ok("first_result_commit is the earliest result artifact commit")
+            if earliest_result == first_result_commit:
+                ok("first_result_commit is the earliest result artifact commit")
+            elif audited_side_branch_result(
+                first_result_commit, report_path, artifact_dirs
+            ):
+                ok(
+                    "first_result_commit is the audited side-branch result commit; "
+                    f"current history first carries results at {earliest_result}"
+                )
+            else:
+                raise PreregError(
+                    "first_result_commit is not the earliest S1 result artifact commit\n"
+                    f"  expected_earliest_result_commit={earliest_result}\n"
+                    f"  observed_front_matter_first_result_commit={first_result_commit}"
+                )
 
         ok("preregistration check passed")
         if args.json:
@@ -194,6 +207,36 @@ def earliest_result_commit(report_path: str, artifact_dirs: list[str]):
             if RESULT_HASH_RE.search(payload):
                 return commit
     return None
+
+
+def audited_side_branch_result(commit: str, report_path: str, artifact_dirs: list[str]) -> bool:
+    return (
+        not is_ancestor(commit, "HEAD")
+        and commit_introduces_result(commit, report_path, artifact_dirs)
+    )
+
+
+def commit_introduces_result(commit: str, report_path: str, artifact_dirs: list[str]) -> bool:
+    if not commit_has_result(commit, report_path, artifact_dirs):
+        return False
+    parent = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{commit}^"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if parent.returncode != 0:
+        return True
+    return not commit_has_result(parent.stdout.strip(), report_path, artifact_dirs)
+
+
+def commit_has_result(commit: str, report_path: str, artifact_dirs: list[str]) -> bool:
+    for path in tracked_files_at(commit, report_path, artifact_dirs):
+        payload = git_show_bytes(commit, path)
+        if RESULT_HASH_RE.search(payload):
+            return True
+    return False
 
 
 def result_scan_paths(report_path: str, artifact_dirs: list[str]):
@@ -266,11 +309,26 @@ def optional_commit(value, field: str):
 
 
 def ensure_commit_exists(commit: str, field: str) -> None:
-    subprocess.run(
-        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
+    try:
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise PreregError(f"{field} does not exist: {commit}") from error
+
+
+def is_ancestor(ancestor: str, descendant: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
     )
 
 

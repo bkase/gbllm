@@ -106,8 +106,25 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
         &self,
         input: BurnFloatTensor<B, D>,
     ) -> Result<BurnFloatTensor<B, D>, TernaryLinearBurnQatError> {
+        self.validate_input_shape(&input)?;
+        validate_finite_input(&input)?;
+        self.fake_quant_forward_validated_input(input)
+    }
+
+    pub(crate) fn fake_quant_forward_validated_input<const D: usize>(
+        &self,
+        input: BurnFloatTensor<B, D>,
+    ) -> Result<BurnFloatTensor<B, D>, TernaryLinearBurnQatError> {
+        self.validate_input_shape(&input)?;
+        self.fake_quant_forward_unchecked(input)
+    }
+
+    fn validate_input_shape<const D: usize>(
+        &self,
+        input: &BurnFloatTensor<B, D>,
+    ) -> Result<(), TernaryLinearBurnQatError> {
         let shape = self.core.shape();
-        let input_shape = float_tensor_shape(&input);
+        let input_shape = float_tensor_shape(input);
         let actual_last_dim = *input_shape
             .last()
             .expect("Burn tensors always carry a rank in their type");
@@ -118,8 +135,14 @@ impl<B: BurnBackend> TernaryLinearBurnQat<B> {
                 shape: input_shape.to_vec(),
             });
         }
-        validate_finite_input(&input)?;
+        Ok(())
+    }
 
+    fn fake_quant_forward_unchecked<const D: usize>(
+        &self,
+        input: BurnFloatTensor<B, D>,
+    ) -> Result<BurnFloatTensor<B, D>, TernaryLinearBurnQatError> {
+        let shape = self.core.shape();
         if self.core.hardness() == QuantHardness::Off {
             return Ok(burn_linear(
                 input,

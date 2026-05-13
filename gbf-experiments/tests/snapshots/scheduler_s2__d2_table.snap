@@ -1,0 +1,55 @@
+---
+source: gbf-experiments/tests/scheduler_s2.rs
+expression: "pretty_json(&json!({\n    \"ranges\":\n    [{\"steps\": \"1..=5000\", \"expert_qat\": \"off\", \"activation_qat\": \"off\",\n        \"norm_qat\": \"off\"},\n    {\"steps\": \"5001..=6000\", \"expert_qat\": \"off\", \"activation_qat\": \"off\",\n        \"norm_qat\": \"off\"},\n    {\"steps\": \"6001..=7000\", \"expert_qat\": \"soft\", \"activation_qat\": \"off\",\n        \"norm_qat\": \"off\"},\n    {\"steps\": \"7001..=8000\", \"expert_qat\": \"hard\", \"activation_qat\": \"off\",\n        \"norm_qat\": \"off\"},\n    {\"steps\": \"8001..=8500\", \"expert_qat\": \"hard\", \"activation_qat\": \"off\",\n        \"norm_qat\": \"off\"},\n    {\"steps\": \"8501..=9000\", \"expert_qat\": \"hard\", \"activation_qat\": \"soft\",\n        \"norm_qat\": \"soft\"},\n    {\"steps\": \"9001..=10000\", \"expert_qat\": \"hard\", \"activation_qat\": \"hard\",\n        \"norm_qat\": \"hard\"}], \"hard_counts\":\n    {\n        \"expert_qat\": expert_hard, \"activation_qat\": activation_hard,\n        \"norm_qat\": norm_hard\n    }\n}))"
+---
+{
+  "hard_counts": {
+    "activation_qat": 1000,
+    "expert_qat": 3000,
+    "norm_qat": 1000
+  },
+  "ranges": [
+    {
+      "activation_qat": "off",
+      "expert_qat": "off",
+      "norm_qat": "off",
+      "steps": "1..=5000"
+    },
+    {
+      "activation_qat": "off",
+      "expert_qat": "off",
+      "norm_qat": "off",
+      "steps": "5001..=6000"
+    },
+    {
+      "activation_qat": "off",
+      "expert_qat": "soft",
+      "norm_qat": "off",
+      "steps": "6001..=7000"
+    },
+    {
+      "activation_qat": "off",
+      "expert_qat": "hard",
+      "norm_qat": "off",
+      "steps": "7001..=8000"
+    },
+    {
+      "activation_qat": "off",
+      "expert_qat": "hard",
+      "norm_qat": "off",
+      "steps": "8001..=8500"
+    },
+    {
+      "activation_qat": "soft",
+      "expert_qat": "hard",
+      "norm_qat": "soft",
+      "steps": "8501..=9000"
+    },
+    {
+      "activation_qat": "hard",
+      "expert_qat": "hard",
+      "norm_qat": "hard",
+      "steps": "9001..=10000"
+    }
+  ]
+}

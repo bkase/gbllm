@@ -1,0 +1,5 @@
+---
+source: gbf-experiments/tests/oracle_re_run_s2.rs
+expression: "String::from_utf8(S1CanonicalJson::to_vec(&report).expect(\"canonical oracle JSON\")).expect(\"utf8 JSON\")"
+---
+{"metric_oracle_passed":true,"oracle_cases":["O-metric-0","O-metric-1","O-metric-2","O-metric-3","O-metric-4"],"oracle_re_run_self_hash":"sha256:d3cdb78953ce3fdbb20c75bc03c9c850cb8151dc4fce2eb1fda08d8ed2ce3655","s1_oracle_suite_version":"s1-d7.v1","schema":"s2_oracle_re_run.v1"}

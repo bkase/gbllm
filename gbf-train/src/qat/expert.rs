@@ -166,8 +166,8 @@ impl<B: BurnBackend> PhaseControlledModel for ExpertBlockBurnQat<B> {
     fn apply_phase_controls(&mut self, controls: PhaseControls) {
         self.set_hardness(controls.expert_qat(), controls.activation_qat());
         self.set_threshold_schedule_progress(
-            ThresholdScheduleProgress::new(controls.threshold_schedule_progress())
-                .expect("phase progress is finite and within [0, 1]"),
+            ThresholdScheduleProgress::new(controls.threshold_schedule_progress().value())
+                .unwrap_or_else(|_| ThresholdScheduleProgress::start()),
         );
     }
 }

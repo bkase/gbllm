@@ -1,0 +1,10 @@
+---
+source: gbf-experiments/tests/verifier_h4_s2.rs
+expression: "pretty_json(&json!({\n    \"phase_a_eq_ablation\": first.phase_a_eq_ablation, \"first_mismatch\":\n    first.first_mismatch, \"ternary_payload_sha\":\n    first.s2_ternary_tensor_payload_sha, \"ablation_payload_sha\":\n    first.s2_ablation_tensor_payload_sha,\n}))"
+---
+{
+  "ablation_payload_sha": "sha256:70a66e0f82ba2dc904408349286c087416f20dbe3ffb2600444d7a4675d70ffc",
+  "first_mismatch": null,
+  "phase_a_eq_ablation": true,
+  "ternary_payload_sha": "sha256:70a66e0f82ba2dc904408349286c087416f20dbe3ffb2600444d7a4675d70ffc"
+}

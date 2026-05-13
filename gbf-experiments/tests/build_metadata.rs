@@ -12,9 +12,19 @@ use serde_json::json;
 const EXPECTED_BUILD_KIND: &str = "phase_a";
 #[cfg(feature = "ablation")]
 const EXPECTED_BUILD_KIND: &str = "ablation";
+#[cfg(all(
+    feature = "s2-ablation",
+    not(any(feature = "phase-a", feature = "ablation"))
+))]
+const EXPECTED_BUILD_KIND: &str = "s1_unselected";
 #[cfg(feature = "phase-a")]
 const EXPECTED_QAT_ACTIVE: bool = true;
 #[cfg(feature = "ablation")]
+const EXPECTED_QAT_ACTIVE: bool = false;
+#[cfg(all(
+    feature = "s2-ablation",
+    not(any(feature = "phase-a", feature = "ablation"))
+))]
 const EXPECTED_QAT_ACTIVE: bool = false;
 
 #[test]

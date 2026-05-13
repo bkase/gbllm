@@ -18,7 +18,8 @@ use crate::adapter::burn::{
 };
 
 pub const DEFAULT_DISTILLATION_TEMPERATURE: f32 = 2.0;
-const KL_NEGATIVE_TOLERANCE: f32 = 1.0e-6;
+pub const KL_NEGATIVE_TOLERANCE: f32 = 1.0e-6;
+pub const LOG_SOFTMAX_SCALED_LOGIT_MAX_ABS: f32 = 88.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DistillationLogitSide {
@@ -71,6 +72,9 @@ pub enum DistillationLossError {
         value: f32,
     },
     NegativeLoss {
+        value: f32,
+    },
+    NegativeKlBeyondTolerance {
         value: f32,
     },
     #[cfg(feature = "burn-adapter")]
@@ -178,6 +182,10 @@ impl PartialEq for DistillationLossError {
             | (
                 Self::NegativeLoss { value: left_value },
                 Self::NegativeLoss { value: right_value },
+            )
+            | (
+                Self::NegativeKlBeyondTolerance { value: left_value },
+                Self::NegativeKlBeyondTolerance { value: right_value },
             ) => float_error_value_eq(*left_value, *right_value),
             #[cfg(feature = "burn-adapter")]
             (
@@ -261,6 +269,10 @@ impl fmt::Display for DistillationLossError {
                 f,
                 "distillation KL loss should be non-negative, got {value}"
             ),
+            Self::NegativeKlBeyondTolerance { value } => write!(
+                f,
+                "distillation KL loss was below tolerance {KL_NEGATIVE_TOLERANCE}, got {value}"
+            ),
             #[cfg(feature = "burn-adapter")]
             Self::InvalidClassDim { class_dim, rank } => write!(
                 f,
@@ -295,7 +307,8 @@ impl Error for DistillationLossError {
             | Self::NegativeLambdaDistill { .. }
             | Self::NonFiniteLambdaDistill { .. }
             | Self::NonFiniteLoss { .. }
-            | Self::NegativeLoss { .. } => None,
+            | Self::NegativeLoss { .. }
+            | Self::NegativeKlBeyondTolerance { .. } => None,
             #[cfg(feature = "burn-adapter")]
             Self::InvalidClassDim { .. } | Self::ShapeMismatch { .. } => None,
         }
@@ -342,6 +355,22 @@ impl<E> From<DistillationLossError> for FrozenTeacherDistillationError<E> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DistillInputs<'a> {
+    pub student_logits: &'a [f32],
+    pub teacher_logits: &'a [f32],
+    pub class_count: usize,
+    pub temperature: f32,
+    pub lambda_distill: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DistillProduct {
+    pub distill_loss_raw: f32,
+    pub pre_clamp_kl_loss: Option<f32>,
+    pub distill_loss_weighted: f32,
+}
+
 /// KL distillation for a single class distribution.
 pub fn distillation_loss(
     student_logits: &[f32],
@@ -364,22 +393,76 @@ pub fn batched_distillation_loss(
     class_count: usize,
     temperature: f32,
 ) -> Result<f32, DistillationLossError> {
-    validate_logits(student_logits, teacher_logits, temperature)?;
-    validate_class_count(student_logits.len(), class_count)?;
+    let product = distillation_product(DistillInputs {
+        student_logits,
+        teacher_logits,
+        class_count,
+        temperature,
+        lambda_distill: 1.0,
+    })?;
 
-    let row_count = student_logits.len() / class_count;
-    let mut loss_sum = 0.0;
+    Ok(product.distill_loss_raw)
+}
+
+pub fn distillation_product(
+    inputs: DistillInputs<'_>,
+) -> Result<DistillProduct, DistillationLossError> {
+    validate_logits(
+        inputs.student_logits,
+        inputs.teacher_logits,
+        inputs.temperature,
+    )?;
+    validate_class_count(inputs.student_logits.len(), inputs.class_count)?;
+    validate_lambda(inputs.lambda_distill)?;
+
+    let row_count = inputs.student_logits.len() / inputs.class_count;
+    let mut loss_sum = 0.0_f64;
     for row_index in 0..row_count {
-        let row_start = row_index * class_count;
-        let row_end = row_start + class_count;
-        loss_sum += single_row_distillation_loss(
-            &student_logits[row_start..row_end],
-            &teacher_logits[row_start..row_end],
-            temperature,
-        )?;
+        let row_start = row_index * inputs.class_count;
+        let row_end = row_start + inputs.class_count;
+        loss_sum += single_row_pre_clamp_kl_loss(
+            &inputs.student_logits[row_start..row_end],
+            &inputs.teacher_logits[row_start..row_end],
+            inputs.temperature,
+        );
     }
 
-    normalize_kl_loss(loss_sum / row_count as f32)
+    let pre_clamp_kl_loss = loss_sum / row_count as f64;
+    finalize_distillation_product(
+        pre_clamp_kl_loss,
+        inputs.lambda_distill,
+        row_count,
+        inputs.class_count,
+        inputs.temperature,
+    )
+}
+
+fn finalize_distillation_product(
+    pre_clamp_kl_loss: f64,
+    lambda_distill: f32,
+    row_count: usize,
+    class_count: usize,
+    temperature: f32,
+) -> Result<DistillProduct, DistillationLossError> {
+    let pre_clamp_kl_loss = checked_f64_loss_value(pre_clamp_kl_loss)?;
+    let distill_loss_raw = normalize_kl_loss(pre_clamp_kl_loss)?;
+    let distill_loss_weighted = normalize_weighted_loss(distill_loss_raw * lambda_distill)?;
+
+    tracing::debug!(
+        event = "distill_call",
+        batch_positions = row_count as u32,
+        vocab = class_count as u32,
+        temperature,
+        pre_clamp_kl = pre_clamp_kl_loss,
+        raw = distill_loss_raw,
+        weighted = distill_loss_weighted,
+    );
+
+    Ok(DistillProduct {
+        distill_loss_raw,
+        pre_clamp_kl_loss: Some(pre_clamp_kl_loss),
+        distill_loss_weighted,
+    })
 }
 
 pub fn weighted_distillation_loss(
@@ -451,29 +534,33 @@ pub fn burn_distillation_loss<B, const D: usize>(
 where
     B: BurnBackend,
 {
+    validate_temperature(temperature)?;
     validate_tensor_contract(&student_logits, &teacher_logits, class_dim)?;
-    validate_burn_logits(DistillationLogitSide::Student, &student_logits, temperature)?;
-    validate_burn_logits(DistillationLogitSide::Teacher, &teacher_logits, temperature)?;
 
     let teacher_log_probs =
         burn_log_softmax(teacher_logits.detach() / temperature, class_dim).detach();
     let teacher_probs = teacher_log_probs.clone().exp();
     let student_log_probs = burn_log_softmax(student_logits / temperature, class_dim);
     let kl_terms = teacher_probs * (teacher_log_probs - student_log_probs);
+    let loss = kl_terms.sum_dim(class_dim).mean() * temperature * temperature;
+    validate_burn_kl_loss(&loss)?;
 
-    Ok(kl_terms.sum_dim(class_dim).mean() * temperature * temperature)
+    Ok(loss.clamp_min(0.0))
 }
 
 #[cfg(feature = "burn-adapter")]
-pub fn burn_weighted_distillation_loss<B, const D: usize>(
-    raw_distillation_loss: BurnFloatTensor<B, D>,
+pub fn burn_weighted_distillation_loss<B>(
+    raw_distillation_loss: BurnFloatTensor<B, 1>,
     lambda_distill: f32,
-) -> Result<BurnFloatTensor<B, D>, DistillationLossError>
+) -> Result<BurnFloatTensor<B, 1>, DistillationLossError>
 where
     B: BurnBackend,
 {
     validate_lambda(lambda_distill)?;
-    Ok(raw_distillation_loss * lambda_distill)
+    validate_burn_kl_loss(&raw_distillation_loss)?;
+    let loss = raw_distillation_loss.clamp_min(0.0) * lambda_distill;
+    validate_burn_weighted_loss(&loss)?;
+    Ok(loss)
 }
 
 #[cfg(feature = "burn-adapter")]
@@ -496,11 +583,11 @@ where
         .map_err(Into::into)
 }
 
-fn single_row_distillation_loss(
+fn single_row_pre_clamp_kl_loss(
     student_logits: &[f32],
     teacher_logits: &[f32],
     temperature: f32,
-) -> Result<f32, DistillationLossError> {
+) -> f64 {
     let student_log_probs = log_softmax_temperature(student_logits, temperature);
     let teacher_log_probs = log_softmax_temperature(teacher_logits, temperature);
     let teacher_probs = teacher_log_probs
@@ -514,9 +601,9 @@ fn single_row_distillation_loss(
         .map(|((&teacher_prob, &teacher_log_prob), &student_log_prob)| {
             teacher_prob * (teacher_log_prob - student_log_prob)
         })
-        .sum::<f32>();
+        .sum::<f64>();
 
-    normalize_kl_loss(kl * temperature * temperature)
+    kl * f64::from(temperature) * f64::from(temperature)
 }
 
 fn validate_logits(
@@ -577,7 +664,14 @@ fn validate_scaled_logits(
     temperature: f32,
 ) -> Result<(), DistillationLossError> {
     for (index, &value) in logits.iter().enumerate() {
-        if !(value / temperature).is_finite() {
+        let scaled = value / temperature;
+        if !scaled.is_finite() || scaled.abs() >= LOG_SOFTMAX_SCALED_LOGIT_MAX_ABS {
+            tracing::error!(
+                event = "distill_error",
+                kind = "ScaledLogitOverflow",
+                tensor = %side,
+                max_abs = scaled.abs(),
+            );
             return Err(DistillationLossError::ScaledLogitOverflow {
                 side,
                 index,
@@ -617,10 +711,21 @@ fn normalize_kl_loss(loss: f32) -> Result<f32, DistillationLossError> {
 
     if loss < 0.0 {
         if loss >= -KL_NEGATIVE_TOLERANCE {
+            tracing::warn!(
+                event = "distill_kl_near_tolerance",
+                pre_clamp_kl = loss,
+                tolerance = KL_NEGATIVE_TOLERANCE,
+                remediation = "check teacher softmax stability",
+            );
             return Ok(0.0);
         }
 
-        return Err(DistillationLossError::NegativeLoss { value: loss });
+        tracing::error!(
+            event = "distill_error",
+            kind = "NegativeKlBeyondTolerance",
+            observed = loss,
+        );
+        return Err(DistillationLossError::NegativeKlBeyondTolerance { value: loss });
     }
 
     Ok(loss)
@@ -634,20 +739,36 @@ fn normalize_weighted_loss(loss: f32) -> Result<f32, DistillationLossError> {
     Ok(loss)
 }
 
-fn log_softmax_temperature(logits: &[f32], temperature: f32) -> Vec<f32> {
+fn checked_f64_loss_value(value: f64) -> Result<f32, DistillationLossError> {
+    if !value.is_finite() || value > f64::from(f32::MAX) || value < f64::from(f32::MIN) {
+        let value = if value.is_nan() {
+            f32::NAN
+        } else if value.is_sign_negative() {
+            f32::NEG_INFINITY
+        } else {
+            f32::INFINITY
+        };
+        return Err(DistillationLossError::NonFiniteLoss { value });
+    }
+
+    Ok(value as f32)
+}
+
+fn log_softmax_temperature(logits: &[f32], temperature: f32) -> Vec<f64> {
+    let temperature = f64::from(temperature);
     let max = logits
         .iter()
-        .map(|logit| logit / temperature)
-        .fold(f32::NEG_INFINITY, f32::max);
+        .map(|logit| f64::from(*logit) / temperature)
+        .fold(f64::NEG_INFINITY, f64::max);
     let exp_sum = logits
         .iter()
-        .map(|logit| (logit / temperature - max).exp())
-        .sum::<f32>();
+        .map(|logit| (f64::from(*logit) / temperature - max).exp())
+        .sum::<f64>();
     let log_denom = max + exp_sum.ln();
 
     logits
         .iter()
-        .map(|logit| logit / temperature - log_denom)
+        .map(|logit| f64::from(*logit) / temperature - log_denom)
         .collect()
 }
 
@@ -686,23 +807,47 @@ where
 }
 
 #[cfg(feature = "burn-adapter")]
-fn validate_burn_logits<B, const D: usize>(
-    side: DistillationLogitSide,
-    logits: &BurnFloatTensor<B, D>,
-    temperature: f32,
-) -> Result<(), DistillationLossError>
+fn validate_burn_kl_loss<B>(loss: &BurnFloatTensor<B, 1>) -> Result<(), DistillationLossError>
 where
     B: BurnBackend,
 {
-    let values = float_tensor_into_vec(logits.clone().detach())?;
-    validate_finite_logits(side, &values)?;
-    validate_scaled_logits(side, &values, temperature)
+    let value = burn_scalar_loss_value(loss)?;
+    normalize_kl_loss(value)?;
+    Ok(())
+}
+
+#[cfg(feature = "burn-adapter")]
+fn validate_burn_weighted_loss<B>(loss: &BurnFloatTensor<B, 1>) -> Result<(), DistillationLossError>
+where
+    B: BurnBackend,
+{
+    let value = burn_scalar_loss_value(loss)?;
+    normalize_weighted_loss(value)?;
+    Ok(())
+}
+
+#[cfg(feature = "burn-adapter")]
+fn burn_scalar_loss_value<B>(loss: &BurnFloatTensor<B, 1>) -> Result<f32, DistillationLossError>
+where
+    B: BurnBackend,
+{
+    let values = float_tensor_into_vec(loss.clone().detach())?;
+    match values.as_slice() {
+        [value] => Ok(*value),
+        [] => Err(DistillationLossError::EmptyLogits),
+        values => Err(DistillationLossError::LogitCountMismatch {
+            student_len: 1,
+            teacher_len: values.len(),
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::teacher::{TeacherStorageFingerprint, TeacherWeightFingerprint, freeze_teacher};
+    use crate::teacher::{
+        TeacherStorageFingerprint, TeacherStorageIdentity, TeacherWeightFingerprint, freeze_teacher,
+    };
 
     fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         assert!(
@@ -753,6 +898,54 @@ mod tests {
         let batched = batched_distillation_loss(&student_logits, &teacher_logits, 3, 2.0).unwrap();
 
         assert_close(batched, (row_a + row_b) / 2.0, 1.0e-6);
+    }
+
+    #[test]
+    fn distillation_product_records_pre_clamp_and_weighted_losses() {
+        let student_logits = [2.0, 0.0, -1.0, 0.5, -0.5, 1.0, -0.75, 0.25];
+        let teacher_logits = [0.5, 1.5, -0.5, 1.0, -1.0, 0.0, 0.25, -0.75];
+
+        let first = distillation_product(DistillInputs {
+            student_logits: &student_logits,
+            teacher_logits: &teacher_logits,
+            class_count: 4,
+            temperature: 2.0,
+            lambda_distill: 0.5,
+        })
+        .unwrap();
+        let second = distillation_product(DistillInputs {
+            student_logits: &student_logits,
+            teacher_logits: &teacher_logits,
+            class_count: 4,
+            temperature: 2.0,
+            lambda_distill: 0.5,
+        })
+        .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.distill_loss_raw.to_bits(),
+            second.distill_loss_raw.to_bits()
+        );
+        assert_close(
+            first.distill_loss_weighted,
+            first.distill_loss_raw * 0.5,
+            1.0e-6,
+        );
+        assert_eq!(first.pre_clamp_kl_loss, Some(first.distill_loss_raw));
+    }
+
+    #[test]
+    fn distillation_product_clamps_near_tolerance_negative_and_errors_beyond() {
+        let product = finalize_distillation_product(-0.5e-6_f64, 0.5, 1, 3, 2.0).unwrap();
+
+        assert_eq!(product.distill_loss_raw, 0.0);
+        assert_eq!(product.pre_clamp_kl_loss, Some(-0.5e-6));
+        assert_eq!(product.distill_loss_weighted, 0.0);
+        assert_eq!(
+            finalize_distillation_product(-2.0e-6_f64, 0.5, 1, 3, 2.0).unwrap_err(),
+            DistillationLossError::NegativeKlBeyondTolerance { value: -2.0e-6 }
+        );
     }
 
     #[test]
@@ -811,6 +1004,15 @@ mod tests {
                 index: 0,
                 value: f32::MAX,
                 temperature: f32::MIN_POSITIVE,
+            }
+        );
+        assert_eq!(
+            distillation_loss(&[0.0], &[176.0], 2.0).unwrap_err(),
+            DistillationLossError::ScaledLogitOverflow {
+                side: DistillationLogitSide::Teacher,
+                index: 0,
+                value: 176.0,
+                temperature: 2.0,
             }
         );
         assert_eq!(
@@ -891,7 +1093,16 @@ mod tests {
         }
 
         fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
-            TeacherStorageFingerprint::new((self.logits.as_ptr() as usize).to_le_bytes()).unwrap()
+            let mut bytes = Vec::from("distill-test-teacher:f32:logits:");
+            bytes.extend_from_slice(&self.logits.len().to_le_bytes());
+            for logit in &self.logits {
+                bytes.extend_from_slice(&logit.to_le_bytes());
+            }
+            TeacherStorageFingerprint::new(bytes).unwrap()
+        }
+
+        fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+            TeacherStorageIdentity::new((self.logits.as_ptr() as usize).to_le_bytes()).unwrap()
         }
 
         fn teacher_requires_grad(&self) -> bool {
@@ -937,6 +1148,39 @@ mod tests {
             let weighted = burn_weighted_distillation_loss(raw_loss, 0.25).unwrap();
 
             assert_close(float_tensor_into_vec(weighted).unwrap()[0], 0.1875, 1.0e-6);
+        }
+
+        #[test]
+        fn burn_distillation_loss_rejects_non_finite_computed_loss() {
+            let device = BurnDevice::<B>::default();
+            let student_logits =
+                float_tensor_from_vec::<B, 1>(vec![f32::INFINITY, 0.0], [2], &device).unwrap();
+            let teacher_logits =
+                float_tensor_from_vec::<B, 1>(vec![0.0, 1.0], [2], &device).unwrap();
+
+            let error = burn_distillation_loss(student_logits, teacher_logits, 0, 2.0).unwrap_err();
+
+            match error {
+                DistillationLossError::NonFiniteLoss { value } => {
+                    assert!(!value.is_finite());
+                }
+                error => panic!("expected NonFiniteLoss, got {error:?}"),
+            }
+        }
+
+        #[test]
+        fn burn_weighted_distillation_loss_rejects_non_finite_computed_loss() {
+            let device = BurnDevice::<B>::default();
+            let raw_loss = float_tensor_from_vec::<B, 1>(vec![f32::MAX], [1], &device).unwrap();
+
+            let error = burn_weighted_distillation_loss(raw_loss, 2.0).unwrap_err();
+
+            assert_eq!(
+                error,
+                DistillationLossError::NonFiniteLoss {
+                    value: f32::INFINITY
+                }
+            );
         }
 
         #[test]

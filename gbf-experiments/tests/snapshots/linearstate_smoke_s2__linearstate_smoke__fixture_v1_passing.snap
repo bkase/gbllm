@@ -1,0 +1,6 @@
+---
+source: gbf-experiments/tests/linearstate_smoke_s2.rs
+assertion_line: 106
+expression: "String::from_utf8(bytes).unwrap()"
+---
+{"determinism_byte_equal":true,"fixture_batch":1,"fixture_hidden_dim":4,"fixture_id":"FIXTURE_V1","fixture_seq_len":8,"forward_finite":true,"input_grad_norm":0.034404076635837555,"param_grad_norms":{"input_weight":0.019294051453471184,"recurrence_weight":0.022287748754024506},"schema":"s2_linearstate_grad_smoke.v1","smoke_passed":true,"smoke_self_hash":"sha256:8b71f9f3fd55aca428cc5b97ec3998cd5cb8a8ffc3dc45556a7aed5e1ae5c4a1"}

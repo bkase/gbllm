@@ -353,9 +353,11 @@ D4  Threshold plan
 
     S2 chooses one-per-output-row to match the deployment plan
     (PerOutputRow scales already pinned in §F4 / planv0 line 951)
-    rather than a single global threshold. Falsification F4-broken
-    (§13 O5) deliberately uses a per-weight threshold and must Refute
-    H5.4.
+    rather than a single global threshold. Falsification
+    F4_threshold_per_weight_structural_mask_fixture (§13 O5)
+    deliberately uses a structural per-weight-threshold mask fixture
+    and must Refute H5.4 without claiming a real helper/Burn-adapter
+    mutation.
 
     Threshold initialization occurs after the step-5000 optimizer update
     and Phase B-end checkpoint write, and before the first forward pass
@@ -1222,9 +1224,15 @@ Sub-hypotheses:
         zero grad on expert weights of magnitude above the threshold
         (within an epsilon tolerance for the indicator boundary).
         Per CLAUDE.md: matrix thresholds mirror the QAT ternary
-        model contract; this test uses a per-output-row threshold,
-        and the falsification F4-broken (per-weight thresholds) is
-        expected to Refute H5.4.
+        model contract; this test uses a per-output-row threshold.
+        The S2 falsification suite maps F4-broken to
+        F4_threshold_per_weight_structural_mask_fixture (§13 O5),
+        a structural mask fixture expected to Refute H5.4 without
+        claiming a real helper/Burn-adapter mutation.
+        It maps the H5.4b raw-diagnostic honesty fallback to
+        F5_zero_loss_diagnostic_runner_fallback (§13 O5), a diagnostic
+        runner sensitivity check rather than a real zero_loss helper or
+        Burn-adapter mutation.
 
   H5.5  lambda_distill:
         non-zero grad on student_logits.
@@ -1315,6 +1323,11 @@ Falsification:
   exists p in trainable. ||grad(p)||_2 == 0                 => Refuted
   ||grad(input)||_2 == 0                                    => Refuted
   Re-run gradient bytes != original gradient bytes          => Refuted
+
+  The S2 falsification suite maps F6-broken to
+  F6_linearstate_structural_smoke_fallback (§13 O5), a structural
+  smoke fallback expected to Refute H6 without claiming a mutation of
+  the public LinearState Burn adapter.
 
 Verdict:
   Refuted if any falsification hits.
@@ -2523,6 +2536,9 @@ Per sub-hypothesis fixture:
   H5.4b lambda_zero raw-diagnostic honesty:
     This is a diagnostic_subcheck inside the H5.4 FixtureResult, not
     a separate FixtureResult.
+    F5_zero_loss_diagnostic_runner_fallback (§13 O5) exercises this
+    report-sensitivity surface as a diagnostic-runner fallback; it is
+    not a real zero_loss helper or Burn-adapter mutation.
     Same synthetic matrix and thresholds as H5.4.
     lambda_zero = 0.0.
     Expected:
@@ -2669,45 +2685,53 @@ O5  Falsification suite (S2-specific)
                     suite must not rely on an empirical H2/H3 gap
                     failure for this case.
 
-      F4-broken-S2  threshold_per_weight:
+      F4-broken-S2  F4_threshold_per_weight_structural_mask_fixture:
+                    Structural fallback fixture for
                     ThresholdPlan = OneThresholdPerWeight (forbidden
                     by D4 and CLAUDE.md "Training Loss Beads").
-                    The falsification fixture assigns non-uniform
-                    per-weight thresholds chosen so that at least one
-                    weight is below the illegal per-weight threshold
-                    but above the legal row threshold, and at least one
-                    weight is above the illegal per-weight threshold
-                    but below the legal row threshold. Expected: H5.4
-                    sub-hypothesis Refuted because the observed
-                    gradient mask deviates from the legal per-row mask.
+                    The fixture assigns non-uniform per-weight
+                    thresholds chosen so that at least one weight is
+                    below the illegal per-weight threshold but above the
+                    legal row threshold, and at least one weight is
+                    above the illegal per-weight threshold but below the
+                    legal row threshold. Expected: H5.4 sub-hypothesis
+                    Refuted because the observed structural mask
+                    deviates from the legal per-row mask. This is not a
+                    real zero_loss helper or Burn-adapter mutation.
 
-      F5-broken-S2  zero_loss_on_already_zero_grad:
-                    The zero-loss helper short-circuits and returns
-                    0.0 without computing the L1 sum when
-                    lambda_zero = 0. This violates the "raw
-                    weighted-loss helpers must validate finite/
-                    non-negative raw diagnostics even when the
-                    configured weight is zero" rule (CLAUDE.md
-                    "Training Loss Beads"). Expected: the raw-diagnostic
-                    zero-loss fixture is Refuted because raw_loss is
-                    missing or incorrectly reported as computed. This is
-                    not a weighted-gradient failure: with lambda_zero = 0,
+      F5-broken-S2  F5_zero_loss_diagnostic_runner_fallback:
+                    Diagnostic-runner fallback for the case where the
+                    zero-loss helper would short-circuit and return 0.0
+                    without computing the L1 sum when lambda_zero = 0.
+                    Such behavior would violate the "raw weighted-loss
+                    helpers must validate finite/non-negative raw
+                    diagnostics even when the configured weight is zero"
+                    rule (CLAUDE.md "Training Loss Beads"). Expected:
+                    the raw-diagnostic zero-loss fixture is Refuted
+                    because raw_loss is missing or incorrectly reported
+                    as computed. This row proves H5.4b report
+                    sensitivity; it is not a real zero_loss helper or
+                    Burn-adapter mutation, and it is not a
+                    weighted-gradient failure: with lambda_zero = 0,
                     weighted gradients are expected to be zero.
 
-      F6-broken-S2  linearstate_grad_dead:
-                    The Burn adapter for LinearStateBlock returns
-                    a gradient with all zeros for the recurrence
-                    parameter. Expected: H6 Refuted (LS-2 violated).
+      F6-broken-S2  F6_linearstate_structural_smoke_fallback:
+                    Structural smoke fallback for a dead
+                    LinearState recurrence/readout gradient. Expected:
+                    H6 Refuted (LS-2 violated). This row proves H6
+                    smoke-report sensitivity to the structural fixture;
+                    it is not a mutation of the public LinearState Burn
+                    adapter.
 
     These are unit tests against the S2 framework, not actual S2
     runs.
     Required test files:
-      gbf-experiments/tests/falsification_s2/f1_phase_b_skips_ternary.rs
-      gbf-experiments/tests/falsification_s2/f2_phase_d_unfreezes_teacher.rs
-      gbf-experiments/tests/falsification_s2/f3_distill_temp_inverted.rs
-      gbf-experiments/tests/falsification_s2/f4_threshold_per_weight.rs
-      gbf-experiments/tests/falsification_s2/f5_zero_loss_short_circuit.rs
-      gbf-experiments/tests/falsification_s2/f6_linearstate_grad_dead.rs
+      gbf-experiments/tests/falsification_s2/f1.rs
+      gbf-experiments/tests/falsification_s2/f2.rs
+      gbf-experiments/tests/falsification_s2/f3.rs
+      gbf-experiments/tests/falsification_s2/f4.rs
+      gbf-experiments/tests/falsification_s2/f5.rs
+      gbf-experiments/tests/falsification_s2/f6.rs
     Gated by the test-only `falsify` feature on gbf-experiments so
     the broken substitutes cannot leak into a release build.
 
@@ -3361,7 +3385,7 @@ scripts/s2_distill_determinism_check.sh
 | AS2-3 | QuantHardness ramp shape inside Phase C: linear vs cosine vs piecewise step | Piecewise step at 1000 / 2000 boundaries (D2) | Why not anneal smoothly? | QuantHardness is a discrete enum with three variants (Off/Soft/Hard) at the gbf-model::qat level. A continuous ramp between two discrete values is undefined at the model surface. A piecewise schedule is honest about the discrete transitions, and the soak-then-ramp-then-hard pattern is a known-good QAT cadence. |
 | AS2-4 | lambda_distill default value | 1.0 (D3) | Why not 0.5? | 1.0 keeps distill_loss directly comparable across builds (no implicit scaling). The H3 weak-form gate accommodates the case where distillation does not strictly help on Toy0. |
 | AS2-5 | distillation_temperature default | 2.0 (D3) | Why not 1.0 or 4.0? | 2.0 is the default already pinned in gbf-train::loss::distillation::DEFAULT_DISTILLATION_TEMPERATURE and matches the existing distillation contract. Falsification F3-broken (T=0.5) is expected to be rejected by the train-config validator before training, not to rely on empirical H2/H3 behavior. |
-| AS2-6 | Threshold init: per-row vs per-matrix vs per-weight | One per output row (D4) | Per-weight gives finer control. | Forbidden by CLAUDE.md "Training Loss Beads" and by the deployed PerOutputRow scale granularity. Falsification F4-broken (per-weight) is expected to Refute H5.4. |
+| AS2-6 | Threshold init: per-row vs per-matrix vs per-weight | One per output row (D4) | Per-weight gives finer control. | Forbidden by CLAUDE.md "Training Loss Beads" and by the deployed PerOutputRow scale granularity. Falsification F4-broken is represented by `F4_threshold_per_weight_structural_mask_fixture`, a structural mask fixture expected to Refute H5.4 without claiming a real zero-loss helper/Burn-adapter mutation. |
 | AS2-7 | Threshold init multiplier: 0.7 vs other values like 0.5 or mean_abs * sqrt(2 / pi) | 0.7 * mean_abs(row) (D4) | Why exactly 0.7? | Matches the 1-bit LLM literature convention; alternative values are an A-block follow-up bead (F4 epic), not an S2 amendment. The exact value is part of train_config_hash so a change forces a new pass_version_S2. |
 | AS2-8 | s2-fp build: should it really run distillation from its own teacher, or be a strict no-distill fp baseline? | Run distillation from its own Phase A teacher (D6) | Doesn't this conflate "fp matters" with "distillation matters"? | The H2 gap measures the QUANTIZATION impact alone. To isolate quantization from distillation, both ternary and fp builds must distill from comparable teachers. The no-distill ternary control (s2_ternary_nodistill, H3) isolates distillation impact separately. |
 | AS2-9 | qat-fp-only feature: compile out QAT or guard at runtime? | Guard at runtime (16.2, 16.6) | A compile-out is more honest. | A compile-out makes the s2-fp binary smaller and structurally different from s2-ternary, breaking the "same binary surface, different config" property. Runtime guard preserves binary comparability. The s2-ablation build is the place for compile-out (16.4). |
@@ -3450,7 +3474,13 @@ F-S2 QAT Survives is correct when:
 
 10. The six-test S2 falsification suite passes: deliberately-broken
     implementations (F1-broken-S2..F6-broken-S2) produce the expected
-    Refuted verdicts, gated by the test-only `falsify` feature. S2
+    Refuted verdicts, gated by the test-only `falsify` feature. F4/F5/F6
+    use self-describing fallback labels
+    (`F4_threshold_per_weight_structural_mask_fixture`,
+    `F5_zero_loss_diagnostic_runner_fallback`,
+    `F6_linearstate_structural_smoke_fallback`) so structural mask,
+    diagnostic-runner, and smoke-fixture sensitivity are not read as
+    stronger real helper or Burn-adapter mutations. S2
     retires QAT survival risk on Toy0 only; it does not claim ROM,
     MoE, multi-timescale state, oracle round-trip, charset_v1, or
     v0_success readiness — those are later slices' proof obligations.

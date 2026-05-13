@@ -1,0 +1,7 @@
+---
+source: gbf-experiments/tests/phase_log_emitter_s2.rs
+expression: "first_jsonl_lines(&entries, 3)"
+---
+{"distill_loss":null,"events":[],"grad_norm":0.5,"hardness":{"activation_qat":"off","expert_qat":"off","norm_qat":"off"},"lambda_effective":{"lambda_balance":0.0,"lambda_distill":0.0,"lambda_overflow":0.0,"lambda_range":0.0,"lambda_shape":0.0,"lambda_switch":0.0,"lambda_zero":0.0,"lambda_zrouter":0.0},"phase":"phase-a","router_mode":"no-router","step":1,"teacher_frozen":false,"train_loss":1.0}
+{"distill_loss":null,"events":[],"grad_norm":0.5,"hardness":{"activation_qat":"off","expert_qat":"off","norm_qat":"off"},"lambda_effective":{"lambda_balance":0.0,"lambda_distill":0.0,"lambda_overflow":0.0,"lambda_range":0.0,"lambda_shape":0.0,"lambda_switch":0.0,"lambda_zero":0.0,"lambda_zrouter":0.0},"phase":"phase-a","router_mode":"no-router","step":2,"teacher_frozen":false,"train_loss":1.0}
+{"distill_loss":null,"events":[],"grad_norm":0.5,"hardness":{"activation_qat":"off","expert_qat":"off","norm_qat":"off"},"lambda_effective":{"lambda_balance":0.0,"lambda_distill":0.0,"lambda_overflow":0.0,"lambda_range":0.0,"lambda_shape":0.0,"lambda_switch":0.0,"lambda_zero":0.0,"lambda_zrouter":0.0},"phase":"phase-a","router_mode":"no-router","step":3,"teacher_frozen":false,"train_loss":1.0}

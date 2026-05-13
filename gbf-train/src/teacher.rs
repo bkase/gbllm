@@ -20,6 +20,7 @@ pub trait DenseTeacherModel: Clone {
     fn forward_no_grad(&self, input: Self::Input) -> Result<Self::Output, Self::ForwardError>;
     fn teacher_weight_fingerprint(&self) -> TeacherWeightFingerprint;
     fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint;
+    fn teacher_storage_identity(&self) -> TeacherStorageIdentity;
     fn teacher_requires_grad(&self) -> bool;
 }
 
@@ -68,6 +69,37 @@ impl TeacherStorageFingerprint {
 
         Ok(Self { bytes })
     }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        let mut hex = String::with_capacity(self.bytes.len() * 2);
+        for byte in &self.bytes {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("writing to a String should not fail");
+        }
+        hex
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TeacherStorageIdentity {
+    bytes: Vec<u8>,
+}
+
+impl TeacherStorageIdentity {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Result<Self, TeacherFreezeError> {
+        let bytes = bytes.into();
+        if bytes.is_empty() {
+            return Err(TeacherFreezeError::EmptyStorageIdentity);
+        }
+
+        Ok(Self { bytes })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +140,9 @@ impl TeacherFreezeMetadata {
 #[derive(Debug, Clone)]
 pub struct FrozenTeacher<M: DenseTeacherModel> {
     snapshot: M,
+    storage_fingerprint: TeacherStorageFingerprint,
     weight_fingerprint: TeacherWeightFingerprint,
+    requires_grad: bool,
 }
 
 impl<M: DenseTeacherModel> FrozenTeacher<M> {
@@ -120,6 +154,63 @@ impl<M: DenseTeacherModel> FrozenTeacher<M> {
     pub fn weight_fingerprint(&self) -> &TeacherWeightFingerprint {
         &self.weight_fingerprint
     }
+
+    #[must_use]
+    pub fn storage_fingerprint(&self) -> &TeacherStorageFingerprint {
+        &self.storage_fingerprint
+    }
+
+    #[must_use]
+    pub const fn requires_grad(&self) -> bool {
+        self.requires_grad
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TeacherFreezeGuard {
+    fired: bool,
+}
+
+impl TeacherFreezeGuard {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { fired: false }
+    }
+
+    #[must_use]
+    pub const fn has_fired(&self) -> bool {
+        self.fired
+    }
+
+    pub fn freeze<M>(&mut self, model: &M) -> Result<FrozenTeacher<M>, TeacherFreezeError>
+    where
+        M: DenseTeacherModel,
+    {
+        self.ensure_not_fired();
+        self.fired = true;
+        freeze_teacher(model)
+    }
+
+    pub fn freeze_with_logging<M>(
+        &mut self,
+        model: &M,
+        metadata: TeacherFreezeMetadata,
+        log_emitter: &TrainingLogEmitter,
+    ) -> Result<FrozenTeacher<M>, TeacherFreezeError>
+    where
+        M: DenseTeacherModel,
+    {
+        self.ensure_not_fired();
+        self.fired = true;
+        freeze_teacher_with_logging(model, metadata, log_emitter)
+    }
+
+    fn ensure_not_fired(&self) {
+        assert!(
+            !self.fired,
+            "teacher freeze guard fired more than once for one run"
+        );
+    }
 }
 
 pub fn freeze_teacher<M>(model: &M) -> Result<FrozenTeacher<M>, TeacherFreezeError>
@@ -128,10 +219,12 @@ where
 {
     let source_fingerprint = model.teacher_weight_fingerprint();
     let source_storage = model.teacher_storage_fingerprint();
+    let source_storage_identity = model.teacher_storage_identity();
     let mut snapshot = model.clone();
     snapshot.detach_for_teacher();
     let frozen_fingerprint = snapshot.teacher_weight_fingerprint();
     let frozen_storage = snapshot.teacher_storage_fingerprint();
+    let frozen_storage_identity = snapshot.teacher_storage_identity();
 
     if frozen_fingerprint != source_fingerprint {
         return Err(TeacherFreezeError::FingerprintMismatch {
@@ -140,7 +233,14 @@ where
         });
     }
 
-    if frozen_storage == source_storage {
+    if frozen_storage != source_storage {
+        return Err(TeacherFreezeError::StorageFingerprintMismatch {
+            source: source_storage,
+            frozen: frozen_storage,
+        });
+    }
+
+    if source_storage_identity == frozen_storage_identity {
         return Err(TeacherFreezeError::SharedStorage);
     }
 
@@ -150,7 +250,9 @@ where
 
     Ok(FrozenTeacher {
         snapshot,
+        storage_fingerprint: frozen_storage,
         weight_fingerprint: frozen_fingerprint,
+        requires_grad: false,
     })
 }
 
@@ -187,12 +289,17 @@ where
 pub enum TeacherFreezeError {
     EmptyFingerprint,
     EmptyStorageFingerprint,
+    EmptyStorageIdentity,
     EmptyMetadataField {
         name: &'static str,
     },
     FingerprintMismatch {
         source: TeacherWeightFingerprint,
         frozen: TeacherWeightFingerprint,
+    },
+    StorageFingerprintMismatch {
+        source: TeacherStorageFingerprint,
+        frozen: TeacherStorageFingerprint,
     },
     SharedStorage,
     FrozenSnapshotRequiresGrad,
@@ -206,10 +313,17 @@ impl fmt::Display for TeacherFreezeError {
             Self::EmptyStorageFingerprint => {
                 f.write_str("teacher storage fingerprint must not be empty")
             }
+            Self::EmptyStorageIdentity => f.write_str("teacher storage identity must not be empty"),
             Self::EmptyMetadataField { name } => write!(f, "{name} must not be empty"),
             Self::FingerprintMismatch { source, frozen } => write!(
                 f,
                 "frozen teacher fingerprint {} did not match source fingerprint {}",
+                frozen.to_hex(),
+                source.to_hex()
+            ),
+            Self::StorageFingerprintMismatch { source, frozen } => write!(
+                f,
+                "frozen teacher storage fingerprint {} did not match source storage fingerprint {}",
                 frozen.to_hex(),
                 source.to_hex()
             ),
@@ -230,8 +344,10 @@ impl Error for TeacherFreezeError {
             Self::Logging(error) => Some(error),
             Self::EmptyFingerprint
             | Self::EmptyStorageFingerprint
+            | Self::EmptyStorageIdentity
             | Self::EmptyMetadataField { .. }
             | Self::FingerprintMismatch { .. }
+            | Self::StorageFingerprintMismatch { .. }
             | Self::SharedStorage
             | Self::FrozenSnapshotRequiresGrad => None,
         }
@@ -259,9 +375,14 @@ mod tests {
         student.weights[0] = 10.0;
         student.requires_grad = true;
 
+        assert!(!teacher.requires_grad());
         assert_eq!(
             teacher.weight_fingerprint().bytes(),
             &[0, 0, 128, 63, 0, 0, 0, 64]
+        );
+        assert_eq!(
+            teacher.storage_fingerprint(),
+            &ToyTeacherModel::new([1.0, 2.0], true).teacher_storage_fingerprint()
         );
         assert_eq!(
             teacher.forward_no_grad(vec![2.0, 3.0]).unwrap(),
@@ -286,6 +407,40 @@ mod tests {
     }
 
     #[test]
+    fn freeze_teacher_records_deterministic_storage_and_weight_fingerprints() {
+        let first_replay = ToyTeacherModel::new([5.0, -7.0], true);
+        let second_replay = ToyTeacherModel::new([5.0, -7.0], true);
+
+        let first_teacher = freeze_teacher(&first_replay).unwrap();
+        let second_teacher = freeze_teacher(&second_replay).unwrap();
+
+        assert_eq!(
+            first_teacher.weight_fingerprint(),
+            second_teacher.weight_fingerprint()
+        );
+        assert_eq!(
+            first_teacher.storage_fingerprint(),
+            second_teacher.storage_fingerprint()
+        );
+        assert_ne!(
+            first_replay.teacher_storage_identity(),
+            second_replay.teacher_storage_identity()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "teacher freeze guard fired more than once for one run")]
+    fn teacher_freeze_guard_panics_on_second_freeze_attempt() {
+        let student = ToyTeacherModel::new([1.0, 2.0], true);
+        let mut guard = TeacherFreezeGuard::new();
+
+        let _ = guard.freeze(&student).unwrap();
+        assert!(guard.has_fired());
+
+        let _ = guard.freeze(&student);
+    }
+
+    #[test]
     fn freeze_teacher_rejects_snapshot_that_changes_weights_during_detach() {
         let student = BuggyDetachModel(ToyTeacherModel::new([1.0, 2.0], true));
 
@@ -293,6 +448,40 @@ mod tests {
             freeze_teacher(&student).unwrap_err(),
             TeacherFreezeError::FingerprintMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn freeze_teacher_rejects_snapshot_that_changes_storage_fingerprint_only() {
+        let student = StorageFingerprintDriftModel {
+            weights: vec![1.0, 2.0],
+            storage_epoch: 0,
+            requires_grad: true,
+        };
+
+        let error = freeze_teacher(&student).unwrap_err();
+
+        match error {
+            TeacherFreezeError::StorageFingerprintMismatch { source, frozen } => {
+                assert_ne!(source, frozen);
+                let mut expected_source = storage_fingerprint_bytes(&[1.0, 2.0]);
+                expected_source.extend_from_slice(&0_u8.to_le_bytes());
+                let mut expected_frozen = storage_fingerprint_bytes(&[1.0, 2.0]);
+                expected_frozen.extend_from_slice(&1_u8.to_le_bytes());
+                assert_eq!(source.bytes(), expected_source.as_slice());
+                assert_eq!(frozen.bytes(), expected_frozen.as_slice());
+            }
+            error => panic!("expected storage fingerprint mismatch, got {error:?}"),
+        }
+        assert_eq!(
+            student.teacher_weight_fingerprint(),
+            TeacherWeightFingerprint::new(
+                [1.0_f32, 2.0_f32]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -368,6 +557,10 @@ mod tests {
             TeacherFreezeError::EmptyStorageFingerprint
         );
         assert_eq!(
+            TeacherStorageIdentity::new(Vec::new()).unwrap_err(),
+            TeacherFreezeError::EmptyStorageIdentity
+        );
+        assert_eq!(
             TeacherFreezeMetadata::new(0, "   ").unwrap_err(),
             TeacherFreezeError::EmptyMetadataField {
                 name: "teacher_checkpoint_id",
@@ -423,7 +616,11 @@ mod tests {
         }
 
         fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
-            TeacherStorageFingerprint::new((self.weights.as_ptr() as usize).to_le_bytes()).unwrap()
+            TeacherStorageFingerprint::new(storage_fingerprint_bytes(&self.weights)).unwrap()
+        }
+
+        fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+            TeacherStorageIdentity::new((self.weights.as_ptr() as usize).to_le_bytes()).unwrap()
         }
 
         fn teacher_requires_grad(&self) -> bool {
@@ -456,6 +653,10 @@ mod tests {
             self.0.teacher_storage_fingerprint()
         }
 
+        fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+            self.0.teacher_storage_identity()
+        }
+
         fn teacher_requires_grad(&self) -> bool {
             self.0.teacher_requires_grad()
         }
@@ -481,6 +682,10 @@ mod tests {
 
         fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
             self.0.teacher_storage_fingerprint()
+        }
+
+        fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+            self.0.teacher_storage_identity()
         }
 
         fn teacher_requires_grad(&self) -> bool {
@@ -521,8 +726,12 @@ mod tests {
         }
 
         fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
-            TeacherStorageFingerprint::new((Rc::as_ptr(&self.weights) as usize).to_le_bytes())
+            TeacherStorageFingerprint::new(storage_fingerprint_bytes(&self.weights.borrow()))
                 .unwrap()
+        }
+
+        fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+            TeacherStorageIdentity::new((Rc::as_ptr(&self.weights) as usize).to_le_bytes()).unwrap()
         }
 
         fn teacher_requires_grad(&self) -> bool {
@@ -539,11 +748,68 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct ToyForwardError;
 
+    #[derive(Debug, Clone)]
+    struct StorageFingerprintDriftModel {
+        weights: Vec<f32>,
+        storage_epoch: u8,
+        requires_grad: bool,
+    }
+
+    impl DenseTeacherModel for StorageFingerprintDriftModel {
+        type Input = Vec<f32>;
+        type Output = ToyForwardOutput;
+        type ForwardError = ToyForwardError;
+
+        fn detach_for_teacher(&mut self) {
+            self.requires_grad = false;
+            self.storage_epoch = self.storage_epoch.saturating_add(1);
+        }
+
+        fn forward_no_grad(&self, input: Self::Input) -> Result<Self::Output, Self::ForwardError> {
+            Ok(ToyForwardOutput {
+                value: dot(&self.weights, &input),
+                requires_grad: false,
+            })
+        }
+
+        fn teacher_weight_fingerprint(&self) -> TeacherWeightFingerprint {
+            let bytes = self
+                .weights
+                .iter()
+                .flat_map(|weight| weight.to_le_bytes())
+                .collect::<Vec<_>>();
+            TeacherWeightFingerprint::new(bytes).unwrap()
+        }
+
+        fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
+            let mut bytes = storage_fingerprint_bytes(&self.weights);
+            bytes.extend_from_slice(&self.storage_epoch.to_le_bytes());
+            TeacherStorageFingerprint::new(bytes).unwrap()
+        }
+
+        fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+            TeacherStorageIdentity::new((self.weights.as_ptr() as usize).to_le_bytes()).unwrap()
+        }
+
+        fn teacher_requires_grad(&self) -> bool {
+            self.requires_grad
+        }
+    }
+
     fn dot(weights: &[f32], input: &[f32]) -> f32 {
         weights
             .iter()
             .zip(input.iter())
             .map(|(weight, input)| weight * input)
             .sum()
+    }
+
+    fn storage_fingerprint_bytes(weights: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::from("toy-teacher:f32:rank1:");
+        bytes.extend_from_slice(&weights.len().to_le_bytes());
+        for weight in weights {
+            bytes.extend_from_slice(&weight.to_le_bytes());
+        }
+        bytes
     }
 }

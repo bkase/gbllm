@@ -1,0 +1,55 @@
+---
+source: gbf-experiments/tests/falsification_s2_suite_hash.rs
+expression: "serde_json::to_string_pretty(&report).expect(\"suite report JSON\")"
+---
+{
+  "schema": "s2_falsification_suite.v1",
+  "source_digests": {
+    "gbf-experiments/tests/falsification_s2/f1.rs": "sha256:14987bba4aaae70498e230187cbdf649dc0da8903519c31ed026344cd0e1791f",
+    "gbf-experiments/tests/falsification_s2/f2.rs": "sha256:44ab4b81bb31f877cde6bf9c90b224ac2b544f720f4d760a0be5e81f71ee447f",
+    "gbf-experiments/tests/falsification_s2/f3.rs": "sha256:5d3b12f981a103c5a1d213a7713baa4e91ca15cb084ba4f15853e979739df2eb",
+    "gbf-experiments/tests/falsification_s2/f4.rs": "sha256:67d85b6b9c71125f458975e1ea816d926aaa3aeb8f1fa86ba987e0e49a4f7405",
+    "gbf-experiments/tests/falsification_s2/f5.rs": "sha256:9c11a5ebadb394a55d430b7ba0f155f1ebd36dd17bcb39893121bd3ed1173ad6",
+    "gbf-experiments/tests/falsification_s2/f6.rs": "sha256:5087c207fd5845d6fcbc42e5c2183698856feca3d299c8ec7d6b6e390e52bed6"
+  },
+  "results": [
+    {
+      "broken_kind": "F1_phase_b_skips_ternary",
+      "expected_verdict": "H1 Refuted",
+      "observed_verdict": "H1 Refuted",
+      "passed": true
+    },
+    {
+      "broken_kind": "F2_phase_d_unfreezes_teacher",
+      "expected_verdict": "H1 Refuted",
+      "observed_verdict": "H1 Refuted",
+      "passed": true
+    },
+    {
+      "broken_kind": "F3_distill_temperature_inverted",
+      "expected_verdict": "config-validator rejected",
+      "observed_verdict": "config-validator unexpectedly accepted",
+      "passed": false
+    },
+    {
+      "broken_kind": "F4_threshold_per_weight_structural_mask_fixture",
+      "expected_verdict": "H5.4 structural mask fixture Refuted",
+      "observed_verdict": "H5.4 structural mask fixture Refuted",
+      "passed": true
+    },
+    {
+      "broken_kind": "F5_zero_loss_diagnostic_runner_fallback",
+      "expected_verdict": "H5.4b diagnostic-runner fallback Refuted",
+      "observed_verdict": "H5.4b diagnostic-runner fallback Refuted",
+      "passed": true
+    },
+    {
+      "broken_kind": "F6_linearstate_structural_smoke_fallback",
+      "expected_verdict": "H6 structural smoke fallback Refuted",
+      "observed_verdict": "H6 structural smoke fallback Refuted",
+      "passed": true
+    }
+  ],
+  "falsification_s2_passed": false,
+  "falsification_s2_suite_hash": "sha256:79405fc339e781a1ebaf6d40f7239d387e839f3fbfa63ce16d391beddeafb4f0"
+}

@@ -1,0 +1,14 @@
+---
+source: gbf-experiments/tests/verifier_h1_s2.rs
+expression: "pretty_json(&serde_json::to_value(first_hit(&verdict.hits,\n\"phase_schedule\")).unwrap())"
+---
+{
+  "build_kind": "s2-ternary-full",
+  "check_name": "phase_schedule",
+  "expected": "phase-c",
+  "hypothesis_id": "H1.e",
+  "observed": "phase-d",
+  "remediation": "Use the D1 Phase A/B/C/D schedule from RFC §3.",
+  "seed": null,
+  "step": 5001
+}

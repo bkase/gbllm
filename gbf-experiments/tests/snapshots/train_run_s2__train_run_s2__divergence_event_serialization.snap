@@ -1,0 +1,6 @@
+---
+source: gbf-experiments/tests/train_run_s2.rs
+assertion_line: 267
+expression: "serde_json::to_string(&diverged.divergence_event).expect(\"event JSON\")"
+---
+{"step":5500,"observed":"NonFiniteDistillLoss","last_finite_step":5499,"no_nan_serialized":true}

@@ -1,0 +1,5 @@
+---
+source: gbf-experiments/tests/score_wrapper_s2.rs
+expression: "String::from_utf8(report.canonical_json_bytes().expect(\"score canonical\")).unwrap()"
+---
+{"bpc":7.931233737288277,"build_kind":"s2-ternary-full","checkpoint_sha":"sha256:ea0948e99c1ddcc3856f2ceeccadd3c4807b131b9de98d32aa9dada69e78bd80","chunk_size":128,"corpus_val_sha":"sha256:5034f4f4b05f1efc8c51cfe57e0a0b23e5082000dd2cb27eda6729cf45cef988","log2_sum":103.10603858474761,"scale_stats":{"matrices":1,"scale_count":2,"scale_max":1.5,"scale_mean_f32":1.25,"scale_min":1.0},"schema":"s2_score.v1","seed":0,"threshold_stats":{"matrices":1,"threshold_count":2,"threshold_max":0.800000011920929,"threshold_mean":0.75,"threshold_min":0.699999988079071},"token_count":13}
