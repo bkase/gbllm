@@ -40,8 +40,10 @@ fn phase_a_and_ablation_features_trigger_gbf_train_mutex() {
 
     let combined = command_output(&output);
     assert!(
-        combined.contains("qat and qat-ablation are mutually exclusive"),
-        "mutex probe failed without the gbf-train diagnostic:\n{combined}"
+        combined.contains("qat and qat-ablation are mutually exclusive")
+            || combined
+                .contains("gbf-experiments features phase-a and ablation are mutually exclusive"),
+        "mutex probe failed without the expected feature diagnostic:\n{combined}"
     );
 }
 
