@@ -1,0 +1,5 @@
+schema = "infer_ir.reject_input.v1"
+reject_id = 30
+class = "infer_ir_unexpected_rng_effect_on_pure_op"
+base_fixture = "dense_toy0"
+mutation = "infer_ir_unexpected_rng_effect_on_pure_op"

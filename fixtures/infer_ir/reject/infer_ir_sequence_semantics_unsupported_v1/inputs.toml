@@ -1,0 +1,5 @@
+schema = "infer_ir.reject_input.v1"
+reject_id = 36
+class = "infer_ir_sequence_semantics_unsupported_v1"
+base_fixture = "dense_toy0"
+mutation = "infer_ir_sequence_semantics_unsupported_v1"

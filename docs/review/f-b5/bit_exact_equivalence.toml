@@ -1,0 +1,98 @@
+schema = "f_b5.bit_exact_equivalence_golden.v1"
+source = "fixtures/infer_ir"
+feature = "semantic_equivalence_check"
+closure_gate = "cargo test -p gbf-codegen --features semantic_equivalence_check --lib fixture_infer_ir_fixture_semantic_equivalence_bit_exact"
+status = "VerifiedFixtureBitExact"
+stage3_driver_evidence = "scripts/e2e/stage3.sh verifies run_stage3 emits product-bearing infer_ir.json to its report_dir."
+driver_materialization = "exported"
+fixture_export_status = "exported"
+
+[[fixtures]]
+name = "dense_toy0"
+determinism = "BitExact"
+fixture_equivalence = "VerifiedFixtureBitExact"
+infer_ir_json = "golden/dense_toy0/infer_ir.json"
+infer_ir_self_hash = "sha256:cf7f891c7f2f25baabf282cb587a72f5a5166a38439163094ea50c06ee1887c3"
+infer_ir_canonical_bytes_hash = "sha256:f0f0055f27be6a019dc13d6b4659d7995e8a851ebc73a80f8bb385433020da3d"
+topological_order_hash = "sha256:077b5c7a5cd377f70bbf2bf683a26377d876389818127e646400c86ae01cc541"
+anchor_count = 11
+
+[[samples]]
+fixture = "dense_toy0"
+sample_index = 0
+token_id = 0
+sequence_state_seed = "sha256:6161616161616161616161616161616161616161616161616161616161616161"
+rng_seed = "sha256:6262626262626262626262626262626262626262626262626262626262626262"
+ir_trace_hash = "sha256:08411b1539cf9e85de55780e62c364628906d88d1631a00eab5d759106a3cffb"
+qg_trace_hash = "sha256:08411b1539cf9e85de55780e62c364628906d88d1631a00eab5d759106a3cffb"
+match = true
+
+[[samples]]
+fixture = "dense_toy0"
+sample_index = 1
+token_id = 7
+sequence_state_seed = "sha256:6161616161616161616161616161616161616161616161616161616161616161"
+rng_seed = "sha256:6262626262626262626262626262626262626262626262626262626262626262"
+ir_trace_hash = "sha256:9d93f9c51b547eb2a9008995810b5e144783fce0e87b5533f0b57e5e35304724"
+qg_trace_hash = "sha256:9d93f9c51b547eb2a9008995810b5e144783fce0e87b5533f0b57e5e35304724"
+match = true
+
+[[fixtures]]
+name = "routed_basic"
+determinism = "BitExact"
+fixture_equivalence = "VerifiedFixtureBitExact"
+infer_ir_json = "golden/routed_basic/infer_ir.json"
+infer_ir_self_hash = "sha256:fa6437611f341bd4b59dd6e7a1c28c33bbde6a856fc0cd80c68bf0bca2f1d68e"
+infer_ir_canonical_bytes_hash = "sha256:145ab41985f7b4498d58b8c062f8b9a35063f379ee7b76d233b87594be1e6401"
+topological_order_hash = "sha256:89a15db53783fb722058a97a342dfb27d9017976812a2b716426578a1df5cf8b"
+anchor_count = 17
+
+[[samples]]
+fixture = "routed_basic"
+sample_index = 0
+token_id = 0
+sequence_state_seed = "sha256:6161616161616161616161616161616161616161616161616161616161616161"
+rng_seed = "sha256:6262626262626262626262626262626262626262626262626262626262626262"
+ir_trace_hash = "sha256:73b95e7bd913d4f2af028e524ffcbadf8a4b58efa38bb7f03076c642e3318d12"
+qg_trace_hash = "sha256:73b95e7bd913d4f2af028e524ffcbadf8a4b58efa38bb7f03076c642e3318d12"
+match = true
+
+[[samples]]
+fixture = "routed_basic"
+sample_index = 1
+token_id = 7
+sequence_state_seed = "sha256:6161616161616161616161616161616161616161616161616161616161616161"
+rng_seed = "sha256:6262626262626262626262626262626262626262626262626262626262626262"
+ir_trace_hash = "sha256:481241576986a8f9293ecad7f17971cb1a0c733e04b0abb69130e259ad75355c"
+qg_trace_hash = "sha256:481241576986a8f9293ecad7f17971cb1a0c733e04b0abb69130e259ad75355c"
+match = true
+
+[[fixtures]]
+name = "mixed_topology"
+determinism = "BitExact"
+fixture_equivalence = "VerifiedFixtureBitExact"
+infer_ir_json = "golden/mixed_topology/infer_ir.json"
+infer_ir_self_hash = "sha256:e35d886f4d93aee31b7c458cf8c344a6bd6bf3064ea1794b3007cd961cffd27d"
+infer_ir_canonical_bytes_hash = "sha256:c7f6a5069eda19049a4863cf3875d9b40f9c9f9ecb7a13ccfcf0feae32d2c00d"
+topological_order_hash = "sha256:7446809c6dc45d3cd36417bd1811c37bb44b76bc91404f9b618c3464aab955e4"
+anchor_count = 24
+
+[[samples]]
+fixture = "mixed_topology"
+sample_index = 0
+token_id = 0
+sequence_state_seed = "sha256:6161616161616161616161616161616161616161616161616161616161616161"
+rng_seed = "sha256:6262626262626262626262626262626262626262626262626262626262626262"
+ir_trace_hash = "sha256:eef8cc430f4bf5a68953bc7d5363ec108fddbf0cae68c1cf9efc057c0b52884a"
+qg_trace_hash = "sha256:eef8cc430f4bf5a68953bc7d5363ec108fddbf0cae68c1cf9efc057c0b52884a"
+match = true
+
+[[samples]]
+fixture = "mixed_topology"
+sample_index = 1
+token_id = 7
+sequence_state_seed = "sha256:6161616161616161616161616161616161616161616161616161616161616161"
+rng_seed = "sha256:6262626262626262626262626262626262626262626262626262626262626262"
+ir_trace_hash = "sha256:539939170e3ff4c517c8ac179b583c969224020d0d5ce45ee7d6939ebad5d5d1"
+qg_trace_hash = "sha256:539939170e3ff4c517c8ac179b583c969224020d0d5ce45ee7d6939ebad5d5d1"
+match = true

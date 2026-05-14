@@ -1,0 +1,5 @@
+qg_reject = 29
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_aux_blob_kind_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes the required scale aux blob from a Binary1 expert weight"

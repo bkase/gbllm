@@ -5,8 +5,10 @@ use std::fmt;
 
 use gbf_foundation::{Hash256, SemVer};
 use gbf_policy::ValidationDiagnostic;
-use gbf_report::report_schemas::{artifact_validation_v1, policy_resolution_v1, static_budget_v1};
-use gbf_report::{ReportBody, ReportOutcome};
+use gbf_report::report_schemas::{
+    artifact_validation_v1, infer_ir_v1, policy_resolution_v1, quant_graph_v1, static_budget_v1,
+};
+use gbf_report::{ReportBody, ReportEnvelope, ReportOutcome};
 use gbf_report::{canonicalize as canonicalize_report, canonicalize_value, compute_self_hash};
 use gbf_store::stage_cache::{
     ComponentDigestSet, ComponentId, FeatureFlag, StageCache as StoreStageCache, StageCacheError,
@@ -17,6 +19,10 @@ use sha2::{Digest, Sha256};
 
 use crate::budget::StaticBudgetReport;
 use crate::policy::{PolicyResolutionStageFailure, ResolvedPolicyProduct};
+use crate::s1::quant_graph::{PASS_VERSION_QUANT_GRAPH, QuantGraphProduct};
+use crate::s3::infer_ir::{
+    GbInferIR, GbInferIRProduct, InferIrAuditParents, PASS_VERSION_INFER_IR,
+};
 use crate::validate::{
     CachedValidationProduct, CachedValidationProductRehydrateError, ValidatedInputHashes,
     ValidationStageFailure,
@@ -24,14 +30,22 @@ use crate::validate::{
 
 pub const PASS_VERSION_VALIDATE: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_RESOLVE: SemVer = SemVer::new(1, 0, 0);
+pub const PASS_VERSION_QUANT_GRAPH_STAGE1: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_BUDGET: SemVer = SemVer::new(1, 0, 0);
+pub const PASS_VERSION_INFER_IR_STAGE3: SemVer = SemVer::new(1, 0, 0);
 
 const STAGE0_VALIDATE_SUCCESS_ID: &str = "gbf-codegen.stage0.validate.success";
 const STAGE0_VALIDATE_FAILURE_ID: &str = "gbf-codegen.stage0.validate.failure";
 const STAGE05_RESOLVE_SUCCESS_ID: &str = "gbf-codegen.stage0_5.resolve_policy.success";
 const STAGE05_RESOLVE_FAILURE_ID: &str = "gbf-codegen.stage0_5.resolve_policy.failure";
+const STAGE1_QUANT_GRAPH_SUCCESS_ID: &str = "gbf-codegen.stage1.quant_graph.success";
+const STAGE1_QUANT_GRAPH_FAILURE_ID: &str = "gbf-codegen.stage1.quant_graph.failure";
 const STAGE2_BUDGET_SUCCESS_ID: &str = "gbf-codegen.stage2.static_budget.success";
 const STAGE2_BUDGET_FAILURE_ID: &str = "gbf-codegen.stage2.static_budget.failure";
+const STAGE3_INFER_IR_SUCCESS_ID: &str = "gbf-codegen.stage3.infer_ir.success";
+const STAGE3_INFER_IR_FAILURE_ID: &str = "gbf-codegen.stage3.infer_ir.failure";
+pub const STAGE3_CACHE_LOOKUP_EVENT: &str = "stage3.cache.lookup";
+pub const STAGE3_CACHE_AUDIT_REWRAP_EVENT: &str = "stage3.cache.audit_rewrap";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage0CellKind {
@@ -46,7 +60,19 @@ pub enum Stage05CellKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage1CellKind {
+    Success,
+    FailureMemo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage2CellKind {
+    Success,
+    FailureMemo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage3CellKind {
     Success,
     FailureMemo,
 }
@@ -143,6 +169,45 @@ pub struct Stage2CacheKeyMaterial {
     pub static_budget_schema_hash: Hash256,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage1CacheKeyMaterial {
+    pub artifact_validation_self_hash: Hash256,
+    /// Stage 1 intentionally keys by the full policy-resolution report hash.
+    /// A76: a cache hit therefore already has the report audit parent it was
+    /// built with; unlike Stage 3, there is no policy-projection key or audit
+    /// rewrap.
+    pub policy_resolution_self_hash: Hash256,
+    pub artifact_effective_core_hash: Hash256,
+    pub lowering_manifest_hash: Hash256,
+    pub resolved_blob_index_hash: Hash256,
+    pub pass_version_quant_graph: String,
+    pub crate_feature_set_hash: Hash256,
+    pub quant_graph_schema_hash: Hash256,
+}
+
+impl Stage1CacheKeyMaterial {
+    #[must_use]
+    pub fn new(
+        artifact_validation_self_hash: Hash256,
+        policy_resolution_self_hash: Hash256,
+        artifact_effective_core_hash: Hash256,
+        lowering_manifest_hash: Hash256,
+        resolved_blob_index_hash: Hash256,
+    ) -> Self {
+        Self {
+            artifact_validation_self_hash,
+            policy_resolution_self_hash,
+            artifact_effective_core_hash,
+            lowering_manifest_hash,
+            resolved_blob_index_hash,
+            pass_version_quant_graph: PASS_VERSION_QUANT_GRAPH.to_owned(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            quant_graph_schema_hash: quant_graph_schema_hash(),
+        }
+    }
+}
+
 impl Stage2CacheKeyMaterial {
     #[must_use]
     pub fn new(
@@ -158,6 +223,35 @@ impl Stage2CacheKeyMaterial {
             target_profile_hash,
             crate_feature_set_hash: crate_feature_set_hash(),
             static_budget_schema_hash: static_budget_schema_hash(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage3CacheKeyMaterial {
+    pub quant_graph_self_hash: Hash256,
+    pub infer_ir_policy_projection_hash: Hash256,
+    pub static_budget_self_hash: Hash256,
+    pub pass_version_infer_ir: String,
+    pub crate_feature_set_hash: Hash256,
+    pub infer_ir_schema_hash: Hash256,
+}
+
+impl Stage3CacheKeyMaterial {
+    #[must_use]
+    pub fn new(
+        quant_graph_self_hash: Hash256,
+        infer_ir_policy_projection_hash: Hash256,
+        static_budget_self_hash: Hash256,
+    ) -> Self {
+        Self {
+            quant_graph_self_hash,
+            infer_ir_policy_projection_hash,
+            static_budget_self_hash,
+            pass_version_infer_ir: PASS_VERSION_INFER_IR.to_owned(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            infer_ir_schema_hash: infer_ir_schema_hash(),
         }
     }
 }
@@ -195,11 +289,37 @@ pub enum Stage05CacheCell {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "cell", deny_unknown_fields)]
+pub enum Stage1CacheCell {
+    QuantGraphSuccess {
+        product: Box<QuantGraphProduct>,
+        report: CachedReportBytes,
+    },
+    FailureMemo {
+        report: CachedReportBytes,
+        diagnostics: Vec<ValidationDiagnostic>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cell", deny_unknown_fields)]
 pub enum Stage2CacheCell {
     StaticBudgetSuccess {
         product: Box<StaticBudgetReport>,
+        report: CachedReportBytes,
+    },
+    FailureMemo {
+        report: CachedReportBytes,
+        diagnostics: Vec<ValidationDiagnostic>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "cell", deny_unknown_fields)]
+pub enum Stage3CacheCell {
+    InferIrSuccess {
+        product: Box<GbInferIRProduct>,
         report: CachedReportBytes,
     },
     FailureMemo {
@@ -436,6 +556,34 @@ pub fn stage05_resolve_policy_store_key_with_pass_version(
 }
 
 #[must_use]
+pub fn stage1_quant_graph_store_key(
+    material: &Stage1CacheKeyMaterial,
+    cell_kind: Stage1CellKind,
+) -> StageKey {
+    stage1_quant_graph_store_key_with_pass_version(
+        material,
+        cell_kind,
+        PASS_VERSION_QUANT_GRAPH_STAGE1,
+    )
+}
+
+#[must_use]
+pub fn stage1_quant_graph_store_key_with_pass_version(
+    material: &Stage1CacheKeyMaterial,
+    cell_kind: Stage1CellKind,
+    pass_version: SemVer,
+) -> StageKey {
+    stage_key(
+        match cell_kind {
+            Stage1CellKind::Success => STAGE1_QUANT_GRAPH_SUCCESS_ID,
+            Stage1CellKind::FailureMemo => STAGE1_QUANT_GRAPH_FAILURE_ID,
+        },
+        material,
+        pass_version,
+    )
+}
+
+#[must_use]
 pub fn stage2_static_budget_store_key(
     material: &Stage2CacheKeyMaterial,
     cell_kind: Stage2CellKind,
@@ -453,6 +601,30 @@ pub fn stage2_static_budget_store_key_with_pass_version(
         match cell_kind {
             Stage2CellKind::Success => STAGE2_BUDGET_SUCCESS_ID,
             Stage2CellKind::FailureMemo => STAGE2_BUDGET_FAILURE_ID,
+        },
+        material,
+        pass_version,
+    )
+}
+
+#[must_use]
+pub fn stage3_infer_ir_store_key(
+    material: &Stage3CacheKeyMaterial,
+    cell_kind: Stage3CellKind,
+) -> StageKey {
+    stage3_infer_ir_store_key_with_pass_version(material, cell_kind, PASS_VERSION_INFER_IR_STAGE3)
+}
+
+#[must_use]
+pub fn stage3_infer_ir_store_key_with_pass_version(
+    material: &Stage3CacheKeyMaterial,
+    cell_kind: Stage3CellKind,
+    pass_version: SemVer,
+) -> StageKey {
+    stage_key(
+        match cell_kind {
+            Stage3CellKind::Success => STAGE3_INFER_IR_SUCCESS_ID,
+            Stage3CellKind::FailureMemo => STAGE3_INFER_IR_FAILURE_ID,
         },
         material,
         pass_version,
@@ -656,6 +828,105 @@ pub fn put_stage05_failure_memo(
     )
 }
 
+pub fn get_stage1_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage1CacheKeyMaterial,
+) -> Result<Option<Stage1CacheCell>, CodegenStageCacheError> {
+    let Some(bytes) = cache.get(&stage1_quant_graph_store_key(
+        material,
+        Stage1CellKind::Success,
+    ))?
+    else {
+        return Ok(None);
+    };
+    let cell: Stage1CacheCell = serde_json::from_slice(&bytes)?;
+    match &cell {
+        Stage1CacheCell::QuantGraphSuccess { product, report } => {
+            validate_cached_quant_graph_product(product, report, material)?;
+        }
+        Stage1CacheCell::FailureMemo { .. } => {
+            return Err(CodegenStageCacheError::UnexpectedCell {
+                expected: "Stage 1 quant_graph success",
+                observed: "Stage 1 quant_graph failure memo",
+            });
+        }
+    }
+    Ok(Some(cell))
+}
+
+pub fn get_stage1_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage1CacheKeyMaterial,
+) -> Result<Option<Stage1CacheCell>, CodegenStageCacheError> {
+    let Some(bytes) = cache.get(&stage1_quant_graph_store_key(
+        material,
+        Stage1CellKind::FailureMemo,
+    ))?
+    else {
+        return Ok(None);
+    };
+    let cell: Stage1CacheCell = serde_json::from_slice(&bytes)?;
+    if !matches!(cell, Stage1CacheCell::FailureMemo { .. }) {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "Stage 1 quant_graph failure memo",
+            observed: "Stage 1 quant_graph success",
+        });
+    }
+    Ok(Some(cell))
+}
+
+pub fn put_stage1_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage1CacheKeyMaterial,
+    product: &QuantGraphProduct,
+    report_bytes: Vec<u8>,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    debug_assert_eq!(
+        product.report.outcome,
+        ReportOutcome::Passed,
+        "Stage 1 success cells only store passed quant_graph reports"
+    );
+    debug_assert_eq!(
+        product
+            .report
+            .body
+            .result
+            .as_ref()
+            .map(|result| result.quant_graph_self_hash),
+        Some(product.quant_graph_self_hash),
+        "Stage 1 report result carries the product quant_graph_self_hash"
+    );
+    let cell = Stage1CacheCell::QuantGraphSuccess {
+        product: Box::new(product.clone()),
+        report: CachedReportBytes {
+            report_self_hash: product.report.report_self_hash,
+            canonical_bytes: report_bytes,
+        },
+    };
+    put_cell(
+        cache,
+        &stage1_quant_graph_store_key(material, Stage1CellKind::Success),
+        &cell,
+    )
+}
+
+pub fn put_stage1_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage1CacheKeyMaterial,
+    report: CachedReportBytes,
+    diagnostics: Vec<ValidationDiagnostic>,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    let cell = Stage1CacheCell::FailureMemo {
+        report,
+        diagnostics,
+    };
+    put_cell(
+        cache,
+        &stage1_quant_graph_store_key(material, Stage1CellKind::FailureMemo),
+        &cell,
+    )
+}
+
 pub fn get_stage2_success(
     cache: &StoreStageCache<'_>,
     material: &Stage2CacheKeyMaterial,
@@ -756,6 +1027,112 @@ pub fn put_stage2_failure_memo(
     )
 }
 
+pub fn get_stage3_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage3CacheKeyMaterial,
+) -> Result<Option<Stage3CacheCell>, CodegenStageCacheError> {
+    let key = stage3_infer_ir_store_key(material, Stage3CellKind::Success);
+    let bytes = cache.get(&key)?;
+    tracing::debug!(
+        event = STAGE3_CACHE_LOOKUP_EVENT,
+        stage_id = STAGE3_INFER_IR_SUCCESS_ID,
+        cell_kind = ?Stage3CellKind::Success,
+        hit = bytes.is_some(),
+        "stage3.cache.lookup"
+    );
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let cell: Stage3CacheCell = serde_json::from_slice(&bytes)?;
+    match &cell {
+        Stage3CacheCell::InferIrSuccess { product, report } => {
+            validate_cached_infer_ir_product(product, report, material)?;
+        }
+        Stage3CacheCell::FailureMemo { .. } => {
+            return Err(unexpected_stage3_cell("Stage 3 infer_ir success", &cell));
+        }
+    }
+    Ok(Some(cell))
+}
+
+pub fn get_stage3_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage3CacheKeyMaterial,
+) -> Result<Option<Stage3CacheCell>, CodegenStageCacheError> {
+    let key = stage3_infer_ir_store_key(material, Stage3CellKind::FailureMemo);
+    let bytes = cache.get(&key)?;
+    tracing::debug!(
+        event = STAGE3_CACHE_LOOKUP_EVENT,
+        stage_id = STAGE3_INFER_IR_FAILURE_ID,
+        cell_kind = ?Stage3CellKind::FailureMemo,
+        hit = bytes.is_some(),
+        "stage3.cache.lookup"
+    );
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let cell: Stage3CacheCell = serde_json::from_slice(&bytes)?;
+    if !matches!(cell, Stage3CacheCell::FailureMemo { .. }) {
+        return Err(unexpected_stage3_cell(
+            "Stage 3 infer_ir failure memo",
+            &cell,
+        ));
+    }
+    Ok(Some(cell))
+}
+
+pub fn put_stage3_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage3CacheKeyMaterial,
+    product: &GbInferIRProduct,
+    report_bytes: Vec<u8>,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    debug_assert_eq!(
+        product.report.outcome,
+        ReportOutcome::Passed,
+        "Stage 3 success cells only store passed infer_ir reports"
+    );
+    debug_assert_eq!(
+        product
+            .report
+            .body
+            .result
+            .as_ref()
+            .map(|result| result.infer_ir_self_hash),
+        Some(product.infer_ir_self_hash),
+        "Stage 3 report result carries the product infer_ir_self_hash"
+    );
+    let cell = Stage3CacheCell::InferIrSuccess {
+        product: Box::new(product.clone()),
+        report: CachedReportBytes {
+            report_self_hash: product.report.report_self_hash,
+            canonical_bytes: report_bytes,
+        },
+    };
+    put_cell(
+        cache,
+        &stage3_infer_ir_store_key(material, Stage3CellKind::Success),
+        &cell,
+    )
+}
+
+pub fn put_stage3_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage3CacheKeyMaterial,
+    report: CachedReportBytes,
+    diagnostics: Vec<ValidationDiagnostic>,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    let cell = Stage3CacheCell::FailureMemo {
+        report,
+        diagnostics,
+    };
+    put_cell(
+        cache,
+        &stage3_infer_ir_store_key(material, Stage3CellKind::FailureMemo),
+        &cell,
+    )
+}
+
 #[must_use]
 pub fn materialize_stage0_cached_report(cell: &Stage0CacheCell) -> CachedReportBytes {
     match cell {
@@ -778,6 +1155,55 @@ pub fn materialize_stage05_cached_report(cell: &Stage05CacheCell) -> CachedRepor
         Stage05CacheCell::ResolvePolicySuccess { report, .. }
         | Stage05CacheCell::FailureMemo { report, .. } => report.clone(),
     }
+}
+
+#[must_use]
+pub fn materialize_stage1_cached_report(cell: &Stage1CacheCell) -> CachedReportBytes {
+    match cell {
+        Stage1CacheCell::QuantGraphSuccess { report, .. }
+        | Stage1CacheCell::FailureMemo { report, .. } => report.clone(),
+    }
+}
+
+#[must_use]
+pub fn materialize_stage3_cached_report(cell: &Stage3CacheCell) -> CachedReportBytes {
+    match cell {
+        Stage3CacheCell::InferIrSuccess { report, .. }
+        | Stage3CacheCell::FailureMemo { report, .. } => report.clone(),
+    }
+}
+
+pub fn rewrap_stage3_cached_report_audit_parents(
+    report: &ReportEnvelope<infer_ir_v1::InferIrReportBody<GbInferIR>>,
+    audit_parents: InferIrAuditParents,
+) -> Result<
+    ReportEnvelope<infer_ir_v1::InferIrReportBody<GbInferIR>>,
+    gbf_report::ReportSelfHashError,
+> {
+    let pre_audit_hash = report.report_self_hash;
+    let embedded_product_hash = report
+        .body
+        .result
+        .as_ref()
+        .map(|result| result.infer_ir_self_hash);
+    let mut rewrapped = report.clone();
+    rewrapped.body.input_identity.policy_resolution_self_hash =
+        audit_parents.policy_resolution_self_hash;
+    rewrapped.body.input_identity.compile_request_hash = audit_parents.compile_request_hash;
+    rewrapped = rewrapped.with_computed_self_hash()?;
+    tracing::debug!(
+        event = STAGE3_CACHE_AUDIT_REWRAP_EVENT,
+        pre_audit_hash = %pre_audit_hash,
+        post_audit_hash = %rewrapped.report_self_hash,
+        embedded_product_hash_unchanged = embedded_product_hash
+            == rewrapped
+                .body
+                .result
+                .as_ref()
+                .map(|result| result.infer_ir_self_hash),
+        "stage3.cache.audit_rewrap"
+    );
+    Ok(rewrapped)
 }
 
 #[must_use]
@@ -804,6 +1230,24 @@ pub fn static_budget_schema_hash() -> Hash256 {
         static_budget_v1::SCHEMA_ID,
         static_budget_v1::SCHEMA_VERSION,
         "static_budget_v1::StaticBudgetReportBody::validate_semantics",
+    )
+}
+
+#[must_use]
+pub fn quant_graph_schema_hash() -> Hash256 {
+    schema_hash(
+        quant_graph_v1::SCHEMA_ID,
+        quant_graph_v1::SCHEMA_VERSION,
+        "quant_graph_v1::QuantGraphReportBody::validate_semantics",
+    )
+}
+
+#[must_use]
+pub fn infer_ir_schema_hash() -> Hash256 {
+    schema_hash(
+        infer_ir_v1::SCHEMA_ID,
+        infer_ir_v1::SCHEMA_VERSION,
+        "infer_ir_v1::InferIrReportBody::validate_semantics",
     )
 }
 
@@ -976,6 +1420,130 @@ fn validate_cached_report_bytes(
     Ok(())
 }
 
+fn validate_cached_quant_graph_product(
+    product: &QuantGraphProduct,
+    cached_report: &CachedReportBytes,
+    material: &Stage1CacheKeyMaterial,
+) -> Result<(), CodegenStageCacheError> {
+    if cached_report.report_self_hash != product.report.report_self_hash
+        || product
+            .report
+            .body
+            .result
+            .as_ref()
+            .map(|result| result.quant_graph_self_hash)
+            != Some(product.quant_graph_self_hash)
+    {
+        return Err(CodegenStageCacheError::CachedReportBytes(
+            CachedReportBytesError::CanonicalBytesHashMismatch {
+                canonical_bytes_hash: cached_report.report_self_hash,
+                expected_canonical_bytes_hash: product.report.report_self_hash,
+            },
+        ));
+    }
+    product
+        .report
+        .body
+        .validate_semantics(product.report.outcome)
+        .map_err(|_| CodegenStageCacheError::UnexpectedCell {
+            expected: "semantically valid Stage 1 quant_graph success",
+            observed: "semantically invalid Stage 1 quant_graph success",
+        })?;
+    if product.report.outcome != ReportOutcome::Passed {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "passed Stage 1 quant_graph success",
+            observed: "failed Stage 1 quant_graph report",
+        });
+    }
+    let canonical_bytes = canonicalize_report(&product.report).map_err(|err| {
+        CodegenStageCacheError::Json(serde_json::Error::io(std::io::Error::other(
+            err.to_string(),
+        )))
+    })?;
+    let canonical_bytes_hash = Hash256::from_bytes(Sha256::digest(&canonical_bytes).into());
+    validate_cached_report_bytes(cached_report, canonical_bytes_hash)?;
+    if product
+        .report
+        .body
+        .input_identity
+        .artifact_validation_self_hash
+        != material.artifact_validation_self_hash
+        || product
+            .report
+            .body
+            .input_identity
+            .policy_resolution_self_hash
+            != material.policy_resolution_self_hash
+        || product.report.body.input_identity.semantic_core_hash
+            != material.artifact_effective_core_hash
+        || product.report.body.input_identity.lowering_manifest_hash
+            != material.lowering_manifest_hash
+        || product.report.body.input_identity.resolved_blob_index_hash
+            != material.resolved_blob_index_hash
+    {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "Stage 1 key-compatible quant_graph product",
+            observed: "Stage 1 quant_graph product for different key material",
+        });
+    }
+    Ok(())
+}
+
+fn validate_cached_infer_ir_product(
+    product: &GbInferIRProduct,
+    cached_report: &CachedReportBytes,
+    material: &Stage3CacheKeyMaterial,
+) -> Result<(), CodegenStageCacheError> {
+    if cached_report.report_self_hash != product.report.report_self_hash
+        || product
+            .report
+            .body
+            .result
+            .as_ref()
+            .map(|result| result.infer_ir_self_hash)
+            != Some(product.infer_ir_self_hash)
+    {
+        return Err(CodegenStageCacheError::CachedReportBytes(
+            CachedReportBytesError::CanonicalBytesHashMismatch {
+                canonical_bytes_hash: cached_report.report_self_hash,
+                expected_canonical_bytes_hash: product.report.report_self_hash,
+            },
+        ));
+    }
+    product
+        .report
+        .body
+        .validate_semantics(product.report.outcome)
+        .map_err(|_| CodegenStageCacheError::UnexpectedCell {
+            expected: "semantically valid Stage 3 infer_ir success",
+            observed: "semantically invalid Stage 3 infer_ir success",
+        })?;
+    if product.report.outcome != ReportOutcome::Passed {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "passed Stage 3 infer_ir success",
+            observed: "failed Stage 3 infer_ir report",
+        });
+    }
+    let canonical_bytes = canonicalize_report(&product.report).map_err(|err| {
+        CodegenStageCacheError::Json(serde_json::Error::io(std::io::Error::other(
+            err.to_string(),
+        )))
+    })?;
+    let canonical_bytes_hash = Hash256::from_bytes(Sha256::digest(&canonical_bytes).into());
+    validate_cached_report_bytes(cached_report, canonical_bytes_hash)?;
+    if product.infer_ir.identity.quant_graph_self_hash != material.quant_graph_self_hash
+        || product.infer_ir.identity.infer_ir_policy_projection_hash
+            != material.infer_ir_policy_projection_hash
+        || product.infer_ir.identity.static_budget_self_hash != material.static_budget_self_hash
+    {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "Stage 3 key-compatible infer_ir product",
+            observed: "Stage 3 infer_ir product for different key material",
+        });
+    }
+    Ok(())
+}
+
 fn cached_policy_report_identity_matches_product(product: &ResolvedPolicyProduct) -> bool {
     let input_hashes = product.input_hashes;
     let report = &product.report.body;
@@ -1053,23 +1621,50 @@ fn unexpected_stage2_cell(
     }
 }
 
+fn unexpected_stage3_cell(
+    expected: &'static str,
+    observed: &Stage3CacheCell,
+) -> CodegenStageCacheError {
+    CodegenStageCacheError::UnexpectedCell {
+        expected,
+        observed: match observed {
+            Stage3CacheCell::InferIrSuccess { .. } => "Stage 3 infer_ir success",
+            Stage3CacheCell::FailureMemo { .. } => "Stage 3 infer_ir failure memo",
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+
     use gbf_hw::target::dmg_mbc5_8mib_128kib;
     use gbf_policy::{
         BudgetFailure, BudgetSlotClass, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile, RuntimeMode,
         budget_failure_diagnostic,
     };
     use gbf_report::ReportEnvelope;
+    use gbf_report::report_schemas::infer_ir_v1::{
+        FixtureEquivalenceSkippedReason, FixtureEquivalenceTag,
+    };
     use gbf_store::blob::BlobStore;
     use gbf_store::stage_cache::{StageCache, compose_key};
     use tempfile::TempDir;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::prelude::*;
 
     use crate::budget::{
         BudgetInputs, QuantGraphBudgetSource, QuantGraphBudgetView, QuantGraphBudgetViewError,
         static_budget_report as run_stage2_static_budget,
     };
     use crate::policy::resolve_policy;
+    use crate::s1::quant_graph::{DeterminismClass, QuantFormat};
+    use crate::s3::infer_ir::{
+        GbInferIR, InferIrIdentity, InferIrProvenance, InferOp, NodeAnchorMap, NodeId,
+        QuantGraphEntityRef, SemanticAnchor, TokenIngressMode, TokenInput, TokenInputId, ValueAxis,
+        ValueDecl, ValueFormat, ValueId, ValueKind, ValueLayout, ValueProducerRef,
+    };
 
     use super::*;
 
@@ -1210,6 +1805,510 @@ mod tests {
                 SemVer::new(1, 0, 1)
             ))
         );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_is_deterministic() {
+        let material = stage1_material();
+
+        assert_eq!(
+            compose_key(&stage1_quant_graph_store_key(
+                &material,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &material,
+                Stage1CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_changes_with_resolved_blob_index() {
+        let left = stage1_material();
+        let mut right = left.clone();
+        right.resolved_blob_index_hash = hash(0x9a);
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key(
+                &left,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &right,
+                Stage1CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_changes_with_full_policy_resolution_hash() {
+        let left = stage1_material();
+        let mut right = left.clone();
+        right.policy_resolution_self_hash = hash(0x99);
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key(
+                &left,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &right,
+                Stage1CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_changes_with_schema_hash() {
+        let left = stage1_material();
+        let mut right = left.clone();
+        right.quant_graph_schema_hash = hash(0x9b);
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key(
+                &left,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &right,
+                Stage1CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_changes_with_lowering_manifest_hash() {
+        let left = stage1_material();
+        let mut right = left.clone();
+        right.lowering_manifest_hash = hash(0x9c);
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key(
+                &left,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &right,
+                Stage1CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_changes_with_artifact_effective_core_hash() {
+        let left = stage1_material();
+        let mut right = left.clone();
+        right.artifact_effective_core_hash = hash(0x9d);
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key(
+                &left,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &right,
+                Stage1CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_changes_with_feature_set_hash() {
+        let left = stage1_material();
+        let mut right = left.clone();
+        right.crate_feature_set_hash = hash(0x9e);
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key(
+                &left,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &right,
+                Stage1CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_excludes_sequence_semantics_hash() {
+        let material = stage1_material();
+        let material_value =
+            serde_json::to_value(&material).expect("stage1 material serializes to JSON");
+
+        assert!(material_value.get("sequence_semantics_hash").is_none());
+        assert!(
+            !serde_json::to_string(&material_value)
+                .expect("material JSON renders")
+                .contains("sequence_semantics")
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_success_and_failure_memo_are_distinct() {
+        let material = stage1_material();
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key(
+                &material,
+                Stage1CellKind::Success
+            )),
+            compose_key(&stage1_quant_graph_store_key(
+                &material,
+                Stage1CellKind::FailureMemo
+            ))
+        );
+    }
+
+    #[test]
+    fn stage_cache_key_quant_graph_changes_with_pass_version() {
+        let material = stage1_material();
+
+        assert_ne!(
+            compose_key(&stage1_quant_graph_store_key_with_pass_version(
+                &material,
+                Stage1CellKind::Success,
+                SemVer::new(1, 0, 0)
+            )),
+            compose_key(&stage1_quant_graph_store_key_with_pass_version(
+                &material,
+                Stage1CellKind::Success,
+                SemVer::new(1, 0, 1)
+            ))
+        );
+    }
+
+    #[test]
+    fn k3_excludes_policy_resolution_self_hash() {
+        let material = stage3_material();
+        let value = serde_json::to_value(&material).expect("stage3 material serializes");
+
+        assert!(value.get("policy_resolution_self_hash").is_none());
+        assert!(
+            !serde_json::to_string(&value)
+                .expect("material JSON renders")
+                .contains("policy_resolution_self_hash")
+        );
+    }
+
+    #[test]
+    fn k3_excludes_compile_request_hash() {
+        let material = stage3_material();
+        let value = serde_json::to_value(&material).expect("stage3 material serializes");
+
+        assert!(value.get("compile_request_hash").is_none());
+        assert!(
+            !serde_json::to_string(&value)
+                .expect("material JSON renders")
+                .contains("compile_request_hash")
+        );
+    }
+
+    #[test]
+    fn k3_includes_infer_ir_policy_projection_hash() {
+        let left = stage3_material();
+        let mut right = left.clone();
+        right.infer_ir_policy_projection_hash = hash(0xa0);
+
+        assert_ne!(
+            compose_key(&stage3_infer_ir_store_key(&left, Stage3CellKind::Success)),
+            compose_key(&stage3_infer_ir_store_key(&right, Stage3CellKind::Success))
+        );
+    }
+
+    #[test]
+    fn k3_excludes_requested_runtime_modes_hash_double_count() {
+        let material = stage3_material();
+        let value = serde_json::to_value(&material).expect("stage3 material serializes");
+
+        assert!(value.get("requested_runtime_modes_hash").is_none());
+        assert!(
+            !serde_json::to_string(&value)
+                .expect("material JSON renders")
+                .contains("requested_runtime_modes_hash")
+        );
+    }
+
+    #[test]
+    fn stage3_cache_success_store_iff_passed() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let product = infer_ir_product();
+        let material = stage3_material_for(&product);
+        let report_bytes = canonical_report_bytes(&product.report);
+
+        put_stage3_success(&cache, &material, &product, report_bytes.clone())
+            .expect("put Stage 3 success cell");
+        let cell = get_stage3_success(&cache, &material)
+            .expect("Stage 3 success lookup")
+            .expect("Stage 3 cache hit");
+        let Stage3CacheCell::InferIrSuccess {
+            product: cached, ..
+        } = cell
+        else {
+            panic!("expected Stage 3 success product");
+        };
+
+        assert_eq!(cached.report.outcome, ReportOutcome::Passed);
+        assert_eq!(cached.infer_ir_self_hash, product.infer_ir_self_hash);
+    }
+
+    #[test]
+    fn stage3_cache_no_false_success_on_failure() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let material = stage3_material();
+        put_stage3_failure_memo(
+            &cache,
+            &material,
+            CachedReportBytes {
+                report_self_hash: hash(0xa1),
+                canonical_bytes: b"cached infer_ir failure".to_vec(),
+            },
+            Vec::new(),
+        )
+        .expect("put Stage 3 failure memo");
+
+        assert!(
+            get_stage3_success(&cache, &material)
+                .expect("Stage 3 success lookup")
+                .is_none()
+        );
+        assert!(matches!(
+            get_stage3_failure_memo(&cache, &material).expect("Stage 3 failure lookup"),
+            Some(Stage3CacheCell::FailureMemo { .. })
+        ));
+    }
+
+    #[test]
+    fn stage3_cache_lookup_and_audit_rewrap_traces_are_subscriber_captured() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let product = infer_ir_product();
+        let material = stage3_material_for(&product);
+        let report_bytes = canonical_report_bytes(&product.report);
+        put_stage3_success(&cache, &material, &product, report_bytes)
+            .expect("put Stage 3 success cell");
+        let capture = TraceCapture::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(LevelFilter::TRACE)
+            .with(capture.clone());
+
+        tracing::callsite::rebuild_interest_cache();
+        let rewrapped = tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            get_stage3_success(&cache, &material)
+                .expect("Stage 3 success lookup")
+                .expect("Stage 3 success cache hit");
+            assert!(
+                get_stage3_failure_memo(&cache, &material)
+                    .expect("Stage 3 failure memo lookup")
+                    .is_none()
+            );
+            let rewrapped = rewrap_stage3_cached_report_audit_parents(
+                &product.report,
+                InferIrAuditParents {
+                    policy_resolution_self_hash: hash(0xb9),
+                    compile_request_hash: hash(0xba),
+                },
+            )
+            .expect("audit rewrap hashes");
+            tracing::callsite::rebuild_interest_cache();
+            rewrapped
+        });
+        tracing::callsite::rebuild_interest_cache();
+
+        let records = capture.records();
+        assert!(records.iter().any(|record| {
+            record.level == "DEBUG"
+                && record.field_equals("event", STAGE3_CACHE_LOOKUP_EVENT)
+                && record.field_equals("stage_id", STAGE3_INFER_IR_SUCCESS_ID)
+                && record.field_equals("cell_kind", "Success")
+                && record.field_equals("hit", "true")
+        }));
+        assert!(records.iter().any(|record| {
+            record.level == "DEBUG"
+                && record.field_equals("event", STAGE3_CACHE_LOOKUP_EVENT)
+                && record.field_equals("stage_id", STAGE3_INFER_IR_FAILURE_ID)
+                && record.field_equals("cell_kind", "FailureMemo")
+                && record.field_equals("hit", "false")
+        }));
+        assert!(records.iter().any(|record| {
+            record.level == "DEBUG"
+                && record.field_equals("event", STAGE3_CACHE_AUDIT_REWRAP_EVENT)
+                && record.field_contains(
+                    "pre_audit_hash",
+                    &product.report.report_self_hash.to_string(),
+                )
+                && record.field_contains("post_audit_hash", &rewrapped.report_self_hash.to_string())
+                && record.field_equals("embedded_product_hash_unchanged", "true")
+        }));
+    }
+
+    #[test]
+    fn stage3_cache_failure_memo_distinct_from_success() {
+        let material = stage3_material();
+
+        assert_ne!(
+            compose_key(&stage3_infer_ir_store_key(
+                &material,
+                Stage3CellKind::Success
+            )),
+            compose_key(&stage3_infer_ir_store_key(
+                &material,
+                Stage3CellKind::FailureMemo
+            ))
+        );
+    }
+
+    #[test]
+    fn stage3_cache_pass_version_drift_invalidates() {
+        let material = stage3_material();
+
+        assert_ne!(
+            compose_key(&stage3_infer_ir_store_key_with_pass_version(
+                &material,
+                Stage3CellKind::Success,
+                SemVer::new(1, 0, 0)
+            )),
+            compose_key(&stage3_infer_ir_store_key_with_pass_version(
+                &material,
+                Stage3CellKind::Success,
+                SemVer::new(1, 0, 1)
+            ))
+        );
+    }
+
+    #[test]
+    fn stage3_cache_schema_drift_invalidates() {
+        let left = stage3_material();
+        let mut right = left.clone();
+        right.infer_ir_schema_hash = hash(0xa2);
+
+        assert_ne!(
+            compose_key(&stage3_infer_ir_store_key(&left, Stage3CellKind::Success)),
+            compose_key(&stage3_infer_ir_store_key(&right, Stage3CellKind::Success))
+        );
+    }
+
+    #[test]
+    fn stage3_cache_feature_set_drift_invalidates() {
+        let left = stage3_material();
+        let mut right = left.clone();
+        right.crate_feature_set_hash = hash(0xa3);
+
+        assert_ne!(
+            compose_key(&stage3_infer_ir_store_key(&left, Stage3CellKind::Success)),
+            compose_key(&stage3_infer_ir_store_key(&right, Stage3CellKind::Success))
+        );
+    }
+
+    #[test]
+    fn unrelated_policy_edit_does_not_invalidate_cache() {
+        let left = stage3_material();
+        let right = stage3_material();
+        let value = serde_json::to_value(&left).expect("stage3 material serializes");
+
+        assert_eq!(
+            compose_key(&stage3_infer_ir_store_key(&left, Stage3CellKind::Success)),
+            compose_key(&stage3_infer_ir_store_key(&right, Stage3CellKind::Success))
+        );
+        assert!(value.get("policy_resolution_self_hash").is_none());
+        assert!(value.get("compile_request_hash").is_none());
+    }
+
+    #[test]
+    fn stage3_cache_hit_replays_byte_identical_embedded_product() {
+        let product = infer_ir_product();
+        let rewrapped = rewrap_stage3_cached_report_audit_parents(
+            &product.report,
+            InferIrAuditParents {
+                policy_resolution_self_hash: hash(0xb1),
+                compile_request_hash: hash(0xb2),
+            },
+        )
+        .expect("audit rewrap hashes");
+        let before_product =
+            serde_json::to_value(&product.report.body.result.as_ref().expect("result").product)
+                .expect("product serializes");
+        let after_product = serde_json::to_value(
+            &rewrapped
+                .body
+                .result
+                .as_ref()
+                .expect("rewrapped result")
+                .product,
+        )
+        .expect("product serializes");
+
+        assert_eq!(
+            canonicalize_value(&before_product).expect("before canonicalizes"),
+            canonicalize_value(&after_product).expect("after canonicalizes")
+        );
+    }
+
+    #[test]
+    fn stage3_cache_hit_audit_parents_refreshed_on_envelope() {
+        let product = infer_ir_product();
+        let audit_parents = InferIrAuditParents {
+            policy_resolution_self_hash: hash(0xb3),
+            compile_request_hash: hash(0xb4),
+        };
+
+        let rewrapped = rewrap_stage3_cached_report_audit_parents(&product.report, audit_parents)
+            .expect("audit rewrap hashes");
+
+        assert_eq!(
+            rewrapped.body.input_identity.policy_resolution_self_hash,
+            audit_parents.policy_resolution_self_hash
+        );
+        assert_eq!(
+            rewrapped.body.input_identity.compile_request_hash,
+            audit_parents.compile_request_hash
+        );
+    }
+
+    #[test]
+    fn stage3_cache_hit_audit_rewrap_does_not_change_embedded_hash() {
+        let product = infer_ir_product();
+        let rewrapped = rewrap_stage3_cached_report_audit_parents(
+            &product.report,
+            InferIrAuditParents {
+                policy_resolution_self_hash: hash(0xb5),
+                compile_request_hash: hash(0xb6),
+            },
+        )
+        .expect("audit rewrap hashes");
+
+        assert_eq!(
+            product
+                .report
+                .body
+                .result
+                .as_ref()
+                .map(|result| result.infer_ir_self_hash),
+            rewrapped
+                .body
+                .result
+                .as_ref()
+                .map(|result| result.infer_ir_self_hash)
+        );
+    }
+
+    #[test]
+    fn stage3_cache_hit_audit_rewrap_changes_envelope_self_hash() {
+        let product = infer_ir_product();
+        let rewrapped = rewrap_stage3_cached_report_audit_parents(
+            &product.report,
+            InferIrAuditParents {
+                policy_resolution_self_hash: hash(0xb7),
+                compile_request_hash: hash(0xb8),
+            },
+        )
+        .expect("audit rewrap hashes");
+
+        assert_ne!(product.report.report_self_hash, rewrapped.report_self_hash);
     }
 
     #[test]
@@ -1778,6 +2877,19 @@ mod tests {
         }
     }
 
+    fn stage1_material() -> Stage1CacheKeyMaterial {
+        Stage1CacheKeyMaterial {
+            artifact_validation_self_hash: hash(36),
+            policy_resolution_self_hash: hash(37),
+            artifact_effective_core_hash: hash(38),
+            lowering_manifest_hash: hash(39),
+            resolved_blob_index_hash: hash(40),
+            pass_version_quant_graph: PASS_VERSION_QUANT_GRAPH.to_owned(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            quant_graph_schema_hash: quant_graph_schema_hash(),
+        }
+    }
+
     fn stage2_material(runtime_chrome_budget_hash: Option<Hash256>) -> Stage2CacheKeyMaterial {
         Stage2CacheKeyMaterial {
             policy_resolution_self_hash: hash(40),
@@ -1888,6 +3000,122 @@ mod tests {
         }
     }
 
+    fn stage3_material() -> Stage3CacheKeyMaterial {
+        Stage3CacheKeyMaterial {
+            quant_graph_self_hash: hash(0x71),
+            infer_ir_policy_projection_hash: hash(0x72),
+            static_budget_self_hash: hash(0x73),
+            pass_version_infer_ir: PASS_VERSION_INFER_IR.to_owned(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            infer_ir_schema_hash: infer_ir_schema_hash(),
+        }
+    }
+
+    fn stage3_material_for(product: &GbInferIRProduct) -> Stage3CacheKeyMaterial {
+        Stage3CacheKeyMaterial {
+            quant_graph_self_hash: product.infer_ir.identity.quant_graph_self_hash,
+            infer_ir_policy_projection_hash: product
+                .infer_ir
+                .identity
+                .infer_ir_policy_projection_hash,
+            static_budget_self_hash: product.infer_ir.identity.static_budget_self_hash,
+            pass_version_infer_ir: PASS_VERSION_INFER_IR.to_owned(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            infer_ir_schema_hash: infer_ir_schema_hash(),
+        }
+    }
+
+    fn infer_ir_product() -> GbInferIRProduct {
+        let infer_ir = infer_ir_fixture();
+        GbInferIRProduct::new(
+            infer_ir,
+            InferIrAuditParents {
+                policy_resolution_self_hash: hash(0x74),
+                compile_request_hash: hash(0x75),
+            },
+            BTreeSet::from([RuntimeMode::Interactive, RuntimeMode::Safe]),
+            FixtureEquivalenceTag::Skipped {
+                reason: FixtureEquivalenceSkippedReason::NonFixtureBuild,
+            },
+        )
+        .expect("infer_ir product builds")
+    }
+
+    fn infer_ir_fixture() -> GbInferIR {
+        let token_input = TokenInput::new(
+            TokenInputId::new(0),
+            ValueId::new(0),
+            BTreeSet::from([TokenIngressMode::Prompt]),
+        )
+        .expect("token input builds");
+        let node = crate::s3::infer_ir::GbNode {
+            node_id: NodeId::new(0),
+            op: InferOp::Embedding {
+                token_input: TokenInputId::new(0),
+            },
+            inputs: vec![ValueId::new(0)],
+            effects_in: Vec::new(),
+            outputs: vec![ValueId::new(1)],
+            effects_out: Vec::new(),
+            reduction_site: None,
+        };
+        let mut provenance = InferIrProvenance::default();
+        provenance.nodes.insert(
+            NodeId::new(0),
+            QuantGraphEntityRef::TokenInput {
+                token_input: TokenInputId::new(0),
+            },
+        );
+        provenance.values.insert(
+            ValueId::new(0),
+            ValueProducerRef::External {
+                token_input: TokenInputId::new(0),
+            },
+        );
+        provenance.values.insert(
+            ValueId::new(1),
+            ValueProducerRef::Node {
+                node: NodeId::new(0),
+            },
+        );
+        let anchors = NodeAnchorMap::from([(NodeId::new(0), SemanticAnchor::new(hash(0x76)))]);
+
+        GbInferIR::new(
+            InferIrIdentity {
+                quant_graph_self_hash: hash(0x71),
+                infer_ir_policy_projection_hash: hash(0x72),
+                static_budget_self_hash: hash(0x73),
+                requested_runtime_modes_hash: hash(0x77),
+                determinism: DeterminismClass::BitExact,
+                topological_order_hash: hash(0x78),
+            },
+            vec![token_input],
+            vec![node],
+            vec![
+                ValueDecl {
+                    value_id: ValueId::new(0),
+                    kind: ValueKind::InputToken,
+                    format: ValueFormat::TokenIdDomain { vocab_size: 16 },
+                    layout: ValueLayout::scalar(),
+                },
+                ValueDecl {
+                    value_id: ValueId::new(1),
+                    kind: ValueKind::EmbeddingOutput,
+                    format: ValueFormat::Quant {
+                        format: QuantFormat::I8,
+                    },
+                    layout: ValueLayout {
+                        shape: vec![ValueAxis::Model],
+                    },
+                },
+            ],
+            Vec::new(),
+            provenance,
+            anchors,
+        )
+        .expect("infer_ir fixture builds")
+    }
+
     fn input_hashes() -> ValidatedInputHashes {
         ValidatedInputHashes {
             artifact_source_hash: hash(21),
@@ -1924,5 +3152,89 @@ mod tests {
 
     fn hash(byte: u8) -> Hash256 {
         Hash256::from_bytes([byte; 32])
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct TraceCapture {
+        records: Arc<Mutex<Vec<TraceRecord>>>,
+    }
+
+    impl TraceCapture {
+        fn records(&self) -> Vec<TraceRecord> {
+            self.records
+                .lock()
+                .expect("trace capture mutex is not poisoned")
+                .clone()
+        }
+    }
+
+    impl<S> tracing_subscriber::layer::Layer<S> for TraceCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = TraceFieldVisitor::default();
+            event.record(&mut visitor);
+            self.records
+                .lock()
+                .expect("trace capture mutex is not poisoned")
+                .push(TraceRecord {
+                    level: event.metadata().level().as_str().to_owned(),
+                    fields: visitor.fields,
+                });
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TraceRecord {
+        level: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    impl TraceRecord {
+        fn field_contains(&self, field: &str, needle: &str) -> bool {
+            self.fields
+                .get(field)
+                .is_some_and(|value| value.contains(needle))
+        }
+
+        fn field_equals(&self, field: &str, expected: &str) -> bool {
+            self.fields
+                .get(field)
+                .is_some_and(|value| value == expected)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TraceFieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl TraceFieldVisitor {
+        fn insert(&mut self, field: &tracing::field::Field, value: String) {
+            self.fields.insert(field.name().to_owned(), value);
+        }
+    }
+
+    impl tracing::field::Visit for TraceFieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            self.insert(field, format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.insert(field, value.to_owned());
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.insert(field, value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.insert(field, value.to_string());
+        }
     }
 }

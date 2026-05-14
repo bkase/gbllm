@@ -1,0 +1,4 @@
+qg_reject = 11
+diagnostic_code = "QuantGraphExpertSectionWeightMissing"
+severity = "Hard"
+clause = "8.5 SC-5"

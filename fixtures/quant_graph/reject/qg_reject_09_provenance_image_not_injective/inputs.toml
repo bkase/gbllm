@@ -1,0 +1,5 @@
+qg_reject = 9
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_provenance_image_not_injective_inputs"
+base_fixture = "dense_toy0"
+mutation = "maps two tensor ids to the same export tensor id"

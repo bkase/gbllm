@@ -1,0 +1,4 @@
+qg_reject = 3
+diagnostic_code = "QuantGraphRoutingMissingForRoutedLayer"
+severity = "Hard"
+clause = "2.11"

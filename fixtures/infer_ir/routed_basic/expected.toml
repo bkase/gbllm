@@ -1,0 +1,5 @@
+schema = "infer_ir.fixture_expected.v1"
+name = "routed_basic"
+result = "Passed"
+self_consistency = "Passed"
+fixture_equivalence = "BitExactWhenFeatureEnabled"

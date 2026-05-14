@@ -1,0 +1,5 @@
+schema = "infer_ir.reject_input.v1"
+reject_id = 33
+class = "infer_ir_router_present_for_dense_layer"
+base_fixture = "dense_toy0"
+mutation = "infer_ir_router_present_for_dense_layer"

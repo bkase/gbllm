@@ -9,7 +9,7 @@ use crate::Hash256;
 /// `BlobRef` carries the canonical content hash, the stored byte length, and
 /// the codec chosen by the blob producer. Storage layers keep the bytes opaque;
 /// consumers interpret `codec` when they materialize the blob.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BlobRef {
     #[serde(with = "hash_hex")]
     pub hash: Hash256,
@@ -18,7 +18,7 @@ pub struct BlobRef {
 }
 
 /// Encoding applied to the stored blob bytes by the producer.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlobCodec {
     Raw,

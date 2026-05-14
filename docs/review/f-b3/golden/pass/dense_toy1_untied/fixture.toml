@@ -1,0 +1,4 @@
+name = "dense_toy1_untied"
+kind = "pass"
+description = "two-layer dense FFN with untied classify head"
+builder = "gbf-codegen::s1::quant_graph::tests::dense_toy1_untied_inputs"

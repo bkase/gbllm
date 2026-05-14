@@ -1,0 +1,5 @@
+qg_reject = 12
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_classify_head_tied_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "points a tied classify head at a non-embedding tensor"

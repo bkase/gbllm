@@ -1,0 +1,4 @@
+schema = "infer_ir.fixture_input.v1"
+name = "routed_basic"
+kind = "routed"
+source = "gbf-codegen::s3::infer_ir::tests"

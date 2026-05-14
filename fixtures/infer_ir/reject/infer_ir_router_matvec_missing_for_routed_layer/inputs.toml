@@ -1,0 +1,5 @@
+schema = "infer_ir.reject_input.v1"
+reject_id = 32
+class = "infer_ir_router_matvec_missing_for_routed_layer"
+base_fixture = "dense_toy0"
+mutation = "infer_ir_router_matvec_missing_for_routed_layer"

@@ -1,0 +1,5 @@
+qg_reject = 13
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_classify_head_format_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "uses an unsupported ternary logit format for the classify head"

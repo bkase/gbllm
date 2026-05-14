@@ -1,0 +1,10 @@
+schema = "f_b5.review_golden_hashes.v1"
+fixture = "dense_toy0"
+source_fixture = "fixtures/infer_ir/dense_toy0"
+infer_ir_json = "golden/dense_toy0/infer_ir.json"
+infer_ir_self_hash = "sha256:cf7f891c7f2f25baabf282cb587a72f5a5166a38439163094ea50c06ee1887c3"
+infer_ir_canonical_bytes_hash = "sha256:f0f0055f27be6a019dc13d6b4659d7995e8a851ebc73a80f8bb385433020da3d"
+topological_order_hash = "sha256:077b5c7a5cd377f70bbf2bf683a26377d876389818127e646400c86ae01cc541"
+report_self_hash = "sha256:55660a4640ceaa736f765e8d564114bce18ba8d10b35e4772241d6cf399e9f6c"
+anchor_count = 11
+driver_product_report_status = "exported"

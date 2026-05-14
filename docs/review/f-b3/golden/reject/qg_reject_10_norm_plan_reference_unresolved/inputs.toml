@@ -1,0 +1,5 @@
+qg_reject = 10
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_norm_plan_reference_unresolved_inputs"
+base_fixture = "dense_toy0"
+mutation = "adds a norm tensor role pointing at an unknown norm plan id"

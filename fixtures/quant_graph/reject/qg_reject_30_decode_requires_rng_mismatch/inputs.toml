@@ -1,0 +1,5 @@
+qg_reject = 30
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_decode_requires_rng_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "marks decode requires-rng facts as mismatched"

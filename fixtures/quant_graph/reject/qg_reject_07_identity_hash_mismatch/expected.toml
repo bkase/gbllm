@@ -1,0 +1,4 @@
+qg_reject = 7
+diagnostic_code = "QuantGraphIdentityHashMismatch"
+severity = "Hard"
+clause = "QG-Ok-4"

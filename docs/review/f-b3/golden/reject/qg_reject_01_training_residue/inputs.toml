@@ -1,0 +1,5 @@
+qg_reject = 1
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_training_residue_inputs"
+base_fixture = "dense_toy0"
+mutation = "marks upstream export-role facts as containing training-only residue"

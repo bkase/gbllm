@@ -1,0 +1,4 @@
+qg_reject = 20
+diagnostic_code = "QuantGraphDeterminismRequiresEnforcedReductionOrder"
+severity = "Hard"
+clause = "2.10"

@@ -1,0 +1,4 @@
+qg_reject = 1
+diagnostic_code = "QuantGraphTrainingResidue"
+severity = "Hard"
+clause = "2.16"

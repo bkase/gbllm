@@ -1,0 +1,5 @@
+qg_reject = 28
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_norm_site_duplicate_inputs"
+base_fixture = "dense_toy0"
+mutation = "duplicates a norm site binding"

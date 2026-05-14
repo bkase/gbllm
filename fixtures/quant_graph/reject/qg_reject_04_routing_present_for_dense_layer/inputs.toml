@@ -1,0 +1,5 @@
+qg_reject = 4
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_routing_present_for_dense_layer_inputs"
+base_fixture = "dense_toy0"
+mutation = "adds a router layer to a dense model summary"

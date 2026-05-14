@@ -1,0 +1,9 @@
+{
+  "schema": "f-b3.review.quant_graph_golden.v1",
+  "fixture": "dense_toy1_tied",
+  "description": "two-layer dense FFN with tied classify head",
+  "builder": "gbf-codegen::s1::quant_graph::tests::dense_toy1_tied_inputs",
+  "quant_graph_self_hash": "sha256:23eb111087869ffa7f99d1df3dc466562e1fba72ecabd48f388ac5e7dc72d0ee",
+  "quant_graph_canonical_bytes_hash": "sha256:af58be544486442feea712435a53c8155641cfd4f58c387a32f2e90a4d947be3",
+  "report_self_hash": "sha256:af256312489abaf560610546c7027365524ff6746b3342503a7e966a9d21018b"
+}

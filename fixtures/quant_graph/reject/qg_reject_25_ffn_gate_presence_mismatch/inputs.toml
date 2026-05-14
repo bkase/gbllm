@@ -1,0 +1,5 @@
+qg_reject = 25
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_ffn_gate_presence_mismatch_inputs"
+base_fixture = "dense_toy0"
+mutation = "switches the FFN plan to SwiGLU without adding a gate weight"

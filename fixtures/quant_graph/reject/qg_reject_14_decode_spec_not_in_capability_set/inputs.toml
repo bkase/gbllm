@@ -1,0 +1,5 @@
+qg_reject = 14
+kind = "programmatic_counterexample"
+counterexample = "gbf-codegen::s1::quant_graph::tests::reject_decode_spec_not_in_capability_set_inputs"
+base_fixture = "dense_toy0"
+mutation = "removes Argmax from the decode capability set"
