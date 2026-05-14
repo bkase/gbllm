@@ -1,0 +1,31 @@
+---
+source: gbf-experiments/tests/verifier_h3_s2.rs
+expression: pretty_json(&h3_snapshot(&verification))
+---
+{
+  "per_seed": [
+    {
+      "gap_distill": 0.10000000000000009,
+      "gap_nodistill": 0.30000000000000004,
+      "passes": true,
+      "seed": 0
+    },
+    {
+      "gap_distill": 0.19999999999999996,
+      "gap_nodistill": 0.5,
+      "passes": true,
+      "seed": 1
+    },
+    {
+      "gap_distill": 0.1499999999999999,
+      "gap_nodistill": 0.3999999999999999,
+      "passes": true,
+      "seed": 2
+    }
+  ],
+  "status": {
+    "kind": "confirmed"
+  },
+  "strong_form_observed": 0.25,
+  "weak_form_passed": true
+}

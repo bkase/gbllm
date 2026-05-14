@@ -197,10 +197,6 @@ fn fail_capacity_decision() -> S1Decision {
     }
 }
 
-fn mean(values: &[f64]) -> f64 {
-    values.iter().sum::<f64>() / values.len() as f64
-}
-
 fn tiny_val_bytes() -> Vec<u8> {
     let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

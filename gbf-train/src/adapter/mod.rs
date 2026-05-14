@@ -274,20 +274,18 @@ pub fn scalar_only() -> u32 {
         workspace_deps: &toml::map::Map<String, toml::Value>,
         resolving_workspace: bool,
     ) -> String {
-        if let Some(table) = spec.as_table() {
-            if let Some(package) = table.get("package").and_then(toml::Value::as_str) {
-                return package.to_owned();
-            }
-            if !resolving_workspace && table_bool(table, "workspace") {
-                if let Some(workspace_spec) = workspace_deps.get(dep_name) {
-                    return dependency_package_inner(
-                        dep_name,
-                        workspace_spec,
-                        workspace_deps,
-                        true,
-                    );
-                }
-            }
+        let Some(table) = spec.as_table() else {
+            return dep_name.to_owned();
+        };
+
+        if let Some(package) = table.get("package").and_then(toml::Value::as_str) {
+            return package.to_owned();
+        }
+        if !resolving_workspace
+            && table_bool(table, "workspace")
+            && let Some(workspace_spec) = workspace_deps.get(dep_name)
+        {
+            return dependency_package_inner(dep_name, workspace_spec, workspace_deps, true);
         }
 
         dep_name.to_owned()

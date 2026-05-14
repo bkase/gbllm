@@ -1,0 +1,151 @@
+name: S2 On-Demand Replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref or SHA to reproduce"
+        required: true
+        default: "main"
+      seed_list:
+        description: "Comma-separated S2 seed list"
+        required: false
+        default: "0,1,2,3,4"
+      builds:
+        description: "Comma-separated S2 full-build list"
+        required: false
+        default: "s2_ternary_full,s2_fp_full,s2_ternary_nodistill"
+      pass_version:
+        description: "S2 pass version"
+        required: false
+        default: "0.1.0"
+
+concurrency:
+  group: s2-on-demand-${{ github.event.inputs.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  s2-on-demand:
+    name: S2 on-demand replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    env:
+      S2_SEED_LIST: ${{ github.event.inputs.seed_list }}
+      S2_BUILDS: ${{ github.event.inputs.builds }}
+      S2_PASS_VERSION: ${{ github.event.inputs.pass_version }}
+      S2_ARTIFACT_DIR: experiments/S2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: s2-on-demand-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            s2-on-demand-cargo-${{ runner.os }}-
+
+      - name: Run S2 on-demand suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/s2-on-demand "$S2_ARTIFACT_DIR"
+
+          # bd-30fu owns the measured <60s integration_s2 budget; this replay
+          # workflow preserves full forensic output rather than claiming that budget.
+          run_capture_log() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s2-on-demand/${name}.stdout") \
+              2> >(tee "artifacts/s2-on-demand/${name}.stderr.log" >&2)
+          }
+
+          run_capture_ndjson() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s2-on-demand/${name}.stdout") \
+              2> >(tee "artifacts/s2-on-demand/${name}.ndjson" >&2)
+          }
+
+          pass_slug="${S2_PASS_VERSION//[^A-Za-z0-9._-]/_}"
+          export pass_slug
+
+          run_capture_log gbf-experiments-build-s2-full cargo build -p gbf-experiments --features s2-full
+          run_capture_log gbf-experiments-build-s2-ablation cargo build -p gbf-experiments --no-default-features --features s2-ablation
+          run_capture_log integration-s2 cargo test -p gbf-experiments --test integration_s2
+          run_capture_log replay-full-s2 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s2-full -- s2 replay-full --seed-list "$S2_SEED_LIST" --builds "$S2_BUILDS" --fixture tiny --json | tee "$S2_ARTIFACT_DIR/replay-full-${pass_slug}.json"'
+          run_capture_log distill-once-s2 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s2-full -- s2 distill-once --json | tee "$S2_ARTIFACT_DIR/distill-once-${pass_slug}.json"'
+          run_capture_log report-s2 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s2-full -- s2 report --replay-full-json "$S2_ARTIFACT_DIR/replay-full-${pass_slug}.json" --distill-json "$S2_ARTIFACT_DIR/distill-once-${pass_slug}.json" --output docs/experiments/S2-report.md --json | tee "$S2_ARTIFACT_DIR/report-${pass_slug}.json"'
+          python3 - "$S2_ARTIFACT_DIR/report-${pass_slug}.json" "$S2_ARTIFACT_DIR/replay-full-${pass_slug}.json" "$S2_ARTIFACT_DIR/distill-once-${pass_slug}.json" docs/experiments/S2-report.md "$S2_ARTIFACT_DIR/commit-comment-${pass_slug}.md" "$S2_ARTIFACT_DIR/commit-comment-${pass_slug}.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report_json, replay_json, distill_json, report_md, comment_md, comment_payload = map(Path, sys.argv[1:])
+          report_cli = json.loads(report_json.read_text(encoding="utf-8"))
+          replay = json.loads(replay_json.read_text(encoding="utf-8"))
+          distill = json.loads(distill_json.read_text(encoding="utf-8"))
+          markdown = report_md.read_text(encoding="utf-8")
+          front_matter = json.loads(markdown.split("---", 2)[1].strip())
+          body = "\n".join([
+              "### S2 on-demand replay-evidence report",
+              "",
+              "- mode: `replay-evidence report; fixture/default verifier fields remain present`",
+              "- scope: `not full live closure and not deployable artifact acceptance`",
+              f"- outcome: `{front_matter['s2_outcome']}`",
+              f"- decision: `{json.dumps(front_matter['decision'], sort_keys=True)}`",
+              f"- report self-hash: `{front_matter['report_self_hash']}`",
+              f"- report artifact: `{report_cli['path']}`",
+              f"- replay evidence: `{replay['evidence_source']}` in `{replay_json}`",
+              f"- distill evidence: `{distill['evidence_source']}` in `{distill_json}`",
+              "- distill JSON mode: `provenance-only; distill JSON bytes are not threaded into report_self_hash`",
+          ]) + "\n"
+          comment_md.write_text(body, encoding="utf-8")
+          comment_payload.write_text(json.dumps({"body": body}, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          run_capture_ndjson s2-preregistration scripts/s2_preregistration_check.sh
+          run_capture_ndjson s2-determinism scripts/s2_determinism_check.sh
+          run_capture_ndjson s2-isolation scripts/s2_isolation_check.sh
+          run_capture_ndjson s2-api-drift scripts/s2_api_drift_check.sh
+          run_capture_ndjson s2-distill-determinism scripts/s2_distill_determinism_check.sh
+
+      - name: Comment S2 outcome on commit
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pass_slug="${S2_PASS_VERSION//[^A-Za-z0-9._-]/_}"
+          commit_sha="$(git rev-parse HEAD)"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/commits/${commit_sha}/comments" \
+            --input "$S2_ARTIFACT_DIR/commit-comment-${pass_slug}.json" \
+            > >(tee "artifacts/s2-on-demand/commit-comment.stdout") \
+            2> >(tee "artifacts/s2-on-demand/commit-comment.stderr.log" >&2)
+
+      - name: Upload S2 on-demand artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-on-demand-artifacts
+          path: |
+            artifacts/s2-on-demand/**/*.stdout
+            artifacts/s2-on-demand/**/*.stderr.log
+            artifacts/s2-on-demand/**/*.ndjson
+            /tmp/s2-*.json
+            experiments/S2/**
+            docs/experiments/S2-report.md
+          if-no-files-found: warn
+          retention-days: 30

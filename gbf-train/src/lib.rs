@@ -10,8 +10,13 @@ pub mod logging;
 pub mod loss;
 pub mod phase;
 pub mod preflight;
-#[cfg(feature = "qat")]
+#[cfg(any(feature = "qat", feature = "qat-ablation"))]
 pub mod qat;
 pub mod scheduler;
+#[cfg(all(
+    feature = "burn-adapter",
+    any(feature = "qat", feature = "qat-ablation")
+))]
+pub mod sequence;
 pub mod shadow;
 pub mod teacher;

@@ -1,0 +1,5 @@
+---
+source: gbf-experiments/tests/canonical_json_s2.rs
+expression: "String::from_utf8(phase.canonical_json_bytes().expect(\"phase canonical JSON\")).unwrap()"
+---
+{"empty_phase_error_raised":true,"fixture_id":"tiny_model_T10.1","fixture_phase_boundaries":[0,10,20,30,40,50],"hardness_at_boundary":{"10":{"activation_qat":"off","expert_qat":"off","norm_qat":"off"},"20":{"activation_qat":"off","expert_qat":"soft","norm_qat":"off"},"30":{"activation_qat":"soft","expert_qat":"hard","norm_qat":"soft"},"40":{"activation_qat":"hard","expert_qat":"hard","norm_qat":"hard"}},"integ_passed":true,"overlap_phase_error_raised":true,"schema":"s2_phase_transition_integration.v1","skip_phase_test_passed":true,"teacher_freeze_event_count":1,"transition_event_count":4}

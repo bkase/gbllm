@@ -253,4 +253,35 @@ git add "$custom_report"
 git commit -q -m "custom report records result commit"
 "$SCRIPT" --report "$custom_report" --artifact-dir experiments/S1-toy1 >/dev/null
 
+git_init squash-carrier-repo
+
+write_report null null
+git add docs/experiments/S1-report.md
+git commit -q -m "pre-register predictions before squash"
+squash_predictions_commit="$(git rev-parse HEAD)"
+
+mkdir -p experiments/S1/checkpoints/seed-0
+cat >experiments/S1/checkpoints/seed-0/metadata.json <<'JSON'
+{
+  "schema": "s1_checkpoint.v1",
+  "checkpoint_self_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}
+JSON
+git add experiments/S1/checkpoints/seed-0/metadata.json
+git commit -q -m "add audited first result before squash"
+squash_first_result_commit="$(git rev-parse HEAD)"
+
+write_report "$squash_predictions_commit" "$squash_first_result_commit"
+git add docs/experiments/S1-report.md
+git commit -q -m "record audited report before squash"
+audited_report_commit="$(git rev-parse HEAD)"
+
+git checkout --orphan squash-main >/dev/null 2>&1
+git rm -rf . >/dev/null 2>&1 || true
+rm -rf docs experiments
+git checkout "$audited_report_commit" -- docs/experiments/S1-report.md experiments/S1
+git add docs/experiments/S1-report.md experiments/S1
+git commit -q -m "squash audited report and artifacts"
+"$SCRIPT" --report docs/experiments/S1-report.md >/dev/null
+
 echo "[PREREG TEST] all preregistration check scenarios passed"

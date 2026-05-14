@@ -1,0 +1,19 @@
+---
+source: gbf-experiments/tests/state_machine_s2.rs
+expression: "run.transitions.iter().map(|transition|\nformat!(\"{} -> {}\", transition.from,\ntransition.to)).collect::<Vec<_>>().join(\"\\n\")"
+---
+Configured -> LoadedBaselines
+LoadedBaselines -> LinearStateSmokeRun
+LinearStateSmokeRun -> LossGradFlowRun
+LossGradFlowRun -> PhaseTransitionIntegRun
+PhaseTransitionIntegRun -> OracleReRun
+OracleReRun -> ApiDriftChecked
+ApiDriftChecked -> FalsificationChecked
+FalsificationChecked -> TrainAttempted
+TrainAttempted -> Trained
+Trained -> Scored
+Scored -> GapComputed
+GapComputed -> AblationAttempted
+AblationAttempted -> AblationCompared
+AblationCompared -> Reported
+Reported -> Decided

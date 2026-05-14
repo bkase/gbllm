@@ -33,6 +33,8 @@ jobs:
       GBF_BIN: target/release/gbf-cli
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 

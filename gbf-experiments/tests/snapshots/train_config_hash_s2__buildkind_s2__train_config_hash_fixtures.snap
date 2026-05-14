@@ -1,0 +1,6 @@
+---
+source: gbf-experiments/tests/train_config_hash_s2.rs
+assertion_line: 89
+expression: "String::from_utf8(bytes).unwrap()"
+---
+[{"build_kind":"s2-ternary-full","train_config_hash":"sha256:a1799a18a6b4da03cb91fa1ee9d815c1d2834cde597518f51fbbbb7164cf1f7d"},{"build_kind":"s2-fp-full","train_config_hash":"sha256:e5e564095d89a09b2728e0fd259d95f75c6c701c9eed66945cfb1f522365a02e"},{"build_kind":"s2-ternary-nodistill","train_config_hash":"sha256:2544af5c0cbdcd1e1a74953e10d3c64d9374f006ca3ccb7e479cf28f8e6ed317"},{"build_kind":"s2-ablation","train_config_hash":"sha256:acdddd7bd6a2416cc1b797d8ec29285c95bf244e5b0b77c911456913c1a3a0cf"}]

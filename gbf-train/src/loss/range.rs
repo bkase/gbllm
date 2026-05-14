@@ -1,12 +1,10 @@
 //! Activation range penalty loss.
 //!
 //! This module owns the raw `lambda_range` diagnostic term:
-//! `mean(max(0, abs(activation) - safe_bound)^2)`. The mean is per expert
-//! boundary sample, then over batch rows; for rectangular tensors this is the
-//! same value as an elementwise mean over all supplied activation values. The
-//! safe bound is supplied by the caller after target accumulator and
-//! activation-chain scaling have been resolved. Callers that compose total loss
-//! apply `lambda_range` explicitly.
+//! `(1 / batch) * sum_b sum_axis(max(0, x - safe_hi)^2 + max(0, safe_lo - x)^2)`.
+//! The checked view names both axes so callers cannot silently flatten the
+//! batch/sample contract. Callers that compose total loss apply `lambda_range`
+//! explicitly.
 
 use std::error::Error;
 use std::fmt;
@@ -36,6 +34,32 @@ impl SafeActivationBound {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SafeActivationInterval {
+    lo: f32,
+    hi: f32,
+}
+
+impl SafeActivationInterval {
+    pub fn new(lo: f32, hi: f32) -> Result<Self, ActivationRangeLossError> {
+        if !lo.is_finite() || !hi.is_finite() || lo > hi {
+            return Err(ActivationRangeLossError::InvalidSafeInterval { lo, hi });
+        }
+
+        Ok(Self { lo, hi })
+    }
+
+    #[must_use]
+    pub const fn lo(self) -> f32 {
+        self.lo
+    }
+
+    #[must_use]
+    pub const fn hi(self) -> f32 {
+        self.hi
+    }
+}
+
 #[derive(Debug)]
 pub enum ActivationRangeLossError {
     EmptyActivations,
@@ -46,6 +70,10 @@ pub enum ActivationRangeLossError {
     },
     InvalidSafeBound {
         value: f32,
+    },
+    InvalidSafeInterval {
+        lo: f32,
+        hi: f32,
     },
     NonFiniteActivation {
         index: usize,
@@ -60,9 +88,12 @@ pub enum ActivationRangeLossError {
     NonFiniteLambdaRange {
         lambda_range: f32,
     },
-    #[cfg(feature = "burn-adapter")]
     InvalidActivationShape {
         shape: Vec<usize>,
+    },
+    #[cfg(feature = "burn-adapter")]
+    InvalidBurnActivationRank {
+        rank: usize,
     },
     #[cfg(feature = "burn-adapter")]
     BurnAdapter(BurnAdapterError),
@@ -95,6 +126,19 @@ impl PartialEq for ActivationRangeLossError {
                 Self::NonFiniteLoss { value: right_value },
             ) => float_error_value_eq(*left_value, *right_value),
             (
+                Self::InvalidSafeInterval {
+                    lo: left_lo,
+                    hi: left_hi,
+                },
+                Self::InvalidSafeInterval {
+                    lo: right_lo,
+                    hi: right_hi,
+                },
+            ) => {
+                float_error_value_eq(*left_lo, *right_lo)
+                    && float_error_value_eq(*left_hi, *right_hi)
+            }
+            (
                 Self::NonFiniteActivation {
                     index: left_index,
                     value: left_value,
@@ -120,11 +164,15 @@ impl PartialEq for ActivationRangeLossError {
                     lambda_range: right_lambda,
                 },
             ) => float_error_value_eq(*left_lambda, *right_lambda),
-            #[cfg(feature = "burn-adapter")]
             (
                 Self::InvalidActivationShape { shape: left_shape },
                 Self::InvalidActivationShape { shape: right_shape },
             ) => left_shape == right_shape,
+            #[cfg(feature = "burn-adapter")]
+            (
+                Self::InvalidBurnActivationRank { rank: left_rank },
+                Self::InvalidBurnActivationRank { rank: right_rank },
+            ) => left_rank == right_rank,
             #[cfg(feature = "burn-adapter")]
             (Self::BurnAdapter(_), Self::BurnAdapter(_)) => false,
             _ => false,
@@ -154,6 +202,12 @@ impl fmt::Display for ActivationRangeLossError {
                     "safe activation bound must be finite and positive, got {value}"
                 )
             }
+            Self::InvalidSafeInterval { lo, hi } => {
+                write!(
+                    f,
+                    "safe activation interval must be finite with lo <= hi, got [{lo}, {hi}]"
+                )
+            }
             Self::NonFiniteActivation { index, value } => {
                 write!(f, "activation at index {index} must be finite, got {value}")
             }
@@ -166,11 +220,17 @@ impl fmt::Display for ActivationRangeLossError {
             Self::NonFiniteLambdaRange { lambda_range } => {
                 write!(f, "lambda_range must be finite, got {lambda_range}")
             }
-            #[cfg(feature = "burn-adapter")]
             Self::InvalidActivationShape { shape } => {
                 write!(
                     f,
                     "activation tensor must be rank >= 1 with non-zero dimensions, got {shape:?}"
+                )
+            }
+            #[cfg(feature = "burn-adapter")]
+            Self::InvalidBurnActivationRank { rank } => {
+                write!(
+                    f,
+                    "S2 range loss activation tensor must be rank 2, got rank {rank}"
                 )
             }
             #[cfg(feature = "burn-adapter")]
@@ -188,12 +248,14 @@ impl Error for ActivationRangeLossError {
             | Self::ZeroActivationSampleWidth
             | Self::ActivationCountNotDivisibleBySampleWidth { .. }
             | Self::InvalidSafeBound { .. }
+            | Self::InvalidSafeInterval { .. }
             | Self::NonFiniteActivation { .. }
             | Self::NonFiniteLoss { .. }
             | Self::NegativeLambdaRange { .. }
             | Self::NonFiniteLambdaRange { .. } => None,
-            #[cfg(feature = "burn-adapter")]
             Self::InvalidActivationShape { .. } => None,
+            #[cfg(feature = "burn-adapter")]
+            Self::InvalidBurnActivationRank { .. } => None,
         }
     }
 }
@@ -250,6 +312,74 @@ impl<'a> ActivationRangeBatch<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CheckedActivationView<'a> {
+    data: &'a [f32],
+    batch_axis_len: usize,
+    per_sample_axis_len: usize,
+}
+
+impl<'a> CheckedActivationView<'a> {
+    pub fn new(
+        data: &'a [f32],
+        batch_axis_len: usize,
+        per_sample_axis_len: usize,
+    ) -> Result<Self, ActivationRangeLossError> {
+        if batch_axis_len == 0 || data.is_empty() {
+            return Err(ActivationRangeLossError::EmptyActivations);
+        }
+        if per_sample_axis_len == 0 {
+            return Err(ActivationRangeLossError::ZeroActivationSampleWidth);
+        }
+
+        let expected = batch_axis_len.checked_mul(per_sample_axis_len).ok_or(
+            ActivationRangeLossError::ActivationCountNotDivisibleBySampleWidth {
+                activation_len: data.len(),
+                sample_width: per_sample_axis_len,
+            },
+        )?;
+        if data.len() != expected {
+            return Err(
+                ActivationRangeLossError::ActivationCountNotDivisibleBySampleWidth {
+                    activation_len: data.len(),
+                    sample_width: per_sample_axis_len,
+                },
+            );
+        }
+        validate_activations(data)?;
+
+        Ok(Self {
+            data,
+            batch_axis_len,
+            per_sample_axis_len,
+        })
+    }
+
+    pub fn from_shape(data: &'a [f32], shape: &[usize]) -> Result<Self, ActivationRangeLossError> {
+        if shape.len() != 2 {
+            return Err(ActivationRangeLossError::InvalidActivationShape {
+                shape: shape.to_vec(),
+            });
+        }
+        Self::new(data, shape[0], shape[1])
+    }
+
+    #[must_use]
+    pub const fn data(self) -> &'a [f32] {
+        self.data
+    }
+
+    #[must_use]
+    pub const fn batch_axis_len(self) -> usize {
+        self.batch_axis_len
+    }
+
+    #[must_use]
+    pub const fn per_sample_axis_len(self) -> usize {
+        self.per_sample_axis_len
+    }
+}
+
 /// Mean quadratic penalty for flattened activations outside `[-safe_bound, safe_bound]`.
 ///
 /// Use [`ActivationRangeBatch`] when the caller wants the boundary sample width
@@ -289,6 +419,44 @@ pub fn activation_range_penalty_for_batch(
     normalize_f64_range_loss(batch_loss_sum / batch.batch_size() as f64)
 }
 
+pub fn range_loss(
+    view: CheckedActivationView<'_>,
+    safe_lo: f32,
+    safe_hi: f32,
+) -> Result<f32, ActivationRangeLossError> {
+    range_loss_with_interval(view, SafeActivationInterval::new(safe_lo, safe_hi)?)
+}
+
+pub fn range_loss_with_interval(
+    view: CheckedActivationView<'_>,
+    interval: SafeActivationInterval,
+) -> Result<f32, ActivationRangeLossError> {
+    let mut out_of_range_count = 0_u32;
+    let mut batch_loss_sum = 0.0_f64;
+    for sample in view.data().chunks_exact(view.per_sample_axis_len()) {
+        for &activation in sample {
+            let above = (f64::from(activation) - f64::from(interval.hi())).max(0.0);
+            let below = (f64::from(interval.lo()) - f64::from(activation)).max(0.0);
+            if above > 0.0 || below > 0.0 {
+                out_of_range_count = out_of_range_count.saturating_add(1);
+            }
+            batch_loss_sum += above * above + below * below;
+        }
+    }
+
+    let raw = normalize_f64_range_loss(batch_loss_sum / view.batch_axis_len() as f64)?;
+    tracing::debug!(
+        event = "range_loss_call",
+        batch = view.batch_axis_len() as u32,
+        per_sample_axis = view.per_sample_axis_len() as u32,
+        safe_lo = interval.lo(),
+        safe_hi = interval.hi(),
+        out_of_range_count,
+        raw,
+    );
+    Ok(raw)
+}
+
 pub fn weighted_activation_range_penalty(
     raw_range_loss: f32,
     lambda_range: f32,
@@ -310,6 +478,29 @@ where
 
     let excess = (activations.abs() - safe_bound.value()).clamp_min(0.0);
     let loss = (excess.clone() * excess).mean();
+    validate_burn_loss(&loss)?;
+
+    Ok(loss)
+}
+
+#[cfg(feature = "burn-adapter")]
+pub fn burn_range_loss<B>(
+    activations: BurnFloatTensor<B, 2>,
+    safe_lo: f32,
+    safe_hi: f32,
+) -> Result<BurnFloatTensor<B, 1>, ActivationRangeLossError>
+where
+    B: BurnBackend,
+{
+    let interval = SafeActivationInterval::new(safe_lo, safe_hi)?;
+    let shape = float_tensor_shape(&activations);
+    validate_burn_checked_activation_shape(shape)?;
+    validate_burn_activation_shape(shape)?;
+
+    let above = (activations.clone() - interval.hi()).clamp_min(0.0);
+    let below = (interval.lo() - activations).clamp_min(0.0);
+    let penalty = above.clone() * above + below.clone() * below;
+    let loss = penalty.sum() / shape[0] as f32;
     validate_burn_loss(&loss)?;
 
     Ok(loss)
@@ -420,6 +611,19 @@ fn validate_burn_activation_shape<const D: usize>(
 }
 
 #[cfg(feature = "burn-adapter")]
+fn validate_burn_checked_activation_shape(
+    shape: [usize; 2],
+) -> Result<(), ActivationRangeLossError> {
+    if shape.contains(&0) {
+        return Err(ActivationRangeLossError::InvalidActivationShape {
+            shape: shape.to_vec(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "burn-adapter")]
 fn validate_burn_loss<B, const D: usize>(
     loss: &BurnFloatTensor<B, D>,
 ) -> Result<(), ActivationRangeLossError>
@@ -492,6 +696,45 @@ mod tests {
                 .unwrap();
 
         assert_close(batched, (row_a + row_b) / 2.0, 1.0e-7);
+    }
+
+    #[test]
+    fn range_loss_uses_explicit_lo_hi_and_batch_denominator() {
+        let view = CheckedActivationView::new(&[-2.0, -0.5, 0.0, 2.0], 2, 2).unwrap();
+
+        let loss = range_loss(view, -1.0, 1.0).unwrap();
+
+        assert_close(loss, 1.0, 1.0e-7);
+    }
+
+    #[test]
+    fn range_loss_does_not_double_penalize_negative_out_of_range_values() {
+        let view = CheckedActivationView::new(&[-2.0], 1, 1).unwrap();
+
+        let loss = range_loss(view, -1.0, 1.0).unwrap();
+
+        assert_close(loss, 1.0, 1.0e-7);
+    }
+
+    #[test]
+    fn checked_activation_view_rejects_non_2d_shapes() {
+        assert_eq!(
+            CheckedActivationView::from_shape(&[0.0], &[1]).unwrap_err(),
+            ActivationRangeLossError::InvalidActivationShape { shape: vec![1] }
+        );
+        assert_eq!(
+            CheckedActivationView::from_shape(&[0.0], &[1, 1, 1]).unwrap_err(),
+            ActivationRangeLossError::InvalidActivationShape {
+                shape: vec![1, 1, 1],
+            }
+        );
+        assert_eq!(
+            CheckedActivationView::from_shape(&[0.0, 1.0, 2.0], &[1, 2]).unwrap_err(),
+            ActivationRangeLossError::ActivationCountNotDivisibleBySampleWidth {
+                activation_len: 3,
+                sample_width: 2,
+            }
+        );
     }
 
     #[test]
@@ -609,6 +852,44 @@ mod tests {
                 float_tensor_into_vec(burn_loss).unwrap()[0],
                 scalar_loss,
                 1.0e-6,
+            );
+        }
+
+        #[test]
+        fn burn_range_loss_matches_checked_scalar_oracle() {
+            let device = BurnDevice::<B>::default();
+            let values = vec![-2.0, -0.5, 0.0, 2.0];
+            let activations =
+                float_tensor_from_vec::<B, 2>(values.clone(), [2, 2], &device).unwrap();
+            let view = CheckedActivationView::new(&values, 2, 2).unwrap();
+
+            let burn_loss = burn_range_loss(activations, -1.0, 1.0).unwrap();
+            let scalar_loss = range_loss(view, -1.0, 1.0).unwrap();
+
+            assert_close(
+                float_tensor_into_vec(burn_loss).unwrap()[0],
+                scalar_loss,
+                1.0e-6,
+            );
+        }
+
+        #[test]
+        fn burn_range_loss_gradient_is_zero_inside_and_linear_outside() {
+            let device = BurnDevice::<B>::default();
+            let activations =
+                float_tensor_from_vec::<B, 2>(vec![-2.0, -0.5, 0.5, 2.0], [2, 2], &device)
+                    .unwrap()
+                    .require_grad();
+
+            let loss = burn_range_loss(activations.clone(), -1.0, 1.0).unwrap();
+            let gradients = loss.backward();
+            let grad = activations
+                .grad(&gradients)
+                .expect("activations should receive range-loss gradients");
+
+            assert_eq!(
+                float_tensor_into_vec(grad).unwrap(),
+                vec![-1.0, 0.0, 0.0, 1.0]
             );
         }
 

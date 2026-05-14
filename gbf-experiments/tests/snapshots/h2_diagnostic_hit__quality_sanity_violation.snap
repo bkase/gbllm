@@ -1,0 +1,18 @@
+---
+source: gbf-experiments/tests/verifier_h2_s2.rs
+expression: "pretty_json(&serde_json::to_value(first_hit(&verdict.hits,\n\"fp_quality\")).unwrap())"
+---
+{
+  "build_kind": "s2-fp-full",
+  "check_name": "fp_quality",
+  "expected": {
+    "max_bpc": 2.5
+  },
+  "hypothesis_id": "H2.b",
+  "observed": {
+    "bpc": 2.6
+  },
+  "remediation": "Reject the run; full-precision quality failed the H2 absolute sanity gate.",
+  "seed": 2,
+  "step": null
+}

@@ -1,0 +1,40 @@
+schema = "tinystories_manifest.v1"
+schema_version = "1.0.0"
+corpus_id = "s2-tinystories-stub-with-eval-split"
+dataset_version = "fixture-v1"
+source_name = "synthetic-s2-tinystories-stub"
+source_url = "https://example.invalid/gbllm/s2-tinystories-stub"
+train_path = "train.bytes"
+val_path = "eval.bytes"
+train_sha256 = "sha256:17c4b7c0b8813d555e8db28dc895f8ebd50ddbdd6c036f3263fabb22b8b4bf0e"
+val_sha256 = "sha256:8f36f9e841ee99984ef14b9ba3ed74567e537cf11c7100b2f2b7e4a181ad0e06"
+raw_root = "."
+raw_byte_policy = "ASCII test fixture bytes only; no normalization."
+story_separator = "<|endoftext|>"
+s2_policy = "S2 fixture includes a train split and a distinct eval split for integration smoke tests."
+deferred_scope = []
+
+[source]
+name = "synthetic-s2-tinystories-stub"
+url = "https://example.invalid/gbllm/s2-tinystories-stub"
+dataset_card_url = "https://example.invalid/gbllm/s2-tinystories-stub-card"
+license = "CC0-1.0"
+license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+downloaded_at = "2026-05-10"
+decompression = "none"
+
+[splits.train]
+role = "train"
+url = "file://train.bytes"
+local_filename = "train.bytes"
+sha256 = "sha256:17c4b7c0b8813d555e8db28dc895f8ebd50ddbdd6c036f3263fabb22b8b4bf0e"
+byte_length = 18
+story_count = 1
+
+[splits.eval]
+role = "eval"
+url = "file://eval.bytes"
+local_filename = "eval.bytes"
+sha256 = "sha256:8f36f9e841ee99984ef14b9ba3ed74567e537cf11c7100b2f2b7e4a181ad0e06"
+byte_length = 19
+story_count = 1

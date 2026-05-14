@@ -1,0 +1,8 @@
+---
+source: gbf-experiments/tests/api_drift_check_s2.rs
+expression: "format!(\"passed={}\\ndrift_count={}\\nqat_hash={}\\nlinearstate_hash={}\",\nreport.passed, report.drift_count, report.qat_public_api_snapshot_hash,\nreport.linearstate_public_api_snapshot_hash)"
+---
+passed=true
+drift_count=0
+qat_hash=sha256:a14f7e01bb0ad1a47667408b83dbdfb3e2f84814c40cfb15717871ab2303efd0
+linearstate_hash=sha256:75ef03a134de0ed81db4c111c8c326cfc8fa198a13979cdca3a80d269fb3bdd0

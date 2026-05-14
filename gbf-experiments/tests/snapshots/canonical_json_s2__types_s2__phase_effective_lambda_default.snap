@@ -1,0 +1,5 @@
+---
+source: gbf-experiments/tests/canonical_json_s2.rs
+expression: "String::from_utf8(bytes).expect(\"utf8 JSON\")"
+---
+{"lambda_balance":0.0,"lambda_distill":1.0,"lambda_overflow":0.0,"lambda_range":0.009999999776482582,"lambda_shape":0.0,"lambda_switch":0.0,"lambda_zero":0.00009999999747378752,"lambda_zrouter":0.0}
