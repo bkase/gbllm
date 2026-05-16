@@ -39,6 +39,7 @@ fn s3_workflows_are_yaml_shaped_and_upload_forensic_artifacts() {
         );
         assert_capture_modes_are_honest(&source, workflow);
         assert_script_references_are_known(&source, workflow);
+        assert_checkout_fetches_full_history(&source, workflow);
     }
 }
 
@@ -209,6 +210,22 @@ fn assert_script_references_are_known(source: &str, workflow: &str) {
         );
     }
     assert_cargo_test_targets_exist(source, workflow);
+}
+
+fn assert_checkout_fetches_full_history(source: &str, workflow: &str) {
+    let checkout = "uses: actions/checkout@v4";
+    let Some(start) = source.find(checkout) else {
+        panic!("{workflow} must use actions/checkout@v4");
+    };
+    let checkout_block = &source[start..];
+    let checkout_block = checkout_block
+        .split("\n\n")
+        .next()
+        .expect("checkout block exists");
+    assert!(
+        checkout_block.contains("fetch-depth: 0"),
+        "{workflow} must fetch full history for strict S3 prediction ancestry"
+    );
 }
 
 fn assert_capture_modes_are_honest(source: &str, workflow: &str) {

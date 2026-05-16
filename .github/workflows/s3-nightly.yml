@@ -32,6 +32,8 @@ jobs:
       S3_ARTIFACT_DIR: experiments/S3
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
