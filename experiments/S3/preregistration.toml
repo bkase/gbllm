@@ -1,0 +1,6 @@
+schema = "s3_preregistration.v1"
+predictions_commit = "b4d9f0abcbec9140506288fd8344bcd16dab7479"
+predictions_section_hash = "sha256:77872aef2b0cb83523077015773a999ac713472e89673d22339d6441f520e95a"
+pass_version_S3 = "s3-prereg-bd-m20r-2026-05-14"
+rfc_revision = "b4d9f0abcbec9140506288fd8344bcd16dab7479"
+first_result_commit = ""

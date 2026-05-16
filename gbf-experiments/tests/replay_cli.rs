@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use common::tempdir::fresh_isolated_env;
 use gbf_experiments::s1::cli::{
-    CURRENT_PASS_VERSION, CliBudgetProfile, ReplayArgs, S1Cli, S1CliError, S1Command, run,
+    CURRENT_PASS_VERSION, CliBudgetProfile, CliModelProfile, ReplayArgs, S1Cli, S1CliError,
+    S1Command, run,
 };
 use gbf_experiments::s1::schema::RunLog;
 
@@ -29,6 +30,7 @@ fn replay_divergence_writes_run_log_without_checkpoint_artifacts() {
             device_profile: "S1CpuDeterministic".to_owned(),
             out_dir: out_dir.clone(),
             budget_profile: CliBudgetProfile::IntegrationFixture,
+            model_profile: CliModelProfile::Toy0,
             allow_noncanonical_integration_fixture: true,
             inject_non_finite_loss_at_step: Some(3),
             inject_non_finite_grad_norm_at_step: None,

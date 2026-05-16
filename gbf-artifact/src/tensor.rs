@@ -605,7 +605,7 @@ mod tests {
         let first = ternary_tensor("a", &[1], vec![1]);
         let second = ternary_tensor("b", &[1], vec![-1]);
         let two_tensors = vec![first.clone(), second.clone()];
-        let first_stream = legacy_unframed_tensor_stream(&[first.clone()]);
+        let first_stream = legacy_unframed_tensor_stream(std::slice::from_ref(&first));
         let prefix_len = first_stream.len() - payload_byte_len(&first.payload);
 
         let mut absorbed_second_tensor = first;

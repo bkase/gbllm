@@ -1,0 +1,120 @@
+name: S3 On-Demand Replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref or SHA to reproduce"
+        required: true
+        default: "main"
+      seed_list:
+        description: "Comma-separated S3 seed list"
+        required: false
+        default: "0,1,2,3,4"
+      pass_version:
+        description: "S3 pass version"
+        required: false
+        default: "0.3.0"
+
+concurrency:
+  group: s3-on-demand-${{ github.event.inputs.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  s3-on-demand:
+    name: S3 on-demand replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    env:
+      S3_SEED_LIST: ${{ github.event.inputs.seed_list }}
+      S3_PASS_VERSION: ${{ github.event.inputs.pass_version }}
+      S3_ARTIFACT_DIR: experiments/S3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: s3-on-demand-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            s3-on-demand-cargo-${{ runner.os }}-
+
+      - name: Run S3 on-demand suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/s3-on-demand "$S3_ARTIFACT_DIR"
+
+          run_capture_log() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s3-on-demand/${name}.stdout") \
+              2> >(tee "artifacts/s3-on-demand/${name}.stderr.log" >&2)
+          }
+
+          run_capture_ndjson() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s3-on-demand/${name}.stdout") \
+              2> >(tee "artifacts/s3-on-demand/${name}.ndjson" >&2)
+          }
+
+          pass_slug="${S3_PASS_VERSION//[^A-Za-z0-9._-]/_}"
+          export pass_slug
+
+          run_capture_log gbf-experiments-build-s3 cargo build -p gbf-experiments --no-default-features --features s3,s3-phase-d,s3-oracle-real
+          run_capture_log gbf-cli-build-s3 cargo build -p gbf-cli --no-default-features --features s3-full
+          run_capture_log replay-full-s3 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s3-full -- s3 replay-full --seed-list "$S3_SEED_LIST" --pass-version "$S3_PASS_VERSION" --output "$S3_ARTIFACT_DIR/replay-full-${pass_slug}.json"'
+          run_capture_log report-s3 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s3-full -- s3 report --replay-full "$S3_ARTIFACT_DIR/replay-full-${pass_slug}.json" --output docs/experiments/S3-report.md --evidence-output "$S3_ARTIFACT_DIR/report-cli-${pass_slug}.json"'
+          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run
+          run_capture_ndjson s3-determinism scripts/s3_determinism_check.sh --dry-run
+          run_capture_ndjson s3-full-determinism scripts/s3_full_determinism_check.sh --dry-run
+          run_capture_ndjson s3-isolation scripts/s3_isolation_check.sh --dry-run
+          run_capture_ndjson s3-api-drift scripts/s3_api_drift_check.sh --dry-run
+          run_capture_ndjson s3-oracle-re-run scripts/s3_oracle_re_run_check.sh --dry-run
+          run_capture_ndjson s3-no-naming-resolution scripts/s3_no_naming_resolution_check.sh
+          run_capture_ndjson s3-feature-matrix scripts/s3_feature_matrix_check.sh --dry-run
+
+      - name: Comment S3 outcome on commit
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pass_slug="${S3_PASS_VERSION//[^A-Za-z0-9._-]/_}"
+          commit_sha="$(git rev-parse HEAD)"
+          body="$(printf '### S3 on-demand replay-evidence report\n\n- report artifact: `%s`\n- replay evidence: `%s`\n' docs/experiments/S3-report.md "$S3_ARTIFACT_DIR/replay-full-${pass_slug}.json")"
+          printf '{"body":%s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' <<<"$body")" > "$S3_ARTIFACT_DIR/commit-comment-${pass_slug}.json"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/commits/${commit_sha}/comments" \
+            --input "$S3_ARTIFACT_DIR/commit-comment-${pass_slug}.json" \
+            > >(tee "artifacts/s3-on-demand/commit-comment.stdout") \
+            2> >(tee "artifacts/s3-on-demand/commit-comment.stderr.log" >&2)
+
+      - name: Upload S3 on-demand artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-on-demand-artifacts
+          path: |
+            artifacts/s3-on-demand/**/*.stdout
+            artifacts/s3-on-demand/**/*.stderr.log
+            artifacts/s3-on-demand/**/*.ndjson
+            /tmp/s3-*.json
+            experiments/S3/**
+            docs/experiments/S3-report.md
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,40 @@
+schema = "tinystories_manifest.v1"
+schema_version = "1.0.0"
+corpus_id = "s3-kn-oracle-fixture"
+dataset_version = "fixture-v1"
+source_name = "synthetic-s3-kn-oracle"
+source_url = "https://example.invalid/gbllm/s3-kn-oracle"
+train_path = "train.bytes"
+val_path = "eval.bytes"
+train_sha256 = "sha256:3936c7cc6368bc0c253b9bfa789263f9cf77bc9fdb20210212b2201643aa9522"
+val_sha256 = "sha256:d4de53fcdb9d8805711dfd61a80ca82c7206daa6c57af09e870b76be1d65cfb0"
+raw_root = "."
+raw_byte_policy = "ASCII fixture bytes; S3 tests normalize through charset_v1 before KN fitting."
+story_separator = "<|endoftext|>"
+s3_policy = "Synthetic B10-owned modified Kneser-Ney oracle/smoke fixture; not TinyStories."
+deferred_scope = []
+
+[source]
+name = "synthetic-s3-kn-oracle"
+url = "https://example.invalid/gbllm/s3-kn-oracle"
+dataset_card_url = "https://example.invalid/gbllm/s3-kn-oracle-card"
+license = "CC0-1.0"
+license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+downloaded_at = "2026-05-14"
+decompression = "none"
+
+[splits.train]
+role = "train"
+url = "file://train.bytes"
+local_filename = "train.bytes"
+sha256 = "sha256:3936c7cc6368bc0c253b9bfa789263f9cf77bc9fdb20210212b2201643aa9522"
+byte_length = 257
+story_count = 1
+
+[splits.validation]
+role = "validation"
+url = "file://eval.bytes"
+local_filename = "eval.bytes"
+sha256 = "sha256:d4de53fcdb9d8805711dfd61a80ca82c7206daa6c57af09e870b76be1d65cfb0"
+byte_length = 62
+story_count = 1

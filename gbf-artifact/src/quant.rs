@@ -1,13 +1,140 @@
 //! Artifact quantization references.
 
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ids::ArtifactPath;
 use crate::norm_plan::NormPlan;
+use crate::opset_v1::ReferenceOp;
+use crate::reference_eval_graph::ReferenceEvalGraph;
 use crate::tensor::CanonicalTensorId;
 use crate::weight_plan::{
     ScaleFormat, ScaleGranularity, TernaryWeightPlan, ThresholdPlan, WeightEncoding,
 };
+
+/// F-S3 QuantSpec shape: total quantization resolution by canonical tensor id.
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct QuantSpec_S3 {
+    pub weight_quant: BTreeMap<CanonicalTensorId, WeightQuant>,
+}
+
+impl QuantSpec_S3 {
+    #[must_use]
+    pub fn new(weight_quant: BTreeMap<CanonicalTensorId, WeightQuant>) -> Self {
+        Self { weight_quant }
+    }
+
+    #[must_use]
+    pub fn weight_quant(&self, tensor_id: &CanonicalTensorId) -> Option<&WeightQuant> {
+        self.weight_quant.get(tensor_id)
+    }
+
+    /// Verify that all graph-consumed Linear/Embedding/Classifier weights
+    /// resolve through `QuantSpec::weight_quant`.
+    pub fn verify_coverage(&self, graph: &ReferenceEvalGraph) -> Result<(), QuantSpecError> {
+        for node in &graph.nodes {
+            let Some((tensor_id, op_kind)) = graph_weight_input(node) else {
+                continue;
+            };
+            if !self.weight_quant.contains_key(tensor_id) {
+                tracing::error!(
+                    target: "gbf_artifact::quant",
+                    event_name = "s3::quant::coverage_missing",
+                    tensor_id = %tensor_id,
+                    op_kind = op_kind,
+                );
+                return Err(QuantSpecError::CoverageMissing {
+                    tensor_id: tensor_id.clone(),
+                    op_kind,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// S3 weight-quantization resolution result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WeightQuant {
+    Fp32,
+    Ternary2 {
+        row_scale: Q8_8Scale,
+        threshold: Q8_8Scale,
+        accumulator: Accumulator,
+        reduction_order: CanonicalIntegerThenScale,
+    },
+}
+
+/// Raw Q8.8 scale/threshold value.
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Q8_8Scale(pub u16);
+
+impl Q8_8Scale {
+    #[must_use]
+    pub const fn raw(self) -> u16 {
+        self.0
+    }
+}
+
+/// Accumulator dtype pinned by F-S3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Accumulator {
+    I32,
+}
+
+/// Canonical integer accumulation followed by scale application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CanonicalIntegerThenScale {
+    HardenedReductionPolicyV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuantSpecError {
+    CoverageMissing {
+        tensor_id: CanonicalTensorId,
+        op_kind: &'static str,
+    },
+}
+
+impl fmt::Display for QuantSpecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CoverageMissing { tensor_id, op_kind } => {
+                write!(
+                    f,
+                    "QuantSpec_S3 missing weight_quant entry for {op_kind} tensor {tensor_id}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for QuantSpecError {}
+
+fn graph_weight_input(
+    node: &crate::reference_eval_graph::ReferenceNode,
+) -> Option<(&CanonicalTensorId, &'static str)> {
+    match node.op {
+        ReferenceOp::Embedding => node.inputs.first().map(|id| (id, "embedding")),
+        ReferenceOp::Linear => node.inputs.get(1).map(|id| (id, "linear")),
+        ReferenceOp::Classifier => node.inputs.get(1).map(|id| (id, "classifier")),
+        ReferenceOp::LinearStateBlock
+        | ReferenceOp::Activation(_)
+        | ReferenceOp::MatMul
+        | ReferenceOp::Add
+        | ReferenceOp::Mul
+        | ReferenceOp::LayerNorm
+        | ReferenceOp::Softmax => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct QuantSpec {

@@ -1,0 +1,3 @@
+Source: Charles Stross, Accelerando (2005), chapter 1 excerpt from the local corpus file corpus/accelerando/chapters/01-lobsters.txt.
+License recorded by the local corpus manifest: Creative Commons Attribution-NonCommercial-NoDerivs 2.5.
+Fixture scope: 939-byte held-out excerpt used only for v0_success prompt provenance; the full corpus remains outside git.

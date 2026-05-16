@@ -146,6 +146,11 @@ pub struct FrozenTeacher<M: DenseTeacherModel> {
 }
 
 impl<M: DenseTeacherModel> FrozenTeacher<M> {
+    #[must_use]
+    pub const fn snapshot(&self) -> &M {
+        &self.snapshot
+    }
+
     pub fn forward_no_grad(&self, input: M::Input) -> Result<M::Output, M::ForwardError> {
         self.snapshot.forward_no_grad(input)
     }

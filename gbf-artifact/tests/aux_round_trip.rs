@@ -283,15 +283,15 @@ fn aux_with_no_golden_vectors_serializes_as_empty_array() {
 }
 
 #[test]
-fn aux_re_exports_golden_vector_ref_from_workload() {
-    let workload_ref = gbf_workload::manifest::GoldenVectorRef {
-        id: gbf_workload::manifest::GoldenVectorId("vec.smoke.001".to_owned()),
+fn aux_re_exports_golden_vector_ref_from_foundation() {
+    let foundation_ref = gbf_foundation::GoldenVectorRef {
+        id: gbf_foundation::GoldenVectorId("vec.smoke.001".to_owned()),
         manifest_hash: hash(4),
     };
 
-    let aux_ref: gbf_artifact::aux::GoldenVectorRef = workload_ref.clone();
+    let aux_ref: gbf_artifact::aux::GoldenVectorRef = foundation_ref.clone();
     let root_ref: gbf_artifact::GoldenVectorRef = aux_ref.clone();
-    let workload_ref_again: gbf_workload::manifest::GoldenVectorRef = root_ref;
+    let foundation_ref_again: gbf_foundation::GoldenVectorRef = root_ref;
 
-    assert_eq!(workload_ref_again, workload_ref);
+    assert_eq!(foundation_ref_again, foundation_ref);
 }

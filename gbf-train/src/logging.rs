@@ -19,6 +19,7 @@ pub const EVENT_NAME_SCALAR_METRIC: &str = "scalar_metric";
 pub const EVENT_NAME_LOSS_STEP: &str = "loss_step";
 pub const EVENT_NAME_PHASE_TRANSITION: &str = "phase_transition";
 pub const EVENT_NAME_TEACHER_FREEZE: &str = "teacher_freeze";
+pub const EVENT_NAME_STUDENT_FREEZE: &str = "s3::student_freeze";
 pub const EVENT_NAME_EXPORT_COMPLETE: &str = "export_complete";
 pub const EVENT_NAME_PREFLIGHT: &str = "preflight";
 pub const EVENT_NAME_SHADOW_COMPILE: &str = "shadow_compile";
@@ -424,6 +425,15 @@ pub struct TeacherFreezeEvent {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudentFreezeEvent {
+    pub step: u64,
+    pub student_storage_fingerprint: String,
+    pub student_weight_fingerprint: String,
+    pub source_storage_identity: u64,
+    pub frozen_storage_identity: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportEvent {
     pub step: u64,
@@ -823,6 +833,45 @@ impl TrainingLogEmitter {
         Ok(())
     }
 
+    pub fn student_freeze(&self, fields: &StudentFreezeEvent) -> Result<(), LoggingEventError> {
+        validate_nonempty(
+            "student_storage_fingerprint",
+            &fields.student_storage_fingerprint,
+        )?;
+        validate_nonempty(
+            "student_weight_fingerprint",
+            &fields.student_weight_fingerprint,
+        )?;
+
+        emit_student_freeze_tracing(fields);
+
+        self.record_test_event(TestEvent::new(
+            TestEventKind::StudentFreeze,
+            LogLevel::Info,
+            fields_map([
+                ("step", TestFieldValue::U64(fields.step)),
+                (
+                    "student_storage_fingerprint",
+                    TestFieldValue::String(fields.student_storage_fingerprint.clone()),
+                ),
+                (
+                    "student_weight_fingerprint",
+                    TestFieldValue::String(fields.student_weight_fingerprint.clone()),
+                ),
+                (
+                    "source_storage_identity",
+                    TestFieldValue::U64(fields.source_storage_identity),
+                ),
+                (
+                    "frozen_storage_identity",
+                    TestFieldValue::U64(fields.frozen_storage_identity),
+                ),
+            ]),
+        ));
+
+        Ok(())
+    }
+
     pub fn export_complete(&self, fields: &ExportEvent) -> Result<(), LoggingEventError> {
         validate_nonempty("artifact_core_hash", &fields.artifact_core_hash)?;
         validate_nonempty(
@@ -1056,6 +1105,7 @@ pub enum TestEventKind {
     LossStep,
     PhaseTransition,
     TeacherFreeze,
+    StudentFreeze,
     ExportComplete,
     Preflight,
     ShadowCompile,
@@ -1324,6 +1374,18 @@ fn fields_map<const N: usize>(
         .into_iter()
         .map(|(name, value)| (name.to_owned(), value))
         .collect()
+}
+
+fn emit_student_freeze_tracing(fields: &StudentFreezeEvent) {
+    tracing::info!(
+        target: "gbf_train::student",
+        event_name = EVENT_NAME_STUDENT_FREEZE,
+        step = fields.step,
+        student_storage_fingerprint = %fields.student_storage_fingerprint,
+        student_weight_fingerprint = %fields.student_weight_fingerprint,
+        source_storage_identity = fields.source_storage_identity,
+        frozen_storage_identity = fields.frozen_storage_identity,
+    );
 }
 
 fn validate_loss_breakdown(fields: &LossBreakdown) -> Result<(), LoggingEventError> {
@@ -1685,6 +1747,7 @@ mod tests {
             EVENT_NAME_LOSS_STEP,
             EVENT_NAME_PHASE_TRANSITION,
             EVENT_NAME_TEACHER_FREEZE,
+            EVENT_NAME_STUDENT_FREEZE,
             EVENT_NAME_EXPORT_COMPLETE,
             EVENT_NAME_PREFLIGHT,
             EVENT_NAME_SHADOW_COMPILE,

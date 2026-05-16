@@ -1,0 +1,60 @@
+schema = "s3_kn_oracle_expected.v1"
+train_post_sha256 = "sha256:a2f19415b2b2edb8d43f4d2b73f0d282b10f6ec3e677861f8428a653e62fd7c9"
+val_post_sha256 = "sha256:b8800d2826cc6e3b661d463ef7c1b4ed389b726a64cea17baf66a36a5389ee6a"
+bpc_kn1_val = 2.6661838084678116
+bpc_kn2_val = 2.6002245829137722
+bpc_kn3_val = 2.4014924550629426
+bpc_kn4_val = 2.0192393985156367
+bpc_kn5_val = 1.9082159147394182
+counts_blob_sha256 = "sha256:b58c242516a0fd800fe740167a807065aa7e9175c0875ba4bae230046fbc4f0a"
+baseline_self_hash = "sha256:bfae1b37193cf55cb17ee88461311facb61c14427f9a03488bdc5cd89f114334"
+
+[counts_summary]
+train_chars = 257
+val_chars = 62
+c2_unique_count = 37
+c3_unique_count = 139
+c4_unique_count = 222
+c5_unique_count = 246
+
+[p1_left_continuations]
+a = 6
+b = 6
+c = 6
+d = 6
+e = 6
+f = 6
+newline = 1
+denominator = 37
+
+[[orders]]
+k = 2
+count_of_counts = { 1 = 2, 2 = 3, 3 = 8, 4 = 16, 5 = 5, 6 = 3 }
+y_k = 0.25
+d_1 = 0.25
+d_2 = 0.0
+d_3p = 1.0
+
+[[orders]]
+k = 3
+count_of_counts = { 1 = 78, 2 = 43, 3 = 14, 4 = 3, 5 = 1 }
+y_k = 0.47560975609756095
+d_1 = 0.47560975609756095
+d_2 = 1.535450935904708
+d_3p = 2.592334494773519
+
+[[orders]]
+k = 4
+count_of_counts = { 1 = 200, 2 = 20, 3 = 2 }
+y_k = 0.8333333333333334
+d_1 = 0.8333333333333333
+d_2 = 1.75
+d_3p = 3.0
+
+[[orders]]
+k = 5
+count_of_counts = { 1 = 240, 2 = 5, 3 = 1 }
+y_k = 0.96
+d_1 = 0.96
+d_2 = 1.424
+d_3p = 3.0

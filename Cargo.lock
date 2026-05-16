@@ -2271,12 +2271,13 @@ dependencies = [
  "gbf-foundation",
  "gbf-hw",
  "gbf-policy",
- "gbf-workload",
+ "insta",
  "proptest",
  "serde",
  "serde_json",
  "sha2",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2364,6 +2365,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+ "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -2417,8 +2420,10 @@ dependencies = [
  "gbf-data",
  "gbf-foundation",
  "gbf-model",
+ "gbf-oracle",
  "gbf-policy",
  "gbf-train",
+ "gbf-workload",
  "insta",
  "predicates",
  "pretty_assertions",
@@ -2525,8 +2530,11 @@ dependencies = [
  "gbf-abi",
  "gbf-artifact",
  "gbf-foundation",
+ "gbf-workload",
  "serde",
  "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2642,11 +2650,15 @@ dependencies = [
 name = "gbf-workload"
 version = "0.1.0"
 dependencies = [
+ "gbf-artifact",
  "gbf-foundation",
  "gbf-policy",
+ "insta",
  "serde",
  "serde_json",
  "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

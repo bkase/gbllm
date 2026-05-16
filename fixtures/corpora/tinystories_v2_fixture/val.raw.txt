@@ -1,0 +1,3 @@
+S3 fixture validation split is separate from training.
+It gives the manifest verifier a second raw file and post charset hash.
+The held out chapter is not copied into this validation text.

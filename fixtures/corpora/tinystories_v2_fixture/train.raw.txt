@@ -1,0 +1,5 @@
+S3 fixture train split stays small and deterministic.
+It is not the external TinyStories corpus.
+The real full corpus pins remain owned by the full S3 data job.
+This train text uses charset v1 printable symbols only.
+Numbers 0123456789 and letters abcde ABCDE appear here.
