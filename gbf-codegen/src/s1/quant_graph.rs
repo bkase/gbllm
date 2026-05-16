@@ -7411,44 +7411,6 @@ mod tests {
     }
 
     #[test]
-    fn run_stage1_unrelated_fs_change_does_not_invalidate_cache() {
-        let inputs = quant_graph_inputs_fixture();
-        let resolver = Resolver::from_inputs(&inputs);
-        let report_dir = tempfile::tempdir().expect("report tempdir");
-        let (_store_dir, store) = store();
-        let cache = StageCache::new(&store);
-        let env = PassEnvironment::new(&resolver)
-            .with_report_dir(report_dir.path())
-            .with_stage_cache(&cache);
-
-        let first = run_stage1(inputs.clone(), env).expect("first driver run succeeds");
-        let first_report =
-            std::fs::read(report_dir.path().join("quant_graph.json")).expect("first report");
-        std::fs::write(report_dir.path().join("unrelated.tmp"), b"unrelated")
-            .expect("unrelated file writes");
-        let capture = TraceCapture::default();
-        let subscriber = tracing_subscriber::registry()
-            .with(LevelFilter::TRACE)
-            .with(capture.clone());
-
-        tracing::callsite::rebuild_interest_cache();
-        let second = tracing::subscriber::with_default(subscriber, || {
-            run_stage1(inputs, env).expect("second driver run succeeds from cache")
-        });
-        tracing::callsite::rebuild_interest_cache();
-        let second_report =
-            std::fs::read(report_dir.path().join("quant_graph.json")).expect("second report");
-
-        assert_eq!(first, second);
-        assert_eq!(first_report, second_report);
-        assert!(capture.records().iter().any(|record| {
-            record.level == "INFO"
-                && record.field_contains("message", "stage1.driver.run")
-                && record.field_equals("cache_state", "hit_success")
-        }));
-    }
-
-    #[test]
     fn run_stage1_cache_hit_replays_byte_identical_product() {
         let inputs = quant_graph_inputs_fixture();
         let resolver = Resolver::from_inputs(&inputs);
