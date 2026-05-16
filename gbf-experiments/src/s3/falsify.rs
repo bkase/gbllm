@@ -24,7 +24,7 @@ use crate::s3::workload::V0SuccessPerSeed;
 // Cargo does not set `cfg(test)` for the normal library artifact linked by
 // integration tests. Match the B7 module-level guard: debug integration builds
 // are permitted, while release-like builds reject this test-only feature.
-#[cfg(all(not(any(test, debug_assertions))))]
+#[cfg(not(any(test, debug_assertions)))]
 compile_error!("the unified `falsify` feature must only be enabled in test builds");
 
 thread_local! {
