@@ -171,7 +171,7 @@ fn build_seed_envelope(
         let tolerance = checkpoint_records
             .iter()
             .copied()
-            .filter_map(|r| gated_diff(r))
+            .filter_map(gated_diff)
             .fold(0.0_f32, f32::max);
         let passed = checkpoint_records.iter().all(|record| {
             record.train_vs_bundle_pass.unwrap_or(true)
@@ -305,23 +305,23 @@ fn insert_record_metrics(
         );
     }
 
-    if let Some(value) = record.bundle_vs_artifact_per_token_kl {
-        if record.checkpoint == AgreementCheckpoint::PostLogits {
-            insert_metric(
-                per_metric,
-                metric_id(
-                    &record.prompt_id,
-                    phase,
-                    checkpoint,
-                    record.step,
-                    "bundle_vs_artifact_per_token_kl",
-                )?,
-                value,
-                aggregation_kind,
-                true,
-            );
-            per_token_kls.push(value);
-        }
+    if let Some(value) = record.bundle_vs_artifact_per_token_kl
+        && record.checkpoint == AgreementCheckpoint::PostLogits
+    {
+        insert_metric(
+            per_metric,
+            metric_id(
+                &record.prompt_id,
+                phase,
+                checkpoint,
+                record.step,
+                "bundle_vs_artifact_per_token_kl",
+            )?,
+            value,
+            aggregation_kind,
+            true,
+        );
+        per_token_kls.push(value);
     }
 
     if let Some(argmax_match) = record

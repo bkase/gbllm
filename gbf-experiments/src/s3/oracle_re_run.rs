@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 use crate::s1::neg_test::{NEGATIVE_TEST_SHUFFLE_SEED, fisher_yates};
@@ -22,6 +23,7 @@ use crate::s1::neg_test::{NEGATIVE_TEST_SHUFFLE_SEED, fisher_yates};
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 use crate::s1::oracle::{OracleEmitError, run_metric_oracles};
@@ -30,6 +32,7 @@ use crate::s1::oracle::{OracleEmitError, run_metric_oracles};
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 use crate::s1::schema::OracleReport;
@@ -38,6 +41,7 @@ use crate::s1::schema::OracleReport;
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 use crate::s2::oracle_re_run::{ORACLE_CASE_IDS as S2_ORACLE_CASE_IDS, S2OracleReRunError};
@@ -363,6 +367,7 @@ impl OracleReRunReport {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 pub fn s3_oracle_re_run() -> Result<OracleReRunReport, OracleReRunError> {
@@ -431,6 +436,7 @@ pub fn s3_oracle_re_run() -> Result<OracleReRunReport, OracleReRunError> {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 )))]
 pub fn s3_oracle_re_run() -> Result<OracleReRunReport, OracleReRunError> {
@@ -470,6 +476,7 @@ pub enum OracleReRunError {
         feature = "ablation",
         feature = "s2-full",
         feature = "s2-ablation",
+        feature = "s3-phase-d",
         feature = "falsify"
     ))]
     S1Oracle(OracleEmitError),
@@ -479,6 +486,7 @@ pub enum OracleReRunError {
         feature = "ablation",
         feature = "s2-full",
         feature = "s2-ablation",
+        feature = "s3-phase-d",
         feature = "falsify"
     ))]
     S2Oracle(S2OracleReRunError),
@@ -570,6 +578,7 @@ impl fmt::Display for OracleReRunError {
                 feature = "ablation",
                 feature = "s2-full",
                 feature = "s2-ablation",
+                feature = "s3-phase-d",
                 feature = "falsify"
             ))]
             Self::S1Oracle(error) => write!(f, "{error}"),
@@ -578,6 +587,7 @@ impl fmt::Display for OracleReRunError {
                 feature = "ablation",
                 feature = "s2-full",
                 feature = "s2-ablation",
+                feature = "s3-phase-d",
                 feature = "falsify"
             ))]
             Self::S2Oracle(error) => write!(f, "{error}"),
@@ -656,6 +666,7 @@ impl From<CanonicalJsonError> for OracleReRunError {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 impl From<OracleEmitError> for OracleReRunError {
@@ -669,6 +680,7 @@ impl From<OracleEmitError> for OracleReRunError {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 impl From<S2OracleReRunError> for OracleReRunError {
@@ -682,6 +694,7 @@ impl From<S2OracleReRunError> for OracleReRunError {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn run_s1_suite_under_s3_binary() -> Result<OracleReport, OracleReRunError> {
@@ -699,6 +712,7 @@ fn run_s1_suite_under_s3_binary() -> Result<OracleReport, OracleReRunError> {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn s1_oracle_results_from_report(report: &OracleReport) -> [(&'static str, bool); 5] {

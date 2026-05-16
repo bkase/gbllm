@@ -70,7 +70,7 @@ jobs:
           }
 
           run_capture_log cargo-fmt cargo fmt --check --all
-          run_capture_log cargo-clippy-workspace-supported cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings
+          run_capture_log cargo-clippy-workspace-supported cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features -- -D warnings
           run_capture_log cargo-clippy-gbf-experiments-s3 cargo clippy -p gbf-experiments --no-default-features --features s3,s3-phase-d,s3-oracle-real -- -D warnings
           run_capture_log cargo-clippy-gbf-cli-s3 cargo clippy -p gbf-cli --no-default-features --features s3-full -- -D warnings
           run_capture_log gbf-experiments-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real

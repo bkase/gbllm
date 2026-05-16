@@ -219,7 +219,7 @@ fn finish_surface_agreement(
             phase_d_gate.max_per_token_logit_abs_diff as f32,
             phase_d_gate.argmax_token_must_match,
         ),
-        fallback_tags(&denotational, &artifact),
+        fallback_tags(denotational, artifact),
         live_capture.source,
     )
     .map_err(S3OracleAgreementError::Agreement)?;

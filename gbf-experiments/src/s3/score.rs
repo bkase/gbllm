@@ -24,6 +24,7 @@ const LOG2_E: f64 = std::f64::consts::LOG2_E;
 const TARGET_LOGPROB_TOLERANCE: f64 = 1.0e-5;
 
 /// Scorer implementation used for an `s3_score.v1` product.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ScorerKind {
     /// Full-precision reference-bundle scorer.

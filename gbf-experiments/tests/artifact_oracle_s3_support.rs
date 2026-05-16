@@ -1,3 +1,4 @@
+#![cfg(feature = "s3")]
 #![allow(dead_code)]
 
 use gbf_artifact::{TextCharSeq, UNK_ID, VOCAB_SIZE};

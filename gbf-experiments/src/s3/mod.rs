@@ -40,6 +40,7 @@ pub mod preregistration;
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 pub mod report;

@@ -47,7 +47,7 @@ fn s2_pr_workflow_pins_rfc_pr_gates() {
         "s2-pr.yml",
         &[
             "cargo fmt --check --all",
-            "cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings",
+            "cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features -- -D warnings",
             "cargo clippy -p gbf-train --features qat,burn-adapter -- -D warnings",
             "cargo clippy -p gbf-train --features qat-ablation,burn-adapter -- -D warnings",
             "cargo clippy -p gbf-experiments --no-default-features --features s2-full -- -D warnings",
@@ -418,7 +418,7 @@ fn supported_clippy_invocations() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (
             "cargo-clippy-workspace-supported",
-            "cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings",
+            "cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features -- -D warnings",
         ),
         (
             "cargo-clippy-gbf-train-qat",

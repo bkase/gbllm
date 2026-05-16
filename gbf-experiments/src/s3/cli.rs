@@ -23,6 +23,7 @@ use serde::Serialize;
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 use serde::de::DeserializeOwned;
@@ -562,6 +563,7 @@ fn oracle_re_run(args: OracleReRunArgs) -> Result<(), S3CliError> {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn report(args: ReportArgs) -> Result<(), S3CliError> {
@@ -682,6 +684,7 @@ fn report(args: ReportArgs) -> Result<(), S3CliError> {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 )))]
 fn report(_args: ReportArgs) -> Result<(), S3CliError> {
@@ -1032,6 +1035,7 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), S3CliError> {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn read_canonical<T>(path: &Path) -> Result<T, S3CliError>
@@ -1074,6 +1078,7 @@ where
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn git_commit_pair() -> Result<
@@ -1118,6 +1123,7 @@ fn git_commit_pair() -> Result<
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn parse_semver(value: &str) -> Result<gbf_foundation::SemVer, S3CliError> {
@@ -1136,6 +1142,7 @@ fn parse_semver(value: &str) -> Result<gbf_foundation::SemVer, S3CliError> {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn parse_semver_part(part: Option<&str>, original: &str) -> Result<u64, S3CliError> {
@@ -1148,6 +1155,7 @@ fn parse_semver_part(part: Option<&str>, original: &str) -> Result<u64, S3CliErr
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn report_body(
@@ -1182,6 +1190,7 @@ fn report_body(
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 #[derive(Default)]
@@ -1197,6 +1206,7 @@ struct ReportEvidenceInputs {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn consume_report_evidence(
@@ -1361,6 +1371,7 @@ fn consume_report_evidence(
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 struct ParsedEvidence<T> {
@@ -1373,6 +1384,7 @@ struct ParsedEvidence<T> {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn read_typed_evidence<T>(
@@ -1404,6 +1416,7 @@ where
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn replay_seed(replay: &S3ReplayFullCliEvidence, seed: u64) -> Option<&S3ReplaySeedEvidence> {
@@ -1415,6 +1428,7 @@ fn replay_seed(replay: &S3ReplayFullCliEvidence, seed: u64) -> Option<&S3ReplayS
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 fn ensure_report_evidence_hash(
@@ -1683,11 +1697,11 @@ impl JsonFieldVisitor {
     }
 
     fn insert_string_or_args_json(&mut self, field: &tracing::field::Field, value: String) {
-        if field.name() == "args" {
-            if let Ok(json_value) = serde_json::from_str::<Value>(&value) {
-                self.insert(field, json_value);
-                return;
-            }
+        if field.name() == "args"
+            && let Ok(json_value) = serde_json::from_str::<Value>(&value)
+        {
+            self.insert(field, json_value);
+            return;
         }
         self.insert(field, Value::String(value));
     }
@@ -1763,6 +1777,7 @@ pub enum S3CliError {
         feature = "ablation",
         feature = "s2-full",
         feature = "s2-ablation",
+        feature = "s3-phase-d",
         feature = "falsify"
     ))]
     Report(crate::s3::report::ReportError),
@@ -1772,6 +1787,7 @@ pub enum S3CliError {
         feature = "ablation",
         feature = "s2-full",
         feature = "s2-ablation",
+        feature = "s3-phase-d",
         feature = "falsify"
     ))]
     S1Schema(crate::s1::schema::S1SchemaError),
@@ -1897,6 +1913,7 @@ impl fmt::Display for S3CliError {
                 feature = "ablation",
                 feature = "s2-full",
                 feature = "s2-ablation",
+                feature = "s3-phase-d",
                 feature = "falsify"
             ))]
             Self::Report(error) => write!(f, "{error}"),
@@ -1905,6 +1922,7 @@ impl fmt::Display for S3CliError {
                 feature = "ablation",
                 feature = "s2-full",
                 feature = "s2-ablation",
+                feature = "s3-phase-d",
                 feature = "falsify"
             ))]
             Self::S1Schema(error) => write!(f, "{error}"),
@@ -2003,6 +2021,7 @@ impl Error for S3CliError {
                 feature = "ablation",
                 feature = "s2-full",
                 feature = "s2-ablation",
+                feature = "s3-phase-d",
                 feature = "falsify"
             ))]
             Self::Report(error) => Some(error),
@@ -2011,6 +2030,7 @@ impl Error for S3CliError {
                 feature = "ablation",
                 feature = "s2-full",
                 feature = "s2-ablation",
+                feature = "s3-phase-d",
                 feature = "falsify"
             ))]
             Self::S1Schema(error) => Some(error),
@@ -2112,6 +2132,7 @@ impl From<V0SuccessError> for S3CliError {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 impl From<crate::s3::report::ReportError> for S3CliError {
@@ -2125,6 +2146,7 @@ impl From<crate::s3::report::ReportError> for S3CliError {
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 impl From<crate::s1::schema::S1SchemaError> for S3CliError {

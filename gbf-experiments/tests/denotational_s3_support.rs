@@ -1,3 +1,4 @@
+#![cfg(feature = "s3")]
 #![allow(dead_code)]
 
 use gbf_artifact::{

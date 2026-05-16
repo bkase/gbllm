@@ -1,3 +1,7 @@
+#![cfg(all(
+    feature = "s3",
+    any(feature = "s3-oracle-real", feature = "s3-oracle-fallback")
+))]
 #![allow(dead_code)]
 
 #[path = "oracle_agreement_s3_support.rs"]

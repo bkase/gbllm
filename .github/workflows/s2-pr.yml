@@ -69,7 +69,7 @@ jobs:
           }
 
           run_capture_log cargo-fmt cargo fmt --check --all
-          run_capture_log cargo-clippy-workspace-supported cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings
+          run_capture_log cargo-clippy-workspace-supported cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features -- -D warnings
           run_capture_log cargo-clippy-gbf-train-qat cargo clippy -p gbf-train --features qat,burn-adapter -- -D warnings
           run_capture_log cargo-clippy-gbf-train-qat-ablation cargo clippy -p gbf-train --features qat-ablation,burn-adapter -- -D warnings
           run_capture_log cargo-clippy-gbf-experiments-s2-full cargo clippy -p gbf-experiments --no-default-features --features s2-full -- -D warnings

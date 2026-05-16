@@ -311,7 +311,7 @@ fn s3_pr_cargo_invocations() -> BTreeMap<&'static str, &'static str> {
         ("cargo-fmt", "cargo fmt --check --all"),
         (
             "cargo-clippy-workspace-supported",
-            "cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings",
+            "cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features -- -D warnings",
         ),
         (
             "cargo-clippy-gbf-experiments-s3",

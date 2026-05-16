@@ -296,6 +296,7 @@ pub enum S3Completion {
 }
 
 /// Named S3 fallback oracle backend used during a run.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum OracleFallbackTag {
     /// Fixture-local denotational oracle fallback.

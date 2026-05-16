@@ -49,6 +49,7 @@ pub const S3_LOG_TARGET: &str = "gbf_experiments::s3";
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 pub mod s1;
@@ -59,6 +60,7 @@ pub mod s1;
     feature = "ablation",
     feature = "s2-full",
     feature = "s2-ablation",
+    feature = "s3-phase-d",
     feature = "falsify"
 ))]
 pub mod s2;

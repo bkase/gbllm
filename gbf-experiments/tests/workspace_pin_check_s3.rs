@@ -78,7 +78,11 @@ fn s3_feature_contract_is_registered() {
     );
     assert_feature_values(features, "s3-oracle-real", &["gbf-oracle/s3-real"]);
     assert_feature_values(features, "s3-oracle-fallback", &["gbf-oracle/s3-fallback"]);
-    assert_feature_values(features, "s3-oracle-adversarial", &[]);
+    assert_feature_values(
+        features,
+        "s3-oracle-adversarial",
+        &["gbf-oracle/s3-oracle-adversarial"],
+    );
     assert_feature_values(features, "qat-ablation", &["gbf-train/qat-ablation"]);
     assert!(
         features
