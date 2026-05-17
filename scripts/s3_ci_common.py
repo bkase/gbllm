@@ -112,6 +112,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--report-dir")
     parser.add_argument("--pin", default="experiments/S3/preregistration.toml")
     parser.add_argument("--rfc", default="history/rfcs/F-S3-v0-success-tinystories.md")
+    parser.add_argument(
+        "--result-state",
+        choices=("pre", "post"),
+        default="pre",
+        help="verify either the default pre-result preregistration state or the post-result registered state",
+    )
     parser.add_argument("--artifact-dir", action="append", default=None)
     parser.add_argument("--force-failure-for-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("target", nargs="?")
@@ -188,19 +194,37 @@ def preregistration_check(args: argparse.Namespace, gate: Gate) -> None:
     for field in ("predictions_commit", "rfc_revision"):
         if not COMMIT_RE.fullmatch(pin[field]):
             raise GateFailure(1, f"{field} must be a lowercase 40-character git commit id")
-    if pin["first_result_commit"] != "":
-        raise GateFailure(1, "first_result_commit must remain empty before first S3 result")
+    if args.result_state == "pre":
+        if pin["first_result_commit"] != "":
+            raise GateFailure(1, "first_result_commit must remain empty before first S3 result")
+    else:
+        if pin["first_result_commit"] == "":
+            raise GateFailure(1, "first_result_commit is required in post-result mode")
+        if not COMMIT_RE.fullmatch(pin["first_result_commit"]):
+            raise GateFailure(1, "first_result_commit must be a lowercase 40-character git commit id")
+        if pin["predictions_commit"] == pin["first_result_commit"] or not git_is_ancestor(
+            pin["predictions_commit"], pin["first_result_commit"]
+        ):
+            raise GateFailure(1, "predictions_commit must be a strict ancestor of first_result_commit")
 
-    gate.stage_start(2, "scan for preregistration-breaking result artifacts")
-    found = first_result_artifact_path(pin_path, artifact_dirs)
-    gate.stage_done(
-        "empty_result_scan",
+    gate.stage_start(
         2,
-        found is None,
+        "scan for preregistration-breaking result artifacts"
+        if args.result_state == "pre"
+        else "scan for registered S3 result artifacts",
+    )
+    found = first_result_artifact_path(pin_path, artifact_dirs)
+    passed = found is None if args.result_state == "pre" else found is not None
+    gate.stage_done(
+        "empty_result_scan" if args.result_state == "pre" else "registered_result_scan",
+        2,
+        passed,
         {"artifact_dirs": [rel(path) for path in artifact_dirs], "first_result_artifact": found},
     )
-    if found is not None:
+    if args.result_state == "pre" and found is not None:
         raise GateFailure(2, f"unexpected S3 result artifact evidence in {found}")
+    if args.result_state == "post" and found is None:
+        raise GateFailure(2, "missing S3 result artifact evidence in post-result mode")
 
 
 def determinism_check(args: argparse.Namespace, gate: Gate) -> None:
@@ -506,6 +530,17 @@ def predictions_section(markdown: str) -> str:
 def predictions_hash(section: str) -> str:
     canonical = json.dumps(section.strip(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def git_is_ancestor(ancestor: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return completed.returncode == 0
 
 
 def first_result_artifact_path(pin_path: Path, artifact_dirs: list[Path]) -> str | None:

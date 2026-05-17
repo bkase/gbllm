@@ -74,13 +74,13 @@ jobs:
           export pass_slug
 
           run_capture_log cargo-fmt cargo fmt --check --all
+          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run
           run_capture_log gbf-experiments-build-s3 cargo build -p gbf-experiments --no-default-features --features s3,s3-phase-d,s3-oracle-real
           run_capture_log gbf-cli-build-s3 cargo build -p gbf-cli --no-default-features --features s3-full
           run_capture_log replay-full-s3 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s3-full -- s3 replay-full --seed-list "$S3_SEED_LIST" --pass-version "$S3_PASS_VERSION" --output "$S3_ARTIFACT_DIR/replay-full-${pass_slug}.json"'
           run_capture_log export-artifact-s3 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s3-full -- s3 export-artifact --artifact-output "$S3_ARTIFACT_DIR/artifacts/seed-0/artifact-${pass_slug}.bin" --metadata-output "$S3_ARTIFACT_DIR/artifacts/seed-0/artifact-metadata-${pass_slug}.json" --evidence-output "$S3_ARTIFACT_DIR/artifacts/seed-0/artifact-cli-${pass_slug}.json"'
           run_capture_log oracle-re-run-s3 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s3-full -- s3 oracle-re-run --output "$S3_ARTIFACT_DIR/oracle-re-run-${pass_slug}.json" --evidence-output "$S3_ARTIFACT_DIR/oracle-re-run-cli-${pass_slug}.json"'
           run_capture_log report-s3 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s3-full -- s3 report --replay-full "$S3_ARTIFACT_DIR/replay-full-${pass_slug}.json" --oracle-re-run "$S3_ARTIFACT_DIR/oracle-re-run-cli-${pass_slug}.json" --output docs/experiments/S3-report.md --evidence-output "$S3_ARTIFACT_DIR/report-cli-${pass_slug}.json"'
-          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run
           run_capture_ndjson s3-determinism scripts/s3_determinism_check.sh
           run_capture_ndjson s3-full-determinism scripts/s3_full_determinism_check.sh
           run_capture_ndjson s3-isolation scripts/s3_isolation_check.sh --dry-run

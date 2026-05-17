@@ -173,6 +173,8 @@ def run_b24_gates(args: argparse.Namespace, audit: Audit) -> list[dict[str, Any]
         full_command = list(command)
         if args.ci_mode == "fixture":
             full_command.append("--dry-run")
+        if script_name == "s3_preregistration_check" and args.current_objective == "post-merge-closure":
+            full_command.extend(["--result-state", "post"])
         full_command.extend(["--report-dir", str(report_dir)])
         completed = run_cmd(full_command)
         events = parse_ndjson(completed.stderr)

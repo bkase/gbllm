@@ -46,6 +46,7 @@ use crate::s3::bundle::{
     BundleExportError, s3_export_fixture_reference_bundle, write_bundle_export_product,
 };
 use crate::s3::oracle_re_run::{OracleReRunError, s3_oracle_re_run, write_oracle_re_run_report};
+use crate::s3::preregistration::S3PreregistrationError;
 use crate::s3::schema::{CharsetProductRecord, OracleFallbackTag, S3BuildKind};
 use crate::s3::workload::{
     ConservativeChromeBudget, RomBudgetSlot, V0SuccessError, V0SuccessPerSeed, V0SuccessProduct,
@@ -64,6 +65,11 @@ const DEFAULT_EXPORT_VISITOR_ID: &str = "gbf-train.export_visitor.s3.reference_b
 const DEFAULT_BUILD_KIND: &str = "s3_v0_success_real_oracle";
 const DEFAULT_PASS_VERSION_S3: &str = "0.3.0";
 const CLI_LOG_TARGET: &str = "gbf_experiments::s3::cli";
+const S3_DENOTATIONAL_ORACLE_OWNER_BEAD: &str = "bd-1rcc";
+const S3_ARTIFACT_ORACLE_OWNER_BEAD: &str = "bd-c4wg";
+const S3_CONFORMANCE_OWNER_BEAD: &str = "bd-35l3";
+const S3_E2E_TEST_OWNER_BEAD: &str = "bd-1wd";
+const S3_STRUCTURED_LOGGING_OWNER_BEAD: &str = "bd-2sd7";
 
 /// S3 CLI envelope.
 #[derive(Debug, Clone, Parser)]
@@ -330,6 +336,12 @@ pub struct ReportArgs {
     /// Output markdown report path.
     #[arg(long, default_value = "docs/experiments/S3-report.md")]
     pub output: PathBuf,
+    /// Optional F-S3 preregistration pin supplying final closure prediction metadata.
+    #[arg(long)]
+    pub preregistration_pin: Option<PathBuf>,
+    /// RFC markdown carrying the pre-registered predictions section.
+    #[arg(long, default_value = "history/rfcs/F-S3-v0-success-tinystories.md")]
+    pub predictions_rfc: PathBuf,
     /// Replay evidence emitted by `gbf s3 replay-full` or `replay-fallback`.
     #[arg(long)]
     pub replay_full: Option<PathBuf>,
@@ -569,11 +581,10 @@ fn oracle_re_run(args: OracleReRunArgs) -> Result<(), S3CliError> {
 fn report(args: ReportArgs) -> Result<(), S3CliError> {
     use gbf_foundation::SemVer;
 
-    use crate::s1::schema::RfcRevisionRef;
     use crate::s3::report::{
         OracleOwnerBeads, PhaseCompletion, S2EnvironmentHashRecord, S3EnvironmentHashRecord,
         S3PerSeedArtifacts, S3Report, S3ReportFrontMatter, decision_for_outcome,
-        emit_report_to_path, generated_at_commit_time, predictions_section_hash,
+        emit_report_to_path, generated_at_commit_time,
     };
     use crate::s3::schema::{HypothesisStatus, S3Completion, S3Hypothesis, S3Outcome};
 
@@ -593,9 +604,8 @@ fn report(args: ReportArgs) -> Result<(), S3CliError> {
     } else {
         S3Outcome::PassWithFallbackOracle
     };
-    let predictions = "S3 replay predicts H1..H7 closure with deterministic replay evidence.";
-    let (predictions_commit, first_result_commit) = git_commit_pair()?;
-    let generated_at_commit_time = generated_at_commit_time(&first_result_commit)?;
+    let preregistration = report_preregistration_inputs(&args)?;
+    let generated_at_commit_time = generated_at_commit_time(&preregistration.first_result_commit)?;
     let per_seed_artifacts = replay
         .per_seed
         .iter()
@@ -612,7 +622,7 @@ fn report(args: ReportArgs) -> Result<(), S3CliError> {
             generation_log_self_hash: Some(row.generation_log_self_hash),
         })
         .collect::<Vec<_>>();
-    let body = report_body(predictions, &replay, outcome);
+    let body = report_body(&preregistration.predictions_section, &replay, outcome);
     let front_matter = S3ReportFrontMatter {
         schema: "s3_report.v1".to_owned(),
         s3_outcome: outcome,
@@ -628,16 +638,16 @@ fn report(args: ReportArgs) -> Result<(), S3CliError> {
         v0_success_self_hash: replay.v0_success_self_hash,
         per_seed_artifacts,
         oracle_owner_beads: OracleOwnerBeads {
-            denotational: "bd-2z8c".to_owned(),
-            artifact: "bd-1ybu".to_owned(),
+            denotational: S3_DENOTATIONAL_ORACLE_OWNER_BEAD.to_owned(),
+            artifact: S3_ARTIFACT_ORACLE_OWNER_BEAD.to_owned(),
         },
         oracle_fallback_used: replay.oracle_fallback_used.clone(),
         oracle_re_run_self_hash: consumed_inputs
             .oracle_re_run_self_hash
             .or_else(|| Some(hash_label(b"oracle-re-run-cli"))),
-        conformance_owner_bead: "bd-2cjs".to_owned(),
-        e2e_test_owner_bead: "bd-24e6".to_owned(),
-        structured_logging_owner_bead: "bd-24e6".to_owned(),
+        conformance_owner_bead: S3_CONFORMANCE_OWNER_BEAD.to_owned(),
+        e2e_test_owner_bead: S3_E2E_TEST_OWNER_BEAD.to_owned(),
+        structured_logging_owner_bead: S3_STRUCTURED_LOGGING_OWNER_BEAD.to_owned(),
         pass_version_s1: SemVer::new(0, 1, 0),
         pass_version_s2: SemVer::new(0, 2, 0),
         pass_version_s3: parse_semver(&replay.pass_version_s3)?,
@@ -656,10 +666,10 @@ fn report(args: ReportArgs) -> Result<(), S3CliError> {
         },
         s2_pinned_phase_schedule_hash: hash_label(b"s2-phase-schedule"),
         generated_at_commit_time,
-        rfc_revision: RfcRevisionRef::Hash256(hash_label(b"rfc-s3")),
-        predictions_section_hash: predictions_section_hash(predictions)?,
-        predictions_commit,
-        first_result_commit,
+        rfc_revision: preregistration.rfc_revision,
+        predictions_section_hash: preregistration.predictions_section_hash,
+        predictions_commit: preregistration.predictions_commit,
+        first_result_commit: preregistration.first_result_commit,
         hypothesis_statuses: S3Hypothesis::ALL
             .into_iter()
             .map(|hypothesis| (hypothesis, HypothesisStatus::Confirmed))
@@ -689,6 +699,123 @@ fn report(args: ReportArgs) -> Result<(), S3CliError> {
 )))]
 fn report(_args: ReportArgs) -> Result<(), S3CliError> {
     Err(S3CliError::ReportFeatureDisabled)
+}
+
+#[cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+struct S3ReportPreregistrationInputs {
+    predictions_section: String,
+    predictions_commit: crate::s1::schema::GitCommitId,
+    first_result_commit: crate::s1::schema::GitCommitId,
+    rfc_revision: crate::s1::schema::RfcRevisionRef,
+    predictions_section_hash: Hash256,
+}
+
+#[cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+fn report_preregistration_inputs(
+    args: &ReportArgs,
+) -> Result<S3ReportPreregistrationInputs, S3CliError> {
+    use crate::s1::schema::{GitCommitId, RfcRevisionRef};
+    use crate::s3::preregistration::load_preregistration_pin;
+    use crate::s3::report::predictions_section_hash;
+
+    let Some(pin_path) = &args.preregistration_pin else {
+        let predictions_section =
+            "S3 replay predicts H1..H7 closure with deterministic replay evidence.".to_owned();
+        let (predictions_commit, first_result_commit) = git_commit_pair()?;
+        return Ok(S3ReportPreregistrationInputs {
+            predictions_section: predictions_section.clone(),
+            predictions_commit,
+            first_result_commit,
+            rfc_revision: RfcRevisionRef::Hash256(hash_label(b"rfc-s3")),
+            predictions_section_hash: predictions_section_hash(&predictions_section)?,
+        });
+    };
+
+    let pin = load_preregistration_pin(resolve_input_path(pin_path))?;
+    let predictions_section = preregistered_predictions_section(&args.predictions_rfc)?;
+    let observed_hash = predictions_section_hash(&predictions_section)?;
+    let pinned_hash = parse_hash256(&pin.predictions_section_hash, "predictions_section_hash")?;
+    if observed_hash != pinned_hash {
+        return Err(S3CliError::HashMismatch {
+            field: "predictions_section_hash",
+            expected: pinned_hash,
+            observed: observed_hash,
+        });
+    }
+    Ok(S3ReportPreregistrationInputs {
+        predictions_section,
+        predictions_commit: GitCommitId::new(pin.predictions_commit)?,
+        first_result_commit: GitCommitId::new(pin.first_result_commit)?,
+        rfc_revision: RfcRevisionRef::GitCommitId(GitCommitId::new(pin.rfc_revision)?),
+        predictions_section_hash: pinned_hash,
+    })
+}
+
+#[cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+fn preregistered_predictions_section(path: &Path) -> Result<String, S3CliError> {
+    let path = resolve_input_path(path);
+    let markdown = std::fs::read_to_string(&path).map_err(|source| S3CliError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let pairs = [
+        ("## Pre-registered predictions\n\n", "\n## Observed\n"),
+        ("  ## Pre-registered predictions\n", "\n\n  ## Observed\n"),
+    ];
+    for (start_marker, end_marker) in pairs {
+        let Some(start) = markdown.find(start_marker) else {
+            continue;
+        };
+        let content_start = start + start_marker.len();
+        let Some(end) = markdown[content_start..].find(end_marker) else {
+            continue;
+        };
+        return Ok(markdown[content_start..content_start + end]
+            .trim()
+            .to_owned());
+    }
+    Err(S3CliError::MissingPreregistrationSection {
+        path: path.display().to_string(),
+        start_heading: "## Pre-registered predictions",
+        end_heading: "## Observed",
+    })
+}
+
+#[cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+fn parse_hash256(value: &str, field: &'static str) -> Result<Hash256, S3CliError> {
+    value.parse().map_err(|_| S3CliError::UnsupportedOption {
+        option: field,
+        value: value.to_owned(),
+        expected: "sha256:<64 lowercase hex>",
+    })
 }
 
 fn replay_evidence(
@@ -1771,6 +1898,8 @@ pub enum S3CliError {
     OracleReRun(OracleReRunError),
     /// v0_success product construction failed.
     V0Success(V0SuccessError),
+    /// F-S3 preregistration pin failed to load or parse.
+    Preregistration(S3PreregistrationError),
     /// Report emission failed.
     #[cfg(any(
         feature = "phase-a",
@@ -1828,6 +1957,15 @@ pub enum S3CliError {
     },
     /// Report command requires inherited S1/S2 report types.
     ReportFeatureDisabled,
+    /// RFC markdown was missing the pre-registered predictions section.
+    MissingPreregistrationSection {
+        /// RFC path that was inspected.
+        path: String,
+        /// Required start heading.
+        start_heading: &'static str,
+        /// Required following heading.
+        end_heading: &'static str,
+    },
     /// Fixture split was dropped by charset normalization.
     DroppedFixtureSplit {
         /// Split name.
@@ -1908,6 +2046,7 @@ impl fmt::Display for S3CliError {
             Self::OracleAgreement(error) => write!(f, "{error}"),
             Self::OracleReRun(error) => write!(f, "{error}"),
             Self::V0Success(error) => write!(f, "{error}"),
+            Self::Preregistration(error) => write!(f, "{error}"),
             #[cfg(any(
                 feature = "phase-a",
                 feature = "ablation",
@@ -1956,6 +2095,14 @@ impl fmt::Display for S3CliError {
             Self::ReportFeatureDisabled => {
                 f.write_str("s3 report requires inherited S1/S2 report features")
             }
+            Self::MissingPreregistrationSection {
+                path,
+                start_heading,
+                end_heading,
+            } => write!(
+                f,
+                "{path}: missing {start_heading:?} section followed by {end_heading:?}"
+            ),
             Self::DroppedFixtureSplit { split } => {
                 write!(f, "{split} fixture split was dropped by charset_v1")
             }
@@ -2016,6 +2163,7 @@ impl Error for S3CliError {
             Self::OracleAgreement(error) => Some(error),
             Self::OracleReRun(error) => Some(error),
             Self::V0Success(error) => Some(error),
+            Self::Preregistration(error) => Some(error),
             #[cfg(any(
                 feature = "phase-a",
                 feature = "ablation",
@@ -2042,6 +2190,7 @@ impl Error for S3CliError {
             | Self::UnsupportedBuildKind { .. }
             | Self::OracleBackendFeatureDisabled { .. }
             | Self::ReportFeatureDisabled
+            | Self::MissingPreregistrationSection { .. }
             | Self::DroppedFixtureSplit { .. }
             | Self::HashMismatch { .. }
             | Self::InvalidEvidenceSchema { .. }
@@ -2124,6 +2273,12 @@ impl From<OracleReRunError> for S3CliError {
 impl From<V0SuccessError> for S3CliError {
     fn from(error: V0SuccessError) -> Self {
         Self::V0Success(error)
+    }
+}
+
+impl From<S3PreregistrationError> for S3CliError {
+    fn from(error: S3PreregistrationError) -> Self {
+        Self::Preregistration(error)
     }
 }
 

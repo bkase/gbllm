@@ -7,9 +7,11 @@ use gbf_experiments::s3::cli::evidence_schemas::{
     S3ReportCliEvidence, S3VerifyDeterminismCliEvidence, canonical_evidence_bytes,
 };
 use gbf_experiments::s3::cli::{S3Cli, S3CliError, S3CliLogging, run};
+use gbf_experiments::s3::report::{ReportError, ReportValidationError, predictions_section_hash};
 use gbf_foundation::Hash256;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 #[test]
 fn s3_cli_evidence_schemas_round_trip_canonically() {
@@ -256,6 +258,255 @@ fn s3_report_consumes_oracle_agreement_evidence() {
     assert_consumed(&report, "oracle-agreement");
 }
 
+#[test]
+fn s3_report_uses_explicit_preregistration_pin_for_closure_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let replay = temp.path().join("replay.json");
+    run_cli(&[
+        "s3",
+        "replay-full",
+        "--output",
+        replay.to_str().expect("utf8"),
+    ]);
+
+    let predictions = "Pinned S3 closure predictions from the RFC.";
+    let rfc = write_predictions_rfc(temp.path(), predictions);
+    let (predictions_commit, first_result_commit) = current_git_commit_pair();
+    let pin = write_preregistration_pin(
+        temp.path(),
+        predictions,
+        &predictions_commit,
+        &first_result_commit,
+    );
+    let report = temp.path().join("report.md");
+    run_cli(&[
+        "s3",
+        "report",
+        "--replay-full",
+        replay.to_str().expect("utf8"),
+        "--preregistration-pin",
+        pin.to_str().expect("utf8"),
+        "--predictions-rfc",
+        rfc.to_str().expect("utf8"),
+        "--output",
+        report.to_str().expect("utf8"),
+    ]);
+
+    let markdown = std::fs::read_to_string(&report).expect("report reads");
+    assert!(markdown.contains(predictions));
+    let front_matter = report_front_matter(&markdown);
+    assert_eq!(front_matter["predictions_commit"], predictions_commit);
+    assert_eq!(front_matter["first_result_commit"], first_result_commit);
+    assert_eq!(
+        front_matter["predictions_section_hash"],
+        predictions_section_hash(predictions)
+            .expect("predictions hash")
+            .to_string()
+    );
+    assert_eq!(
+        front_matter["oracle_owner_beads"]["denotational"],
+        "bd-1rcc"
+    );
+    assert_eq!(front_matter["oracle_owner_beads"]["artifact"], "bd-c4wg");
+    assert_eq!(front_matter["conformance_owner_bead"], "bd-35l3");
+    assert_eq!(front_matter["e2e_test_owner_bead"], "bd-1wd");
+    assert_eq!(front_matter["structured_logging_owner_bead"], "bd-2sd7");
+}
+
+#[test]
+fn s3_report_rejects_preregistration_pin_rfc_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let replay = temp.path().join("replay.json");
+    run_cli(&[
+        "s3",
+        "replay-full",
+        "--output",
+        replay.to_str().expect("utf8"),
+    ]);
+
+    let rfc = write_predictions_rfc(temp.path(), "Observed RFC predictions.");
+    let (predictions_commit, first_result_commit) = current_git_commit_pair();
+    let pin = write_preregistration_pin(
+        temp.path(),
+        "Different pinned predictions.",
+        &predictions_commit,
+        &first_result_commit,
+    );
+
+    let error = run_cli_result(&[
+        "s3",
+        "report",
+        "--replay-full",
+        replay.to_str().expect("utf8"),
+        "--preregistration-pin",
+        pin.to_str().expect("utf8"),
+        "--predictions-rfc",
+        rfc.to_str().expect("utf8"),
+        "--output",
+        temp.path().join("report.md").to_str().expect("utf8"),
+    ])
+    .expect_err("report rejects mismatched pin/RFC predictions");
+    assert!(matches!(
+        error,
+        S3CliError::HashMismatch {
+            field: "predictions_section_hash",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn s3_report_rejects_explicit_pre_result_pin() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let replay = temp.path().join("replay.json");
+    run_cli(&[
+        "s3",
+        "replay-full",
+        "--output",
+        replay.to_str().expect("utf8"),
+    ]);
+
+    let predictions = "Pinned S3 closure predictions from the RFC.";
+    let rfc = write_predictions_rfc(temp.path(), predictions);
+    let (predictions_commit, _) = current_git_commit_pair();
+    let pin = write_preregistration_pin(temp.path(), predictions, &predictions_commit, "");
+
+    let error = run_cli_result(&[
+        "s3",
+        "report",
+        "--replay-full",
+        replay.to_str().expect("utf8"),
+        "--preregistration-pin",
+        pin.to_str().expect("utf8"),
+        "--predictions-rfc",
+        rfc.to_str().expect("utf8"),
+        "--output",
+        temp.path().join("report.md").to_str().expect("utf8"),
+    ])
+    .expect_err("report rejects explicit pre-result pin");
+    assert!(matches!(error, S3CliError::S1Schema(_)));
+}
+
+#[test]
+fn s3_report_rejects_preregistration_rfc_without_prediction_section() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let replay = temp.path().join("replay.json");
+    run_cli(&[
+        "s3",
+        "replay-full",
+        "--output",
+        replay.to_str().expect("utf8"),
+    ]);
+
+    let predictions = "Pinned S3 closure predictions from the RFC.";
+    let rfc = temp.path().join("missing-predictions.md");
+    std::fs::write(&rfc, "# Fixture\n\n## Observed\n\nNo prediction section.\n")
+        .expect("RFC fixture writes");
+    let (predictions_commit, first_result_commit) = current_git_commit_pair();
+    let pin = write_preregistration_pin(
+        temp.path(),
+        predictions,
+        &predictions_commit,
+        &first_result_commit,
+    );
+
+    let error = run_cli_result(&[
+        "s3",
+        "report",
+        "--replay-full",
+        replay.to_str().expect("utf8"),
+        "--preregistration-pin",
+        pin.to_str().expect("utf8"),
+        "--predictions-rfc",
+        rfc.to_str().expect("utf8"),
+        "--output",
+        temp.path().join("report.md").to_str().expect("utf8"),
+    ])
+    .expect_err("report rejects RFC without pre-registered predictions");
+    assert!(matches!(
+        error,
+        S3CliError::MissingPreregistrationSection { .. }
+    ));
+}
+
+#[test]
+fn s3_report_rejects_equal_prediction_and_result_commits_from_pin() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let replay = temp.path().join("replay.json");
+    run_cli(&[
+        "s3",
+        "replay-full",
+        "--output",
+        replay.to_str().expect("utf8"),
+    ]);
+
+    let predictions = "Pinned S3 closure predictions from the RFC.";
+    let rfc = write_predictions_rfc(temp.path(), predictions);
+    let (_, first_result_commit) = current_git_commit_pair();
+    let pin = write_preregistration_pin(
+        temp.path(),
+        predictions,
+        &first_result_commit,
+        &first_result_commit,
+    );
+
+    let error = run_cli_result(&[
+        "s3",
+        "report",
+        "--replay-full",
+        replay.to_str().expect("utf8"),
+        "--preregistration-pin",
+        pin.to_str().expect("utf8"),
+        "--predictions-rfc",
+        rfc.to_str().expect("utf8"),
+        "--output",
+        temp.path().join("report.md").to_str().expect("utf8"),
+    ])
+    .expect_err("report rejects equal predictions/result commits");
+    assert!(matches!(
+        error,
+        S3CliError::Report(ReportError::Validation(
+            ReportValidationError::PredictionsCommitEqualsFirstResult { .. }
+        ))
+    ));
+}
+
+#[test]
+fn s3_report_default_predictions_rfc_matches_registered_pin_hash() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let replay = temp.path().join("replay.json");
+    run_cli(&[
+        "s3",
+        "replay-full",
+        "--output",
+        replay.to_str().expect("utf8"),
+    ]);
+
+    let pin_hash = read_preregistration_pin_field("predictions_section_hash");
+    let (predictions_commit, first_result_commit) = current_git_commit_pair();
+    let pin = write_preregistration_pin_with_hash(
+        temp.path(),
+        &pin_hash,
+        &predictions_commit,
+        &first_result_commit,
+    );
+    let report = temp.path().join("report.md");
+    run_cli(&[
+        "s3",
+        "report",
+        "--replay-full",
+        replay.to_str().expect("utf8"),
+        "--preregistration-pin",
+        pin.to_str().expect("utf8"),
+        "--output",
+        report.to_str().expect("utf8"),
+    ]);
+
+    let markdown = std::fs::read_to_string(&report).expect("report reads");
+    let front_matter = report_front_matter(&markdown);
+    assert_eq!(front_matter["predictions_section_hash"], pin_hash);
+}
+
 fn run_cli(args: &[&str]) {
     run_cli_result(args).expect("S3 CLI command succeeds");
 }
@@ -306,4 +557,110 @@ fn assert_consumed(report: &S3ReportCliEvidence, evidence_kind: &str) {
         "missing consumed evidence kind {evidence_kind}: {:#?}",
         report.consumed_evidence
     );
+}
+
+fn write_predictions_rfc(dir: &std::path::Path, predictions: &str) -> std::path::PathBuf {
+    let path = dir.join("F-S3-fixture.md");
+    std::fs::write(
+        &path,
+        format!(
+            "# Fixture\n\n## Pre-registered predictions\n\n{predictions}\n\n## Observed\n\nPending.\n"
+        ),
+    )
+    .expect("RFC fixture writes");
+    path
+}
+
+fn write_preregistration_pin(
+    dir: &std::path::Path,
+    predictions: &str,
+    predictions_commit: &str,
+    first_result_commit: &str,
+) -> std::path::PathBuf {
+    write_preregistration_pin_with_hash(
+        dir,
+        &predictions_section_hash(predictions)
+            .expect("predictions hash")
+            .to_string(),
+        predictions_commit,
+        first_result_commit,
+    )
+}
+
+fn write_preregistration_pin_with_hash(
+    dir: &std::path::Path,
+    predictions_section_hash: &str,
+    predictions_commit: &str,
+    first_result_commit: &str,
+) -> std::path::PathBuf {
+    let path = dir.join("preregistration.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "schema = \"s3_preregistration.v1\"\n\
+             predictions_commit = \"{predictions_commit}\"\n\
+             predictions_section_hash = \"{}\"\n\
+             pass_version_S3 = \"fixture\"\n\
+             rfc_revision = \"{predictions_commit}\"\n\
+             first_result_commit = \"{first_result_commit}\"\n",
+            predictions_section_hash,
+        ),
+    )
+    .expect("pin fixture writes");
+    path
+}
+
+fn current_git_commit_pair() -> (String, String) {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--max-count=2", "HEAD"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("git rev-list runs");
+    assert!(
+        output.status.success(),
+        "git rev-list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commits = String::from_utf8(output.stdout)
+        .expect("git output is UTF-8")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        commits.len() >= 2,
+        "S3 report tests require HEAD and a parent"
+    );
+    (commits[1].clone(), commits[0].clone())
+}
+
+fn report_front_matter(markdown: &str) -> Value {
+    let front_matter = markdown
+        .strip_prefix("---\n")
+        .expect("front matter opens")
+        .split_once("\n---\n")
+        .expect("front matter closes")
+        .0;
+    serde_json::from_str(front_matter).expect("front matter parses")
+}
+
+fn read_preregistration_pin_field(field: &str) -> String {
+    let text =
+        std::fs::read_to_string(workspace_root().join("experiments/S3/preregistration.toml"))
+            .expect("S3 preregistration pin reads");
+    for line in text.lines() {
+        let Some((key, raw)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == field {
+            return serde_json::from_str(raw.trim()).expect("pin string value parses");
+        }
+    }
+    panic!("missing {field} in S3 preregistration pin")
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("gbf-experiments has workspace parent")
+        .to_path_buf()
 }
