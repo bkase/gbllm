@@ -84,7 +84,7 @@ jobs:
           run_capture_log cli-scripts-event-shape-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test cli_scripts_event_shape_s3
           run_capture_log workflow-lint-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test workflow_lint_s3
           run_capture_log workflow-regression-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test workflow_regression_s3
-          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run
+          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run --result-state post
           run_capture_ndjson s3-determinism scripts/s3_determinism_check.sh --dry-run
           run_capture_ndjson s3-full-determinism scripts/s3_full_determinism_check.sh --dry-run
           run_capture_ndjson s3-isolation scripts/s3_isolation_check.sh --dry-run

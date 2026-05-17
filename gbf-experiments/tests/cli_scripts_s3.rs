@@ -53,13 +53,14 @@ const SCRIPTS: [ScriptSpec; 8] = [
 fn s3_scripts_dry_run_emit_schema_and_stable_reports() {
     for spec in SCRIPTS {
         let temp = tempfile::tempdir().expect("tempdir");
-        let empty_artifact_dir = temp.path().join("empty-artifacts");
-        fs::create_dir_all(&empty_artifact_dir).expect("empty artifact dir");
+        let artifact_dir = temp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        write_result_artifact(&artifact_dir);
         let report_dir = temp_path(&temp);
-        let artifact_dir = empty_artifact_dir.to_str().expect("utf8 artifact path");
+        let artifact_dir = artifact_dir.to_str().expect("utf8 artifact path");
         let mut args = vec!["--dry-run", "--report-dir", report_dir];
         if spec.name == "s3_preregistration_check.sh" {
-            args.extend(["--artifact-dir", artifact_dir]);
+            args.extend(["--result-state", "post", "--artifact-dir", artifact_dir]);
         }
         let first = run_script(spec, &args);
         assert_success(spec, &first);
@@ -148,10 +149,11 @@ first_result_commit = ""
 fn s3_scripts_forced_failure_uses_common_structured_plumbing() {
     for spec in SCRIPTS {
         let temp = tempfile::tempdir().expect("tempdir");
-        let empty_artifact_dir = temp.path().join("empty-artifacts");
-        fs::create_dir_all(&empty_artifact_dir).expect("empty artifact dir");
+        let artifact_dir = temp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        write_result_artifact(&artifact_dir);
         let report_dir = temp_path(&temp);
-        let artifact_dir = empty_artifact_dir.to_str().expect("utf8 artifact path");
+        let artifact_dir = artifact_dir.to_str().expect("utf8 artifact path");
         let mut args = vec![
             "--dry-run",
             "--force-failure-for-test",
@@ -159,7 +161,7 @@ fn s3_scripts_forced_failure_uses_common_structured_plumbing() {
             report_dir,
         ];
         if spec.name == "s3_preregistration_check.sh" {
-            args.extend(["--artifact-dir", artifact_dir]);
+            args.extend(["--result-state", "post", "--artifact-dir", artifact_dir]);
         }
         let output = run_script(spec, &args);
         assert!(
@@ -376,6 +378,14 @@ fn stage_names(report: &Value) -> Vec<String> {
 
 fn temp_path(temp: &tempfile::TempDir) -> &str {
     temp.path().to_str().expect("utf8 temp path")
+}
+
+fn write_result_artifact(dir: &Path) {
+    fs::write(
+        dir.join("artifact-metadata.json"),
+        r#"{"v0_success_self_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+    )
+    .expect("write result artifact fixture");
 }
 
 fn command_output(output: &Output) -> String {

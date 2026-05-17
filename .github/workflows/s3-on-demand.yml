@@ -76,7 +76,7 @@ jobs:
           pass_slug="${S3_PASS_VERSION//[^A-Za-z0-9._-]/_}"
           export pass_slug
 
-          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run
+          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run --result-state post
           run_capture_log gbf-experiments-build-s3 cargo build -p gbf-experiments --no-default-features --features s3,s3-phase-d,s3-oracle-real
           run_capture_log gbf-cli-build-s3 cargo build -p gbf-cli --no-default-features --features s3-full
           run_capture_log replay-full-s3 bash -c 'set -euo pipefail; cargo run --quiet -p gbf-cli --features s3-full -- s3 replay-full --seed-list "$S3_SEED_LIST" --pass-version "$S3_PASS_VERSION" --output "$S3_ARTIFACT_DIR/replay-full-${pass_slug}.json"'

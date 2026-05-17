@@ -177,9 +177,9 @@ fn assert_required_script_invocations(source: &str, workflow: &str) {
     }
     assert!(
         source.contains(
-            "run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run"
+            "run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run --result-state post"
         ),
-        "{workflow} should run the preregistration gate explicitly in pre-result dry-run mode"
+        "{workflow} should run the preregistration gate explicitly in post-result dry-run mode"
     );
     if workflow == ".github/workflows/s3-nightly.yml"
         || workflow == ".github/workflows/s3-on-demand.yml"
@@ -192,7 +192,7 @@ fn assert_required_script_invocations(source: &str, workflow: &str) {
             .expect("replay invocation exists");
         assert!(
             preregistration < replay,
-            "{workflow} must run the pre-result preregistration gate before writing experiments/S3 result artifacts"
+            "{workflow} must run the post-result preregistration gate before replaying experiments/S3 result artifacts"
         );
     }
 }

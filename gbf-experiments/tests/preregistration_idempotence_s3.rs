@@ -7,12 +7,34 @@ use std::process::Command;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const EMPTY_ARTIFACT_DIR: &str = "target/s3-preregistration-empty-artifacts";
-
 #[test]
 fn dry_run_preregistration_output_is_byte_identical_across_replays() {
-    let first = run_checker();
-    let second = run_checker();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let artifact_dir = temp.path().join("artifacts");
+    fs::create_dir(&artifact_dir).expect("artifact dir");
+    write_result_artifact(&artifact_dir);
+    let artifact_dir = artifact_dir.to_str().expect("artifact path UTF-8");
+    let first_result_artifact = temp
+        .path()
+        .join("artifacts/artifact-metadata.json")
+        .to_str()
+        .expect("artifact path UTF-8")
+        .to_owned();
+
+    let first = run_checker_with([
+        "--dry-run",
+        "--result-state",
+        "post",
+        "--artifact-dir",
+        artifact_dir,
+    ]);
+    let second = run_checker_with([
+        "--dry-run",
+        "--result-state",
+        "post",
+        "--artifact-dir",
+        artifact_dir,
+    ]);
 
     assert!(
         first.status.success(),
@@ -62,15 +84,15 @@ fn dry_run_preregistration_output_is_byte_identical_across_replays() {
             json!({
                 "event": "s3_preregistration_check_stage_start",
                 "stage": 2,
-                "description": "scan for preregistration-breaking result artifacts",
+                "description": "scan for registered S3 result artifacts",
             }),
             json!({
                 "event": "s3_preregistration_check_stage_done",
                 "stage": 2,
                 "passed": true,
                 "detail": {
-                    "artifact_dirs": [EMPTY_ARTIFACT_DIR],
-                    "first_result_artifact": null,
+                    "artifact_dirs": [artifact_dir],
+                    "first_result_artifact": first_result_artifact.as_str(),
                 },
             }),
             json!({
@@ -89,11 +111,11 @@ fn dry_run_preregistration_output_is_byte_identical_across_replays() {
                         },
                     },
                     {
-                        "name": "empty_result_scan",
+                        "name": "registered_result_scan",
                         "passed": true,
                         "detail": {
-                            "artifact_dirs": [EMPTY_ARTIFACT_DIR],
-                            "first_result_artifact": null,
+                            "artifact_dirs": [artifact_dir],
+                            "first_result_artifact": first_result_artifact.as_str(),
                         },
                     },
                 ],
@@ -269,13 +291,6 @@ impl ScriptOutput {
     fn stderr_text(&self) -> String {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
-}
-
-fn run_checker() -> ScriptOutput {
-    let artifact_dir = workspace_root().join(EMPTY_ARTIFACT_DIR);
-    let _ = fs::remove_dir_all(&artifact_dir);
-    fs::create_dir_all(&artifact_dir).expect("empty artifact dir");
-    run_checker_with(["--dry-run", "--artifact-dir", EMPTY_ARTIFACT_DIR])
 }
 
 fn run_checker_with<const N: usize>(args: [&str; N]) -> ScriptOutput {

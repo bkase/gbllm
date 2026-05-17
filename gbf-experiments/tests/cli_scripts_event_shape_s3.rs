@@ -21,8 +21,9 @@ const SCRIPTS: [&str; 8] = [
 fn s3_script_event_shape_carries_stage_and_summary_events() {
     for script in SCRIPTS {
         let temp = tempfile::tempdir().expect("tempdir");
-        let empty_artifact_dir = temp.path().join("empty-artifacts");
-        fs::create_dir_all(&empty_artifact_dir).expect("empty artifact dir");
+        let artifact_dir = temp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        write_result_artifact(&artifact_dir);
         let mut args = vec![
             "--dry-run",
             "--report-dir",
@@ -30,8 +31,10 @@ fn s3_script_event_shape_carries_stage_and_summary_events() {
         ];
         if script == "s3_preregistration_check.sh" {
             args.extend([
+                "--result-state",
+                "post",
                 "--artifact-dir",
-                empty_artifact_dir.to_str().expect("utf8 artifact path"),
+                artifact_dir.to_str().expect("utf8 artifact path"),
             ]);
         }
         let output = Command::new(repo_root().join("scripts").join(script))
@@ -89,6 +92,14 @@ fn command_output(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn write_result_artifact(dir: &Path) {
+    fs::write(
+        dir.join("artifact-metadata.json"),
+        r#"{"v0_success_self_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+    )
+    .expect("write result artifact fixture");
 }
 
 fn repo_root() -> PathBuf {

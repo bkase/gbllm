@@ -868,7 +868,14 @@ pub fn predictions_section_hash(section: &str) -> Result<Hash256, ReportError> {
 /// Read the RFC3339 commit timestamp used for `generated_at_commit_time`.
 pub fn generated_at_commit_time(first_result_commit: &GitCommitId) -> Result<String, ReportError> {
     let output = Command::new("git")
-        .args(["show", "-s", "--format=%cI", first_result_commit.as_str()])
+        .env("TZ", "UTC")
+        .args([
+            "show",
+            "-s",
+            "--date=format-local:%Y-%m-%dT%H:%M:%SZ",
+            "--format=%cd",
+            first_result_commit.as_str(),
+        ])
         .output()
         .map_err(|error| ReportValidationError::GitCommandFailed {
             operation: "show",
