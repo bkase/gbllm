@@ -1,11 +1,23 @@
 id = "Recovery"
-defaults_hash = "sha256:4d576df695e48ed3d2485a43b6478a6e16aacea6fb30c2d3a776ce5d1bc538b5"
+schema_version = "2.0.0"
+defaults_hash = "sha256:175048c41adaed3a2d99245ebf6f4d59db521d074e549ee73ff92f0e44cf03ac"
 observability = { kind = "Flexible" }
 
 [trace_budget]
 max_events_per_slice = 128
 max_bytes_per_frame = 2048
 drop_policy = { kind = "DropNewest" }
+
+[range_caps]
+profile_chunk_max = 256
+profile_tile_max = 256
+profile_tile_min = 16
+renorm_strategy = { kind = "ExactPostBoundaryOnly" }
+
+[observation_caps]
+important_max = 32
+diagnostic_max = 8
+best_effort_max = 0
 
 [repair_policy]
 max_refinement_iters = 6

@@ -610,15 +610,17 @@ fn validation_origin_rank(origin: ValidationOrigin) -> u8 {
     match origin {
         ValidationOrigin::Schema => 0,
         ValidationOrigin::SemanticCore => 1,
-        ValidationOrigin::Manifest => 2,
-        ValidationOrigin::Lowering => 3,
-        ValidationOrigin::Calibration => 4,
-        ValidationOrigin::HintBundle => 5,
-        ValidationOrigin::Workload => 6,
-        ValidationOrigin::GoldenVector => 7,
-        ValidationOrigin::CompileRequest => 8,
-        ValidationOrigin::PolicyResolution => 9,
-        ValidationOrigin::Budget => 10,
+        ValidationOrigin::ObservationPlanConstruction => 2,
+        ValidationOrigin::RangePlanConstruction => 3,
+        ValidationOrigin::Manifest => 4,
+        ValidationOrigin::Lowering => 5,
+        ValidationOrigin::Calibration => 6,
+        ValidationOrigin::HintBundle => 7,
+        ValidationOrigin::Workload => 8,
+        ValidationOrigin::GoldenVector => 9,
+        ValidationOrigin::CompileRequest => 10,
+        ValidationOrigin::PolicyResolution => 11,
+        ValidationOrigin::Budget => 12,
     }
 }
 

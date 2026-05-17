@@ -31,4 +31,5 @@ semantic_equivalence_check = []
 gbf-verify = { path = "../gbf-verify" }
 proptest.workspace = true
 tempfile.workspace = true
+tracing-core = "=0.1.36"
 tracing-subscriber.workspace = true

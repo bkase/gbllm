@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-METRIC-SOURCE-RESERVED-V1","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::metric_registry_filter_per_slice_reserved_rejected producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

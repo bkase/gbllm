@@ -2,17 +2,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::time::Instant;
 
-use gbf_foundation::{Hash256, SemVer};
-use gbf_policy::ValidationDiagnostic;
+use gbf_foundation::{CompileProfileId, Hash256, SemVer};
+use gbf_policy::{ProbeImportanceClass, ReductionPlanCeiling, ValidationDiagnostic};
 use gbf_report::report_schemas::{
     artifact_validation_v1, infer_ir_v1, policy_resolution_v1, quant_graph_v1, static_budget_v1,
 };
-use gbf_report::{ReportBody, ReportEnvelope, ReportOutcome};
+use gbf_report::{
+    ReportBody, ReportEnvelope, ReportEnvelopeError, ReportOutcome, ReportSelfHashError,
+};
 use gbf_report::{canonicalize as canonicalize_report, canonicalize_value, compute_self_hash};
 use gbf_store::stage_cache::{
     ComponentDigestSet, ComponentId, FeatureFlag, StageCache as StoreStageCache, StageCacheError,
-    StageCacheKey, StageId, StageKey,
+    StageCacheKey, StageId, StageKey, compose_key,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,16 +26,34 @@ use crate::s1::quant_graph::{PASS_VERSION_QUANT_GRAPH, QuantGraphProduct};
 use crate::s3::infer_ir::{
     GbInferIR, GbInferIRProduct, InferIrAuditParents, PASS_VERSION_INFER_IR,
 };
+use crate::s4::observation_plan::{
+    BUILD_ACTIVE_CHECKPOINT_SCHEMA_VERSION, NonEmptyList, OBSERVATION_PLAN_SCHEMA_VERSION,
+    OPERATIONAL_PROBE_SCHEMA_VERSION, ObservationPlanAuditParents, ObservationPlanCoreFailure,
+    ObservationPlanCoreProduct, ObservationPlanReportBody, ObservationPlanReportInputIdentity,
+    ObservationPlanReportResult, ObservationPlanStageOutput, OperationalProbeSchemaBody,
+    OperationalProbeSchemaInputIdentity, OperationalProbeSchemaResult, PerClassCount,
+    SemanticCheckpointRole, SemanticCheckpointSchemaReEmitBody,
+    SemanticCheckpointSchemaReEmitInputIdentity, SemanticCheckpointSchemaReEmitResult,
+    observation_plan_self_hash, observation_policy_projection_hash,
+};
+use crate::s5::range_plan::{
+    RANGE_CERT_SCHEMA_VERSION, RANGE_PLAN_SCHEMA_VERSION, RangeCertBody, RangePlanAuditParents,
+    RangePlanCoreProduct, RangePlanReportBody, RangePlanReportInputIdentity, RangePlanReportResult,
+    RangePlanStageOutput, ReductionCeilingProvenanceTag, ReductionPlan, range_cert_body_hash,
+    range_plan_self_hash, range_policy_projection_hash,
+};
 use crate::validate::{
     CachedValidationProduct, CachedValidationProductRehydrateError, ValidatedInputHashes,
     ValidationStageFailure,
 };
 
 pub const PASS_VERSION_VALIDATE: SemVer = SemVer::new(1, 0, 0);
-pub const PASS_VERSION_RESOLVE: SemVer = SemVer::new(1, 0, 0);
+pub const PASS_VERSION_RESOLVE: SemVer = SemVer::new(2, 0, 0);
 pub const PASS_VERSION_QUANT_GRAPH_STAGE1: SemVer = SemVer::new(1, 0, 0);
-pub const PASS_VERSION_BUDGET: SemVer = SemVer::new(1, 0, 0);
+pub const PASS_VERSION_BUDGET: SemVer = SemVer::new(1, 1, 0);
 pub const PASS_VERSION_INFER_IR_STAGE3: SemVer = SemVer::new(1, 0, 0);
+pub const PASS_VERSION_OBSERVATION_PLAN: SemVer = SemVer::new(1, 0, 0);
+pub const PASS_VERSION_RANGE_PLAN: SemVer = SemVer::new(1, 0, 0);
 
 const STAGE0_VALIDATE_SUCCESS_ID: &str = "gbf-codegen.stage0.validate.success";
 const STAGE0_VALIDATE_FAILURE_ID: &str = "gbf-codegen.stage0.validate.failure";
@@ -44,8 +65,28 @@ const STAGE2_BUDGET_SUCCESS_ID: &str = "gbf-codegen.stage2.static_budget.success
 const STAGE2_BUDGET_FAILURE_ID: &str = "gbf-codegen.stage2.static_budget.failure";
 const STAGE3_INFER_IR_SUCCESS_ID: &str = "gbf-codegen.stage3.infer_ir.success";
 const STAGE3_INFER_IR_FAILURE_ID: &str = "gbf-codegen.stage3.infer_ir.failure";
+const STAGE4_OBSERVATION_PLAN_SUCCESS_ID: &str = "observation_plan.v1.success";
+const STAGE4_OBSERVATION_PLAN_FAILURE_ID: &str = "observation_plan.v1.failure";
+const STAGE5_RANGE_PLAN_SUCCESS_ID: &str = "range_plan.v1.success";
+const STAGE5_RANGE_PLAN_FAILURE_ID: &str = "range_plan.v1.failure";
 pub const STAGE3_CACHE_LOOKUP_EVENT: &str = "stage3.cache.lookup";
 pub const STAGE3_CACHE_AUDIT_REWRAP_EVENT: &str = "stage3.cache.audit_rewrap";
+pub const STAGE4_DRIVER_CACHE_LOOKUP_EVENT: &str = "stage4.driver.cache_lookup";
+pub const STAGE4_DRIVER_CACHE_HIT_EVENT: &str = "stage4.driver.cache_hit";
+pub const STAGE4_DRIVER_CACHE_MISS_EVENT: &str = "stage4.driver.cache_miss";
+pub const STAGE4_DRIVER_AUDIT_PARENT_REWRAP_EVENT: &str = "stage4.driver.audit_parent_rewrap";
+pub const STAGE5_DRIVER_CACHE_LOOKUP_EVENT: &str = "stage5.driver.cache_lookup";
+pub const STAGE5_DRIVER_CACHE_HIT_EVENT: &str = "stage5.driver.cache_hit";
+pub const STAGE5_DRIVER_CACHE_MISS_EVENT: &str = "stage5.driver.cache_miss";
+pub const STAGE5_DRIVER_AUDIT_PARENT_REWRAP_EVENT: &str = "stage5.driver.audit_parent_rewrap";
+
+fn stage4_pass_version_string() -> String {
+    PASS_VERSION_OBSERVATION_PLAN.to_string()
+}
+
+fn stage5_pass_version_string() -> String {
+    PASS_VERSION_RANGE_PLAN.to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage0CellKind {
@@ -73,6 +114,18 @@ pub enum Stage2CellKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage3CellKind {
+    Success,
+    FailureMemo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage4CellKind {
+    Success,
+    FailureMemo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage5CellKind {
     Success,
     FailureMemo,
 }
@@ -258,6 +311,173 @@ impl Stage3CacheKeyMaterial {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Stage4CacheKeyMaterial {
+    pub infer_ir_self_hash: Hash256,
+    pub quant_graph_self_hash: Hash256,
+    pub semantic_checkpoint_schema_hash: Hash256,
+    pub observation_policy_projection_hash: Hash256,
+    pub pass_version_observation_plan: String,
+    pub crate_feature_set_hash: Hash256,
+    pub observation_plan_schema_hash: Hash256,
+    pub build_active_semantic_checkpoint_schema_schema_hash: Hash256,
+    pub operational_probe_schema_schema_hash: Hash256,
+    pub probe_registry_hash: Hash256,
+    pub metric_registry_hash: Hash256,
+    pub trace_event_layout_registry_hash: Hash256,
+}
+
+impl Stage4CacheKeyMaterial {
+    #[must_use]
+    pub fn new(
+        infer_ir_self_hash: Hash256,
+        quant_graph_self_hash: Hash256,
+        semantic_checkpoint_schema_hash: Hash256,
+        observation_policy_projection_hash: Hash256,
+        probe_registry_hash: Hash256,
+        metric_registry_hash: Hash256,
+        trace_event_layout_registry_hash: Hash256,
+    ) -> Self {
+        Self {
+            infer_ir_self_hash,
+            quant_graph_self_hash,
+            semantic_checkpoint_schema_hash,
+            observation_policy_projection_hash,
+            pass_version_observation_plan: stage4_pass_version_string(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            observation_plan_schema_hash: observation_plan_schema_hash(),
+            build_active_semantic_checkpoint_schema_schema_hash:
+                build_active_semantic_checkpoint_schema_schema_hash(),
+            operational_probe_schema_schema_hash: operational_probe_schema_schema_hash(),
+            probe_registry_hash,
+            metric_registry_hash,
+            trace_event_layout_registry_hash,
+        }
+    }
+
+    pub fn from_inputs(
+        inputs: &crate::s4::observation_plan::ObservationPlanInputs,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self::new(
+            inputs.infer_ir_self_hash,
+            inputs.quant_graph_self_hash,
+            inputs.semantic_checkpoint_schema_hash,
+            observation_policy_projection_hash(&inputs.op_policy_projection)?,
+            inputs.probe_registry_hash,
+            inputs.metric_registry_hash,
+            inputs.trace_event_layout_registry_hash,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage5CacheKeyMaterial {
+    pub infer_ir_self_hash: Hash256,
+    pub quant_graph_self_hash: Hash256,
+    pub static_budget_self_hash: Hash256,
+    pub range_policy_projection_hash: Hash256,
+    pub pass_version_range_plan: String,
+    pub crate_feature_set_hash: Hash256,
+    pub range_plan_schema_hash: Hash256,
+    pub range_cert_schema_hash: Hash256,
+}
+
+impl Stage5CacheKeyMaterial {
+    #[must_use]
+    pub fn new(
+        infer_ir_self_hash: Hash256,
+        quant_graph_self_hash: Hash256,
+        static_budget_self_hash: Hash256,
+        range_policy_projection_hash: Hash256,
+    ) -> Self {
+        Self {
+            infer_ir_self_hash,
+            quant_graph_self_hash,
+            static_budget_self_hash,
+            range_policy_projection_hash,
+            pass_version_range_plan: stage5_pass_version_string(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            range_plan_schema_hash: range_plan_schema_hash(),
+            range_cert_schema_hash: range_cert_schema_hash(),
+        }
+    }
+
+    pub fn from_inputs(
+        inputs: &crate::s5::range_plan::RangePlanInputs,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self::new(
+            inputs.infer_ir_self_hash,
+            inputs.quant_graph_self_hash,
+            inputs.static_budget_self_hash,
+            range_policy_projection_hash(&inputs.range_policy_projection)?,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage4ReportRewrapContext {
+    pub profile_id: CompileProfileId,
+    pub audit_parents: ObservationPlanAuditParents,
+}
+
+impl Stage4ReportRewrapContext {
+    #[must_use]
+    pub fn from_inputs(inputs: &crate::s4::observation_plan::ObservationPlanInputs) -> Self {
+        Self {
+            profile_id: inputs.op_policy_projection.profile_id.clone(),
+            audit_parents: inputs.audit_parents.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage5ReportRewrapContext {
+    pub audit_parents: RangePlanAuditParents,
+}
+
+impl Stage5ReportRewrapContext {
+    #[must_use]
+    pub const fn new(audit_parents: RangePlanAuditParents) -> Self {
+        Self { audit_parents }
+    }
+
+    #[must_use]
+    pub const fn from_inputs(inputs: &crate::s5::range_plan::RangePlanInputs) -> Self {
+        Self {
+            audit_parents: inputs.audit_parents,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage4FailureReplay {
+    pub report: ReportEnvelope<ObservationPlanReportBody>,
+    pub sc_re_emit_report: Option<ReportEnvelope<SemanticCheckpointSchemaReEmitBody>>,
+    pub operational_probe_report: Option<ReportEnvelope<OperationalProbeSchemaBody>>,
+    pub diagnostics: NonEmptyList<ValidationDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangePlanCoreFailure {
+    pub range_plan_body: RangePlanReportBody,
+    pub range_cert_body: Option<RangeCertBody>,
+    pub diagnostics: Vec<ValidationDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage5FailureReplay {
+    pub report: ReportEnvelope<RangePlanReportBody>,
+    pub cert_report: Option<ReportEnvelope<RangeCertBody>>,
+    pub diagnostics: Vec<ValidationDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CachedReportBytes {
     pub report_self_hash: Hash256,
     pub canonical_bytes: Vec<u8>,
@@ -332,6 +552,8 @@ pub enum Stage3CacheCell {
 pub enum CodegenStageCacheError {
     Store(StageCacheError),
     Json(serde_json::Error),
+    ReportEnvelope(ReportEnvelopeError),
+    ReportSelfHash(ReportSelfHashError),
     CachedValidationProduct(CachedValidationProductRehydrateError),
     CachedReportBytes(CachedReportBytesError),
     CachedPolicyProduct(CachedPolicyProductError),
@@ -346,6 +568,8 @@ impl fmt::Display for CodegenStageCacheError {
         match self {
             Self::Store(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "stage cache payload JSON error: {err}"),
+            Self::ReportEnvelope(err) => write!(f, "stage cache report envelope error: {err}"),
+            Self::ReportSelfHash(err) => write!(f, "stage cache report self-hash error: {err}"),
             Self::CachedValidationProduct(err) => write!(f, "{err}"),
             Self::CachedReportBytes(err) => write!(f, "{err}"),
             Self::CachedPolicyProduct(err) => write!(f, "{err}"),
@@ -361,6 +585,8 @@ impl std::error::Error for CodegenStageCacheError {
         match self {
             Self::Store(err) => Some(err),
             Self::Json(err) => Some(err),
+            Self::ReportEnvelope(err) => Some(err),
+            Self::ReportSelfHash(err) => Some(err),
             Self::CachedValidationProduct(err) => Some(err),
             Self::CachedReportBytes(err) => Some(err),
             Self::CachedPolicyProduct(err) => Some(err),
@@ -378,6 +604,18 @@ impl From<StageCacheError> for CodegenStageCacheError {
 impl From<serde_json::Error> for CodegenStageCacheError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
+    }
+}
+
+impl From<ReportEnvelopeError> for CodegenStageCacheError {
+    fn from(value: ReportEnvelopeError) -> Self {
+        Self::ReportEnvelope(value)
+    }
+}
+
+impl From<ReportSelfHashError> for CodegenStageCacheError {
+    fn from(value: ReportSelfHashError) -> Self {
+        Self::ReportSelfHash(value)
     }
 }
 
@@ -625,6 +863,58 @@ pub fn stage3_infer_ir_store_key_with_pass_version(
         match cell_kind {
             Stage3CellKind::Success => STAGE3_INFER_IR_SUCCESS_ID,
             Stage3CellKind::FailureMemo => STAGE3_INFER_IR_FAILURE_ID,
+        },
+        material,
+        pass_version,
+    )
+}
+
+#[must_use]
+pub fn stage4_observation_plan_store_key(
+    material: &Stage4CacheKeyMaterial,
+    cell_kind: Stage4CellKind,
+) -> StageKey {
+    stage4_observation_plan_store_key_with_pass_version(
+        material,
+        cell_kind,
+        PASS_VERSION_OBSERVATION_PLAN,
+    )
+}
+
+#[must_use]
+pub fn stage4_observation_plan_store_key_with_pass_version(
+    material: &Stage4CacheKeyMaterial,
+    cell_kind: Stage4CellKind,
+    pass_version: SemVer,
+) -> StageKey {
+    stage_key(
+        match cell_kind {
+            Stage4CellKind::Success => STAGE4_OBSERVATION_PLAN_SUCCESS_ID,
+            Stage4CellKind::FailureMemo => STAGE4_OBSERVATION_PLAN_FAILURE_ID,
+        },
+        material,
+        pass_version,
+    )
+}
+
+#[must_use]
+pub fn stage5_range_plan_store_key(
+    material: &Stage5CacheKeyMaterial,
+    cell_kind: Stage5CellKind,
+) -> StageKey {
+    stage5_range_plan_store_key_with_pass_version(material, cell_kind, PASS_VERSION_RANGE_PLAN)
+}
+
+#[must_use]
+pub fn stage5_range_plan_store_key_with_pass_version(
+    material: &Stage5CacheKeyMaterial,
+    cell_kind: Stage5CellKind,
+    pass_version: SemVer,
+) -> StageKey {
+    stage_key(
+        match cell_kind {
+            Stage5CellKind::Success => STAGE5_RANGE_PLAN_SUCCESS_ID,
+            Stage5CellKind::FailureMemo => STAGE5_RANGE_PLAN_FAILURE_ID,
         },
         material,
         pass_version,
@@ -1133,6 +1423,142 @@ pub fn put_stage3_failure_memo(
     )
 }
 
+pub fn get_stage4_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage4CacheKeyMaterial,
+) -> Result<Option<ObservationPlanCoreProduct>, CodegenStageCacheError> {
+    let key = stage4_observation_plan_store_key(material, Stage4CellKind::Success);
+    let replay_started = Instant::now();
+    emit_stage4_cache_lookup(&key, Stage4CellKind::Success);
+    let bytes = cache.get(&key)?;
+    let Some(bytes) = bytes else {
+        emit_stage4_cache_miss(&key, Stage4CellKind::Success);
+        return Ok(None);
+    };
+    let product: ObservationPlanCoreProduct = serde_json::from_slice(&bytes)?;
+    validate_cached_observation_plan_product(&product, material)?;
+    emit_stage4_cache_hit(
+        &key,
+        Stage4CellKind::Success,
+        replay_elapsed_ns(replay_started),
+    );
+    Ok(Some(product))
+}
+
+pub fn get_stage4_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage4CacheKeyMaterial,
+) -> Result<Option<ObservationPlanCoreFailure>, CodegenStageCacheError> {
+    let key = stage4_observation_plan_store_key(material, Stage4CellKind::FailureMemo);
+    let replay_started = Instant::now();
+    emit_stage4_cache_lookup(&key, Stage4CellKind::FailureMemo);
+    let bytes = cache.get(&key)?;
+    let Some(bytes) = bytes else {
+        emit_stage4_cache_miss(&key, Stage4CellKind::FailureMemo);
+        return Ok(None);
+    };
+    let failure: ObservationPlanCoreFailure = serde_json::from_slice(&bytes)?;
+    emit_stage4_cache_hit(
+        &key,
+        Stage4CellKind::FailureMemo,
+        replay_elapsed_ns(replay_started),
+    );
+    Ok(Some(failure))
+}
+
+pub fn put_stage4_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage4CacheKeyMaterial,
+    product: &ObservationPlanCoreProduct,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    validate_cached_observation_plan_product(product, material)?;
+    put_cell(
+        cache,
+        &stage4_observation_plan_store_key(material, Stage4CellKind::Success),
+        product,
+    )
+}
+
+pub fn put_stage4_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage4CacheKeyMaterial,
+    failure: &ObservationPlanCoreFailure,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    put_cell(
+        cache,
+        &stage4_observation_plan_store_key(material, Stage4CellKind::FailureMemo),
+        failure,
+    )
+}
+
+pub fn get_stage5_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage5CacheKeyMaterial,
+) -> Result<Option<RangePlanCoreProduct>, CodegenStageCacheError> {
+    let key = stage5_range_plan_store_key(material, Stage5CellKind::Success);
+    let replay_started = Instant::now();
+    let bytes = cache.get(&key)?;
+    emit_stage5_cache_lookup(&key, Stage5CellKind::Success);
+    let Some(bytes) = bytes else {
+        emit_stage5_cache_miss(&key, Stage5CellKind::Success);
+        return Ok(None);
+    };
+    let product: RangePlanCoreProduct = serde_json::from_slice(&bytes)?;
+    validate_cached_range_plan_product(&product, material)?;
+    emit_stage5_cache_hit(
+        &key,
+        Stage5CellKind::Success,
+        replay_elapsed_ns(replay_started),
+    );
+    Ok(Some(product))
+}
+
+pub fn get_stage5_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage5CacheKeyMaterial,
+) -> Result<Option<RangePlanCoreFailure>, CodegenStageCacheError> {
+    let key = stage5_range_plan_store_key(material, Stage5CellKind::FailureMemo);
+    let replay_started = Instant::now();
+    let bytes = cache.get(&key)?;
+    emit_stage5_cache_lookup(&key, Stage5CellKind::FailureMemo);
+    let Some(bytes) = bytes else {
+        emit_stage5_cache_miss(&key, Stage5CellKind::FailureMemo);
+        return Ok(None);
+    };
+    let failure: RangePlanCoreFailure = serde_json::from_slice(&bytes)?;
+    emit_stage5_cache_hit(
+        &key,
+        Stage5CellKind::FailureMemo,
+        replay_elapsed_ns(replay_started),
+    );
+    Ok(Some(failure))
+}
+
+pub fn put_stage5_success(
+    cache: &StoreStageCache<'_>,
+    material: &Stage5CacheKeyMaterial,
+    product: &RangePlanCoreProduct,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    validate_cached_range_plan_product(product, material)?;
+    put_cell(
+        cache,
+        &stage5_range_plan_store_key(material, Stage5CellKind::Success),
+        product,
+    )
+}
+
+pub fn put_stage5_failure_memo(
+    cache: &StoreStageCache<'_>,
+    material: &Stage5CacheKeyMaterial,
+    failure: &RangePlanCoreFailure,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    put_cell(
+        cache,
+        &stage5_range_plan_store_key(material, Stage5CellKind::FailureMemo),
+        failure,
+    )
+}
+
 #[must_use]
 pub fn materialize_stage0_cached_report(cell: &Stage0CacheCell) -> CachedReportBytes {
     match cell {
@@ -1206,6 +1632,135 @@ pub fn rewrap_stage3_cached_report_audit_parents(
     Ok(rewrapped)
 }
 
+pub fn rewrap_stage4_cached_success(
+    product: &ObservationPlanCoreProduct,
+    context: &Stage4ReportRewrapContext,
+) -> Result<ObservationPlanStageOutput, CodegenStageCacheError> {
+    let sc_re_emit_body = stage4_sc_re_emit_body(product, context);
+    let sc_re_emit_report = report_envelope(ReportOutcome::Passed, sc_re_emit_body)?;
+    let operational_probe_body = stage4_operational_probe_body(product, context);
+    let operational_probe_report = report_envelope(ReportOutcome::Passed, operational_probe_body)?;
+    let report_body = stage4_observation_report_body(
+        product,
+        context,
+        sc_re_emit_report.report_self_hash,
+        operational_probe_report.report_self_hash,
+    );
+    let report = report_envelope(ReportOutcome::Passed, report_body)?;
+
+    // Success cache cells store audit-free core products, so there is no
+    // cached compile-request hash to compare against during rewrap.
+    tracing::debug!(
+        event = STAGE4_DRIVER_AUDIT_PARENT_REWRAP_EVENT,
+        current_compile_request_hash = %context.audit_parents.compile_request_hash
+    );
+
+    Ok(ObservationPlanStageOutput {
+        product: product.clone(),
+        report,
+        sc_re_emit_report,
+        operational_probe_report,
+    })
+}
+
+pub fn rewrap_stage4_cached_failure(
+    failure: &ObservationPlanCoreFailure,
+    context: &Stage4ReportRewrapContext,
+) -> Result<Stage4FailureReplay, CodegenStageCacheError> {
+    let cached_compile_request_hash = failure
+        .observation_plan_body
+        .input_identity
+        .compile_request_hash;
+    let mut observation_plan_body = failure.observation_plan_body.clone();
+    refresh_stage4_observation_input_identity(
+        &mut observation_plan_body.input_identity,
+        &context.audit_parents,
+    );
+    let report = report_envelope(ReportOutcome::Failed, observation_plan_body)?;
+
+    let sc_re_emit_report = failure
+        .sc_re_emit_body
+        .as_ref()
+        .map(|body| {
+            let mut body = body.clone();
+            body.input_identity.artifact_aux_hash = context.audit_parents.artifact_aux_hash;
+            report_envelope(ReportOutcome::Failed, body)
+        })
+        .transpose()?;
+    let operational_probe_report = failure
+        .operational_probe_body
+        .as_ref()
+        .map(|body| report_envelope(ReportOutcome::Failed, body.clone()))
+        .transpose()?;
+
+    tracing::debug!(
+        event = STAGE4_DRIVER_AUDIT_PARENT_REWRAP_EVENT,
+        cached_compile_request_hash = %cached_compile_request_hash,
+        current_compile_request_hash = %context.audit_parents.compile_request_hash
+    );
+
+    Ok(Stage4FailureReplay {
+        report,
+        sc_re_emit_report,
+        operational_probe_report,
+        diagnostics: failure.diagnostics.clone(),
+    })
+}
+
+pub fn rewrap_stage5_cached_success(
+    product: &RangePlanCoreProduct,
+    context: &Stage5ReportRewrapContext,
+) -> Result<RangePlanStageOutput, CodegenStageCacheError> {
+    let cert_report = report_envelope(ReportOutcome::Passed, product.range_cert.clone())?;
+    let report_body = stage5_range_plan_report_body(product, context, cert_report.report_self_hash);
+    let report = report_envelope(ReportOutcome::Passed, report_body)?;
+
+    // Success cache cells store audit-free core products, so there is no
+    // cached compile-request hash to compare against during rewrap.
+    tracing::info!(
+        target: "gbf_codegen::s5",
+        event = STAGE5_DRIVER_AUDIT_PARENT_REWRAP_EVENT,
+        current_compile_request_hash = %context.audit_parents.compile_request_hash
+    );
+
+    Ok(RangePlanStageOutput {
+        product: product.clone(),
+        report,
+        cert_report,
+    })
+}
+
+pub fn rewrap_stage5_cached_failure(
+    failure: &RangePlanCoreFailure,
+    context: &Stage5ReportRewrapContext,
+) -> Result<Stage5FailureReplay, CodegenStageCacheError> {
+    let cached_compile_request_hash = failure.range_plan_body.input_identity.compile_request_hash;
+    let mut range_plan_body = failure.range_plan_body.clone();
+    refresh_stage5_range_input_identity(
+        &mut range_plan_body.input_identity,
+        &context.audit_parents,
+    );
+    let report = report_envelope(ReportOutcome::Failed, range_plan_body)?;
+    let cert_report = failure
+        .range_cert_body
+        .as_ref()
+        .map(|body| report_envelope(ReportOutcome::Failed, body.clone()))
+        .transpose()?;
+
+    tracing::info!(
+        target: "gbf_codegen::s5",
+        event = STAGE5_DRIVER_AUDIT_PARENT_REWRAP_EVENT,
+        cached_compile_request_hash = %cached_compile_request_hash,
+        current_compile_request_hash = %context.audit_parents.compile_request_hash
+    );
+
+    Ok(Stage5FailureReplay {
+        report,
+        cert_report,
+        diagnostics: failure.diagnostics.clone(),
+    })
+}
+
 #[must_use]
 pub fn artifact_validation_schema_hash() -> Hash256 {
     schema_hash(
@@ -1248,6 +1803,51 @@ pub fn infer_ir_schema_hash() -> Hash256 {
         infer_ir_v1::SCHEMA_ID,
         infer_ir_v1::SCHEMA_VERSION,
         "infer_ir_v1::InferIrReportBody::validate_semantics",
+    )
+}
+
+#[must_use]
+pub fn observation_plan_schema_hash() -> Hash256 {
+    schema_hash(
+        OBSERVATION_PLAN_SCHEMA_VERSION,
+        crate::s4::observation_plan::OBSERVATION_REPORT_SCHEMA_SEMVER,
+        "observation_plan::ObservationPlanReportBody::validate_semantics",
+    )
+}
+
+#[must_use]
+pub fn build_active_semantic_checkpoint_schema_schema_hash() -> Hash256 {
+    schema_hash(
+        BUILD_ACTIVE_CHECKPOINT_SCHEMA_VERSION,
+        crate::s4::observation_plan::OBSERVATION_REPORT_SCHEMA_SEMVER,
+        "observation_plan::SemanticCheckpointSchemaReEmitBody::validate_semantics",
+    )
+}
+
+#[must_use]
+pub fn operational_probe_schema_schema_hash() -> Hash256 {
+    schema_hash(
+        OPERATIONAL_PROBE_SCHEMA_VERSION,
+        crate::s4::observation_plan::OBSERVATION_REPORT_SCHEMA_SEMVER,
+        "observation_plan::OperationalProbeSchemaBody::validate_semantics",
+    )
+}
+
+#[must_use]
+pub fn range_plan_schema_hash() -> Hash256 {
+    schema_hash(
+        RANGE_PLAN_SCHEMA_VERSION,
+        crate::s5::range_plan::RANGE_REPORT_SCHEMA_SEMVER,
+        "range_plan::RangePlanReportBody::validate_semantics",
+    )
+}
+
+#[must_use]
+pub fn range_cert_schema_hash() -> Hash256 {
+    schema_hash(
+        RANGE_CERT_SCHEMA_VERSION,
+        crate::s5::range_plan::RANGE_REPORT_SCHEMA_SEMVER,
+        "range_plan::RangeCertBody::validate_semantics",
     )
 }
 
@@ -1321,6 +1921,404 @@ fn canonical_hash<T: Serialize>(domain: &str, value: &T) -> Hash256 {
     hasher.update([0]);
     hasher.update(bytes);
     Hash256::from_bytes(hasher.finalize().into())
+}
+
+fn report_envelope<B>(
+    outcome: ReportOutcome,
+    body: B,
+) -> Result<ReportEnvelope<B>, CodegenStageCacheError>
+where
+    B: ReportBody + Serialize,
+{
+    Ok(ReportEnvelope::new(outcome, body)?.with_computed_self_hash()?)
+}
+
+fn validate_cached_observation_plan_product(
+    product: &ObservationPlanCoreProduct,
+    material: &Stage4CacheKeyMaterial,
+) -> Result<(), CodegenStageCacheError> {
+    let observation_plan_self_hash = observation_plan_self_hash(&product.observation_plan)
+        .map_err(CodegenStageCacheError::Json)?;
+    let build_active_checkpoint_schema_hash =
+        crate::s4::observation_plan::build_active_checkpoint_schema_hash(
+            &product.build_active_checkpoint_schema,
+        )
+        .map_err(CodegenStageCacheError::Json)?;
+    let operational_probe_schema_hash = crate::s4::observation_plan::operational_probe_schema_hash(
+        &product.operational_probe_schema,
+    )
+    .map_err(CodegenStageCacheError::Json)?;
+
+    if product.observation_plan_self_hash != observation_plan_self_hash
+        || product.build_active_checkpoint_schema_hash != build_active_checkpoint_schema_hash
+        || product.operational_probe_schema_hash != operational_probe_schema_hash
+    {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "hash-consistent Stage 4 observation_plan core product",
+            observed: "Stage 4 observation_plan core product with stale body hash",
+        });
+    }
+
+    let identity = &product.observation_plan.identity;
+    if identity.infer_ir_self_hash != material.infer_ir_self_hash
+        || identity.quant_graph_self_hash != material.quant_graph_self_hash
+        || identity.semantic_checkpoint_schema_hash != material.semantic_checkpoint_schema_hash
+        || identity.observation_policy_projection_hash
+            != material.observation_policy_projection_hash
+        || identity.probe_registry_hash != material.probe_registry_hash
+        || identity.metric_registry_hash != material.metric_registry_hash
+        || identity.trace_event_layout_registry_hash != material.trace_event_layout_registry_hash
+    {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "Stage 4 key-compatible observation_plan core product",
+            observed: "Stage 4 observation_plan core product for different key material",
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_cached_range_plan_product(
+    product: &RangePlanCoreProduct,
+    material: &Stage5CacheKeyMaterial,
+) -> Result<(), CodegenStageCacheError> {
+    let range_plan_self_hash =
+        range_plan_self_hash(&product.range_plan).map_err(CodegenStageCacheError::Json)?;
+    let range_cert_body_hash =
+        range_cert_body_hash(&product.range_cert).map_err(CodegenStageCacheError::Json)?;
+
+    if product.range_plan_self_hash != range_plan_self_hash
+        || product.range_cert_body_hash != range_cert_body_hash
+    {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "hash-consistent Stage 5 range_plan core product",
+            observed: "Stage 5 range_plan core product with stale body hash",
+        });
+    }
+
+    let identity = product.range_plan.identity;
+    if identity.infer_ir_self_hash != material.infer_ir_self_hash
+        || identity.quant_graph_self_hash != material.quant_graph_self_hash
+        || identity.static_budget_self_hash != material.static_budget_self_hash
+        || identity.range_policy_projection_hash != material.range_policy_projection_hash
+    {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "Stage 5 key-compatible range_plan core product",
+            observed: "Stage 5 range_plan core product for different key material",
+        });
+    }
+
+    if product.range_cert.identity.infer_ir_self_hash != material.infer_ir_self_hash
+        || product.range_cert.identity.quant_graph_self_hash != material.quant_graph_self_hash
+        || product.range_cert.identity.static_budget_self_hash != material.static_budget_self_hash
+        || product.range_cert.identity.range_plan_self_hash != Some(product.range_plan_self_hash)
+    {
+        return Err(CodegenStageCacheError::UnexpectedCell {
+            expected: "Stage 5 range certificate body bound to cached range_plan product",
+            observed: "Stage 5 range certificate body for different product identity",
+        });
+    }
+
+    Ok(())
+}
+
+fn stage4_observation_report_body(
+    product: &ObservationPlanCoreProduct,
+    context: &Stage4ReportRewrapContext,
+    sc_re_emit_report_self_hash: Hash256,
+    operational_probe_schema_report_self_hash: Hash256,
+) -> ObservationPlanReportBody {
+    let mut per_class_probe_count = PerClassCount::default();
+    for probe in &product.observation_plan.probes {
+        increment_importance_count(&mut per_class_probe_count, probe.importance);
+    }
+    let mut per_class_metric_count = PerClassCount::default();
+    for metric in &product.observation_plan.metrics {
+        increment_importance_count(&mut per_class_metric_count, metric.importance);
+    }
+    let mandatory_semantic_count = product
+        .observation_plan
+        .semantic
+        .iter()
+        .filter(|semantic| semantic.artifact_role == SemanticCheckpointRole::Mandatory)
+        .count();
+    let optional_semantic_count = product
+        .observation_plan
+        .semantic
+        .iter()
+        .filter(|semantic| semantic.artifact_role == SemanticCheckpointRole::Optional)
+        .count();
+
+    ObservationPlanReportBody {
+        input_identity: stage4_observation_input_identity(product, context),
+        result: Some(ObservationPlanReportResult {
+            product: product.observation_plan.clone(),
+            semantic_count: checked_u16(product.observation_plan.semantic.len(), "semantic_count"),
+            probe_count: checked_u16(product.observation_plan.probes.len(), "probe_count"),
+            metric_count: checked_u16(product.observation_plan.metrics.len(), "metric_count"),
+            mandatory_semantic_count: checked_u16(
+                mandatory_semantic_count,
+                "mandatory_semantic_count",
+            ),
+            optional_semantic_count: checked_u16(
+                optional_semantic_count,
+                "optional_semantic_count",
+            ),
+            per_class_probe_count,
+            per_class_metric_count,
+            sc_re_emit_report_self_hash,
+            operational_probe_schema_report_self_hash,
+            observation_plan_self_hash: product.observation_plan_self_hash,
+        }),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn stage4_observation_input_identity(
+    product: &ObservationPlanCoreProduct,
+    context: &Stage4ReportRewrapContext,
+) -> ObservationPlanReportInputIdentity {
+    let identity = &product.observation_plan.identity;
+    ObservationPlanReportInputIdentity {
+        infer_ir_self_hash: identity.infer_ir_self_hash,
+        quant_graph_self_hash: identity.quant_graph_self_hash,
+        semantic_checkpoint_schema_hash: identity.semantic_checkpoint_schema_hash,
+        observation_policy_projection_hash: identity.observation_policy_projection_hash,
+        static_budget_self_hash: context.audit_parents.static_budget_self_hash,
+        policy_resolution_self_hash: context.audit_parents.policy_resolution_self_hash,
+        compile_request_hash: context.audit_parents.compile_request_hash,
+        artifact_aux_hash: context.audit_parents.artifact_aux_hash,
+        determinism: identity.determinism,
+        observability_mode: identity.observability_mode,
+        trace_budget: identity.trace_budget,
+        profile_id: context.profile_id.clone(),
+        workload_id: identity.workload_id.clone(),
+    }
+}
+
+fn stage4_sc_re_emit_body(
+    product: &ObservationPlanCoreProduct,
+    context: &Stage4ReportRewrapContext,
+) -> SemanticCheckpointSchemaReEmitBody {
+    let identity = &product.observation_plan.identity;
+    SemanticCheckpointSchemaReEmitBody {
+        input_identity: SemanticCheckpointSchemaReEmitInputIdentity {
+            observation_plan_self_hash: Some(product.observation_plan_self_hash),
+            original_schema_hash: identity.semantic_checkpoint_schema_hash,
+            infer_ir_self_hash: identity.infer_ir_self_hash,
+            quant_graph_self_hash: identity.quant_graph_self_hash,
+            artifact_aux_hash: context.audit_parents.artifact_aux_hash,
+            determinism: identity.determinism,
+            workload_id: identity.workload_id.clone(),
+        },
+        result: Some(SemanticCheckpointSchemaReEmitResult {
+            schema_hash: product.build_active_checkpoint_schema_hash,
+            checkpoints: product.build_active_checkpoint_schema.checkpoints.clone(),
+            build_active_count: product.build_active_checkpoint_schema.build_active_count,
+            mandatory_count: product.build_active_checkpoint_schema.mandatory_count,
+            optional_count: product.build_active_checkpoint_schema.optional_count,
+        }),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn stage4_operational_probe_body(
+    product: &ObservationPlanCoreProduct,
+    context: &Stage4ReportRewrapContext,
+) -> OperationalProbeSchemaBody {
+    let identity = &product.observation_plan.identity;
+    OperationalProbeSchemaBody {
+        input_identity: OperationalProbeSchemaInputIdentity {
+            observation_plan_self_hash: Some(product.observation_plan_self_hash),
+            infer_ir_self_hash: identity.infer_ir_self_hash,
+            quant_graph_self_hash: identity.quant_graph_self_hash,
+            determinism: identity.determinism,
+            observability_mode: identity.observability_mode,
+            trace_budget: identity.trace_budget,
+            profile_id: context.profile_id.clone(),
+            workload_id: identity.workload_id.clone(),
+        },
+        result: Some(OperationalProbeSchemaResult {
+            schema_hash: product.operational_probe_schema_hash,
+            probes: product.operational_probe_schema.probes.clone(),
+            metrics: product.operational_probe_schema.metrics.clone(),
+            probe_count: product.operational_probe_schema.probe_count,
+            metric_count: product.operational_probe_schema.metric_count,
+            per_class_probe_weight_total: product
+                .operational_probe_schema
+                .per_class_probe_weight_total,
+            per_class_metric_weight_total: product
+                .operational_probe_schema
+                .per_class_metric_weight_total,
+            per_class_total_weight: product.operational_probe_schema.per_class_total_weight,
+        }),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn stage5_range_plan_report_body(
+    product: &RangePlanCoreProduct,
+    context: &Stage5ReportRewrapContext,
+    range_cert_report_self_hash: Hash256,
+) -> RangePlanReportBody {
+    let mut single_i16_count = 0;
+    let mut chunked_i16_count = 0;
+    let mut renorm_loop_count = 0;
+    let mut effective_ceiling_histogram = BTreeMap::from([
+        (ReductionPlanCeiling::ExactOnly, 0),
+        (ReductionPlanCeiling::Conservative, 0),
+        (ReductionPlanCeiling::Adaptive, 0),
+    ]);
+    let mut ceiling_provenance_histogram = BTreeMap::from([
+        (ReductionCeilingProvenanceTag::Global, 0),
+        (ReductionCeilingProvenanceTag::LayerOverride, 0),
+        (ReductionCeilingProvenanceTag::SiteOverride, 0),
+    ]);
+
+    for entry in &product.range_plan.entries {
+        match entry.plan {
+            ReductionPlan::SingleI16 => single_i16_count += 1,
+            ReductionPlan::ChunkedI16 { .. } => chunked_i16_count += 1,
+            ReductionPlan::RenormLoop { .. } => renorm_loop_count += 1,
+        }
+        *effective_ceiling_histogram
+            .entry(entry.effective_ceiling)
+            .or_insert(0) += 1;
+        *ceiling_provenance_histogram
+            .entry(ReductionCeilingProvenanceTag::from(
+                &entry.ceiling_provenance,
+            ))
+            .or_insert(0) += 1;
+    }
+
+    RangePlanReportBody {
+        input_identity: stage5_range_input_identity(product, context),
+        result: Some(RangePlanReportResult {
+            product: product.range_plan.clone(),
+            entry_count: u32::try_from(product.range_plan.entries.len())
+                .expect("Stage 5 range-plan entry count fits u32"),
+            single_i16_count,
+            chunked_i16_count,
+            renorm_loop_count,
+            effective_ceiling_histogram,
+            ceiling_provenance_histogram,
+            range_cert_report_self_hash,
+            range_plan_self_hash: product.range_plan_self_hash,
+        }),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn stage5_range_input_identity(
+    product: &RangePlanCoreProduct,
+    context: &Stage5ReportRewrapContext,
+) -> RangePlanReportInputIdentity {
+    let identity = product.range_plan.identity;
+    RangePlanReportInputIdentity {
+        infer_ir_self_hash: identity.infer_ir_self_hash,
+        quant_graph_self_hash: identity.quant_graph_self_hash,
+        static_budget_self_hash: identity.static_budget_self_hash,
+        range_policy_projection_hash: identity.range_policy_projection_hash,
+        policy_resolution_self_hash: context.audit_parents.policy_resolution_self_hash,
+        compile_request_hash: context.audit_parents.compile_request_hash,
+        artifact_aux_hash: context.audit_parents.artifact_aux_hash,
+        determinism: identity.determinism,
+    }
+}
+
+fn refresh_stage4_observation_input_identity(
+    identity: &mut ObservationPlanReportInputIdentity,
+    audit_parents: &ObservationPlanAuditParents,
+) {
+    identity.static_budget_self_hash = audit_parents.static_budget_self_hash;
+    identity.policy_resolution_self_hash = audit_parents.policy_resolution_self_hash;
+    identity.compile_request_hash = audit_parents.compile_request_hash;
+    identity.artifact_aux_hash = audit_parents.artifact_aux_hash;
+}
+
+fn refresh_stage5_range_input_identity(
+    identity: &mut RangePlanReportInputIdentity,
+    audit_parents: &RangePlanAuditParents,
+) {
+    identity.policy_resolution_self_hash = audit_parents.policy_resolution_self_hash;
+    identity.compile_request_hash = audit_parents.compile_request_hash;
+    identity.artifact_aux_hash = audit_parents.artifact_aux_hash;
+}
+
+fn increment_importance_count(count: &mut PerClassCount, importance: ProbeImportanceClass) {
+    match importance {
+        ProbeImportanceClass::Required => count.required += 1,
+        ProbeImportanceClass::Important => count.important += 1,
+        ProbeImportanceClass::Diagnostic => count.diagnostic += 1,
+        ProbeImportanceClass::BestEffort => count.best_effort += 1,
+    }
+}
+
+fn checked_u16(value: usize, field: &'static str) -> u16 {
+    u16::try_from(value).unwrap_or_else(|_| panic!("Stage 4 {field} fits u16"))
+}
+
+fn replay_elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn emit_stage4_cache_lookup(key: &StageKey, cell_kind: Stage4CellKind) {
+    let k4 = compose_key(key);
+    tracing::debug!(
+        event = STAGE4_DRIVER_CACHE_LOOKUP_EVENT,
+        k4 = %k4,
+        cell_kind = ?cell_kind
+    );
+}
+
+fn emit_stage4_cache_hit(key: &StageKey, cell_kind: Stage4CellKind, replay_ns: u64) {
+    let k4 = compose_key(key);
+    tracing::debug!(
+        event = STAGE4_DRIVER_CACHE_HIT_EVENT,
+        k4 = %k4,
+        cell_kind = ?cell_kind,
+        replay_ns = replay_ns
+    );
+}
+
+fn emit_stage4_cache_miss(key: &StageKey, cell_kind: Stage4CellKind) {
+    let k4 = compose_key(key);
+    tracing::debug!(
+        event = STAGE4_DRIVER_CACHE_MISS_EVENT,
+        k4 = %k4,
+        cell_kind = ?cell_kind
+    );
+}
+
+fn emit_stage5_cache_lookup(key: &StageKey, cell_kind: Stage5CellKind) {
+    let k5 = compose_key(key);
+    tracing::debug!(
+        target: "gbf_codegen::s5",
+        event = STAGE5_DRIVER_CACHE_LOOKUP_EVENT,
+        k5 = %k5,
+        cell_kind = ?cell_kind
+    );
+}
+
+fn emit_stage5_cache_hit(key: &StageKey, cell_kind: Stage5CellKind, replay_ns: u64) {
+    let k5 = compose_key(key);
+    tracing::debug!(
+        target: "gbf_codegen::s5",
+        event = STAGE5_DRIVER_CACHE_HIT_EVENT,
+        k5 = %k5,
+        cell_kind = ?cell_kind,
+        replay_ns = replay_ns
+    );
+}
+
+fn emit_stage5_cache_miss(key: &StageKey, cell_kind: Stage5CellKind) {
+    let k5 = compose_key(key);
+    tracing::debug!(
+        target: "gbf_codegen::s5",
+        event = STAGE5_DRIVER_CACHE_MISS_EVENT,
+        k5 = %k5,
+        cell_kind = ?cell_kind
+    );
 }
 
 fn validate_cached_policy_product(
@@ -1639,10 +2637,12 @@ mod tests {
     use std::fmt;
     use std::sync::{Arc, Mutex};
 
+    use gbf_abi::{TraceBudget, TraceDropPolicy};
+    use gbf_foundation::WorkloadId;
     use gbf_hw::target::dmg_mbc5_8mib_128kib;
     use gbf_policy::{
-        BudgetFailure, BudgetSlotClass, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile, RuntimeMode,
-        budget_failure_diagnostic,
+        BudgetFailure, BudgetSlotClass, DEFAULT_COMPILE_PROFILE_ID, ObservabilityMode,
+        PlacementProfile, RuntimeMode, budget_failure_diagnostic,
     };
     use gbf_report::ReportEnvelope;
     use gbf_report::report_schemas::infer_ir_v1::{
@@ -1664,6 +2664,15 @@ mod tests {
         GbInferIR, InferIrIdentity, InferIrProvenance, InferOp, NodeAnchorMap, NodeId,
         QuantGraphEntityRef, SemanticAnchor, TokenIngressMode, TokenInput, TokenInputId, ValueAxis,
         ValueDecl, ValueFormat, ValueId, ValueKind, ValueLayout, ValueProducerRef,
+    };
+    use crate::s4::observation_plan::{
+        AnchorAttachmentTable, BuildActiveCheckpointSchema, LockedObservationKnobs,
+        ObservationPlan, ObservationPlanIdentity, ObservationProvenance, OperationalProbeSchema,
+        PerClassWeightTotal, TraceBudgetProjection,
+    };
+    use crate::s5::range_plan::{
+        CertOutcome, LockedRangeKnobs, RangeCertIdentity, RangePlan, RangePlanIdentity,
+        RangePlanProvenance,
     };
 
     use super::*;
@@ -2312,6 +3321,497 @@ mod tests {
     }
 
     #[test]
+    fn k4_includes_required_inputs_and_excludes_audit_only_fields() {
+        let material = stage4_material();
+        let value = serde_json::to_value(&material).expect("stage4 material serializes");
+        let rendered = serde_json::to_string(&value).expect("material JSON renders");
+
+        assert_eq!(
+            material.pass_version_observation_plan,
+            PASS_VERSION_OBSERVATION_PLAN.to_string()
+        );
+        assert_eq!(value["probe_registry_hash"], serde_json::json!(hash(0x86)));
+        assert_eq!(value["metric_registry_hash"], serde_json::json!(hash(0x87)));
+        assert_eq!(
+            value["trace_event_layout_registry_hash"],
+            serde_json::json!(hash(0x88))
+        );
+        assert!(value.get("observation_plan_schema_hash").is_some());
+        assert!(
+            value
+                .get("build_active_semantic_checkpoint_schema_schema_hash")
+                .is_some()
+        );
+        assert!(value.get("operational_probe_schema_schema_hash").is_some());
+        for audit_only in [
+            "policy_resolution_self_hash",
+            "compile_request_hash",
+            "artifact_aux_hash",
+        ] {
+            assert!(value.get(audit_only).is_none());
+            assert!(!rendered.contains(audit_only));
+        }
+    }
+
+    #[test]
+    fn k4_changes_on_pass_feature_projection_and_stays_stable_under_audit_drift() {
+        let left = stage4_material();
+        let mut projection_changed = left.clone();
+        projection_changed.observation_policy_projection_hash = hash(0x91);
+        let mut feature_changed = left.clone();
+        feature_changed.crate_feature_set_hash = hash(0x92);
+
+        assert_ne!(
+            compose_key(&stage4_observation_plan_store_key(
+                &left,
+                Stage4CellKind::Success
+            )),
+            compose_key(&stage4_observation_plan_store_key(
+                &projection_changed,
+                Stage4CellKind::Success
+            ))
+        );
+        assert_ne!(
+            compose_key(&stage4_observation_plan_store_key(
+                &left,
+                Stage4CellKind::Success
+            )),
+            compose_key(&stage4_observation_plan_store_key(
+                &feature_changed,
+                Stage4CellKind::Success
+            ))
+        );
+        assert_ne!(
+            compose_key(&stage4_observation_plan_store_key_with_pass_version(
+                &left,
+                Stage4CellKind::Success,
+                SemVer::new(1, 0, 0)
+            )),
+            compose_key(&stage4_observation_plan_store_key_with_pass_version(
+                &left,
+                Stage4CellKind::Success,
+                SemVer::new(1, 0, 1)
+            ))
+        );
+        assert_eq!(
+            compose_key(&stage4_observation_plan_store_key(
+                &left,
+                Stage4CellKind::Success
+            )),
+            compose_key(&stage4_observation_plan_store_key(
+                &stage4_material(),
+                Stage4CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn k5_includes_static_budget_and_excludes_stage4_and_audit_only_fields() {
+        let material = stage5_material();
+        let value = serde_json::to_value(&material).expect("stage5 material serializes");
+        let rendered = serde_json::to_string(&value).expect("material JSON renders");
+
+        assert_eq!(
+            material.pass_version_range_plan,
+            PASS_VERSION_RANGE_PLAN.to_string()
+        );
+        assert_eq!(
+            value["static_budget_self_hash"],
+            serde_json::json!(hash(0x93))
+        );
+        assert!(value.get("range_plan_schema_hash").is_some());
+        assert!(value.get("range_cert_schema_hash").is_some());
+        for excluded in [
+            "observation_plan_self_hash",
+            "policy_resolution_self_hash",
+            "compile_request_hash",
+            "artifact_aux_hash",
+        ] {
+            assert!(value.get(excluded).is_none());
+            assert!(!rendered.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn k5_changes_on_pass_feature_range_policy_and_static_budget() {
+        let left = stage5_material();
+        let mut range_policy_changed = left.clone();
+        range_policy_changed.range_policy_projection_hash = hash(0x97);
+        let mut static_budget_changed = left.clone();
+        static_budget_changed.static_budget_self_hash = hash(0x95);
+        let mut feature_changed = left.clone();
+        feature_changed.crate_feature_set_hash = hash(0x96);
+
+        for changed in [range_policy_changed, static_budget_changed, feature_changed] {
+            assert_ne!(
+                compose_key(&stage5_range_plan_store_key(&left, Stage5CellKind::Success)),
+                compose_key(&stage5_range_plan_store_key(
+                    &changed,
+                    Stage5CellKind::Success
+                ))
+            );
+        }
+        assert_ne!(
+            compose_key(&stage5_range_plan_store_key_with_pass_version(
+                &left,
+                Stage5CellKind::Success,
+                SemVer::new(1, 0, 0)
+            )),
+            compose_key(&stage5_range_plan_store_key_with_pass_version(
+                &left,
+                Stage5CellKind::Success,
+                SemVer::new(1, 0, 1)
+            ))
+        );
+        assert_eq!(
+            compose_key(&stage5_range_plan_store_key(&left, Stage5CellKind::Success)),
+            compose_key(&stage5_range_plan_store_key(
+                &stage5_material(),
+                Stage5CellKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn stage4_success_cache_stores_core_product_not_envelope() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let product = stage4_product();
+        let material = stage4_material_for(&product);
+
+        put_stage4_success(&cache, &material, &product).expect("put Stage 4 core product");
+        let raw = cache
+            .get(&stage4_observation_plan_store_key(
+                &material,
+                Stage4CellKind::Success,
+            ))
+            .expect("raw Stage 4 cache get")
+            .expect("raw Stage 4 cache hit");
+        let decoded: ObservationPlanCoreProduct =
+            serde_json::from_slice(&raw).expect("raw payload is core product");
+
+        assert_eq!(decoded, product);
+        assert!(serde_json::from_slice::<ReportEnvelope<ObservationPlanReportBody>>(&raw).is_err());
+        assert_eq!(
+            get_stage4_success(&cache, &material)
+                .expect("Stage 4 success lookup")
+                .expect("Stage 4 cache hit"),
+            product
+        );
+    }
+
+    #[test]
+    fn stage5_success_cache_stores_core_product_including_cert_body() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let product = stage5_product();
+        let material = stage5_material_for(&product);
+
+        put_stage5_success(&cache, &material, &product).expect("put Stage 5 core product");
+        let raw = cache
+            .get(&stage5_range_plan_store_key(
+                &material,
+                Stage5CellKind::Success,
+            ))
+            .expect("raw Stage 5 cache get")
+            .expect("raw Stage 5 cache hit");
+        let decoded: RangePlanCoreProduct =
+            serde_json::from_slice(&raw).expect("raw payload is core product");
+
+        assert_eq!(decoded.range_cert.cert_outcome, CertOutcome::Verified);
+        assert_eq!(decoded, product);
+        assert!(serde_json::from_slice::<ReportEnvelope<RangePlanReportBody>>(&raw).is_err());
+    }
+
+    #[test]
+    fn stage4_and_stage5_failure_memos_store_bodies_not_envelopes_and_never_fake_success() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let stage4_product = stage4_product();
+        let stage4_material = stage4_material_for(&stage4_product);
+        let stage4_failure = stage4_failure(&stage4_product, &stage4_context(0x97));
+
+        put_stage4_failure_memo(&cache, &stage4_material, &stage4_failure)
+            .expect("put Stage 4 failure memo");
+        assert!(
+            get_stage4_success(&cache, &stage4_material)
+                .expect("Stage 4 success lookup")
+                .is_none()
+        );
+        let raw_stage4 = cache
+            .get(&stage4_observation_plan_store_key(
+                &stage4_material,
+                Stage4CellKind::FailureMemo,
+            ))
+            .expect("raw Stage 4 failure get")
+            .expect("raw Stage 4 failure hit");
+        assert!(serde_json::from_slice::<ObservationPlanCoreFailure>(&raw_stage4).is_ok());
+        assert!(
+            serde_json::from_slice::<ReportEnvelope<ObservationPlanReportBody>>(&raw_stage4)
+                .is_err()
+        );
+
+        let stage5_product = stage5_product();
+        let stage5_material = stage5_material_for(&stage5_product);
+        let stage5_failure = stage5_failure(&stage5_product, &stage5_context(0x98));
+        put_stage5_failure_memo(&cache, &stage5_material, &stage5_failure)
+            .expect("put Stage 5 failure memo");
+        assert!(
+            get_stage5_success(&cache, &stage5_material)
+                .expect("Stage 5 success lookup")
+                .is_none()
+        );
+        let raw_stage5 = cache
+            .get(&stage5_range_plan_store_key(
+                &stage5_material,
+                Stage5CellKind::FailureMemo,
+            ))
+            .expect("raw Stage 5 failure get")
+            .expect("raw Stage 5 failure hit");
+        let decoded_stage5: RangePlanCoreFailure =
+            serde_json::from_slice(&raw_stage5).expect("raw Stage 5 memo is failure body");
+        assert!(decoded_stage5.range_cert_body.is_some());
+        assert!(
+            serde_json::from_slice::<ReportEnvelope<RangePlanReportBody>>(&raw_stage5).is_err()
+        );
+    }
+
+    #[test]
+    fn stage4_and_stage5_success_replay_rewraps_fresh_audit_parents() {
+        let stage4_product = stage4_product();
+        let first_stage4 = rewrap_stage4_cached_success(&stage4_product, &stage4_context(0xa0))
+            .expect("first Stage 4 rewrap");
+        let second_stage4 = rewrap_stage4_cached_success(&stage4_product, &stage4_context(0xa1))
+            .expect("second Stage 4 rewrap");
+
+        assert_eq!(
+            canonical_json_bytes(&first_stage4.product).expect("first Stage 4 product"),
+            canonical_json_bytes(&second_stage4.product).expect("second Stage 4 product")
+        );
+        assert_ne!(
+            first_stage4.report.body.input_identity.compile_request_hash,
+            second_stage4
+                .report
+                .body
+                .input_identity
+                .compile_request_hash
+        );
+        assert_ne!(
+            first_stage4.report.report_self_hash,
+            second_stage4.report.report_self_hash
+        );
+        assert_ne!(
+            first_stage4
+                .sc_re_emit_report
+                .body
+                .input_identity
+                .artifact_aux_hash,
+            second_stage4
+                .sc_re_emit_report
+                .body
+                .input_identity
+                .artifact_aux_hash
+        );
+
+        let stage5_product = stage5_product();
+        let first_stage5 = rewrap_stage5_cached_success(&stage5_product, &stage5_context(0xa2))
+            .expect("first Stage 5 rewrap");
+        let second_stage5 = rewrap_stage5_cached_success(&stage5_product, &stage5_context(0xa3))
+            .expect("second Stage 5 rewrap");
+
+        assert_eq!(
+            canonical_json_bytes(&first_stage5.product).expect("first Stage 5 product"),
+            canonical_json_bytes(&second_stage5.product).expect("second Stage 5 product")
+        );
+        assert_ne!(
+            first_stage5.report.body.input_identity.compile_request_hash,
+            second_stage5
+                .report
+                .body
+                .input_identity
+                .compile_request_hash
+        );
+        assert_ne!(
+            first_stage5.report.report_self_hash,
+            second_stage5.report.report_self_hash
+        );
+        assert_eq!(
+            first_stage5.cert_report.body.identity.range_plan_self_hash,
+            Some(stage5_product.range_plan_self_hash)
+        );
+    }
+
+    #[test]
+    fn stage4_and_stage5_failure_replay_rewraps_fresh_audit_parents() {
+        let stage4_product = stage4_product();
+        let cached_stage4 = stage4_context(0xb0);
+        let current_stage4 = stage4_context(0xb1);
+        let mut stage4_failure = stage4_failure(&stage4_product, &cached_stage4);
+        let mut cached_sc_re_emit_body = stage4_sc_re_emit_body(&stage4_product, &cached_stage4);
+        cached_sc_re_emit_body.result = None;
+        cached_sc_re_emit_body.diagnostics = vec![hard_diagnostic()];
+        stage4_failure.sc_re_emit_body = Some(cached_sc_re_emit_body);
+        let stage4_replay = rewrap_stage4_cached_failure(&stage4_failure, &current_stage4)
+            .expect("Stage 4 failure rewrap");
+
+        let stage4_identity = &stage4_replay.report.body.input_identity;
+        assert_eq!(
+            stage4_identity.static_budget_self_hash,
+            current_stage4.audit_parents.static_budget_self_hash
+        );
+        assert_eq!(
+            stage4_identity.policy_resolution_self_hash,
+            current_stage4.audit_parents.policy_resolution_self_hash
+        );
+        assert_eq!(
+            stage4_identity.compile_request_hash,
+            current_stage4.audit_parents.compile_request_hash
+        );
+        assert_eq!(
+            stage4_identity.artifact_aux_hash,
+            current_stage4.audit_parents.artifact_aux_hash
+        );
+        assert_ne!(
+            stage4_failure
+                .observation_plan_body
+                .input_identity
+                .compile_request_hash,
+            stage4_identity.compile_request_hash
+        );
+        let stage4_sc_re_emit = stage4_replay
+            .sc_re_emit_report
+            .as_ref()
+            .expect("Stage 4 failure SC re-emit replay");
+        assert_eq!(
+            stage4_sc_re_emit.body.input_identity.artifact_aux_hash,
+            current_stage4.audit_parents.artifact_aux_hash
+        );
+        assert_ne!(
+            stage4_failure
+                .sc_re_emit_body
+                .as_ref()
+                .expect("cached Stage 4 SC re-emit body")
+                .input_identity
+                .artifact_aux_hash,
+            stage4_sc_re_emit.body.input_identity.artifact_aux_hash
+        );
+
+        let stage5_product = stage5_product();
+        let cached_stage5 = stage5_context(0xb2);
+        let current_stage5 = stage5_context(0xb3);
+        let stage5_failure = stage5_failure(&stage5_product, &cached_stage5);
+        let stage5_replay = rewrap_stage5_cached_failure(&stage5_failure, &current_stage5)
+            .expect("Stage 5 failure rewrap");
+
+        let stage5_identity = &stage5_replay.report.body.input_identity;
+        assert_eq!(
+            stage5_identity.policy_resolution_self_hash,
+            current_stage5.audit_parents.policy_resolution_self_hash
+        );
+        assert_eq!(
+            stage5_identity.compile_request_hash,
+            current_stage5.audit_parents.compile_request_hash
+        );
+        assert_eq!(
+            stage5_identity.artifact_aux_hash,
+            current_stage5.audit_parents.artifact_aux_hash
+        );
+        assert_ne!(
+            stage5_failure
+                .range_plan_body
+                .input_identity
+                .compile_request_hash,
+            stage5_identity.compile_request_hash
+        );
+        assert!(stage5_replay.cert_report.is_some());
+    }
+
+    #[test]
+    fn stage4_stage5_cache_and_rewrap_events_are_subscriber_captured() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let stage4_product = stage4_product();
+        let stage4_material = stage4_material_for(&stage4_product);
+        put_stage4_success(&cache, &stage4_material, &stage4_product).expect("put Stage 4 success");
+        let stage5_product = stage5_product();
+        let stage5_material = stage5_material_for(&stage5_product);
+        put_stage5_success(&cache, &stage5_material, &stage5_product).expect("put Stage 5 success");
+        let capture = TraceCapture::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(LevelFilter::TRACE)
+            .with(capture.clone());
+
+        tracing::callsite::rebuild_interest_cache();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            get_stage4_success(&cache, &stage4_material)
+                .expect("Stage 4 lookup")
+                .expect("Stage 4 hit");
+            assert!(
+                get_stage4_failure_memo(&cache, &stage4_material)
+                    .expect("Stage 4 failure memo lookup")
+                    .is_none()
+            );
+            get_stage5_success(&cache, &stage5_material)
+                .expect("Stage 5 lookup")
+                .expect("Stage 5 hit");
+            assert!(
+                get_stage5_failure_memo(&cache, &stage5_material)
+                    .expect("Stage 5 failure memo lookup")
+                    .is_none()
+            );
+            rewrap_stage4_cached_success(&stage4_product, &stage4_context(0xc0))
+                .expect("Stage 4 rewrap");
+            rewrap_stage5_cached_success(&stage5_product, &stage5_context(0xc1))
+                .expect("Stage 5 rewrap");
+            tracing::callsite::rebuild_interest_cache();
+        });
+        tracing::callsite::rebuild_interest_cache();
+
+        let records = capture.records();
+        let stage4_hit = records
+            .iter()
+            .find(|record| {
+                record.level == "DEBUG"
+                    && record.field_equals("event", STAGE4_DRIVER_CACHE_HIT_EVENT)
+                    && record.field_equals("cell_kind", "Success")
+            })
+            .expect("Stage 4 cache hit trace");
+        assert!(stage4_hit.field_u64("replay_ns").is_some());
+        let stage5_hit = records
+            .iter()
+            .find(|record| {
+                record.level == "DEBUG"
+                    && record.field_equals("event", STAGE5_DRIVER_CACHE_HIT_EVENT)
+                    && record.field_equals("cell_kind", "Success")
+            })
+            .expect("Stage 5 cache hit trace");
+        assert!(stage5_hit.field_u64("replay_ns").is_some());
+
+        for (event, cell_kind) in [
+            (STAGE4_DRIVER_CACHE_LOOKUP_EVENT, Some("Success")),
+            (STAGE4_DRIVER_CACHE_MISS_EVENT, Some("FailureMemo")),
+            (STAGE4_DRIVER_AUDIT_PARENT_REWRAP_EVENT, None),
+            (STAGE5_DRIVER_CACHE_LOOKUP_EVENT, Some("Success")),
+            (STAGE5_DRIVER_CACHE_MISS_EVENT, Some("FailureMemo")),
+            (STAGE5_DRIVER_AUDIT_PARENT_REWRAP_EVENT, None),
+        ] {
+            assert!(
+                records.iter().any(|record| {
+                    (record.level == "DEBUG"
+                        || (event == STAGE5_DRIVER_AUDIT_PARENT_REWRAP_EVENT
+                            && record.level == "INFO"))
+                        && record.field_equals("event", event)
+                        && cell_kind.map_or(true, |cell_kind| {
+                            record.field_equals("cell_kind", cell_kind)
+                        })
+                }),
+                "missing trace event {event}"
+            );
+        }
+    }
+
+    #[test]
     fn stage_cache_failed_pass_does_not_enter_success_cache() {
         let (_dir, store) = store();
         let cache = StageCache::new(&store);
@@ -2833,6 +4333,11 @@ mod tests {
         canonicalize_report(report).expect("report canonicalizes")
     }
 
+    fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+        let value = serde_json::to_value(value).map_err(|err| err.to_string())?;
+        canonicalize_value(&value).map_err(|err| err.to_string())
+    }
+
     fn stage0_material() -> Stage0CacheKeyMaterial {
         Stage0CacheKeyMaterial {
             artifact_source_hash: hash(1),
@@ -2974,6 +4479,7 @@ mod tests {
             } else {
                 101
             }),
+            reduction_site_facts: Vec::new(),
         }
     }
 
@@ -3023,6 +4529,250 @@ mod tests {
             crate_feature_set_hash: crate_feature_set_hash(),
             infer_ir_schema_hash: infer_ir_schema_hash(),
         }
+    }
+
+    fn stage4_material() -> Stage4CacheKeyMaterial {
+        Stage4CacheKeyMaterial {
+            infer_ir_self_hash: hash(0x81),
+            quant_graph_self_hash: hash(0x82),
+            semantic_checkpoint_schema_hash: hash(0x83),
+            observation_policy_projection_hash: hash(0x84),
+            pass_version_observation_plan: stage4_pass_version_string(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            observation_plan_schema_hash: observation_plan_schema_hash(),
+            build_active_semantic_checkpoint_schema_schema_hash:
+                build_active_semantic_checkpoint_schema_schema_hash(),
+            operational_probe_schema_schema_hash: operational_probe_schema_schema_hash(),
+            probe_registry_hash: hash(0x86),
+            metric_registry_hash: hash(0x87),
+            trace_event_layout_registry_hash: hash(0x88),
+        }
+    }
+
+    fn stage4_material_for(product: &ObservationPlanCoreProduct) -> Stage4CacheKeyMaterial {
+        let identity = &product.observation_plan.identity;
+        Stage4CacheKeyMaterial {
+            infer_ir_self_hash: identity.infer_ir_self_hash,
+            quant_graph_self_hash: identity.quant_graph_self_hash,
+            semantic_checkpoint_schema_hash: identity.semantic_checkpoint_schema_hash,
+            observation_policy_projection_hash: identity.observation_policy_projection_hash,
+            pass_version_observation_plan: stage4_pass_version_string(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            observation_plan_schema_hash: observation_plan_schema_hash(),
+            build_active_semantic_checkpoint_schema_schema_hash:
+                build_active_semantic_checkpoint_schema_schema_hash(),
+            operational_probe_schema_schema_hash: operational_probe_schema_schema_hash(),
+            probe_registry_hash: identity.probe_registry_hash,
+            metric_registry_hash: identity.metric_registry_hash,
+            trace_event_layout_registry_hash: identity.trace_event_layout_registry_hash,
+        }
+    }
+
+    fn stage5_material() -> Stage5CacheKeyMaterial {
+        Stage5CacheKeyMaterial {
+            infer_ir_self_hash: hash(0x91),
+            quant_graph_self_hash: hash(0x92),
+            static_budget_self_hash: hash(0x93),
+            range_policy_projection_hash: hash(0x94),
+            pass_version_range_plan: stage5_pass_version_string(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            range_plan_schema_hash: range_plan_schema_hash(),
+            range_cert_schema_hash: range_cert_schema_hash(),
+        }
+    }
+
+    fn stage5_material_for(product: &RangePlanCoreProduct) -> Stage5CacheKeyMaterial {
+        let identity = product.range_plan.identity;
+        Stage5CacheKeyMaterial {
+            infer_ir_self_hash: identity.infer_ir_self_hash,
+            quant_graph_self_hash: identity.quant_graph_self_hash,
+            static_budget_self_hash: identity.static_budget_self_hash,
+            range_policy_projection_hash: identity.range_policy_projection_hash,
+            pass_version_range_plan: stage5_pass_version_string(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+            range_plan_schema_hash: range_plan_schema_hash(),
+            range_cert_schema_hash: range_cert_schema_hash(),
+        }
+    }
+
+    fn stage4_context(byte: u8) -> Stage4ReportRewrapContext {
+        Stage4ReportRewrapContext {
+            profile_id: CompileProfileId::from("Default"),
+            audit_parents: ObservationPlanAuditParents {
+                policy_resolution_self_hash: hash(byte),
+                compile_request_hash: hash(byte.wrapping_add(1)),
+                static_budget_self_hash: hash(byte.wrapping_add(2)),
+                artifact_aux_hash: hash(byte.wrapping_add(3)),
+                locked_observation_knobs: LockedObservationKnobs {
+                    trace_demotion_locked: false,
+                    optional_probe_floor_locked: false,
+                    probe_selection_locked: false,
+                },
+            },
+        }
+    }
+
+    fn stage5_context(byte: u8) -> Stage5ReportRewrapContext {
+        Stage5ReportRewrapContext {
+            audit_parents: RangePlanAuditParents {
+                policy_resolution_self_hash: hash(byte),
+                compile_request_hash: hash(byte.wrapping_add(1)),
+                artifact_aux_hash: hash(byte.wrapping_add(2)),
+                locked_range_knobs: LockedRangeKnobs {
+                    reduction_ceiling_locked: false,
+                },
+            },
+        }
+    }
+
+    fn stage4_product() -> ObservationPlanCoreProduct {
+        let observation_plan = ObservationPlan {
+            identity: ObservationPlanIdentity {
+                infer_ir_self_hash: hash(0x81),
+                quant_graph_self_hash: hash(0x82),
+                semantic_checkpoint_schema_hash: hash(0x83),
+                observation_policy_projection_hash: hash(0x84),
+                determinism: DeterminismClass::BitExact,
+                observability_mode: ObservabilityMode::Invariant,
+                trace_budget: TraceBudget::new(8, 128, TraceDropPolicy::DropOldest)
+                    .expect("trace budget"),
+                workload_id: WorkloadId::from("stage4.cache.fixture"),
+                probe_registry_hash: hash(0x86),
+                metric_registry_hash: hash(0x87),
+                trace_event_layout_registry_hash: hash(0x88),
+            },
+            semantic: Vec::new(),
+            probes: Vec::new(),
+            metrics: Vec::new(),
+            anchor_table: AnchorAttachmentTable {
+                semantic: BTreeMap::new(),
+                probes: BTreeMap::new(),
+                metrics: BTreeMap::new(),
+            },
+            provenance: ObservationProvenance {
+                semantic_provenance: BTreeMap::new(),
+                probe_provenance: BTreeMap::new(),
+                metric_provenance: BTreeMap::new(),
+            },
+            trace_budget_projection: TraceBudgetProjection {
+                projected_max_events_per_slice: 0,
+                projected_max_bytes_per_frame: 0,
+                fits_declared_budget: true,
+            },
+        };
+        let build_active_checkpoint_schema = BuildActiveCheckpointSchema {
+            checkpoints: Vec::new(),
+            build_active_count: 0,
+            mandatory_count: 0,
+            optional_count: 0,
+        };
+        let operational_probe_schema = OperationalProbeSchema {
+            probes: Vec::new(),
+            metrics: Vec::new(),
+            probe_count: 0,
+            metric_count: 0,
+            per_class_probe_weight_total: PerClassWeightTotal::default(),
+            per_class_metric_weight_total: PerClassWeightTotal::default(),
+            per_class_total_weight: PerClassWeightTotal::default(),
+        };
+
+        ObservationPlanCoreProduct {
+            observation_plan_self_hash: observation_plan_self_hash(&observation_plan)
+                .expect("observation plan hashes"),
+            build_active_checkpoint_schema_hash:
+                crate::s4::observation_plan::build_active_checkpoint_schema_hash(
+                    &build_active_checkpoint_schema,
+                )
+                .expect("checkpoint schema hashes"),
+            operational_probe_schema_hash:
+                crate::s4::observation_plan::operational_probe_schema_hash(
+                    &operational_probe_schema,
+                )
+                .expect("operational probe schema hashes"),
+            observation_plan,
+            build_active_checkpoint_schema,
+            operational_probe_schema,
+        }
+    }
+
+    fn stage5_product() -> RangePlanCoreProduct {
+        let range_plan = RangePlan {
+            identity: RangePlanIdentity {
+                infer_ir_self_hash: hash(0x91),
+                quant_graph_self_hash: hash(0x92),
+                static_budget_self_hash: hash(0x93),
+                range_policy_projection_hash: hash(0x94),
+                determinism: DeterminismClass::BitExact,
+            },
+            entries: Vec::new(),
+            provenance: RangePlanProvenance {
+                site_to_node: BTreeMap::new(),
+                site_to_qg: BTreeMap::new(),
+            },
+        };
+        let range_plan_self_hash = range_plan_self_hash(&range_plan).expect("range plan hashes");
+        let range_cert = RangeCertBody {
+            identity: RangeCertIdentity {
+                range_plan_self_hash: Some(range_plan_self_hash),
+                infer_ir_self_hash: range_plan.identity.infer_ir_self_hash,
+                quant_graph_self_hash: range_plan.identity.quant_graph_self_hash,
+                static_budget_self_hash: range_plan.identity.static_budget_self_hash,
+                determinism: range_plan.identity.determinism,
+            },
+            cert_outcome: CertOutcome::Verified,
+            certificates: Vec::new(),
+            site_to_certificate_index: BTreeMap::new(),
+            diagnostics: Vec::new(),
+        };
+
+        RangePlanCoreProduct {
+            range_plan_self_hash,
+            range_cert_body_hash: range_cert_body_hash(&range_cert).expect("range cert hashes"),
+            range_plan,
+            range_cert,
+        }
+    }
+
+    fn stage4_failure(
+        product: &ObservationPlanCoreProduct,
+        context: &Stage4ReportRewrapContext,
+    ) -> ObservationPlanCoreFailure {
+        let diagnostic = hard_diagnostic();
+        ObservationPlanCoreFailure {
+            observation_plan_body: ObservationPlanReportBody {
+                input_identity: stage4_observation_input_identity(product, context),
+                result: None,
+                diagnostics: vec![diagnostic.clone()],
+            },
+            sc_re_emit_body: None,
+            operational_probe_body: None,
+            diagnostics: NonEmptyList::new(vec![diagnostic])
+                .expect("failure diagnostics are non-empty"),
+        }
+    }
+
+    fn stage5_failure(
+        product: &RangePlanCoreProduct,
+        context: &Stage5ReportRewrapContext,
+    ) -> RangePlanCoreFailure {
+        let diagnostic = hard_diagnostic();
+        let mut failed_cert = product.range_cert.clone();
+        failed_cert.identity.range_plan_self_hash = None;
+        failed_cert.cert_outcome = CertOutcome::Failed;
+        failed_cert.diagnostics = vec![diagnostic.clone()];
+        RangePlanCoreFailure {
+            range_plan_body: RangePlanReportBody {
+                input_identity: stage5_range_input_identity(product, context),
+                result: None,
+                diagnostics: vec![diagnostic.clone()],
+            },
+            range_cert_body: Some(failed_cert),
+            diagnostics: vec![diagnostic],
+        }
+    }
+
+    fn hard_diagnostic() -> ValidationDiagnostic {
+        budget_failure_diagnostic(&BudgetFailure::MissingRuntimeChromeBudget)
     }
 
     fn infer_ir_product() -> GbInferIRProduct {
@@ -3206,6 +4956,12 @@ mod tests {
             self.fields
                 .get(field)
                 .is_some_and(|value| value == expected)
+        }
+
+        fn field_u64(&self, field: &str) -> Option<u64> {
+            self.fields
+                .get(field)
+                .and_then(|value| value.parse::<u64>().ok())
         }
     }
 

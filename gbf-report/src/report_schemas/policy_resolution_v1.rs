@@ -10,8 +10,9 @@ use gbf_policy::{
     CompileKnobBounds, CompileKnobId, CompileKnobOverrides, CompileKnobProvenanceEntry,
     CompileKnobValues, CompileKnobs, CompileObjective, CompilerFeature, ConstraintProvenance,
     DiagnosticSeverity, EffectiveConstraints, KnobLockSet, MonotoneKnob, ObservabilityMode,
-    PolicyProvenance, PolicySource, RepairPolicy, ResolvedCompilePolicy, RuntimeMode, TraceBudget,
-    ValidationCode, ValidationDetail, ValidationDiagnostic, ValidationOrigin,
+    ObservationProfileCaps, PolicyProvenance, PolicySource, RangeCapsSpec, RepairPolicy,
+    ResolvedCompilePolicy, RuntimeMode, TraceBudget, ValidationCode, ValidationDetail,
+    ValidationDiagnostic, ValidationOrigin,
 };
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +71,8 @@ pub struct ResolvedSection {
     pub effective_constraints: EffectiveConstraints,
     pub observability: ObservabilityMode,
     pub trace_budget: TraceBudget,
+    pub range_caps: RangeCapsSpec,
+    pub observation_caps: ObservationProfileCaps,
     pub repair: RepairPolicy,
 }
 
@@ -101,6 +104,8 @@ impl From<&ResolvedCompilePolicy> for ResolvedSection {
             effective_constraints: value.effective_constraints.clone(),
             observability: value.observability,
             trace_budget: value.trace_budget,
+            range_caps: value.range_caps,
+            observation_caps: value.observation_caps,
             repair: value.repair,
         }
     }
@@ -111,6 +116,7 @@ impl From<&ResolvedCompilePolicy> for ResolvedSection {
 pub struct PolicyProvenanceSection {
     pub target_defaults: Hash256,
     pub profile_defaults: Hash256,
+    pub compile_profile_spec_version: String,
     pub hint_bundle_hash: Hash256,
     pub compile_request_hash: Hash256,
     pub calibration_hash: Hash256,
@@ -126,6 +132,7 @@ impl PolicyProvenanceSection {
         Self {
             target_defaults: value.target_defaults,
             profile_defaults: value.profile_defaults,
+            compile_profile_spec_version: value.compile_profile_spec_version.clone(),
             hint_bundle_hash: value.hint_bundle_hash.unwrap_or(hint_bundle_hash),
             compile_request_hash: value.compile_request_hash,
             calibration_hash: value.calibration_hash.unwrap_or(calibration_hash),
@@ -372,13 +379,13 @@ mod tests {
         CompileKnobOverrides, CompileKnobPath, CompileKnobProvenanceEntry, CompileKnobValues,
         CompileKnobs, CompileObjective, CompilerFeature, ConstraintOperation, ConstraintProvenance,
         EffectiveConstraints, EvidenceRef, KnobLockSet, ObservabilityMode, ObservationKnob,
-        OverlayKnob, OverlayPromotion, PlacementKnob, PlacementProfile, PolicyProvenance,
-        PolicySource, ProbeCollectionLevel, RangeKnob, ReductionPlanCeiling, RepairPolicy,
-        RepairPolicyProfile, ResolvedCompilePolicy, RiskPolicy, RomKernelDuplicationBias,
-        RomKernelResidencyBias, RomWindowKnob, RuntimeMode, ScheduleKnob, ScheduleResourcePressure,
-        ScheduleSliceCoarsening, ScheduleTileSearch, ServiceLevelObjective, SramKnob,
-        SramPageAggression, StorageKnob, StorageMaterialization, TraceBudget, TraceDropPolicy,
-        canonical_default_bounds_fixture,
+        ObservationProfileCaps, OverlayKnob, OverlayPromotion, PlacementKnob, PlacementProfile,
+        PolicyProvenance, PolicySource, ProbeCollectionLevel, RangeCapsSpec, RangeKnob,
+        ReductionPlanCeiling, RepairPolicy, RepairPolicyProfile, ResolvedCompilePolicy, RiskPolicy,
+        RomKernelDuplicationBias, RomKernelResidencyBias, RomWindowKnob, RuntimeMode, ScheduleKnob,
+        ScheduleResourcePressure, ScheduleSliceCoarsening, ScheduleTileSearch,
+        ServiceLevelObjective, SramKnob, SramPageAggression, StorageKnob, StorageMaterialization,
+        TraceBudget, TraceDropPolicy, canonical_default_bounds_fixture,
     };
     use gbf_workload::{GoldenVectorId, WorkloadId};
 
@@ -399,6 +406,7 @@ mod tests {
             serde_json::json!({
                 "target_defaults": hash_value(hash(6)),
                 "profile_defaults": hash_value(hash(9)),
+                "compile_profile_spec_version": "2.0.0",
                 "hint_bundle_hash": hash_value(hash(4)),
                 "compile_request_hash": hash_value(hash(5)),
                 "calibration_hash": hash_value(hash(7)),
@@ -696,6 +704,8 @@ mod tests {
                 max_bytes_per_frame: 128,
                 drop_policy: TraceDropPolicy::HaltAndFault,
             },
+            range_caps: RangeCapsSpec::default_v2(),
+            observation_caps: ObservationProfileCaps::default_v2(),
             requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
             knobs: CompileKnobs {
                 global: values,
@@ -723,6 +733,7 @@ mod tests {
             provenance: PolicyProvenance {
                 target_defaults: hash(6),
                 profile_defaults: hash(9),
+                compile_profile_spec_version: "2.0.0".to_owned(),
                 hint_bundle_hash: Some(hash(4)),
                 compile_request_hash: hash(5),
                 calibration_hash: Some(hash(7)),

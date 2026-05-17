@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-SC-HASH-MISMATCH","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::op_pre_2_artifact_declared_hash_mismatch_rejected producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

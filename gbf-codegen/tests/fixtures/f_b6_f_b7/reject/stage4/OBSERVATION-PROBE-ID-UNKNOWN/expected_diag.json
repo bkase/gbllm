@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-PROBE-ID-UNKNOWN","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::disabled_unknown_probe_rejected producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

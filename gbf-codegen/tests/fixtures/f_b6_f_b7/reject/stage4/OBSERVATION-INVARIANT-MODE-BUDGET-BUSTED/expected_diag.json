@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-INVARIANT-MODE-BUDGET-BUSTED","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::invariant_budget_check_under_invariant_fails_when_over producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

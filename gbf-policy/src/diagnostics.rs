@@ -1,5 +1,6 @@
 //! Shared validation diagnostic taxonomy.
 
+use gbf_abi::SemanticCheckpointId;
 pub use gbf_foundation::{
     ArtifactFeature, ArtifactSchemaVersion, ComponentId, DataLoweringProfileId, GoldenVectorId,
     LineageId, LoweringShardId, LoweringShardRef, ManifestInvariant, SidecarKind,
@@ -15,6 +16,8 @@ use crate::compile::{
     CompileKnobBounds, CompileKnobId, CompilerFeature, ConstraintValue, PlacementProfile,
     RuntimeMode, SelectorPath,
 };
+use crate::metrics::MetricId;
+use crate::probe::ProbeImportanceClass;
 use crate::risk::CalibrationConfidenceClass;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +81,8 @@ pub enum DiagnosticSeverity {
 pub enum ValidationOrigin {
     Schema,
     SemanticCore,
+    ObservationPlanConstruction,
+    RangePlanConstruction,
     Manifest,
     Lowering,
     Calibration,
@@ -360,6 +365,69 @@ pub enum ValidationCode {
     },
     InferIrSequenceStateNextOrphaned {
         field: FieldPath,
+    },
+    ObservationMandatoryCheckpointNotFeasible {
+        checkpoint: SemanticCheckpointId,
+    },
+    ObservationWorkloadCheckpointNotFeasible {
+        checkpoint: SemanticCheckpointId,
+    },
+    ObservationCheckpointNotInSchema {
+        checkpoint: SemanticCheckpointId,
+    },
+    ObservationCheckpointNotAttachable {
+        checkpoint: SemanticCheckpointId,
+    },
+    ObservationCheckpointAmbiguous {
+        checkpoint: SemanticCheckpointId,
+    },
+    ObservationEncodingInvalidForCheckpoint {
+        checkpoint: SemanticCheckpointId,
+    },
+    ObservationScHashMismatch {
+        expected: Hash256,
+        observed: Hash256,
+    },
+    ObservationDeterminismMismatch {
+        field: FieldPath,
+    },
+    ObservationProbeIdUnknown {
+        probe_id: TraceProbeId,
+    },
+    ObservationMetricIdUnknown {
+        metric: MetricId,
+    },
+    ObservationRequiredProbeDisabled {
+        probe_id: TraceProbeId,
+    },
+    ObservationMetricSourceReservedV1 {
+        metric: MetricId,
+    },
+    ObservationMetricHistogramBucketCountZero {
+        metric: MetricId,
+    },
+    ObservationProbeSourceInvalid {
+        probe_id: TraceProbeId,
+    },
+    ObservationReservedEffectProbe {
+        probe_id: TraceProbeId,
+    },
+    ObservationSequenceStateProbeReserved {
+        probe_id: TraceProbeId,
+    },
+    ObservationFaultBoundaryProbeReserved {
+        probe_id: TraceProbeId,
+    },
+    ObservationProbeClassCapExceeded {
+        class: ProbeImportanceClass,
+        observed: u32,
+        cap: u32,
+    },
+    ObservationInvariantModeBudgetBusted {
+        projected_max_events_per_slice: u32,
+        projected_max_bytes_per_frame: u32,
+        max_events_per_slice: u16,
+        max_bytes_per_frame: u16,
     },
     BudgetSwitchesPerTokenOverCap {
         decision_value: u16,
@@ -690,6 +758,18 @@ pub struct CompatibilityAdapterId(pub String);
 #[serde(transparent)]
 pub struct TraceProbeId(pub u16);
 
+impl From<TraceProbeId> for gbf_abi::trace::TraceProbeId {
+    fn from(id: TraceProbeId) -> Self {
+        Self(id.0)
+    }
+}
+
+impl From<gbf_abi::trace::TraceProbeId> for TraceProbeId {
+    fn from(id: gbf_abi::trace::TraceProbeId) -> Self {
+        Self(id.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ServiceLevelField {
@@ -863,6 +943,42 @@ mod tests {
     }
 
     #[test]
+    fn trace_probe_id_converts_to_and_from_abi_runtime_id() {
+        let policy_id = TraceProbeId(42);
+        let abi_id: gbf_abi::trace::TraceProbeId = policy_id.into();
+        let round_tripped: TraceProbeId = abi_id.into();
+
+        assert_eq!(abi_id.0, 42);
+        assert_eq!(round_tripped, policy_id);
+    }
+
+    #[test]
+    fn trace_probe_id_conversion_preserves_edge_values() {
+        for raw in [0, 1, u16::MAX] {
+            let policy_id = TraceProbeId(raw);
+            let abi_id: gbf_abi::trace::TraceProbeId = policy_id.into();
+            let round_tripped: TraceProbeId = abi_id.into();
+
+            assert_eq!(abi_id.0, raw);
+            assert_eq!(round_tripped, policy_id);
+        }
+    }
+
+    #[test]
+    fn trace_probe_id_json_shape_is_u16() {
+        assert_eq!(
+            serde_json::to_value(TraceProbeId(u16::MAX)).expect("id serializes"),
+            serde_json::json!(65_535_u16)
+        );
+        assert_eq!(
+            serde_json::from_value::<TraceProbeId>(serde_json::json!(0)).expect("id deserializes"),
+            TraceProbeId(0)
+        );
+        assert!(serde_json::from_value::<TraceProbeId>(serde_json::json!(65_536_u64)).is_err());
+        assert!(serde_json::from_value::<TraceProbeId>(serde_json::json!(-1)).is_err());
+    }
+
+    #[test]
     fn validation_detail_round_trips_through_serde() {
         for detail in [
             ValidationDetail::None,
@@ -927,6 +1043,8 @@ mod tests {
             len: 32,
             codec: BlobCodec::Raw,
         };
+        let checkpoint = SemanticCheckpointId::from_static("layer.0.post_embedding")
+            .expect("checkpoint id is valid");
         let shard = LoweringShardRef {
             id: LoweringShardId("weights.0".to_owned()),
             manifest_hash: hash(4),
@@ -1209,6 +1327,67 @@ mod tests {
             ValidationCode::InferIrSequenceStateNextOrphaned {
                 field: FieldPath::from("values.sequence_state_next"),
             },
+            ValidationCode::ObservationMandatoryCheckpointNotFeasible {
+                checkpoint: checkpoint.clone(),
+            },
+            ValidationCode::ObservationWorkloadCheckpointNotFeasible {
+                checkpoint: checkpoint.clone(),
+            },
+            ValidationCode::ObservationCheckpointNotInSchema {
+                checkpoint: checkpoint.clone(),
+            },
+            ValidationCode::ObservationCheckpointNotAttachable {
+                checkpoint: checkpoint.clone(),
+            },
+            ValidationCode::ObservationCheckpointAmbiguous {
+                checkpoint: checkpoint.clone(),
+            },
+            ValidationCode::ObservationEncodingInvalidForCheckpoint { checkpoint },
+            ValidationCode::ObservationScHashMismatch {
+                expected: hash(0x12),
+                observed: hash(0x13),
+            },
+            ValidationCode::ObservationDeterminismMismatch {
+                field: FieldPath::from("op_policy_projection.determinism_class"),
+            },
+            ValidationCode::ObservationProbeIdUnknown {
+                probe_id: TraceProbeId(99),
+            },
+            ValidationCode::ObservationMetricIdUnknown {
+                metric: MetricId::from_static("metric.unknown").expect("metric id"),
+            },
+            ValidationCode::ObservationRequiredProbeDisabled {
+                probe_id: TraceProbeId(100),
+            },
+            ValidationCode::ObservationMetricSourceReservedV1 {
+                metric: MetricId::from_static("metric.reserved").expect("metric id"),
+            },
+            ValidationCode::ObservationMetricHistogramBucketCountZero {
+                metric: MetricId::from_static("metric.histogram").expect("metric id"),
+            },
+            ValidationCode::ObservationProbeSourceInvalid {
+                probe_id: TraceProbeId(101),
+            },
+            ValidationCode::ObservationReservedEffectProbe {
+                probe_id: TraceProbeId(102),
+            },
+            ValidationCode::ObservationSequenceStateProbeReserved {
+                probe_id: TraceProbeId(103),
+            },
+            ValidationCode::ObservationFaultBoundaryProbeReserved {
+                probe_id: TraceProbeId(104),
+            },
+            ValidationCode::ObservationProbeClassCapExceeded {
+                class: ProbeImportanceClass::Diagnostic,
+                observed: 3,
+                cap: 2,
+            },
+            ValidationCode::ObservationInvariantModeBudgetBusted {
+                projected_max_events_per_slice: 9,
+                projected_max_bytes_per_frame: 128,
+                max_events_per_slice: 8,
+                max_bytes_per_frame: 64,
+            },
             ValidationCode::BudgetSwitchesPerTokenOverCap {
                 decision_value: 7,
                 upper_bound: 9,
@@ -1278,6 +1457,18 @@ mod tests {
                 "fields": {
                     "field": "artifact_validation.v1.compatibility.decision"
                 }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ValidationCode::ObservationCheckpointNotAttachable {
+                checkpoint: SemanticCheckpointId::from_static("post_decode")
+                    .expect("checkpoint id is valid"),
+            })
+            .expect("observation diagnostic serializes"),
+            serde_json::json!({
+                "kind": "ObservationCheckpointNotAttachable",
+                "fields": { "checkpoint": "post_decode" }
             })
         );
     }

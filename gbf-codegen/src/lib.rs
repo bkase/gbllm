@@ -18,6 +18,8 @@ pub mod report;
 pub mod rom;
 pub mod s1;
 pub mod s3;
+pub mod s4;
+pub mod s5;
 pub mod schedule;
 pub mod stage_cache;
 pub mod storage;

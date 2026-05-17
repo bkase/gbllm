@@ -34,6 +34,21 @@ Rules:
 * Source-of-truth changes must be expressed as typed schema changes, not
   prose folklore.
 
+Amends planv0: T-B6.A resolves the probe vocabulary collision by keeping
+`gbf-abi::trace::ProbeBudgetClass` as the runtime budget-window enum and
+introducing `gbf-policy::probe::ProbeImportanceClass` as the build-time
+importance enum used by Stage 4 governance. `gbf-abi::trace::TraceProbeId`
+and `gbf-policy::diagnostics::TraceProbeId` intentionally coexist as
+byte-identity `u16` newtypes with explicit conversions at the trace-install
+boundary.
+
+Amends report-hash anchors: F-B6/F-B7 report-body/product hashes use the
+F-B2/F-B4 `gbf-report` domain separator because `gbf-report` owns the public
+schemas and canonical JSON helper. Stage-cache and policy-projection hashes
+that are compiler-internal remain in the `gbf-codegen` domain. Report-local
+helper telemetry uses the `gbf_report.*` namespace; Stage 4/Stage 5 driver
+telemetry remains in the `gbf_codegen.*` namespace.
+
 | Field           | Value |
 |-----------------|-------|
 | Author          | bkase / canonicalized by design pass |
@@ -1364,7 +1379,7 @@ pub enum AccumulatorFailureWitness {
 }
 ```
 
-`verifies(cert, plan, site_facts)` is a closed predicate over the
+`verifies(cert, plan, site_facts, determinism)` is a closed predicate over the
 certificate variant (see §9.7). The certificate is independently
 re-checkable by `gbf-verify` (F-F1) — the cert JSON contains every
 load-bearing scalar, so an independent reference reads the JSON,
@@ -1694,7 +1709,8 @@ OPS := OperationalProbeSchema
 CanonicalMap<K, V> JSON encoding:
 
 ```text
-Any map whose key type is not a primitive canonical string key MUST
+Any map whose key type is not a primitive canonical string key and is not one
+of the transparent string-newtype maps listed below MUST
 serialize as a sorted list of entries:
 
   [{ "key": K, "value": V }, ...]
@@ -1706,10 +1722,17 @@ This rule applies to every public `BTreeMap` in this RFC, including:
   - BTreeMap<SemanticCheckpointId, ...>
   - BTreeMap<ProbeInstanceId, ...>
   - BTreeMap<MetricId, ...>
-  - BTreeMap<ReductionSelector, ...>
-  - BTreeMap<ReductionSiteId, ...>
   - BTreeMap<ReductionPlanCeiling, ...>
   - BTreeMap<ReductionCeilingProvenanceTag, ...>
+
+Transparent string-newtype maps for `ReductionSelector` and
+`ReductionSiteId` use native JSON object encoding instead:
+
+  { "<selector-or-site-id>": V, ... }
+
+Deserialization rejects duplicate JSON member names before constructing the
+typed map key, so a later duplicate cannot silently overwrite an earlier
+entry. Canonical JSON object-key sorting supplies the byte-stable order.
 ```
 
 ## 5. Authority rules
@@ -2102,18 +2125,21 @@ ObservationPlanProduct := ObservationPlanCoreProduct
   -- parents.
 
 observation_plan_self_hash :=
-  DomainHash("gbf-codegen", "ObservationPlan", "observation_plan.v1",
+  DomainHash("gbf-report", "ObservationPlan", "observation_plan.v1",
     CanonicalJson(observation_plan))
 
 build_active_checkpoint_schema_hash :=
-  DomainHash("gbf-codegen", "BuildActiveCheckpointSchema",
+  DomainHash("gbf-report", "BuildActiveCheckpointSchema",
     "build_active_semantic_checkpoint_schema.v1",
-    CanonicalJson(build_active_checkpoint_schema))
+    CanonicalJson(build_active_checkpoint_schema.checkpoints))
 
 operational_probe_schema_hash :=
-  DomainHash("gbf-codegen", "OperationalProbeSchema",
+  DomainHash("gbf-report", "OperationalProbeSchema",
     "operational_probe_schema.v1",
-    CanonicalJson(operational_probe_schema))
+    CanonicalJson({
+      probes: operational_probe_schema.probes,
+      metrics: operational_probe_schema.metrics
+    }))
 
 ObservationPlanStageFailure :=
   {
@@ -2984,7 +3010,7 @@ OP-SC-17:
 
 OP-SC-18:
   observation_plan_self_hash =
-    DomainHash("gbf-codegen", "ObservationPlan", "observation_plan.v1",
+    DomainHash("gbf-report", "ObservationPlan", "observation_plan.v1",
       CanonicalJson(observation_plan)).
 
 OP-SC-19:
@@ -3121,11 +3147,11 @@ RangePlanProduct := RangePlanCoreProduct
   -- report envelopes for the current build's audit parents.
 
 range_plan_self_hash :=
-  DomainHash("gbf-codegen", "RangePlan", "range_plan.v1",
+  DomainHash("gbf-report", "RangePlan", "range_plan.v1",
     CanonicalJson(range_plan))
 
 range_cert_body_hash :=
-  DomainHash("gbf-codegen", "RangeCertBody", "range.cert.v1",
+  DomainHash("gbf-report", "RangeCertBody", "range.cert.v1",
     CanonicalJson(range_cert))
 
 RangePlanStageFailure :=
@@ -3783,7 +3809,7 @@ may tighten them.
 ### 9.6 Certificate verification predicate (closed)
 
 ```text
-verifies(cert, plan, facts) :=
+verifies(cert, plan, facts, determinism) :=
   facts.accumulator_domain = RawIntegerProducts
   ∧
   match cert:
@@ -3841,10 +3867,7 @@ verifies(cert, plan, facts) :=
       ∧ total_abs_max ≤ 32_767                              -- post-renorm bound
       ∧ slack = 32_767 - total_abs_max
       ∧ plan = RenormLoop { tile_len = tile_len, renorm = renorm }
-      ∧ (determinism = BitExact
-         ⇒ renorm.strategy = ExactPostBoundary
-            ∧ tile_len = facts.term_count
-            ∧ tile_count = 1)
+      ∧ determinism != BitExact
 
     Failed { .. }:
       false   -- a Failed certificate never verifies
@@ -3882,12 +3905,12 @@ scalar (`term_count`, `per_term_abs_max`, `sum_bound`,
 so `gbf-verify` (F-F1) can read the cert, run the formula, and
 verify.
 
-`verifies_for(plan, facts)` is the dual: given a candidate plan and
+`verifies_for(plan, facts, determinism)` is the dual: given a candidate plan and
 site facts, attempt to construct the corresponding certificate and
 return whether it would verify. Implementation:
 
 ```text
-verifies_for(plan, facts) :=
+verifies_for(plan, facts, determinism) :=
   match plan:
     SingleI16:
       total = facts.term_count * facts.per_term_abs_max_q
@@ -3935,7 +3958,7 @@ RP-SC-4a:
 RP-SC-5:
   For every entry e:
     verifies(cert_for_site(cert_report.body, e.site),
-             e.plan, e.site_facts) holds.
+             e.plan, e.site_facts, RangePlan.identity.determinism) holds.
 
 RP-SC-6:
   For every entry e:
@@ -3956,7 +3979,10 @@ RP-SC-7:
 RP-SC-8:
   if RangePlan.identity.determinism = BitExact:
     every ChunkedI16 entry has chunk_len dividing term_count.
-    every RenormLoop entry has renorm_strategy = ExactPostBoundary.
+    every RenormLoop entry is rejected in range_plan.v1. Earlier text in
+    this RFC admitted a degenerate full-tile ExactPostBoundary RenormLoop,
+    but the landed v1 implementation reserves the whole BitExact RenormLoop
+    family behind RANGE-BITEXACT-RENORM-LOOP-RESERVED-V1.
 
 RP-SC-9:
   Every entry's site_facts copies match
@@ -3970,7 +3996,7 @@ RP-SC-10:
 
 RP-SC-11:
   range_plan_self_hash =
-    DomainHash("gbf-codegen", "RangePlan", "range_plan.v1",
+    DomainHash("gbf-report", "RangePlan", "range_plan.v1",
       CanonicalJson(range_plan)).
 
 RP-SC-12:
@@ -4158,7 +4184,7 @@ SCRE-7a: every entry.source references valid GbInferIR entities and
          is identical to the corresponding ObservationPlan.semantic
          source binding
 SCRE-8: result.schema_hash =
-          DomainHash("gbf-codegen", "BuildActiveCheckpointSchema",
+          DomainHash("gbf-report", "BuildActiveCheckpointSchema",
                      "build_active_semantic_checkpoint_schema.v1",
                      CanonicalJson(result.checkpoints))
 SCRE-9: report_self_hash round-trips
@@ -4245,7 +4271,7 @@ OPS-7a: per_class_metric_weight_total[c] =
 OPS-7b: per_class_total_weight[c] =
          per_class_probe_weight_total[c] + per_class_metric_weight_total[c]
 OPS-8: result.schema_hash =
-         DomainHash("gbf-codegen", "OperationalProbeSchema",
+         DomainHash("gbf-report", "OperationalProbeSchema",
                     "operational_probe_schema.v1",
                     CanonicalJson({ probes, metrics }))
 OPS-9: report_self_hash round-trips
@@ -4313,7 +4339,7 @@ OP-8: result.product.probes sorted by
       `(TraceProbeId, ProbeInstanceId.source_fingerprint)`
 OP-9: result.product.metrics sorted by MetricId
 OP-10: result.observation_plan_self_hash =
-        DomainHash("gbf-codegen", "ObservationPlan", "observation_plan.v1",
+        DomainHash("gbf-report", "ObservationPlan", "observation_plan.v1",
                    CanonicalJson(result.product))
 OP-11: report_self_hash round-trips
 OP-12: every diagnostic d has d.severity = Hard
@@ -4369,7 +4395,7 @@ RP-4: result.entry_count = len(result.product.entries)
 RP-5: result.single_i16_count + result.chunked_i16_count + result.renorm_loop_count = result.entry_count
 RP-6: result.product.entries sorted by ReductionSiteId
 RP-7: result.range_plan_self_hash =
-        DomainHash("gbf-codegen", "RangePlan", "range_plan.v1",
+        DomainHash("gbf-report", "RangePlan", "range_plan.v1",
                    CanonicalJson(result.product))
 RP-8: result.range_cert_report_self_hash matches the emitted cert report's self-hash
 RP-9: report_self_hash round-trips

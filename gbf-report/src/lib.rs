@@ -10,6 +10,7 @@ pub mod run;
 
 pub use canonical_json::{
     CanonicalJsonError, DiagnosticSeverity, ReportBody, ReportEnvelope, ReportEnvelopeError,
-    ReportOutcome, ReportSchemaId, ReportSelfHashError, ValidationDiagnostic, canonicalize,
-    canonicalize_value, compute_self_hash, round_trip_self_hash,
+    ReportOutcome, ReportSchemaId, ReportSelfHashError, ValidationDiagnostic, canonical_map,
+    canonicalize, canonicalize_value, compute_self_hash, domain_hash, round_trip_self_hash,
+    string_key_map,
 };

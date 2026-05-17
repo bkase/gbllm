@@ -1,0 +1,6 @@
+{
+  "expected_event": "range_cert.independent_verify.failed.malformed",
+  "fixture": "malformed_json",
+  "materialization": "generated_by_run_cert_verify",
+  "tamper": "write non-JSON bytes"
+}

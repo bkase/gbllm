@@ -1,11 +1,23 @@
 id = "Bringup"
-defaults_hash = "sha256:12dea3c333e9e5f30d5b76c1e349d914f2fcc04ca4bd0be0bc2d1f99963d846d"
+schema_version = "2.0.0"
+defaults_hash = "sha256:bf29866653c974c2ce8da8ccb82700d43fd27f2423badf41233a155635eac351"
 observability = { kind = "Invariant" }
 
 [trace_budget]
 max_events_per_slice = 64
 max_bytes_per_frame = 2048
 drop_policy = { kind = "DropOldest" }
+
+[range_caps]
+profile_chunk_max = 256
+profile_tile_max = 256
+profile_tile_min = 16
+renorm_strategy = { kind = "ExactPostBoundaryOnly" }
+
+[observation_caps]
+important_max = 32
+diagnostic_max = 16
+best_effort_max = 0
 
 [repair_policy]
 max_refinement_iters = 1

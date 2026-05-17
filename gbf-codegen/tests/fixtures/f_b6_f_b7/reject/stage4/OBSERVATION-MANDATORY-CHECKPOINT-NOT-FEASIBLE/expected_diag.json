@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-MANDATORY-CHECKPOINT-NOT-FEASIBLE","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::semantic_selection_mandatory_not_feasible_fails producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}
