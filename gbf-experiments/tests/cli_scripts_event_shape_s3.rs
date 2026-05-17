@@ -1,5 +1,6 @@
 #![cfg(feature = "s3")]
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -20,13 +21,22 @@ const SCRIPTS: [&str; 8] = [
 fn s3_script_event_shape_carries_stage_and_summary_events() {
     for script in SCRIPTS {
         let temp = tempfile::tempdir().expect("tempdir");
+        let empty_artifact_dir = temp.path().join("empty-artifacts");
+        fs::create_dir_all(&empty_artifact_dir).expect("empty artifact dir");
+        let mut args = vec![
+            "--dry-run",
+            "--report-dir",
+            temp.path().to_str().expect("utf8"),
+        ];
+        if script == "s3_preregistration_check.sh" {
+            args.extend([
+                "--artifact-dir",
+                empty_artifact_dir.to_str().expect("utf8 artifact path"),
+            ]);
+        }
         let output = Command::new(repo_root().join("scripts").join(script))
             .current_dir(repo_root())
-            .args([
-                "--dry-run",
-                "--report-dir",
-                temp.path().to_str().expect("utf8"),
-            ])
+            .args(args)
             .output()
             .unwrap_or_else(|error| panic!("{script} launches: {error}"));
         assert!(

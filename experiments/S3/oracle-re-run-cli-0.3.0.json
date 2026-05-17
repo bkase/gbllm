@@ -1,0 +1,1 @@
+{"evidence_source":"gbf s3 oracle-re-run","metric_count":5,"oracle_re_run_self_hash":"sha256:c21c3070362e8699e28ea2545625af3c0aeb4f470774aecd8a6a68a483197ac7","s1_oracle_re_run_passed":true,"s2_oracle_re_run_passed":true,"schema":"s3_oracle_re_run_cli.v1"}

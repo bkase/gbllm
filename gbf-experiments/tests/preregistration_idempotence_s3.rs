@@ -1,9 +1,13 @@
+#![cfg(feature = "s3")]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+const EMPTY_ARTIFACT_DIR: &str = "target/s3-preregistration-empty-artifacts";
 
 #[test]
 fn dry_run_preregistration_output_is_byte_identical_across_replays() {
@@ -65,7 +69,7 @@ fn dry_run_preregistration_output_is_byte_identical_across_replays() {
                 "stage": 2,
                 "passed": true,
                 "detail": {
-                    "artifact_dirs": ["experiments/S3"],
+                    "artifact_dirs": [EMPTY_ARTIFACT_DIR],
                     "first_result_artifact": null,
                 },
             }),
@@ -88,7 +92,7 @@ fn dry_run_preregistration_output_is_byte_identical_across_replays() {
                         "name": "empty_result_scan",
                         "passed": true,
                         "detail": {
-                            "artifact_dirs": ["experiments/S3"],
+                            "artifact_dirs": [EMPTY_ARTIFACT_DIR],
                             "first_result_artifact": null,
                         },
                     },
@@ -268,7 +272,10 @@ impl ScriptOutput {
 }
 
 fn run_checker() -> ScriptOutput {
-    run_checker_with(["--dry-run"])
+    let artifact_dir = workspace_root().join(EMPTY_ARTIFACT_DIR);
+    let _ = fs::remove_dir_all(&artifact_dir);
+    fs::create_dir_all(&artifact_dir).expect("empty artifact dir");
+    run_checker_with(["--dry-run", "--artifact-dir", EMPTY_ARTIFACT_DIR])
 }
 
 fn run_checker_with<const N: usize>(args: [&str; N]) -> ScriptOutput {

@@ -53,7 +53,15 @@ const SCRIPTS: [ScriptSpec; 8] = [
 fn s3_scripts_dry_run_emit_schema_and_stable_reports() {
     for spec in SCRIPTS {
         let temp = tempfile::tempdir().expect("tempdir");
-        let first = run_script(spec, &["--dry-run", "--report-dir", temp_path(&temp)]);
+        let empty_artifact_dir = temp.path().join("empty-artifacts");
+        fs::create_dir_all(&empty_artifact_dir).expect("empty artifact dir");
+        let report_dir = temp_path(&temp);
+        let artifact_dir = empty_artifact_dir.to_str().expect("utf8 artifact path");
+        let mut args = vec!["--dry-run", "--report-dir", report_dir];
+        if spec.name == "s3_preregistration_check.sh" {
+            args.extend(["--artifact-dir", artifact_dir]);
+        }
+        let first = run_script(spec, &args);
         assert_success(spec, &first);
         assert_single_line_stdout(&first);
         let first_events = assert_ndjson_events(&first, spec.event_prefix);
@@ -61,7 +69,7 @@ fn s3_scripts_dry_run_emit_schema_and_stable_reports() {
         assert_report_schema(&first_report, spec.event_prefix, true);
         assert_summary_matches_report(&first_events, &first_report);
 
-        let second = run_script(spec, &["--dry-run", "--report-dir", temp_path(&temp)]);
+        let second = run_script(spec, &args);
         assert_success(spec, &second);
         let second_report = read_report(temp.path(), spec);
         assert_eq!(
@@ -140,15 +148,20 @@ first_result_commit = ""
 fn s3_scripts_forced_failure_uses_common_structured_plumbing() {
     for spec in SCRIPTS {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output = run_script(
-            spec,
-            &[
-                "--dry-run",
-                "--force-failure-for-test",
-                "--report-dir",
-                temp_path(&temp),
-            ],
-        );
+        let empty_artifact_dir = temp.path().join("empty-artifacts");
+        fs::create_dir_all(&empty_artifact_dir).expect("empty artifact dir");
+        let report_dir = temp_path(&temp);
+        let artifact_dir = empty_artifact_dir.to_str().expect("utf8 artifact path");
+        let mut args = vec![
+            "--dry-run",
+            "--force-failure-for-test",
+            "--report-dir",
+            report_dir,
+        ];
+        if spec.name == "s3_preregistration_check.sh" {
+            args.extend(["--artifact-dir", artifact_dir]);
+        }
+        let output = run_script(spec, &args);
         assert!(
             !output.status.success(),
             "{} forced failure should fail:\n{}",
