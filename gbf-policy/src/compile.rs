@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-use gbf_foundation::{BlobRef, CompileProfileId, Hash256, TargetProfileId};
+use gbf_foundation::{
+    BlobRef, CompileProfileId, Hash256, TargetProfileId, canonical_json::DomainHash,
+};
 use gbf_hw::calibration::CalibrationSetRef;
 use gbf_hw::target::TargetProfile;
 use serde::de::Error as _;
@@ -101,6 +103,21 @@ pub struct ResolvedCompilePolicy {
     pub knobs: CompileKnobs,
     pub repair: RepairPolicy,
     pub provenance: PolicyProvenance,
+}
+
+impl ResolvedCompilePolicy {
+    #[must_use]
+    pub fn canonical_hash(&self) -> Hash256 {
+        let domain = DomainHash::new(
+            "gbf-policy",
+            "ResolvedCompilePolicy",
+            "policy_resolution.v1",
+            "1",
+        );
+        domain
+            .hash(self)
+            .expect("ResolvedCompilePolicy canonical hash is computable")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

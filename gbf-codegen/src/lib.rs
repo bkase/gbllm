@@ -23,6 +23,7 @@ pub mod s5;
 pub mod schedule;
 pub mod stage_cache;
 pub mod storage;
+pub mod storage_plan;
 pub mod validate;
 pub mod window;
 

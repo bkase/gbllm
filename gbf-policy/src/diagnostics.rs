@@ -92,6 +92,7 @@ pub enum ValidationOrigin {
     CompileRequest,
     PolicyResolution,
     Budget,
+    StoragePlanConstruction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,6 +446,11 @@ pub enum ValidationCode {
         profile: PlacementProfile,
         reason: PlacementInfeasibilityReason,
     },
+    StorageRangePlanHashMismatch,
+    StorageInferIrHashMismatch,
+    StorageObservationPlanHashMismatch,
+    StorageQuantGraphHashMismatch,
+    StoragePolicyHashMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1404,6 +1410,11 @@ mod tests {
                 profile: PlacementProfile::PackedExperts,
                 reason: PlacementInfeasibilityReason::ExceedsExpertBankCap,
             },
+            ValidationCode::StorageRangePlanHashMismatch,
+            ValidationCode::StorageInferIrHashMismatch,
+            ValidationCode::StorageObservationPlanHashMismatch,
+            ValidationCode::StorageQuantGraphHashMismatch,
+            ValidationCode::StoragePolicyHashMismatch,
         ] {
             assert_code_round_trip(code);
         }
