@@ -42,7 +42,8 @@ Does not own:
   charset_v1 enforcement (S3)
   ReferenceModelBundle export (S3)
   ArtifactOracle round-trip (S3)
-  Project Gutenberg / enwiki8 corpora (S4 / S8)
+  Project Gutenberg corpus (S4); production-scale UpperBankCandidate
+    runs on Gutenberg (S8)
   multi-timescale LinearState (T12.5; arrives in S5 unless promoted)
   Game Boy ROM build (S6)
   MoE / router (S7)
@@ -2029,7 +2030,7 @@ scripts/s1_isolation_check.sh
 | A23 | What if seed 0 ablation succeeds but seeds 1-4 don't?                              | Closure requires only seed 0; others informational                         | Should we require all five?                                                      | No for v1; ablation is expensive. Future tightening is a follow-up bead.                                                              |
 | A24 | gbf-experiments dedicated crate vs. spreading code across gbf-train / gbf-data     | Dedicated crate (§15)                                                      | Why not extend gbf-train?                                                        | gbf-train is substrate (Burn adapter, phase scheduler). S1..S8 are eight falsifiable experiments; collocating them in gbf-train balloons the substrate's API and conflates "framework" with "experiment". A dedicated crate matches the slice graph and lets S2..S8 reuse the scaffolding. |
 | A25 | qat-ablation feature flag vs. `--no-default-features` alone                        | Explicit `qat-ablation`, mutex with `qat` via compile_error! (§16.3)       | Why not just `--no-default-features`?                                            | --no-default-features composes poorly across workspace dependencies and gives no compile-time guarantee QAT was actually compiled out. An explicit mutually-exclusive flag is unambiguous, CI-checkable, and round-trips through the H4 ablation comparator. |
-| A26 | fixtures/corpora/tinystories.toml at repo root vs. crate-local                     | Top-level fixtures/corpora/ (§15.1)                                        | Should the manifest live inside gbf-experiments?                                 | No. Corpora are shared across S1..S8; crate-local fixtures would force duplication when S4 (Project Gutenberg) and S8 (enwiki8) arrive. Keep manifests at repo root, owned by gbf-data's loader contract.                                                  |
+| A26 | fixtures/corpora/tinystories.toml at repo root vs. crate-local                     | Top-level fixtures/corpora/ (§15.1)                                        | Should the manifest live inside gbf-experiments?                                 | No. Corpora are shared across S1..S8; crate-local fixtures would force duplication when S4 (Project Gutenberg) arrives. Keep manifests at repo root, owned by gbf-data's loader contract.                                                  |
 
 ---
 

@@ -88,7 +88,8 @@ Does not own:
   shadow compile + EncodedRom + emulator harness end-to-end (S6)
   emulator-runs-at-least-one-token clause of v0 success (deferred to S6)
   MoE / router (S7)
-  enwiki8 + UpperBankCandidate + StructuredWidthGates (S8)
+  UpperBankCandidate production-scale runs on Gutenberg +
+    StructuredWidthGates (S8)
 ```
 
 ## Decisions
@@ -3302,7 +3303,7 @@ Not proven:
   emulator harness end-to-end (S6)
   EncodedRom build (S6)
   MoE benefit (S7)
-  enwiki8 generalization (S8)
+  UpperBankCandidate production-scale generalization on Gutenberg (S8)
   StructuredWidthGates (S8)
 ```
 
@@ -4000,6 +4001,7 @@ F-S3 v0_success on TinyStories is correct when:
     + reference bundle export) for the v0_success workload only. It
     does not claim cross-corpus generalization (S4), attention-oracle
     conformance or multi-timescale state (S5), emulator end-to-end or
-    EncodedRom (S6), MoE benefit (S7), or enwiki8 generalization (S8) —
-    those are later slices' proof obligations.
+    EncodedRom (S6), MoE benefit (S7), or UpperBankCandidate production-
+    scale generalization on Gutenberg (S8) — those are later slices'
+    proof obligations.
 ```
