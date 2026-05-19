@@ -2,9 +2,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use gbf_experiments::s1::build_metadata::{
-    BUILD_KIND, FALSIFY_ENABLED, QAT_ACTIVE, build_metadata,
-};
+#[cfg(all(
+    any(feature = "phase-a", feature = "ablation"),
+    not(any(feature = "s2-full", feature = "s2-ablation", feature = "s3"))
+))]
+use gbf_experiments::s1::build_metadata::FALSIFY_ENABLED;
+use gbf_experiments::s1::build_metadata::{BUILD_KIND, QAT_ACTIVE, build_metadata};
 use gbf_experiments::s1::run::CheckpointMetadata;
 use serde_json::json;
 
@@ -12,26 +15,26 @@ use serde_json::json;
 const EXPECTED_BUILD_KIND: &str = "phase_a";
 #[cfg(feature = "ablation")]
 const EXPECTED_BUILD_KIND: &str = "ablation";
-#[cfg(all(
-    feature = "s2-ablation",
-    not(any(feature = "phase-a", feature = "ablation"))
-))]
+#[cfg(not(any(feature = "phase-a", feature = "ablation")))]
 const EXPECTED_BUILD_KIND: &str = "s1_unselected";
 #[cfg(feature = "phase-a")]
 const EXPECTED_QAT_ACTIVE: bool = true;
 #[cfg(feature = "ablation")]
 const EXPECTED_QAT_ACTIVE: bool = false;
-#[cfg(all(
-    feature = "s2-ablation",
-    not(any(feature = "phase-a", feature = "ablation"))
-))]
+#[cfg(not(any(feature = "phase-a", feature = "ablation")))]
 const EXPECTED_QAT_ACTIVE: bool = false;
 
 #[test]
 fn build_kind_matches_selected_s1_build() {
     assert_eq!(BUILD_KIND, EXPECTED_BUILD_KIND);
     assert_eq!(QAT_ACTIVE, EXPECTED_QAT_ACTIVE);
-    const { assert!(!FALSIFY_ENABLED, "S1-build-A/B must not enable falsify") };
+    #[cfg(all(
+        any(feature = "phase-a", feature = "ablation"),
+        not(any(feature = "s2-full", feature = "s2-ablation", feature = "s3"))
+    ))]
+    const {
+        assert!(!FALSIFY_ENABLED, "S1-build-A/B must not enable falsify")
+    };
 
     let metadata = build_metadata();
     assert_eq!(metadata.build_kind, EXPECTED_BUILD_KIND);

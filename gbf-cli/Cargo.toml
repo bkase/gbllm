@@ -19,6 +19,16 @@ phase-a = ["gbf-experiments/phase-a"]
 ablation = ["gbf-experiments/ablation"]
 s2-full = ["gbf-experiments/s2-full"]
 s2-ablation = ["gbf-experiments/s2-ablation"]
+s3 = ["gbf-experiments/s3"]
+s3-phase-d = ["gbf-experiments/s3-phase-d"]
+s3-oracle-real = ["gbf-experiments/s3-oracle-real"]
+s3-oracle-fallback = ["gbf-experiments/s3-oracle-fallback"]
+s3-oracle-adversarial = ["gbf-experiments/s3-oracle-adversarial"]
+s3-full = [
+    "s3",
+    "s3-phase-d",
+    "s3-oracle-real",
+]
 falsify = ["phase-a", "gbf-experiments/falsify"]
 
 [dev-dependencies]

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # gbllm pre-commit hook
 # Fast self-cert: format + workspace clippy/test on the main feature set.
-# The full feature-combo matrix (gbf-train qat / qat-ablation, gbf-experiments
-# phase-a / ablation, gbf-cli falsify, etc.) runs in CI, not here.
+# The full feature-combo matrix (gbf-train and gbf-test qat / qat-ablation,
+# gbf-experiments phase-a / ablation, gbf-cli falsify, etc.) runs in CI, not here.
 set -euo pipefail
 
 staged=$(git diff --cached --name-only --diff-filter=ACMR || true)
@@ -28,13 +28,21 @@ if grep -qE '^gbf-train/(src/|Cargo\.toml$)' <<<"$staged"; then
 fi
 
 # Stage 3: lint workspace main feature set.
-if ! cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features -- -D warnings; then
+if ! cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features -- -D warnings; then
+    echo "pre-commit: cargo clippy found warnings. Fix them before committing."
+    exit 1
+fi
+if ! cargo clippy -p gbf-test --no-default-features --features qat -- -D warnings; then
     echo "pre-commit: cargo clippy found warnings. Fix them before committing."
     exit 1
 fi
 
 # Stage 4: test workspace main feature set.
-if ! cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --all-features; then
+if ! cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features; then
+    echo "pre-commit: tests failed."
+    exit 1
+fi
+if ! cargo test -p gbf-test --no-default-features --features qat; then
     echo "pre-commit: tests failed."
     exit 1
 fi

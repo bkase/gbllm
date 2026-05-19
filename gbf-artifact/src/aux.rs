@@ -2,7 +2,7 @@
 
 use gbf_foundation::Hash256;
 pub use gbf_foundation::SidecarKind;
-pub use gbf_workload::manifest::{GoldenVectorId, GoldenVectorRef};
+pub use gbf_foundation::{GoldenVectorId, GoldenVectorRef};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +14,27 @@ pub struct ArtifactAux {
     pub interaction_bundle: Option<InteractionBundleRef>,
     pub lexical_spec: Option<LexicalSpecRef>,
     pub reference_observation_cache: Option<ReferenceObservationCacheRef>,
+}
+
+impl ArtifactAux {
+    /// Return the sparse S3 auxiliary sidecar surface.
+    #[must_use]
+    pub fn sparse() -> Self {
+        Self {
+            checkpoint_schema: None,
+            conformance_envelope: None,
+            golden_vectors: Vec::new(),
+            interaction_bundle: None,
+            lexical_spec: None,
+            reference_observation_cache: None,
+        }
+    }
+}
+
+impl Default for ArtifactAux {
+    fn default() -> Self {
+        Self::sparse()
+    }
 }
 
 macro_rules! sidecar_ref {

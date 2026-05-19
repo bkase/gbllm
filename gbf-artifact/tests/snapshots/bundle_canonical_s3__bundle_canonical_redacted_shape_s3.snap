@@ -1,0 +1,39 @@
+---
+source: gbf-artifact/tests/bundle_canonical_s3.rs
+assertion_line: 18
+expression: "serde_json::to_string_pretty(&bundle_s3_support::redacted_canonical_summary(&decoded)).expect(\"redacted summary serializes\")"
+---
+{
+  "bundle_self_hash_round_trips": true,
+  "decode": {
+    "mode": "argmax"
+  },
+  "edge_order": [
+    "op.activation->op.classifier:activation.hidden",
+    "op.embedding->op.linear:activation.embedding",
+    "op.linear->op.activation:activation.linear"
+  ],
+  "node_order": [
+    "op.embedding",
+    "op.linear",
+    "op.activation",
+    "op.classifier"
+  ],
+  "numeric": {
+    "determinism": "bit_exact",
+    "reduction_order": "canonical",
+    "reduction_order_policy": "enforced",
+    "rng": "no_rng",
+    "scalar_format": "f32"
+  },
+  "opset": "opset_v1",
+  "schema": "reference_model_bundle.v1",
+  "tensor_ids": [
+    "tensor.classifier.bias",
+    "tensor.classifier.weight",
+    "tensor.embedding",
+    "tensor.linear.bias",
+    "tensor.linear.weight"
+  ],
+  "tied_embedding_alias": null
+}

@@ -1,0 +1,1 @@
+Story A<|endoftext|>Story B

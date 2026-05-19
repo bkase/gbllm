@@ -234,6 +234,9 @@ def lint_acceptance_owners(
 ) -> list[str]:
     violations = []
     for issue in issues:
+        if issue.get("status") != "closed":
+            continue
+
         for sentence in ownership_sentences(issue_text(issue)):
             target_ids = sorted(set(ISSUE_ID_RE.findall(sentence)))
             if not target_ids:
@@ -241,6 +244,9 @@ def lint_acceptance_owners(
 
             terms = ownership_terms(sentence)
             for target_id in target_ids:
+                if is_explicitly_negated_reference(sentence, target_id):
+                    continue
+
                 target = by_id.get(target_id)
                 if target is None:
                     violations.append(
@@ -260,6 +266,15 @@ def lint_acceptance_owners(
                     )
 
     return violations
+
+
+def is_explicitly_negated_reference(sentence: str, target_id: str) -> bool:
+    escaped = re.escape(target_id)
+    negated_patterns = [
+        rf"\bnot\s+['\"`]?{escaped}['\"`]?",
+        rf"\binstead\s+of\s+['\"`]?{escaped}['\"`]?",
+    ]
+    return any(re.search(pattern, sentence, re.IGNORECASE) for pattern in negated_patterns)
 
 
 def ownership_sentences(text: str) -> list[str]:

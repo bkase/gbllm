@@ -32,6 +32,43 @@ fn bd_1btw_same_inputs_and_checkpoint_emit_byte_equal_score_reports() {
 
     assert_eq!(first.bpc, second.bpc);
     assert_eq!(first.score_self_hash, second.score_self_hash);
+    let threshold_stats = first
+        .threshold_stats
+        .as_ref()
+        .expect("ternary score threshold stats");
+    let scale_stats = first
+        .scale_stats
+        .as_ref()
+        .expect("ternary score scale stats");
+    assert_eq!(
+        serde_json::to_value(&first).expect("s2 score JSON shape"),
+        json!({
+            "schema": "s2_score.v1",
+            "seed": first.seed,
+            "build_kind": "s2-ternary-full",
+            "checkpoint_sha": first.checkpoint_sha.to_string(),
+            "corpus_val_sha": first.corpus_val_sha.to_string(),
+            "chunk_size": 128,
+            "token_count": first.token_count,
+            "log2_sum": first.log2_sum,
+            "bpc": first.bpc,
+            "threshold_stats": {
+                "matrices": threshold_stats.matrices,
+                "threshold_min": threshold_stats.threshold_min,
+                "threshold_max": threshold_stats.threshold_max,
+                "threshold_mean": threshold_stats.threshold_mean,
+                "threshold_count": threshold_stats.threshold_count,
+            },
+            "scale_stats": {
+                "matrices": scale_stats.matrices,
+                "scale_count": scale_stats.scale_count,
+                "scale_min": scale_stats.scale_min,
+                "scale_max": scale_stats.scale_max,
+                "scale_mean_f32": scale_stats.scale_mean_f32,
+            },
+            "score_self_hash": first.score_self_hash.to_string(),
+        })
+    );
     assert_eq!(
         S1CanonicalJson::to_vec(&first).expect("first score JSON"),
         S1CanonicalJson::to_vec(&second).expect("second score JSON")

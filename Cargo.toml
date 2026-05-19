@@ -43,8 +43,10 @@ gbf-artifact = { path = "gbf-artifact", version = "=0.1.0" }
 gbf-data = { path = "gbf-data", version = "=0.1.0" }
 gbf-foundation = { path = "gbf-foundation", version = "=0.1.0" }
 gbf-model = { path = "gbf-model", version = "=0.1.0" }
+gbf-oracle = { path = "gbf-oracle", version = "=0.1.0" }
 gbf-policy = { path = "gbf-policy", version = "=0.1.0" }
 gbf-train = { path = "gbf-train", version = "=0.1.0", default-features = false }
+gbf-workload = { path = "gbf-workload", version = "=0.1.0" }
 insta = { version = "=1.47.2" }
 predicates = { version = "=3.1.4" }
 pretty_assertions = { version = "=1.4.1" }

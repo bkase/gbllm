@@ -1,0 +1,40 @@
+schema = "tinystories_manifest.v1"
+schema_version = "1.0.0"
+corpus_id = "tiny-corpus-s3-kn-smoke"
+dataset_version = "fixture-v1"
+source_name = "synthetic-s3-kn-smoke"
+source_url = "https://example.invalid/gbllm/s3-kn-smoke"
+train_path = "train.bytes"
+val_path = "eval.bytes"
+train_sha256 = "sha256:a722af691c76a89efcf5f00c66f85804765b0ec23962e4cafe1315c8af67cf18"
+val_sha256 = "sha256:fd5ea843cb8ebf667e50301c82cd5bfbc09d6e0db831774729189928f48aee66"
+raw_root = "."
+raw_byte_policy = "ASCII fixture bytes; S3 tests normalize through charset_v1 before KN precondition counting."
+story_separator = "<|endoftext|>"
+s3_policy = "S3 fixture includes a train split and a distinct eval split for integration smoke tests; it is not TinyStories."
+deferred_scope = []
+
+[source]
+name = "synthetic-s3-kn-smoke"
+url = "https://example.invalid/gbllm/s3-kn-smoke"
+dataset_card_url = "https://example.invalid/gbllm/s3-kn-smoke-card"
+license = "CC0-1.0"
+license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+downloaded_at = "2026-05-14"
+decompression = "none"
+
+[splits.train]
+role = "train"
+url = "file://train.bytes"
+local_filename = "train.bytes"
+sha256 = "sha256:a722af691c76a89efcf5f00c66f85804765b0ec23962e4cafe1315c8af67cf18"
+byte_length = 201
+story_count = 1
+
+[splits.validation]
+role = "validation"
+url = "file://eval.bytes"
+local_filename = "eval.bytes"
+sha256 = "sha256:fd5ea843cb8ebf667e50301c82cd5bfbc09d6e0db831774729189928f48aee66"
+byte_length = 49
+story_count = 1

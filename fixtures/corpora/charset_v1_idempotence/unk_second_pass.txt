@@ -1,0 +1,1 @@
+This example has one emoji 😀 and enough ascii letters to stay kept.

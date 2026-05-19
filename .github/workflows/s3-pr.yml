@@ -1,0 +1,108 @@
+name: S3 PR Gates
+
+on:
+  pull_request:
+    paths:
+      - "gbf-experiments/**"
+      - "gbf-train/**"
+      - "gbf-policy/**"
+      - "gbf-data/**"
+      - "gbf-artifact/**"
+      - "gbf-foundation/**"
+      - "gbf-model/**"
+      - "gbf-test/**"
+      - "gbf-cli/**"
+      - "gbf-workload/**"
+      - "gbf-oracle/**"
+      - "scripts/s3_*.sh"
+      - "scripts/s3_*.py"
+      - "history/rfcs/F-S3-v0-success-tinystories.md"
+      - ".github/workflows/s3-*.yml"
+
+concurrency:
+  group: s3-pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  s3-pr:
+    name: S3 PR gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: s3-pr-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            s3-pr-cargo-${{ runner.os }}-
+
+      - name: Run S3 PR gate suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/s3-pr
+
+          run_capture_log() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s3-pr/${name}.stdout") \
+              2> >(tee "artifacts/s3-pr/${name}.stderr.log" >&2)
+          }
+
+          run_capture_ndjson() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s3-pr/${name}.stdout") \
+              2> >(tee "artifacts/s3-pr/${name}.ndjson" >&2)
+          }
+
+          run_capture_log cargo-fmt cargo fmt --check --all
+          run_capture_log cargo-clippy-workspace-supported cargo clippy --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features -- -D warnings
+          run_capture_log cargo-clippy-gbf-experiments-s3 cargo clippy -p gbf-experiments --no-default-features --features s3,s3-phase-d,s3-oracle-real -- -D warnings
+          run_capture_log cargo-clippy-gbf-cli-s3 cargo clippy -p gbf-cli --no-default-features --features s3-full -- -D warnings
+          run_capture_log gbf-experiments-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real
+          run_capture_log gbf-cli-s3 cargo test -p gbf-cli --features s3-full --test s3_cli_s3
+          run_capture_log falsification-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real,falsify --test falsification_s3
+          run_capture_log conformance-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test conformance_round_trip_s3
+          run_capture_log v0-success-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test v0_success_canonical_s3
+          run_capture_log cli-scripts-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test cli_scripts_s3
+          run_capture_log cli-scripts-event-shape-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test cli_scripts_event_shape_s3
+          run_capture_log workflow-lint-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test workflow_lint_s3
+          run_capture_log workflow-regression-s3 cargo test -p gbf-experiments --features s3,s3-phase-d,s3-oracle-real --test workflow_regression_s3
+          run_capture_ndjson s3-preregistration scripts/s3_preregistration_check.sh --dry-run --result-state post
+          run_capture_ndjson s3-determinism scripts/s3_determinism_check.sh --dry-run
+          run_capture_ndjson s3-full-determinism scripts/s3_full_determinism_check.sh --dry-run
+          run_capture_ndjson s3-isolation scripts/s3_isolation_check.sh --dry-run
+          run_capture_ndjson s3-api-drift scripts/s3_api_drift_check.sh --dry-run
+          run_capture_ndjson s3-oracle-re-run scripts/s3_oracle_re_run_check.sh --dry-run
+          run_capture_ndjson s3-no-naming-resolution scripts/s3_no_naming_resolution_check.sh
+          run_capture_ndjson s3-feature-matrix scripts/s3_feature_matrix_check.sh --dry-run
+
+      - name: Upload S3 PR artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-pr-artifacts
+          path: |
+            artifacts/s3-pr/**/*.stdout
+            artifacts/s3-pr/**/*.stderr.log
+            artifacts/s3-pr/**/*.ndjson
+            /tmp/s3-*.json
+            experiments/S3/**
+          if-no-files-found: warn
+          retention-days: 14

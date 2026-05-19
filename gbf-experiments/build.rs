@@ -2,7 +2,7 @@ use std::env;
 use std::process::Command;
 
 fn main() {
-    validate_s1_build_selection();
+    validate_experiment_build_selection();
 
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../gbf-experiments");
@@ -27,14 +27,20 @@ fn main() {
     println!("cargo:rustc-env=GBF_RUSTC_VERSION={rustc_version}");
 }
 
-fn validate_s1_build_selection() {
+fn validate_experiment_build_selection() {
     let phase_a = env::var_os("CARGO_FEATURE_PHASE_A").is_some();
     let ablation = env::var_os("CARGO_FEATURE_ABLATION").is_some();
     let s2_full = env::var_os("CARGO_FEATURE_S2_FULL").is_some();
     let s2_ablation = env::var_os("CARGO_FEATURE_S2_ABLATION").is_some();
+    let s3 = env::var_os("CARGO_FEATURE_S3").is_some();
+    let s3_oracle_real = env::var_os("CARGO_FEATURE_S3_ORACLE_REAL").is_some();
+    let s3_oracle_fallback = env::var_os("CARGO_FEATURE_S3_ORACLE_FALLBACK").is_some();
 
     if s2_full && s2_ablation {
         panic!("S2 feature mutex violated");
+    }
+    if s3_oracle_real && s3_oracle_fallback {
+        panic!("s3-oracle-real and s3-oracle-fallback are mutually exclusive");
     }
 
     match (phase_a, ablation) {
@@ -43,8 +49,8 @@ fn validate_s1_build_selection() {
             panic!("gbf-experiments features phase-a and ablation are mutually exclusive");
         }
         (false, false) => {
-            if !s2_full && !s2_ablation {
-                panic!("gbf-experiments requires at least one S1 or S2 experiment feature");
+            if !s2_full && !s2_ablation && !s3 {
+                panic!("gbf-experiments requires at least one S1, S2, or S3 experiment feature");
             }
         }
     }

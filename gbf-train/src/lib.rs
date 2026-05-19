@@ -6,6 +6,7 @@ compile_error!("qat and qat-ablation are mutually exclusive");
 pub mod adapter;
 #[cfg(feature = "burn-adapter")]
 pub mod embeddings;
+pub mod export_visitor;
 pub mod logging;
 pub mod loss;
 pub mod phase;
@@ -19,4 +20,5 @@ pub mod scheduler;
 ))]
 pub mod sequence;
 pub mod shadow;
+pub mod student;
 pub mod teacher;

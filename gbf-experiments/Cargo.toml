@@ -9,9 +9,15 @@ publish = false
 default = ["phase-a"]
 phase-a = ["gbf-train/qat", "gbf-train/burn-adapter"]
 ablation = ["gbf-train/qat-ablation", "gbf-train/burn-adapter"]
+qat-ablation = ["gbf-train/qat-ablation"]
 s2-full = ["gbf-train/qat", "gbf-train/burn-adapter"]
 s2-ablation = ["gbf-train/qat-ablation", "gbf-train/burn-adapter"]
-falsify = ["s2-full", "gbf-policy/falsify"]
+s3 = ["gbf-artifact/s3-schemas", "gbf-workload/s3-schemas"]
+s3-phase-d = ["gbf-train/qat", "gbf-train/burn-adapter"]
+s3-oracle-real = ["gbf-oracle/s3-real"]
+s3-oracle-fallback = ["gbf-oracle/s3-fallback"]
+s3-oracle-adversarial = ["gbf-oracle/s3-oracle-adversarial"]
+falsify = ["s2-full", "s3", "s3-oracle-adversarial", "gbf-policy/falsify"]
 
 [dependencies]
 clap = { version = "=4.6.1", features = ["derive"] }
@@ -19,12 +25,15 @@ gbf-artifact.workspace = true
 gbf-data.workspace = true
 gbf-foundation.workspace = true
 gbf-model.workspace = true
+gbf-oracle.workspace = true
 gbf-policy.workspace = true
 gbf-train = { workspace = true, default-features = false }
+gbf-workload.workspace = true
 burn.workspace = true
 safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

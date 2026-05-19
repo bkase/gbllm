@@ -1,0 +1,31 @@
+schema = "s3_tiny_corpus_kn_preconditions.v1"
+corpus_id = "tiny-corpus-s3-kn-smoke"
+train_path = "train.bytes"
+count_domain = "s3_kn_effective_counts.charset_v1_normalized_train_post"
+
+# Synthetic in-repo smoke fixture production effective-count preconditions.
+# These are not TinyStories corpus statistics; the full S3 KN baseline owns
+# real-corpus counts.
+[[orders]]
+k = 2
+n_1 = 44
+n_2 = 7
+n_3 = 3
+
+[[orders]]
+k = 3
+n_1 = 66
+n_2 = 8
+n_3 = 2
+
+[[orders]]
+k = 4
+n_1 = 86
+n_2 = 9
+n_3 = 1
+
+[[orders]]
+k = 5
+n_1 = 80
+n_2 = 16
+n_3 = 12

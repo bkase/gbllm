@@ -121,6 +121,13 @@ pub struct LoweringShardId(pub String);
 #[serde(transparent)]
 pub struct GoldenVectorId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoldenVectorRef {
+    pub id: GoldenVectorId,
+    pub manifest_hash: Hash256,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceRef {

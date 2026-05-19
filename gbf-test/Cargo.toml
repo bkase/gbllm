@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = ["qat"]
+qat = ["gbf-train/qat", "gbf-train/burn-adapter"]
+qat-ablation = ["gbf-train/qat-ablation", "gbf-train/burn-adapter"]
+
 [dependencies]
 gbf-artifact = { path = "../gbf-artifact" }
 gbf-bench = { path = "../gbf-bench" }
@@ -15,7 +20,7 @@ gbf-model = { path = "../gbf-model" }
 gbf-oracle = { path = "../gbf-oracle" }
 gbf-policy = { path = "../gbf-policy" }
 gbf-report = { path = "../gbf-report" }
-gbf-train = { path = "../gbf-train", features = ["burn-adapter", "qat"] }
+gbf-train = { workspace = true, default-features = false }
 gbf-verify = { path = "../gbf-verify" }
 gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true

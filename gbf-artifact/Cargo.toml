@@ -5,15 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+s3-schemas = []
+
 [dependencies]
-gbf-foundation = { path = "../gbf-foundation" }
+gbf-foundation.workspace = true
 gbf-hw = { path = "../gbf-hw" }
 gbf-policy = { path = "../gbf-policy" }
-gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 proptest.workspace = true
+tracing-subscriber.workspace = true
