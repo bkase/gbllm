@@ -1,11 +1,23 @@
 id = "Trace"
-defaults_hash = "sha256:401c15e8dce6f8abe5dc82b68b7503d3f2cfb9ae4ddfca4427ee92e2f7b1d802"
+schema_version = "2.0.0"
+defaults_hash = "sha256:94efb1aa7a8384b1435a187a697804c973eb7024399e84209c0b98f326c446fd"
 observability = { kind = "Invariant" }
 
 [trace_budget]
 max_events_per_slice = 4096
 max_bytes_per_frame = 16384
 drop_policy = { kind = "HaltAndFault" }
+
+[range_caps]
+profile_chunk_max = 256
+profile_tile_max = 256
+profile_tile_min = 16
+renorm_strategy = { kind = "ExactPostBoundaryOnly" }
+
+[observation_caps]
+important_max = 1024
+diagnostic_max = 1024
+best_effort_max = 1024
 
 [repair_policy]
 max_refinement_iters = 2

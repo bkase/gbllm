@@ -4,15 +4,15 @@ use std::collections::BTreeMap;
 
 use gbf_foundation::{FieldPath, Hash256};
 use gbf_policy::{
-    CompileKnobBounds, CompileKnobId, CompileKnobOverrides, CompileKnobPartialBounds,
-    CompileKnobPartialValues, CompileKnobPath, CompileKnobProvenanceEntry, CompileKnobValues,
-    CompileKnobs, ConstraintOperation, ConstraintProvenance, ConstraintValue, DiagnosticSeverity,
-    EffectiveConstraints, EvidenceRef, KnobLockSet, MonotoneKnob, ObservationKnob, PlacementKnob,
-    PolicyProvenance, PolicySource, ProbeCollectionLevel, ReductionPlanCeiling,
-    ResolvedCompilePolicy, RomKernelDuplicationBias, RomKernelResidencyBias, RomWindowKnob,
-    ScheduleKnob, ScheduleResourcePressure, ScheduleSliceCoarsening, ScheduleTileSearch,
-    StorageMaterialization, ValidationCode, ValidationDetail, ValidationDiagnostic,
-    ValidationOrigin, canonical_default_bounds_fixture,
+    COMPILE_PROFILE_SPEC_VERSION, CompileKnobBounds, CompileKnobId, CompileKnobOverrides,
+    CompileKnobPartialBounds, CompileKnobPartialValues, CompileKnobPath,
+    CompileKnobProvenanceEntry, CompileKnobValues, CompileKnobs, ConstraintOperation,
+    ConstraintProvenance, ConstraintValue, DiagnosticSeverity, EffectiveConstraints, EvidenceRef,
+    KnobLockSet, MonotoneKnob, ObservationKnob, PlacementKnob, PolicyProvenance, PolicySource,
+    ProbeCollectionLevel, ReductionPlanCeiling, ResolvedCompilePolicy, RomKernelDuplicationBias,
+    RomKernelResidencyBias, RomWindowKnob, ScheduleKnob, ScheduleResourcePressure,
+    ScheduleSliceCoarsening, ScheduleTileSearch, StorageMaterialization, ValidationCode,
+    ValidationDetail, ValidationDiagnostic, ValidationOrigin, canonical_default_bounds_fixture,
 };
 use gbf_report::report_schemas::policy_resolution_v1::{
     ArtifactIdentitySection, CompileKnobsSection, CompileRequestSection, ConstraintEnforcement,
@@ -693,6 +693,8 @@ fn build_policy(
         },
         observability: validation.validated.compile_profile.observability,
         trace_budget: validation.validated.compile_profile.trace_budget,
+        range_caps: validation.validated.compile_profile.range_caps,
+        observation_caps: validation.validated.compile_profile.observation_caps,
         requested_runtime_modes: validation
             .validated
             .compile_request
@@ -709,6 +711,7 @@ fn build_policy(
         provenance: PolicyProvenance {
             target_defaults: validation.validated.input_hashes.target_profile_hash,
             profile_defaults: validation.validated.compile_profile.defaults_hash,
+            compile_profile_spec_version: COMPILE_PROFILE_SPEC_VERSION.to_owned(),
             hint_bundle_hash: Some(validation.validated.input_hashes.hint_bundle_hash),
             compile_request_hash: validation.validated.input_hashes.compile_request_hash,
             calibration_hash: Some(validation.validated.input_hashes.calibration_hash),
@@ -1846,12 +1849,13 @@ pub(crate) mod tests {
     };
     use gbf_hw::target::{TargetProfile, dmg_mbc5_8mib_128kib};
     use gbf_policy::{
-        BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationBundleSet,
-        CalibrationConfidenceClass, CalibrationLayer, CompileObjective, CompileProfileSpec,
-        CompileRequest, CompilerFeature, DEFAULT_COMPILE_PROFILE_ID, MeasurementBlob,
-        ObservabilityMode, PlacementKnobBounds, PlacementProfile, RepairProposalId,
-        RomKernelResidencyBias, RomWindowKnob, RuntimeMode, ServiceLevelObjective, TraceProbeId,
-        ValidationCode, canonical_compile_profile_specs,
+        BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, COMPILE_PROFILE_SPEC_VERSION,
+        CalibrationBundleSet, CalibrationConfidenceClass, CalibrationLayer, CompileObjective,
+        CompileProfileSpec, CompileRequest, CompilerFeature, DEFAULT_COMPILE_PROFILE_ID,
+        MeasurementBlob, ObservabilityMode, PlacementKnobBounds, PlacementProfile,
+        RECOVERY_COMPILE_PROFILE_ID, RepairProposalId, RomKernelResidencyBias, RomWindowKnob,
+        RuntimeMode, ServiceLevelObjective, TRACE_COMPILE_PROFILE_ID, TraceProbeId, ValidationCode,
+        canonical_compile_profile_specs,
     };
     use gbf_report::{ReportOutcome, round_trip_self_hash};
     use gbf_workload::{GoldenVectorRef, WorkloadLocator, WorkloadManifest, WorkloadManifestRef};
@@ -2548,6 +2552,50 @@ pub(crate) mod tests {
                 }),
                 "bounds path missing target evidence: {:?}",
                 entry.path
+            );
+        }
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_emits_profile_v2_version_and_caps_for_all_canonical_profiles() {
+        for profile in [
+            BRINGUP_COMPILE_PROFILE_ID,
+            DEFAULT_COMPILE_PROFILE_ID,
+            TRACE_COMPILE_PROFILE_ID,
+            RECOVERY_COMPILE_PROFILE_ID,
+        ] {
+            let fixture = Fixture::new(profile);
+            let product = resolve_policy(&fixture.validation()).expect("policy resolves");
+            let result = product
+                .report
+                .body
+                .result
+                .as_ref()
+                .expect("success report has result");
+
+            assert_eq!(
+                product.policy.provenance.compile_profile_spec_version,
+                COMPILE_PROFILE_SPEC_VERSION
+            );
+            assert_eq!(
+                result.provenance.compile_profile_spec_version,
+                COMPILE_PROFILE_SPEC_VERSION
+            );
+            assert_eq!(
+                product.policy.range_caps,
+                fixture.compile_profile.range_caps
+            );
+            assert_eq!(
+                product.policy.observation_caps,
+                fixture.compile_profile.observation_caps
+            );
+            assert_eq!(
+                result.resolved.range_caps,
+                fixture.compile_profile.range_caps
+            );
+            assert_eq!(
+                result.resolved.observation_caps,
+                fixture.compile_profile.observation_caps
             );
         }
     }

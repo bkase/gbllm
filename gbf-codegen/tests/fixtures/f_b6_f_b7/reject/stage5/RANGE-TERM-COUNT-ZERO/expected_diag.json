@@ -1,0 +1,1 @@
+{"code":"RANGE-TERM-COUNT-ZERO","origin":"RangePlanConstruction","producer_evidence":"gbf-codegen::s5::range_plan::term_count_zero_rejected producer test asserts this RANGE code and RangePlanConstruction origin/wire evidence","reserved":false,"rfc_code_location":"evidence.reference","severity":"Hard","stage":"stage5","wire_code_kind":"ReportSemanticInvariantViolated"}

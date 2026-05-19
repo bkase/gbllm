@@ -1,0 +1,6 @@
+{
+  "expected_event": "range_cert.independent_verify.failed.unsupported_plan_family",
+  "fixture": "unsupported_plan_family",
+  "materialization": "generated_by_run_cert_verify",
+  "tamper": "replace the first reduction plan kind with an unknown tag"
+}

@@ -6,4 +6,5 @@ pub mod luts;
 pub mod matmul;
 pub mod pack;
 pub mod persistence;
+pub mod range_cert;
 pub mod ternary;

@@ -317,6 +317,24 @@ pub struct StaticBudgetReport {
     pub report: ReportEnvelope<StaticBudgetReportBody>,
     pub static_budget_self_hash: Hash256,
     pub static_budget_canonical_bytes_hash: Hash256,
+    #[serde(default)]
+    pub reduction_site_facts: Vec<ReductionSiteProjection>,
+}
+
+pub trait StaticBudgetReductionSiteFacts {
+    fn reduction_site_projection(&self, site: &ReductionSiteId)
+    -> Option<&ReductionSiteProjection>;
+}
+
+impl StaticBudgetReductionSiteFacts for StaticBudgetReport {
+    fn reduction_site_projection(
+        &self,
+        site: &ReductionSiteId,
+    ) -> Option<&ReductionSiteProjection> {
+        self.reduction_site_facts
+            .iter()
+            .find(|projection| &projection.site == site)
+    }
 }
 
 pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
@@ -333,6 +351,7 @@ pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
                     view.quant_graph_hash,
                     vec![failure],
                     empty_projections_for_runtime_budget(runtime_chrome_budget),
+                    view.reduction_sites.clone(),
                 ),
             },
             Err(error) => {
@@ -343,6 +362,7 @@ pub fn run_static_budget<Q: QuantGraphBudgetSource + ?Sized>(
                     quant_graph_hash,
                     vec![error.into_failure()],
                     empty_projections_for_runtime_budget(runtime_chrome_budget),
+                    Vec::new(),
                 )
             }
         },
@@ -428,7 +448,7 @@ fn missing_runtime_chrome_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
         ),
         diagnostics: validation_diagnostics_for_budget_failures(&failures),
     };
-    finalize_static_budget_report(ReportOutcome::Failed, body)
+    finalize_static_budget_report(ReportOutcome::Failed, body, Vec::new())
 }
 
 fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
@@ -436,6 +456,7 @@ fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
     runtime_chrome_budget: &RuntimeChromeBudget,
     view: QuantGraphBudgetView,
 ) -> StaticBudgetReport {
+    let reduction_site_facts = view.reduction_sites.clone();
     let (projections, failures) = project_budget(
         inputs.policy,
         inputs.policy.policy.knobs.global.placement.profile,
@@ -460,7 +481,7 @@ fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
             ),
             diagnostics: Vec::new(),
         };
-        finalize_static_budget_report(ReportOutcome::Passed, body)
+        finalize_static_budget_report(ReportOutcome::Passed, body, reduction_site_facts)
     } else {
         budget_failure_report(
             inputs,
@@ -468,6 +489,7 @@ fn evaluated_budget_report<Q: QuantGraphBudgetSource + ?Sized>(
             view.quant_graph_hash,
             failures,
             projections,
+            reduction_site_facts,
         )
     }
 }
@@ -478,6 +500,7 @@ fn budget_failure_report<Q: QuantGraphBudgetSource + ?Sized>(
     quant_graph_hash: Hash256,
     mut failures: Vec<BudgetFailure>,
     projections: BudgetProjectionSection,
+    reduction_site_facts: Vec<ReductionSiteProjection>,
 ) -> StaticBudgetReport {
     sort_budget_failures_canonically(&mut failures);
     let body = StaticBudgetReportBody {
@@ -496,7 +519,7 @@ fn budget_failure_report<Q: QuantGraphBudgetSource + ?Sized>(
         ),
         diagnostics: validation_diagnostics_for_budget_failures(&failures),
     };
-    finalize_static_budget_report(ReportOutcome::Failed, body)
+    finalize_static_budget_report(ReportOutcome::Failed, body, reduction_site_facts)
 }
 
 fn identity_section(
@@ -536,7 +559,13 @@ fn decision_section(
 fn finalize_static_budget_report(
     outcome: ReportOutcome,
     body: StaticBudgetReportBody,
+    reduction_site_facts: Vec<ReductionSiteProjection>,
 ) -> StaticBudgetReport {
+    tracing::info!(
+        site_count = reduction_site_facts.len() as u64,
+        outcome = ?outcome,
+        "stage2.static_budget.reduction_site_facts.bound"
+    );
     let mut report =
         ReportEnvelope::new(outcome, body).expect("static_budget.v1 schema constants are valid");
     report.report_self_hash =
@@ -547,6 +576,7 @@ fn finalize_static_budget_report(
     StaticBudgetReport {
         static_budget_self_hash: report.report_self_hash,
         static_budget_canonical_bytes_hash,
+        reduction_site_facts,
         report,
     }
 }
@@ -1403,6 +1433,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, ThresholdPlan, WeightEncoding};
     use gbf_foundation::{LineageId, TargetProfileId};
@@ -1425,6 +1456,10 @@ mod tests {
         ArtifactIdentitySection, CompileRequestSection, HintConsumptionSection,
         PolicyResolutionReportBody,
     };
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::prelude::*;
 
     use crate::policy::ResolvedPolicyProduct;
     use crate::validate::ValidatedInputHashes;
@@ -1572,6 +1607,8 @@ mod tests {
                 max_bytes_per_frame: 2048,
                 drop_policy: TraceDropPolicy::DropOldest,
             },
+            range_caps: gbf_policy::RangeCapsSpec::default_v2(),
+            observation_caps: gbf_policy::ObservationProfileCaps::default_v2(),
             requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
             knobs: gbf_policy::CompileKnobs {
                 global: values,
@@ -1598,6 +1635,7 @@ mod tests {
             provenance: PolicyProvenance {
                 target_defaults: input_hashes.target_profile_hash,
                 profile_defaults: input_hashes.compile_profile_hash,
+                compile_profile_spec_version: gbf_policy::COMPILE_PROFILE_SPEC_VERSION.to_owned(),
                 hint_bundle_hash: Some(input_hashes.hint_bundle_hash),
                 compile_request_hash: input_hashes.compile_request_hash,
                 calibration_hash: Some(input_hashes.calibration_hash),
@@ -2370,6 +2408,298 @@ mod tests {
             runtime_chrome_budget,
             target_profile: &dmg_mbc5_8mib_128kib(),
         })
+    }
+
+    fn reduction_site_projection(
+        site: &str,
+        bias_max_abs_q: Option<u32>,
+    ) -> ReductionSiteProjection {
+        ReductionSiteProjection {
+            site: ReductionSiteId(site.to_owned()),
+            layer: Some(LayerId::new(0)),
+            expert: Some(ExpertId::new(0)),
+            term_count: 7,
+            input_max_abs_q: 3,
+            weight_max_abs_q: 5,
+            bias_max_abs_q,
+            accumulator_domain: AccumulatorDomain::RawIntegerProducts,
+        }
+    }
+
+    fn run_budget_with_reduction_sites(
+        reduction_sites: Vec<ReductionSiteProjection>,
+    ) -> StaticBudgetReport {
+        let budget = runtime_budget_fixture();
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.reduction_sites = reduction_sites;
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        run_budget_with(Some(&budget), &quant_graph)
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_trait_returns_projection_when_present() {
+        let projection = reduction_site_projection("site.facts.present", None);
+        let report = run_budget_with_reduction_sites(vec![projection.clone()]);
+
+        assert_eq!(
+            report.reduction_site_projection(&projection.site),
+            Some(&projection)
+        );
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_trait_returns_none_for_unknown_site() {
+        let report = run_budget_with_reduction_sites(vec![reduction_site_projection(
+            "site.facts.known",
+            None,
+        )]);
+
+        assert_eq!(
+            report.reduction_site_projection(&ReductionSiteId("site.facts.unknown".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_matches_quant_graph_budget_view() {
+        let mut first = reduction_site_projection("site.facts.first", Some(9));
+        first.accumulator_domain = AccumulatorDomain::PostScaleQ8_8;
+        let mut second = reduction_site_projection("site.facts.second", None);
+        second.layer = Some(LayerId::new(1));
+        second.expert = None;
+        second.term_count = 11;
+        second.input_max_abs_q = 13;
+        second.weight_max_abs_q = 17;
+        second.accumulator_domain = AccumulatorDomain::PostScaleQ16_16;
+        let expected = vec![first, second];
+
+        let report = run_budget_with_reduction_sites(expected.clone());
+        let actual_value =
+            serde_json::to_value(&report.reduction_site_facts).expect("facts serialize");
+        let expected_value = serde_json::to_value(&expected).expect("expected facts serialize");
+
+        assert_eq!(report.reduction_site_facts, expected);
+        assert_eq!(
+            canonicalize_value(&actual_value).expect("facts canonicalize"),
+            canonicalize_value(&expected_value).expect("expected facts canonicalize")
+        );
+        for projection in &expected {
+            assert_eq!(
+                report.reduction_site_projection(&projection.site),
+                Some(projection)
+            );
+        }
+    }
+
+    #[test]
+    fn static_budget_report_serde_unchanged_v1_compat() {
+        let projection = reduction_site_projection("site.facts.serde", Some(3));
+        let report = run_budget_with_reduction_sites(vec![projection]);
+        let canonical = canonicalize_report(&report.report).expect("report canonicalizes");
+        let value: serde_json::Value =
+            serde_json::from_slice(&canonical).expect("canonical report decodes");
+        let body_value = serde_json::to_value(&report.report.body).expect("report body serializes");
+        let accumulator = value["projections"]["accumulator_maxima"][0]
+            .as_object()
+            .expect("accumulator bound is an object");
+
+        assert_eq!(value["schema"], serde_json::json!("static_budget.v1"));
+        assert!(value.get("reduction_site_facts").is_none());
+        assert!(body_value.get("reduction_site_facts").is_none());
+        assert!(value["projections"].get("reduction_site_facts").is_none());
+        assert!(accumulator.get("site").is_some());
+        assert!(accumulator.get("projected_max_abs").is_some());
+        assert!(accumulator.get("i16_safe").is_some());
+        assert!(accumulator.get("i32_safe").is_some());
+        assert!(accumulator.get("term_count").is_none());
+        assert!(accumulator.get("input_max_abs_q").is_none());
+        assert!(accumulator.get("weight_max_abs_q").is_none());
+        assert!(accumulator.get("bias_max_abs_q").is_none());
+        assert!(accumulator.get("accumulator_domain").is_none());
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_with_bias_none() {
+        let projection = reduction_site_projection("site.facts.bias_none", None);
+        let report = run_budget_with_reduction_sites(vec![projection.clone()]);
+
+        assert_eq!(
+            report
+                .reduction_site_projection(&projection.site)
+                .map(|projection| projection.bias_max_abs_q),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_with_bias_some_zero() {
+        let projection = reduction_site_projection("site.facts.bias_zero", Some(0));
+        let report = run_budget_with_reduction_sites(vec![projection.clone()]);
+
+        assert_eq!(
+            report
+                .reduction_site_projection(&projection.site)
+                .map(|projection| projection.bias_max_abs_q),
+            Some(Some(0))
+        );
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_with_bias_some_nonzero() {
+        let projection = reduction_site_projection("site.facts.bias_nonzero", Some(19));
+        let report = run_budget_with_reduction_sites(vec![projection.clone()]);
+
+        assert_eq!(
+            report
+                .reduction_site_projection(&projection.site)
+                .map(|projection| projection.bias_max_abs_q),
+            Some(Some(19))
+        );
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_sites_match_accumulator_maxima_on_success() {
+        let first = reduction_site_projection("site.consistency.first", Some(1));
+        let mut second = reduction_site_projection("site.consistency.second", None);
+        second.term_count = 13;
+        second.input_max_abs_q = 2;
+        second.weight_max_abs_q = 3;
+        let report = run_budget_with_reduction_sites(vec![first.clone(), second.clone()]);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+        let fact_sites = report
+            .reduction_site_facts
+            .iter()
+            .map(|projection| projection.site.clone())
+            .collect::<Vec<_>>();
+        let accumulator_sites = report
+            .report
+            .body
+            .projections
+            .accumulator_maxima
+            .iter()
+            .map(|bound| bound.site.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(fact_sites, accumulator_sites);
+        assert_eq!(
+            fact_sites,
+            vec![
+                ReductionSiteId("site.consistency.first".to_owned()),
+                ReductionSiteId("site.consistency.second".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn static_budget_validation_failure_preserves_non_empty_reduction_site_facts() {
+        let budget = runtime_budget_fixture();
+        let projection = reduction_site_projection("site.validation_failure.preserved", Some(5));
+        let mut view = budget_view_fixture(4, 4, 0);
+        view.semantic_core_hash = hash(0xee);
+        view.reduction_sites = vec![projection.clone()];
+        let quant_graph = TrackingQuantGraph::new(view);
+
+        let report = run_budget_with(Some(&budget), &quant_graph);
+
+        assert_eq!(report.report.outcome, ReportOutcome::Failed);
+        assert_eq!(report.reduction_site_facts, vec![projection]);
+        assert!(report.report.body.projections.accumulator_maxima.is_empty());
+        assert_eq!(
+            report.report.body.decision.failures,
+            vec![BudgetFailure::QuantGraphBudgetViewMalformed {
+                field: FieldPath::from("quant_graph.semantic_core_hash")
+            }]
+        );
+        assert_eq!(
+            report.report.body.diagnostics[0].code,
+            ValidationCode::BudgetQuantGraphViewMalformed {
+                field: FieldPath::from("quant_graph.semantic_core_hash")
+            }
+        );
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    struct CapturedEvent {
+        message: Option<String>,
+        site_count: Option<u64>,
+        outcome: Option<String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = EventVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("capture lock is not poisoned")
+                .push(visitor.event);
+        }
+    }
+
+    #[derive(Default)]
+    struct EventVisitor {
+        event: CapturedEvent,
+    }
+
+    impl Visit for EventVisitor {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            if field.name() == "site_count" {
+                self.event.site_count = Some(value);
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "outcome" => self.event.outcome = Some(format!("{value:?}")),
+                "message" => {
+                    self.event.message = Some(format!("{value:?}").trim_matches('"').to_owned())
+                }
+                _ => {}
+            }
+        }
+    }
+
+    static STATIC_BUDGET_EVENT_CAPTURE: OnceLock<Arc<Mutex<Vec<CapturedEvent>>>> = OnceLock::new();
+
+    fn static_budget_event_capture() -> Arc<Mutex<Vec<CapturedEvent>>> {
+        Arc::clone(STATIC_BUDGET_EVENT_CAPTURE.get_or_init(|| {
+            let capture = CaptureLayer::default();
+            let events = Arc::clone(&capture.events);
+            let subscriber = tracing_subscriber::registry().with(capture);
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("static budget event capture subscriber installs once");
+            tracing::callsite::rebuild_interest_cache();
+            events
+        }))
+    }
+
+    #[test]
+    fn static_budget_reduction_site_facts_bound_event_is_captured_by_subscriber() {
+        let events = static_budget_event_capture();
+        let projection = reduction_site_projection("site.telemetry.bound", Some(1));
+
+        tracing::callsite::rebuild_interest_cache();
+        events.lock().expect("capture lock is not poisoned").clear();
+
+        let report = run_budget_with_reduction_sites(vec![projection]);
+        assert_eq!(report.report.outcome, ReportOutcome::Passed);
+
+        let events = events.lock().expect("capture lock is not poisoned");
+        assert!(events.iter().any(|event| {
+            event.message.as_deref() == Some("stage2.static_budget.reduction_site_facts.bound")
+                && event.site_count == Some(1)
+                && event.outcome.as_deref() == Some("Passed")
+        }));
     }
 
     #[test]
