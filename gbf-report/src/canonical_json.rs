@@ -1,11 +1,13 @@
 //! Shared F-B2/F-B4 report envelope, canonical JSON, and self-hash helpers.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::marker::PhantomData;
 use std::str::FromStr;
 
 use gbf_foundation::{Hash256, SemVer, SemVerParseError};
 pub use gbf_policy::diagnostics::{DiagnosticSeverity, ValidationDiagnostic};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, MapAccess, Visitor};
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
     SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
@@ -31,6 +33,11 @@ const INFER_IR_SCHEMA: &str = "infer_ir.v1";
 const POLICY_RESOLUTION_SCHEMA: &str = "policy_resolution.v1";
 const QUANT_GRAPH_SCHEMA: &str = "quant_graph.v1";
 const STATIC_BUDGET_SCHEMA: &str = "static_budget.v1";
+const BUILD_ACTIVE_SEMANTIC_CHECKPOINT_SCHEMA: &str = "build_active_semantic_checkpoint_schema.v1";
+const OBSERVATION_PLAN_SCHEMA: &str = "observation_plan.v1";
+const OPERATIONAL_PROBE_SCHEMA: &str = "operational_probe_schema.v1";
+const RANGE_CERT_SCHEMA: &str = "range.cert.v1";
+const RANGE_PLAN_SCHEMA: &str = "range_plan.v1";
 
 /// Report schema identifier carried by every F-B2/F-B4 report envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -111,7 +118,16 @@ where
     /// Return this envelope with `report_self_hash` recomputed.
     pub fn with_computed_self_hash(mut self) -> Result<Self, ReportSelfHashError> {
         self.report_self_hash = Hash256::ZERO;
-        self.report_self_hash = compute_self_hash(&self)?;
+        let report_self_hash = compute_self_hash(&self)?;
+        let body_hash = domain_hash(R::REPORT_TYPE, R::SCHEMA_ID, &self.body)?;
+        self.report_self_hash = report_self_hash;
+        tracing::info!(
+            event = "gbf_report.report.envelope_constructed",
+            schema = %self.schema,
+            outcome = ?self.outcome,
+            body_hash = %body_hash,
+            "gbf_report.report.envelope_constructed"
+        );
         Ok(self)
     }
 }
@@ -171,6 +187,244 @@ pub fn canonicalize_value(value: &Value) -> Result<Vec<u8>, CanonicalJsonError> 
     let mut bytes = Vec::new();
     emit_canonical_json(value, &mut bytes)?;
     Ok(bytes)
+}
+
+/// Compute a report-schema domain hash over canonical JSON for an embedded
+/// product/body value.
+pub fn domain_hash<T>(
+    type_name: &str,
+    schema_id: &str,
+    value: &T,
+) -> Result<Hash256, CanonicalJsonError>
+where
+    T: Serialize + ?Sized,
+{
+    let value = to_json_value_rejecting_non_finite(value)?;
+    let mut canonical = Vec::new();
+    emit_canonical_json(&value, &mut canonical)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(format!("gbf:gbf-report:{type_name}:{schema_id}\0"));
+    hasher.update(&canonical);
+    Ok(Hash256::from_bytes(hasher.finalize().into()))
+}
+
+/// Serde adapter and wrapper for RFC §4 complex-key maps.
+///
+/// JSON object keys remain reserved for native string-key maps. Use
+/// `#[serde(with = "gbf_report::canonical_map")]` on `BTreeMap<K, V>` fields
+/// whose key serializes as a structured JSON value.
+pub mod canonical_map {
+    use super::*;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CanonicalMap<K, V>(pub BTreeMap<K, V>);
+
+    impl<K, V> CanonicalMap<K, V> {
+        #[must_use]
+        pub fn into_inner(self) -> BTreeMap<K, V> {
+            self.0
+        }
+    }
+
+    impl<K, V> From<BTreeMap<K, V>> for CanonicalMap<K, V> {
+        fn from(value: BTreeMap<K, V>) -> Self {
+            Self(value)
+        }
+    }
+
+    impl<K, V> From<CanonicalMap<K, V>> for BTreeMap<K, V> {
+        fn from(value: CanonicalMap<K, V>) -> Self {
+            value.0
+        }
+    }
+
+    impl<K, V> Serialize for CanonicalMap<K, V>
+    where
+        K: Ord + Serialize,
+        V: Serialize,
+    {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serialize(&self.0, serializer)
+        }
+    }
+
+    impl<'de, K, V> Deserialize<'de> for CanonicalMap<K, V>
+    where
+        K: Ord + Serialize + Deserialize<'de>,
+        V: Deserialize<'de>,
+    {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserialize(deserializer).map(Self)
+        }
+    }
+
+    pub fn serialize<K, V, S>(map: &BTreeMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: Ord + Serialize,
+        V: Serialize,
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct EntryRef<'a, K, V> {
+            key: &'a K,
+            value: &'a V,
+        }
+
+        let mut entries = map
+            .iter()
+            .map(|(key, value)| {
+                canonical_key_bytes(key)
+                    .map(|bytes| (bytes, EntryRef { key, value }))
+                    .map_err(serde::ser::Error::custom)
+            })
+            .collect::<Result<Vec<_>, S::Error>>()?;
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(serde::ser::Error::custom(
+                "duplicate CanonicalMap key after canonicalization",
+            ));
+        }
+
+        tracing::debug!(
+            event = "gbf_report.canonical_json.sorted_list_emitted",
+            key_type = std::any::type_name::<K>(),
+            entry_count = entries.len(),
+            "gbf_report.canonical_json.sorted_list_emitted"
+        );
+
+        entries
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: Ord + Serialize + Deserialize<'de>,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Entry<K, V> {
+            key: K,
+            value: V,
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut map = BTreeMap::new();
+        for Entry { key, value } in Vec::<Entry<K, V>>::deserialize(deserializer)? {
+            let bytes = canonical_key_bytes(&key).map_err(D::Error::custom)?;
+            if !seen.insert(bytes) {
+                return Err(D::Error::custom(
+                    "duplicate CanonicalMap key after canonicalization",
+                ));
+            }
+            if map.insert(key, value).is_some() {
+                return Err(D::Error::custom("duplicate CanonicalMap key"));
+            }
+        }
+        Ok(map)
+    }
+
+    fn canonical_key_bytes<K>(key: &K) -> Result<Vec<u8>, CanonicalJsonError>
+    where
+        K: Serialize + ?Sized,
+    {
+        let value = to_json_value_rejecting_non_finite(key)?;
+        canonicalize_value(&value)
+    }
+}
+
+/// Serde adapter for maps keyed by transparent string newtypes.
+///
+/// These maps intentionally use native JSON object encoding. The adapter keeps
+/// duplicate JSON member names from silently overwriting earlier entries during
+/// deserialization and rejects key types whose serialized map key is not a
+/// string.
+pub mod string_key_map {
+    use super::*;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<K, V, S>(map: &BTreeMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: Ord + Serialize,
+        V: Serialize,
+        S: Serializer,
+    {
+        let mut seen = BTreeSet::new();
+        let mut out = serializer.serialize_map(Some(map.len()))?;
+        for (key, value) in map {
+            let key = key
+                .serialize(StringKeySerializer)
+                .map_err(serde::ser::Error::custom)?;
+            if !seen.insert(key.clone()) {
+                return Err(serde::ser::Error::custom(
+                    "duplicate string-key map key after serialization",
+                ));
+            }
+            out.serialize_entry(&key, value)?;
+        }
+        out.end()
+    }
+
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: Ord + Deserialize<'de>,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(StringKeyMapVisitor::<K, V>(PhantomData))
+    }
+
+    struct StringKeyMapVisitor<K, V>(PhantomData<(K, V)>);
+
+    impl<'de, K, V> Visitor<'de> for StringKeyMapVisitor<K, V>
+    where
+        K: Ord + Deserialize<'de>,
+        V: Deserialize<'de>,
+    {
+        type Value = BTreeMap<K, V>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a JSON object keyed by transparent string newtypes")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut seen = BTreeSet::new();
+            let mut map = BTreeMap::new();
+            while let Some((raw_key, value)) = access.next_entry::<String, V>()? {
+                if !seen.insert(raw_key.clone()) {
+                    return Err(A::Error::custom(
+                        "duplicate string-key map key in JSON object",
+                    ));
+                }
+                let key = K::deserialize(serde::de::value::StringDeserializer::<A::Error>::new(
+                    raw_key,
+                ))?;
+                if map.insert(key, value).is_some() {
+                    return Err(A::Error::custom(
+                        "duplicate string-key map key after deserialization",
+                    ));
+                }
+            }
+            Ok(map)
+        }
+    }
 }
 
 /// Compute the domain-separated self-hash for `env`.
@@ -1309,6 +1563,7 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
                 || path.ends_with(".max_rom_bytes")
                 || path.ends_with(".fallback_profile")
                 || path.ends_with(".fallback_runtime_mode")
+                || path == "result.resolved.observation_caps.required_max"
                 || path.contains(".constraint_overrides.")
                 || path.contains(".overrides.")
         }
@@ -1328,6 +1583,15 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
                     | "projections.common_bank_footprint.shared_dense_ffn_bytes"
             ) || is_projected_switches_expected_path(path)
         }
+        BUILD_ACTIVE_SEMANTIC_CHECKPOINT_SCHEMA => {
+            path == "result" || path == "input_identity.observation_plan_self_hash"
+        }
+        OBSERVATION_PLAN_SCHEMA => path == "result",
+        OPERATIONAL_PROBE_SCHEMA => {
+            path == "result" || path == "input_identity.observation_plan_self_hash"
+        }
+        RANGE_PLAN_SCHEMA => path == "result",
+        RANGE_CERT_SCHEMA => path == "identity.range_plan_self_hash",
         _ => false,
     }
 }
@@ -1385,6 +1649,7 @@ fn emit_canonical_json(value: &Value, bytes: &mut Vec<u8>) -> Result<(), Canonic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gbf_abi::SemanticCheckpointId;
     use gbf_policy::diagnostics::{ValidationCode, ValidationDetail, ValidationOrigin};
 
     fn hash(byte: u8) -> Hash256 {
@@ -2145,6 +2410,51 @@ mod tests {
         let error = serde_json::from_str::<ReportEnvelope<ByteStableBody>>(json)
             .expect_err("unprefixed hash must reject");
         assert!(error.to_string().contains("report_self_hash"), "{error}");
+    }
+
+    #[test]
+    fn canonical_map_duplicate_key_after_canonicalization_rejected() {
+        let json = concat!(
+            "[",
+            "{\"key\":\"layer.0.post_embedding\",\"value\":1},",
+            "{\"key\":\"layer.0.post_embedding\",\"value\":2}",
+            "]"
+        );
+
+        let error =
+            serde_json::from_str::<canonical_map::CanonicalMap<SemanticCheckpointId, u32>>(json)
+                .expect_err("duplicate canonical key must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate CanonicalMap key after canonicalization"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn canonical_map_serialization_rejects_colliding_canonical_keys() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        struct CollidingKey(u8);
+
+        impl Serialize for CollidingKey {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str("same-key")
+            }
+        }
+
+        let map = BTreeMap::from([(CollidingKey(1), 1_u32), (CollidingKey(2), 2_u32)]);
+        let error = serde_json::to_value(canonical_map::CanonicalMap::from(map))
+            .expect_err("duplicate canonical key must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate CanonicalMap key after canonicalization"),
+            "{error}"
+        );
     }
 
     fn assert_unknown_body_field_rejected<R>(schema: &str, body_json: &str)

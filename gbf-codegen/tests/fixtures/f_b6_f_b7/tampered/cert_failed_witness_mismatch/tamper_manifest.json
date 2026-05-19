@@ -1,0 +1,6 @@
+{
+  "expected_event": "range_cert.independent_verify.failed.witness_mismatch",
+  "fixture": "cert_failed_witness_mismatch",
+  "materialization": "generated_by_run_cert_verify",
+  "tamper": "convert the first proof to failed evidence with a mismatched witness"
+}

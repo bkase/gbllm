@@ -2351,6 +2351,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tracing",
+ "tracing-core",
  "tracing-subscriber",
 ]
 
@@ -2541,12 +2542,15 @@ dependencies = [
 name = "gbf-policy"
 version = "0.1.0"
 dependencies = [
+ "gbf-abi",
  "gbf-foundation",
  "gbf-hw",
  "serde",
  "serde_json",
  "sha2",
  "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2642,8 +2646,12 @@ dependencies = [
  "gbf-abi",
  "gbf-artifact",
  "gbf-foundation",
+ "gbf-policy",
+ "gbf-report",
  "serde",
  "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

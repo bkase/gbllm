@@ -9,5 +9,11 @@ publish = false
 gbf-abi = { path = "../gbf-abi" }
 gbf-artifact = { path = "../gbf-artifact" }
 gbf-foundation = { path = "../gbf-foundation" }
+gbf-policy = { path = "../gbf-policy" }
+gbf-report = { path = "../gbf-report" }
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

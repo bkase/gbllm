@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-METRIC-HISTOGRAM-BUCKET-COUNT-ZERO","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::metric_aggregation_histogram_bucket_count_zero_rejected producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

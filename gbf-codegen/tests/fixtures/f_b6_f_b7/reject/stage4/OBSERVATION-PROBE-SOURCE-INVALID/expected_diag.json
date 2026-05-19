@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-PROBE-SOURCE-INVALID","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::probe_instance_id_collision_rejected_at_canonical_sort producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

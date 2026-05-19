@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-ENCODING-INVALID-FOR-CHECKPOINT","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::encoding_for_invalid_override_fails_without_panicking producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

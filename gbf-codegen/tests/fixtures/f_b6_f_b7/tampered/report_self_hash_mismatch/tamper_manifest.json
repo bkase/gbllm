@@ -1,0 +1,6 @@
+{
+  "expected_event": "range_cert.independent_verify.failed.report_self_hash_mismatch",
+  "fixture": "report_self_hash_mismatch",
+  "materialization": "generated_by_run_cert_verify",
+  "tamper": "replace report_self_hash without recomputing"
+}

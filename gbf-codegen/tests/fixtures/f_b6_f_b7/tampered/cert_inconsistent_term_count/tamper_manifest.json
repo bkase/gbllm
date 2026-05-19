@@ -1,0 +1,6 @@
+{
+  "expected_event": "range_cert.independent_verify.certified_reduction.chunked_i16",
+  "fixture": "cert_inconsistent_term_count",
+  "materialization": "generated_by_run_cert_verify",
+  "tamper": "increment facts.term_count and recompute report_self_hash"
+}

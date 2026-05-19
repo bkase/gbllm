@@ -1,0 +1,1 @@
+Placeholder reject fixture for OBSERVATION-METRIC-HISTOGRAM-BUCKET-COUNT-ZERO.

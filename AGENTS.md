@@ -72,6 +72,18 @@ There is no escape hatch. If tests fail, fix them.
 - For structured logging beads, also use `.agents/skills/logging-bead-closure/SKILL.md`.
 - For F-A8 (`gbf-debug`) usage — driving the CLI, writing scripts, reading envelopes — use `.agents/skills/gbf-debug-usage/SKILL.md`.
 
+### F-B6 Probe Vocabulary
+
+`gbf-abi::trace::ProbeBudgetClass` is the runtime trace budget-window class
+(`PerSlice`, `PerFrame`, `PerSession`). `gbf-policy::probe::ProbeImportanceClass`
+is the build-time Stage 4 governance class (`Required`, `Important`,
+`Diagnostic`, `BestEffort`). They are orthogonal axes; an `OperationalProbe`
+carries both a runtime level/window and a policy importance.
+
+F-B6/F-B7 closure substrate lives under `scripts/review/f-b6-f-b7/`; use
+`verify-packet.sh` as the top-level packet/checklist entry and the matching
+fixtures under `gbf-codegen/tests/fixtures/f_b6_f_b7/`.
+
 ### Reviewer Personas (Per-Bead Review)
 
 Every completed bead is reviewed by automated reviewer personas before close.

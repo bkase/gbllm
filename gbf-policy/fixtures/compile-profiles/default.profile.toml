@@ -1,11 +1,23 @@
 id = "Default"
-defaults_hash = "sha256:79037ff3533cf7db007fa589e495099b412ebbe5af49dbab6c0b4d3db9992a47"
+schema_version = "2.0.0"
+defaults_hash = "sha256:83ff76c0c5523bcc8ec1c3a5175d3f7a77884b930269095fd9551d9a2ec7fc1a"
 observability = { kind = "Flexible" }
 
 [trace_budget]
 max_events_per_slice = 256
 max_bytes_per_frame = 4096
 drop_policy = { kind = "DropOldest" }
+
+[range_caps]
+profile_chunk_max = 256
+profile_tile_max = 256
+profile_tile_min = 16
+renorm_strategy = { kind = "DynamicMargin", margin_q16_16 = 16384 }
+
+[observation_caps]
+important_max = 256
+diagnostic_max = 128
+best_effort_max = 64
 
 [repair_policy]
 max_refinement_iters = 4

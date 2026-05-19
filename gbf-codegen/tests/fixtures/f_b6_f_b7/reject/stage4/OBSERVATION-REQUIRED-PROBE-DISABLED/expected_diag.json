@@ -1,0 +1,1 @@
+{"code":"OBSERVATION-REQUIRED-PROBE-DISABLED","origin":"ObservationPlanConstruction","producer_evidence":"gbf-codegen::s4::observation_plan::disabled_required_probe_rejected producer test asserts this OBSERVATION code and ObservationPlanConstruction origin","reserved":false,"severity":"Hard","stage":"stage4"}

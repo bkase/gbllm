@@ -1,14 +1,18 @@
 //! Compile-request and resolved-policy schema.
 
 use std::collections::BTreeSet;
+use std::error::Error;
+use std::fmt;
 
 use gbf_foundation::{BlobRef, CompileProfileId, Hash256, TargetProfileId};
 use gbf_hw::calibration::CalibrationSetRef;
 use gbf_hw::target::TargetProfile;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::budget::RuntimeChromeBudget;
+use crate::canonical::domain_hash;
 use crate::objective::{CompileObjective, RiskPolicy};
 use crate::repair::{RepairPolicy, RepairProposalId};
 
@@ -34,7 +38,17 @@ pub const RECOVERY_COMPILE_PROFILE_TOML: &str =
 /// spec with `defaults_hash` zeroed. The NUL suffix prevents accidental
 /// concatenation ambiguity with the first JSON byte.
 pub const COMPILE_PROFILE_DEFAULTS_HASH_DOMAIN: &[u8] =
-    b"gbf:gbf-policy:CompileProfileSpec:compile_profile_spec:1.0.0\0";
+    b"gbf:gbf-policy:CompileProfileSpec:compile_profile_spec:2.0.0\0";
+
+pub const COMPILE_PROFILE_SPEC_VERSION: &str = "2.0.0";
+pub const COMPILE_PROFILE_SPEC_UNSUPPORTED_SCHEMA_CODE: &str =
+    "POLICY-PROFILE-SCHEMA-VERSION-UNSUPPORTED";
+pub const PROFILE_SPEC_V2_LOADED_EVENT: &str = "gbf_policy.profile_spec.v2_loaded";
+pub const PROFILE_SPEC_V1_REJECTED_EVENT: &str = "gbf_policy.profile_spec.v1_rejected";
+pub const PROFILE_SPEC_V2_INVARIANT_FAILURE_EVENT: &str =
+    "gbf_policy.profile_spec.v2_invariant_failure";
+
+const PROFILE_SPEC_INLINE_FIXTURE_PATH: &str = "inline";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -81,6 +95,8 @@ pub struct ResolvedCompilePolicy {
     pub effective_constraints: EffectiveConstraints,
     pub observability: ObservabilityMode,
     pub trace_budget: TraceBudget,
+    pub range_caps: RangeCapsSpec,
+    pub observation_caps: ObservationProfileCaps,
     pub requested_runtime_modes: BTreeSet<RuntimeMode>,
     pub knobs: CompileKnobs,
     pub repair: RepairPolicy,
@@ -90,15 +106,137 @@ pub struct ResolvedCompilePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompileProfileSpec {
+    pub schema_version: String,
     pub id: CompileProfileId,
     pub defaults_hash: Hash256,
     pub observability: ObservabilityMode,
     pub trace_budget: TraceBudget,
+    pub range_caps: RangeCapsSpec,
+    pub observation_caps: ObservationProfileCaps,
     pub repair_policy: RepairPolicy,
     pub risk_policy: RiskPolicy,
     pub knob_defaults: CompileKnobPartialValues,
     pub knob_bounds: CompileKnobPartialBounds,
     pub locks: KnobLockSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum RenormStrategyPolicy {
+    ExactPostBoundaryOnly,
+    DynamicMargin { margin_q16_16: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeCapsSpec {
+    pub profile_chunk_max: u16,
+    pub profile_tile_max: u16,
+    pub profile_tile_min: u16,
+    pub renorm_strategy: RenormStrategyPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationProfileCaps {
+    pub required_max: Option<u16>,
+    pub important_max: u16,
+    pub diagnostic_max: u16,
+    pub best_effort_max: u16,
+}
+
+impl ObservationProfileCaps {
+    #[must_use]
+    pub const fn default_v2() -> Self {
+        Self {
+            required_max: None,
+            important_max: 256,
+            diagnostic_max: 256,
+            best_effort_max: 256,
+        }
+    }
+}
+
+impl RangeCapsSpec {
+    #[must_use]
+    pub const fn default_v2() -> Self {
+        Self {
+            profile_chunk_max: 256,
+            profile_tile_max: 256,
+            profile_tile_min: 16,
+            renorm_strategy: RenormStrategyPolicy::ExactPostBoundaryOnly,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum CompileProfileSpecLoadError {
+    Toml(toml::de::Error),
+    UnsupportedSchemaVersion {
+        code: &'static str,
+        actual: String,
+        expected: &'static str,
+    },
+    MissingRequiredField {
+        field: &'static str,
+    },
+    InvalidInvariant {
+        invariant: &'static str,
+        field: &'static str,
+        value: String,
+    },
+}
+
+impl CompileProfileSpecLoadError {
+    #[must_use]
+    pub const fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::UnsupportedSchemaVersion { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CompileProfileSpecLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Toml(err) => write!(f, "{err}"),
+            Self::UnsupportedSchemaVersion {
+                code,
+                actual,
+                expected,
+            } => write!(
+                f,
+                "{code}: compile profile schema version {actual} is unsupported; expected {expected}"
+            ),
+            Self::MissingRequiredField { field } => {
+                write!(f, "compile profile missing required field {field}")
+            }
+            Self::InvalidInvariant {
+                invariant,
+                field,
+                value,
+            } => write!(
+                f,
+                "compile profile invariant {invariant} failed for {field}={value}"
+            ),
+        }
+    }
+}
+
+impl Error for CompileProfileSpecLoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Toml(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<toml::de::Error> for CompileProfileSpecLoadError {
+    fn from(err: toml::de::Error) -> Self {
+        Self::Toml(err)
+    }
 }
 
 pub fn compile_profile_defaults_hash(
@@ -160,17 +298,207 @@ fn write_canonical_json_value(
     Ok(())
 }
 
-pub fn load_compile_profile_spec(toml_source: &str) -> Result<CompileProfileSpec, toml::de::Error> {
-    toml::from_str(toml_source)
+pub fn load_compile_profile_spec(
+    toml_source: &str,
+) -> Result<CompileProfileSpec, CompileProfileSpecLoadError> {
+    let value = toml::from_str::<toml::Value>(toml_source)?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| toml::de::Error::custom("compile profile root must be a TOML table"))?;
+    let has_range_caps = table.contains_key("range_caps");
+    let has_observation_caps = table.contains_key("observation_caps");
+    match table.get("schema_version") {
+        Some(actual) => {
+            let actual = schema_version_literal(actual);
+            if actual != COMPILE_PROFILE_SPEC_VERSION {
+                return Err(unsupported_schema_version_error(
+                    actual,
+                    "unsupported_schema_version",
+                ));
+            }
+        }
+        None if !has_range_caps && !has_observation_caps => {
+            return Err(unsupported_schema_version_error(
+                "1.0.0",
+                "legacy_v1_missing_schema_version_and_caps",
+            ));
+        }
+        None => {
+            return Err(CompileProfileSpecLoadError::MissingRequiredField {
+                field: "schema_version",
+            });
+        }
+    }
+    if !has_range_caps {
+        return Err(CompileProfileSpecLoadError::MissingRequiredField {
+            field: "range_caps",
+        });
+    }
+    if !has_observation_caps {
+        return Err(CompileProfileSpecLoadError::MissingRequiredField {
+            field: "observation_caps",
+        });
+    }
+
+    let spec: CompileProfileSpec = value.try_into()?;
+    validate_compile_profile_spec_v2(&spec)?;
+    emit_profile_spec_v2_loaded(&spec);
+    Ok(spec)
 }
 
-pub fn canonical_compile_profile_specs() -> Result<[CompileProfileSpec; 4], toml::de::Error> {
+pub fn canonical_compile_profile_specs()
+-> Result<[CompileProfileSpec; 4], CompileProfileSpecLoadError> {
     Ok([
         load_compile_profile_spec(BRINGUP_COMPILE_PROFILE_TOML)?,
         load_compile_profile_spec(DEFAULT_COMPILE_PROFILE_TOML)?,
         load_compile_profile_spec(TRACE_COMPILE_PROFILE_TOML)?,
         load_compile_profile_spec(RECOVERY_COMPILE_PROFILE_TOML)?,
     ])
+}
+
+fn validate_compile_profile_spec_v2(
+    spec: &CompileProfileSpec,
+) -> Result<(), CompileProfileSpecLoadError> {
+    if spec.range_caps.profile_chunk_max == 0 {
+        emit_profile_spec_v2_invariant_failure(
+            spec,
+            "profile_chunk_max > 0",
+            "range_caps.profile_chunk_max",
+            &spec.range_caps.profile_chunk_max.to_string(),
+        );
+        return Err(CompileProfileSpecLoadError::InvalidInvariant {
+            invariant: "profile_chunk_max > 0",
+            field: "range_caps.profile_chunk_max",
+            value: spec.range_caps.profile_chunk_max.to_string(),
+        });
+    }
+    if spec.range_caps.profile_tile_max == 0 {
+        emit_profile_spec_v2_invariant_failure(
+            spec,
+            "profile_tile_max > 0",
+            "range_caps.profile_tile_max",
+            &spec.range_caps.profile_tile_max.to_string(),
+        );
+        return Err(CompileProfileSpecLoadError::InvalidInvariant {
+            invariant: "profile_tile_max > 0",
+            field: "range_caps.profile_tile_max",
+            value: spec.range_caps.profile_tile_max.to_string(),
+        });
+    }
+    if spec.range_caps.profile_tile_min == 0 {
+        emit_profile_spec_v2_invariant_failure(
+            spec,
+            "profile_tile_min > 0",
+            "range_caps.profile_tile_min",
+            &spec.range_caps.profile_tile_min.to_string(),
+        );
+        return Err(CompileProfileSpecLoadError::InvalidInvariant {
+            invariant: "profile_tile_min > 0",
+            field: "range_caps.profile_tile_min",
+            value: spec.range_caps.profile_tile_min.to_string(),
+        });
+    }
+    if spec.range_caps.profile_tile_min > spec.range_caps.profile_tile_max {
+        emit_profile_spec_v2_invariant_failure(
+            spec,
+            "profile_tile_min <= profile_tile_max",
+            "range_caps.profile_tile_min",
+            &spec.range_caps.profile_tile_min.to_string(),
+        );
+        return Err(CompileProfileSpecLoadError::InvalidInvariant {
+            invariant: "profile_tile_min <= profile_tile_max",
+            field: "range_caps.profile_tile_min",
+            value: spec.range_caps.profile_tile_min.to_string(),
+        });
+    }
+    if let RenormStrategyPolicy::DynamicMargin { margin_q16_16 } = spec.range_caps.renorm_strategy
+        && margin_q16_16 >= 0x1_0000
+    {
+        emit_profile_spec_v2_invariant_failure(
+            spec,
+            "DynamicMargin.margin_q16_16 < 0x1_0000",
+            "range_caps.renorm_strategy.margin_q16_16",
+            &margin_q16_16.to_string(),
+        );
+        return Err(CompileProfileSpecLoadError::InvalidInvariant {
+            invariant: "DynamicMargin.margin_q16_16 < 0x1_0000",
+            field: "range_caps.renorm_strategy.margin_q16_16",
+            value: margin_q16_16.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn schema_version_literal(value: &toml::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn unsupported_schema_version_error(
+    actual: impl Into<String>,
+    reason: &'static str,
+) -> CompileProfileSpecLoadError {
+    let actual = actual.into();
+    if actual == "1.0.0" {
+        emit_profile_spec_v1_rejected(&actual, reason);
+    }
+    CompileProfileSpecLoadError::UnsupportedSchemaVersion {
+        code: COMPILE_PROFILE_SPEC_UNSUPPORTED_SCHEMA_CODE,
+        actual,
+        expected: COMPILE_PROFILE_SPEC_VERSION,
+    }
+}
+
+fn compile_profile_component_hash<T: Serialize>(
+    type_name: &'static str,
+    value: &T,
+) -> Result<Hash256, serde_json::Error> {
+    domain_hash("gbf-policy", type_name, COMPILE_PROFILE_SPEC_VERSION, value)
+}
+
+fn emit_profile_spec_v2_loaded(spec: &CompileProfileSpec) {
+    let range_caps_hash = compile_profile_component_hash("RangeCapsSpec", &spec.range_caps)
+        .expect("range caps telemetry hash serializes")
+        .to_hex();
+    let observation_caps_hash =
+        compile_profile_component_hash("ObservationProfileCaps", &spec.observation_caps)
+            .expect("observation caps telemetry hash serializes")
+            .to_hex();
+
+    tracing::info!(
+        event = PROFILE_SPEC_V2_LOADED_EVENT,
+        profile_id = spec.id.as_str(),
+        schema_version = spec.schema_version.as_str(),
+        range_caps_hash = range_caps_hash.as_str(),
+        observation_caps_hash = observation_caps_hash.as_str(),
+    );
+}
+
+fn emit_profile_spec_v1_rejected(actual_version: &str, reason: &'static str) {
+    tracing::info!(
+        event = PROFILE_SPEC_V1_REJECTED_EVENT,
+        actual_version,
+        fixture_path = PROFILE_SPEC_INLINE_FIXTURE_PATH,
+        reason,
+    );
+}
+
+fn emit_profile_spec_v2_invariant_failure(
+    spec: &CompileProfileSpec,
+    invariant: &'static str,
+    field: &'static str,
+    value: &str,
+) {
+    tracing::info!(
+        event = PROFILE_SPEC_V2_INVARIANT_FAILURE_EVENT,
+        profile_id = spec.id.as_str(),
+        schema_version = spec.schema_version.as_str(),
+        invariant,
+        field,
+        value,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +649,7 @@ pub struct PolicyProvenance {
     /// Source-schema hashes for inputs that always participate in policy resolution.
     pub target_defaults: Hash256,
     pub profile_defaults: Hash256,
+    pub compile_profile_spec_version: String,
     /// Optional because a source `ResolvedCompilePolicy` may be built before a
     /// hint bundle or calibration layer exists. Report sections that embed a
     /// consumed hint/calibration hash can require those fields after validation.
@@ -762,10 +1091,16 @@ pub const fn canonical_default_bounds_fixture() -> CompileKnobBounds {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex, OnceLock};
+
     use super::*;
     use crate::objective::{CompileObjective, RiskPolicy, ServiceLevelObjective};
     use crate::repair::RepairPolicyProfile;
     use crate::risk::{CalibrationConfidenceClass, CalibrationConfidenceRequirement};
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::prelude::*;
 
     fn objective_fixture() -> CompileObjective {
         CompileObjective {
@@ -904,12 +1239,15 @@ mod tests {
                 max_bytes_per_frame: 128,
                 drop_policy: TraceDropPolicy::HaltAndFault,
             },
+            range_caps: RangeCapsSpec::default_v2(),
+            observation_caps: ObservationProfileCaps::default_v2(),
             requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
             knobs: compile_knobs_fixture(),
             repair: RepairPolicy::for_profile(RepairPolicyProfile::Bringup),
             provenance: PolicyProvenance {
                 target_defaults: Hash256::from_bytes([1; 32]),
                 profile_defaults: Hash256::from_bytes([2; 32]),
+                compile_profile_spec_version: COMPILE_PROFILE_SPEC_VERSION.to_owned(),
                 hint_bundle_hash: Some(Hash256::from_bytes([3; 32])),
                 compile_request_hash: Hash256::from_bytes([4; 32]),
                 calibration_hash: Some(Hash256::from_bytes([5; 32])),
@@ -1098,6 +1436,7 @@ mod tests {
         serde_json::json!({
             "target_defaults": hash_json(1),
             "profile_defaults": hash_json(2),
+            "compile_profile_spec_version": "2.0.0",
             "hint_bundle_hash": hash_json(3),
             "compile_request_hash": hash_json(4),
             "calibration_hash": hash_json(5)
@@ -1120,6 +1459,18 @@ mod tests {
                 "max_events_per_slice": 4,
                 "max_bytes_per_frame": 128,
                 "drop_policy": {"kind": "HaltAndFault"}
+            },
+            "range_caps": {
+                "profile_chunk_max": 256,
+                "profile_tile_max": 256,
+                "profile_tile_min": 16,
+                "renorm_strategy": {"kind": "ExactPostBoundaryOnly"}
+            },
+            "observation_caps": {
+                "required_max": null,
+                "important_max": 256,
+                "diagnostic_max": 256,
+                "best_effort_max": 256
             },
             "requested_runtime_modes": [{"kind": "Interactive"}],
             "knobs": knobs_json(),
@@ -1194,6 +1545,7 @@ mod tests {
     #[test]
     fn compile_profile_spec_includes_risk_policy_field() {
         let spec = CompileProfileSpec {
+            schema_version: COMPILE_PROFILE_SPEC_VERSION.to_owned(),
             id: CompileProfileId::from("Default"),
             defaults_hash: Hash256::from_bytes([9; 32]),
             observability: ObservabilityMode::Invariant,
@@ -1202,6 +1554,8 @@ mod tests {
                 max_bytes_per_frame: 32,
                 drop_policy: TraceDropPolicy::DropOldest,
             },
+            range_caps: RangeCapsSpec::default_v2(),
+            observation_caps: ObservationProfileCaps::default_v2(),
             repair_policy: RepairPolicy::for_profile(RepairPolicyProfile::Default),
             risk_policy: objective_fixture().risk,
             knob_defaults: CompileKnobPartialValues::default(),
@@ -1218,6 +1572,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
+                "schema_version": "2.0.0",
                 "id": "Default",
                 "defaults_hash": hash_json(9),
                 "observability": {"kind": "Invariant"},
@@ -1225,6 +1580,18 @@ mod tests {
                     "max_events_per_slice": 1,
                     "max_bytes_per_frame": 32,
                     "drop_policy": {"kind": "DropOldest"}
+                },
+                "range_caps": {
+                    "profile_chunk_max": 256,
+                    "profile_tile_max": 256,
+                    "profile_tile_min": 16,
+                    "renorm_strategy": {"kind": "ExactPostBoundaryOnly"}
+                },
+                "observation_caps": {
+                    "required_max": null,
+                    "important_max": 256,
+                    "diagnostic_max": 256,
+                    "best_effort_max": 256
                 },
                 "repair_policy": {
                     "max_refinement_iters": 4,
@@ -1279,14 +1646,16 @@ mod tests {
             (TRACE_COMPILE_PROFILE_TOML, &specs[2]),
             (RECOVERY_COMPILE_PROFILE_TOML, &specs[3]),
         ] {
+            assert_eq!(spec.schema_version, COMPILE_PROFILE_SPEC_VERSION);
             assert!(
                 !source.contains("relaxations"),
                 "profile fixture must not expose profile-time relaxations"
             );
             assert_eq!(
-                toml::from_str::<CompileProfileSpec>(source).expect("profile reparses"),
+                load_compile_profile_spec(source).expect("profile reparses"),
                 *spec
             );
+            assert_eq!(spec.observation_caps.required_max, None);
             assert!(
                 spec.knob_defaults.placement.is_some()
                     && spec.knob_defaults.observation.is_some()
@@ -1322,6 +1691,20 @@ mod tests {
             specs[0].risk_policy.calibration_confidence_requirement,
             CalibrationConfidenceRequirement::NoMinimumConfidence
         );
+        assert_eq!(
+            specs[0].range_caps.renorm_strategy,
+            RenormStrategyPolicy::ExactPostBoundaryOnly
+        );
+        assert_eq!(specs[0].observation_caps.important_max, 32);
+        assert_eq!(
+            specs[1].range_caps.renorm_strategy,
+            RenormStrategyPolicy::DynamicMargin {
+                margin_q16_16: 0x4000
+            }
+        );
+        assert_eq!(specs[1].observation_caps.best_effort_max, 64);
+        assert_eq!(specs[2].observation_caps.diagnostic_max, 1024);
+        assert_eq!(specs[3].observation_caps.best_effort_max, 0);
         for spec in &specs[1..] {
             match spec.risk_policy.calibration_confidence_requirement {
                 CalibrationConfidenceRequirement::NoMinimumConfidence => {
@@ -1335,6 +1718,329 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn compile_profile_spec_v2_serde_round_trip() {
+        for spec in canonical_compile_profile_specs().expect("canonical profiles parse") {
+            let value = serde_json::to_value(&spec).expect("profile serializes");
+            assert_eq!(value["schema_version"], COMPILE_PROFILE_SPEC_VERSION);
+            assert_eq!(value["range_caps"]["profile_chunk_max"], 256);
+            assert_eq!(value["range_caps"]["profile_tile_max"], 256);
+            assert_eq!(value["range_caps"]["profile_tile_min"], 16);
+            assert_eq!(
+                value["observation_caps"]["required_max"],
+                serde_json::Value::Null
+            );
+
+            let canonical_bytes = compile_profile_defaults_hash_canonical_json_bytes(&spec)
+                .expect("profile has canonical JSON bytes");
+            let reparsed: CompileProfileSpec =
+                serde_json::from_slice(&canonical_bytes).expect("canonical JSON reparses");
+            let recanonicalized = compile_profile_defaults_hash_canonical_json_bytes(&reparsed)
+                .expect("reparsed profile has canonical JSON bytes");
+
+            assert_eq!(
+                recanonicalized, canonical_bytes,
+                "canonical JSON is byte-stable for {}",
+                spec.id
+            );
+        }
+    }
+
+    #[test]
+    fn compile_profile_spec_v2_invariants_validated_on_load() {
+        fn assert_invalid(source: String, invariant: &str) {
+            match load_compile_profile_spec(&source).expect_err("profile invariant rejects") {
+                CompileProfileSpecLoadError::InvalidInvariant {
+                    invariant: actual, ..
+                } => assert_eq!(actual, invariant),
+                err => panic!("unexpected error: {err:?}"),
+            }
+        }
+
+        let source = DEFAULT_COMPILE_PROFILE_TOML;
+        assert_invalid(
+            source.replace("profile_chunk_max = 256", "profile_chunk_max = 0"),
+            "profile_chunk_max > 0",
+        );
+        assert_invalid(
+            source.replace("profile_tile_max = 256", "profile_tile_max = 0"),
+            "profile_tile_max > 0",
+        );
+        assert_invalid(
+            source.replace("profile_tile_min = 16", "profile_tile_min = 0"),
+            "profile_tile_min > 0",
+        );
+        assert_invalid(
+            source
+                .replace("profile_tile_max = 256", "profile_tile_max = 15")
+                .replace("profile_tile_min = 16", "profile_tile_min = 16"),
+            "profile_tile_min <= profile_tile_max",
+        );
+        assert_invalid(
+            source.replace(
+                "renorm_strategy = { kind = \"DynamicMargin\", margin_q16_16 = 16384 }",
+                "renorm_strategy = { kind = \"DynamicMargin\", margin_q16_16 = 65536 }",
+            ),
+            "DynamicMargin.margin_q16_16 < 0x1_0000",
+        );
+    }
+
+    #[test]
+    fn compile_profile_spec_v2_loaded_event_is_subscriber_captured() {
+        let _guard = crate::TRACE_CAPTURE_LOCK
+            .lock()
+            .expect("trace capture lock is healthy");
+        let capture = installed_trace_capture();
+        let spec = load_compile_profile_spec(DEFAULT_COMPILE_PROFILE_TOML)
+            .expect("v2 profile loads and emits telemetry");
+        tracing::callsite::rebuild_interest_cache();
+        let range_caps_hash = compile_profile_component_hash("RangeCapsSpec", &spec.range_caps)
+            .expect("range caps hash computes")
+            .to_hex();
+        let observation_caps_hash =
+            compile_profile_component_hash("ObservationProfileCaps", &spec.observation_caps)
+                .expect("observation caps hash computes")
+                .to_hex();
+        let events = capture.events.lock().expect("capture lock is healthy");
+        let event = events
+            .iter()
+            .find(|event| {
+                event.fields.get("event").map(String::as_str) == Some(PROFILE_SPEC_V2_LOADED_EVENT)
+                    && event.field("profile_id") == Some("Default")
+            })
+            .expect("profile v2 loaded event is captured");
+
+        assert_eq!(event.field("profile_id"), Some("Default"));
+        assert_eq!(
+            event.field("schema_version"),
+            Some(COMPILE_PROFILE_SPEC_VERSION)
+        );
+        assert_eq!(
+            event.field("range_caps_hash"),
+            Some(range_caps_hash.as_str())
+        );
+        assert_eq!(
+            event.field("observation_caps_hash"),
+            Some(observation_caps_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn compile_profile_spec_v1_fixture_rejected_with_typed_error() {
+        let v1_fixture = DEFAULT_COMPILE_PROFILE_TOML
+            .lines()
+            .filter(|line| {
+                !line.starts_with("schema_version")
+                    && !line.starts_with("[range_caps]")
+                    && !line.starts_with("profile_chunk_max")
+                    && !line.starts_with("profile_tile_max")
+                    && !line.starts_with("profile_tile_min")
+                    && !line.starts_with("renorm_strategy")
+                    && !line.starts_with("[observation_caps]")
+                    && !line.starts_with("important_max")
+                    && !line.starts_with("diagnostic_max")
+                    && !line.starts_with("best_effort_max")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        match load_compile_profile_spec(&v1_fixture).expect_err("v1 profile rejects") {
+            CompileProfileSpecLoadError::UnsupportedSchemaVersion {
+                code,
+                actual,
+                expected,
+            } => {
+                assert_eq!(code, COMPILE_PROFILE_SPEC_UNSUPPORTED_SCHEMA_CODE);
+                assert_eq!(actual, "1.0.0");
+                assert_eq!(expected, COMPILE_PROFILE_SPEC_VERSION);
+            }
+            err => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_profile_spec_v1_rejected_event_is_subscriber_captured() {
+        let _guard = crate::TRACE_CAPTURE_LOCK
+            .lock()
+            .expect("trace capture lock is healthy");
+        let v1_fixture = DEFAULT_COMPILE_PROFILE_TOML
+            .replace(r#"schema_version = "2.0.0""#, r#"schema_version = "1.0.0""#);
+        let capture = installed_trace_capture();
+        let _ = load_compile_profile_spec(&v1_fixture);
+        tracing::callsite::rebuild_interest_cache();
+        let events = capture.events.lock().expect("capture lock is healthy");
+        let event = events
+            .iter()
+            .find(|event| {
+                event.fields.get("event").map(String::as_str)
+                    == Some(PROFILE_SPEC_V1_REJECTED_EVENT)
+                    && event.field("reason") == Some("unsupported_schema_version")
+            })
+            .expect("profile v1 rejected event is captured");
+
+        assert_eq!(event.field("actual_version"), Some("1.0.0"));
+        assert_eq!(event.field("fixture_path"), Some("inline"));
+        assert_eq!(event.field("reason"), Some("unsupported_schema_version"));
+    }
+
+    #[test]
+    fn compile_profile_spec_v2_invariant_failure_event_is_subscriber_captured() {
+        let _guard = crate::TRACE_CAPTURE_LOCK
+            .lock()
+            .expect("trace capture lock is healthy");
+        let capture = installed_trace_capture();
+        let invalid =
+            DEFAULT_COMPILE_PROFILE_TOML.replace("profile_tile_max = 256", "profile_tile_max = 0");
+        let _ = load_compile_profile_spec(&invalid);
+        tracing::callsite::rebuild_interest_cache();
+        let events = capture.events.lock().expect("capture lock is healthy");
+        let event = events
+            .iter()
+            .find(|event| {
+                event.fields.get("event").map(String::as_str)
+                    == Some(PROFILE_SPEC_V2_INVARIANT_FAILURE_EVENT)
+                    && event.field("invariant") == Some("profile_tile_max > 0")
+            })
+            .expect("profile v2 invariant failure event is captured");
+
+        assert_eq!(event.field("profile_id"), Some("Default"));
+        assert_eq!(
+            event.field("schema_version"),
+            Some(COMPILE_PROFILE_SPEC_VERSION)
+        );
+        assert_eq!(event.field("invariant"), Some("profile_tile_max > 0"));
+        assert_eq!(event.field("field"), Some("range_caps.profile_tile_max"));
+        assert_eq!(event.field("value"), Some("0"));
+    }
+
+    #[test]
+    fn compile_profile_spec_explicit_v1_schema_version_rejected_with_typed_error() {
+        let v1_fixture = DEFAULT_COMPILE_PROFILE_TOML
+            .replace(r#"schema_version = "2.0.0""#, r#"schema_version = "1.0.0""#);
+
+        match load_compile_profile_spec(&v1_fixture).expect_err("v1 profile rejects") {
+            CompileProfileSpecLoadError::UnsupportedSchemaVersion {
+                code,
+                actual,
+                expected,
+            } => {
+                assert_eq!(code, COMPILE_PROFILE_SPEC_UNSUPPORTED_SCHEMA_CODE);
+                assert_eq!(actual, "1.0.0");
+                assert_eq!(expected, COMPILE_PROFILE_SPEC_VERSION);
+            }
+            err => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_profile_spec_mismatched_schema_version_rejected_with_typed_error() {
+        let future_fixture = DEFAULT_COMPILE_PROFILE_TOML
+            .replace(r#"schema_version = "2.0.0""#, r#"schema_version = "3.0.0""#);
+
+        match load_compile_profile_spec(&future_fixture).expect_err("future profile rejects") {
+            CompileProfileSpecLoadError::UnsupportedSchemaVersion {
+                code,
+                actual,
+                expected,
+            } => {
+                assert_eq!(code, COMPILE_PROFILE_SPEC_UNSUPPORTED_SCHEMA_CODE);
+                assert_eq!(actual, "3.0.0");
+                assert_eq!(expected, COMPILE_PROFILE_SPEC_VERSION);
+            }
+            err => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_profile_spec_v2_missing_schema_version_field_rejected() {
+        let without_schema_version = DEFAULT_COMPILE_PROFILE_TOML
+            .lines()
+            .filter(|line| !line.starts_with("schema_version"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(matches!(
+            load_compile_profile_spec(&without_schema_version),
+            Err(CompileProfileSpecLoadError::MissingRequiredField {
+                field: "schema_version"
+            })
+        ));
+    }
+
+    #[test]
+    fn compile_profile_spec_v2_missing_range_caps_field_rejected() {
+        let without_range_caps = DEFAULT_COMPILE_PROFILE_TOML
+            .lines()
+            .filter(|line| {
+                !line.starts_with("[range_caps]")
+                    && !line.starts_with("profile_chunk_max")
+                    && !line.starts_with("profile_tile_max")
+                    && !line.starts_with("profile_tile_min")
+                    && !line.starts_with("renorm_strategy")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(matches!(
+            load_compile_profile_spec(&without_range_caps),
+            Err(CompileProfileSpecLoadError::MissingRequiredField {
+                field: "range_caps"
+            })
+        ));
+    }
+
+    #[test]
+    fn compile_profile_spec_v2_missing_observation_caps_field_rejected() {
+        let without_observation_caps = DEFAULT_COMPILE_PROFILE_TOML
+            .lines()
+            .filter(|line| {
+                !line.starts_with("[observation_caps]")
+                    && !line.starts_with("important_max")
+                    && !line.starts_with("diagnostic_max")
+                    && !line.starts_with("best_effort_max")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(matches!(
+            load_compile_profile_spec(&without_observation_caps),
+            Err(CompileProfileSpecLoadError::MissingRequiredField {
+                field: "observation_caps"
+            })
+        ));
+    }
+
+    #[test]
+    fn observation_profile_caps_required_max_none_is_default_v2() {
+        let specs = canonical_compile_profile_specs().expect("canonical profiles parse");
+
+        assert!(
+            specs
+                .iter()
+                .all(|spec| spec.observation_caps.required_max.is_none())
+        );
+    }
+
+    #[test]
+    fn range_caps_renorm_strategy_policy_round_trips_both_variants() {
+        for renorm_strategy in [
+            RenormStrategyPolicy::ExactPostBoundaryOnly,
+            RenormStrategyPolicy::DynamicMargin {
+                margin_q16_16: 0x4000,
+            },
+        ] {
+            let caps = RangeCapsSpec {
+                renorm_strategy,
+                ..RangeCapsSpec::default_v2()
+            };
+            let encoded = serde_json::to_string(&caps).expect("range caps serialize");
+            let decoded: RangeCapsSpec =
+                serde_json::from_str(&encoded).expect("range caps deserialize");
+
+            assert_eq!(decoded, caps);
         }
     }
 
@@ -1362,7 +2068,7 @@ mod tests {
     fn compile_profile_spec_defaults_hash_uses_canonical_domain_preimage() {
         assert_eq!(
             COMPILE_PROFILE_DEFAULTS_HASH_DOMAIN,
-            b"gbf:gbf-policy:CompileProfileSpec:compile_profile_spec:1.0.0\0"
+            b"gbf:gbf-policy:CompileProfileSpec:compile_profile_spec:2.0.0\0"
         );
 
         let spec = load_compile_profile_spec(DEFAULT_COMPILE_PROFILE_TOML)
@@ -1791,5 +2497,84 @@ mod tests {
             serde_json::from_str(&encoded).expect("constraints deserializes");
 
         assert_eq!(decoded, constraints);
+    }
+
+    #[derive(Clone, Default)]
+    struct TraceCapture {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    #[derive(Debug)]
+    struct CapturedEvent {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> Option<&str> {
+            self.fields.get(name).map(String::as_str)
+        }
+    }
+
+    impl<S> tracing_subscriber::layer::Layer<S> for TraceCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = TraceFieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("capture lock is healthy")
+                .push(CapturedEvent {
+                    fields: visitor.fields,
+                });
+        }
+    }
+
+    #[derive(Default)]
+    struct TraceFieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    fn installed_trace_capture() -> TraceCapture {
+        static TRACE_CAPTURE: OnceLock<TraceCapture> = OnceLock::new();
+        static TRACE_CAPTURE_INIT: OnceLock<()> = OnceLock::new();
+
+        let capture = TRACE_CAPTURE.get_or_init(TraceCapture::default).clone();
+        TRACE_CAPTURE_INIT.get_or_init(|| {
+            let subscriber = tracing_subscriber::registry()
+                .with(LevelFilter::INFO)
+                .with(capture.clone());
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("profile telemetry capture subscriber installs once");
+        });
+        capture
+            .events
+            .lock()
+            .expect("capture lock is healthy")
+            .clear();
+        tracing::callsite::rebuild_interest_cache();
+        capture
+    }
+
+    impl tracing::field::Visit for TraceFieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
     }
 }

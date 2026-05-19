@@ -3274,6 +3274,13 @@ evolution rules:
   cached resolve outputs. This is a feature, not a cost: it forces
   recomputation when knob semantics change.
 
+T-B6.C amendment (2026-05-14): `CompileProfileSpec` moved from
+`1.0.0` to `2.0.0` by adding required `range_caps` and
+`observation_caps` fields. Stage 0.5 pins
+`compile_profile_spec_version = "2.0.0"` in `policy_resolution.json`, and
+`pass_version_resolve` is bumped to `2.0.0` so cached resolve outputs are
+invalidated across the profile-spec break.
+
 ### 16.3 Operating posture once the chunk closes
 
 After merge, this chunk is **dormant**: no active development, no expected

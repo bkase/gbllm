@@ -6,12 +6,17 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+gbf-abi = { path = "../gbf-abi", default-features = false, features = ["alloc"] }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
 
 [features]
 falsify = []
