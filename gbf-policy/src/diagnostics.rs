@@ -83,6 +83,7 @@ pub enum ValidationOrigin {
     SemanticCore,
     ObservationPlanConstruction,
     RangePlanConstruction,
+    StoragePlanConstruction,
     Manifest,
     Lowering,
     Calibration,
@@ -444,6 +445,370 @@ pub enum ValidationCode {
     BudgetPlacementProfileInfeasible {
         profile: PlacementProfile,
         reason: PlacementInfeasibilityReason,
+    },
+    StoragePlan {
+        code: StoragePlanDiagnosticCode,
+        provenance: StoragePlanDiagnosticProvenance,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum StoragePlanDiagnosticCode {
+    StorageNoAdmittingDecisionRule,
+    StorageBindingCoverageGap,
+    StorageBindingDoubleBind,
+    StorageRomConstWriteViolation,
+    StorageHramAdmissionInvariantViolation,
+    StorageRecomputeForbiddenForObservedValue,
+    StoragePersistSequenceStateUnsupportedV1,
+    StoragePersistBindingKindMismatch,
+    StoragePersistPageNotReferenced,
+    StorageCommitGroupEmpty,
+    StorageCommitGroupKindMix,
+    StorageCommitGroupDurabilityMix,
+    StorageAliasIntentMaterializationMismatch,
+    StorageAliasClassOverlapWithoutIntent,
+    StorageAliasClassMembershipFunctionalViolation,
+    StorageRecomputeAliasNotIsolated,
+    StorageLifetimeAdmissibilityViolation,
+    StorageForbiddenSpatialEnumLeak,
+    StorageDeterminismRequiresStableRules,
+    StorageRangePlanHashMismatch,
+    StorageInferIrHashMismatch,
+    StorageObservationPlanHashMismatch,
+    StorageQuantGraphHashMismatch,
+    StoragePolicyHashMismatch,
+    StorageIterationInputInvalid,
+    StorageOverlayLensViolation,
+    StorageRepairProposalIllegal,
+    StorageInferIrEffectClassUnknown,
+    StorageQuantGraphRoutingMismatch,
+    StorageReservedShapeEmitted,
+    StorageAliasMixedIntentComponent,
+    StorageAliasIntentCardinalityViolation,
+    StorageForcedRecomputeNotAllowed,
+    StoragePolicyBudgetUnderflow,
+    StorageAliasClassFingerprintCollision,
+}
+
+impl StoragePlanDiagnosticCode {
+    pub const ALL: [Self; 35] = [
+        Self::StorageNoAdmittingDecisionRule,
+        Self::StorageBindingCoverageGap,
+        Self::StorageBindingDoubleBind,
+        Self::StorageRomConstWriteViolation,
+        Self::StorageHramAdmissionInvariantViolation,
+        Self::StorageRecomputeForbiddenForObservedValue,
+        Self::StoragePersistSequenceStateUnsupportedV1,
+        Self::StoragePersistBindingKindMismatch,
+        Self::StoragePersistPageNotReferenced,
+        Self::StorageCommitGroupEmpty,
+        Self::StorageCommitGroupKindMix,
+        Self::StorageCommitGroupDurabilityMix,
+        Self::StorageAliasIntentMaterializationMismatch,
+        Self::StorageAliasClassOverlapWithoutIntent,
+        Self::StorageAliasClassMembershipFunctionalViolation,
+        Self::StorageRecomputeAliasNotIsolated,
+        Self::StorageLifetimeAdmissibilityViolation,
+        Self::StorageForbiddenSpatialEnumLeak,
+        Self::StorageDeterminismRequiresStableRules,
+        Self::StorageRangePlanHashMismatch,
+        Self::StorageInferIrHashMismatch,
+        Self::StorageObservationPlanHashMismatch,
+        Self::StorageQuantGraphHashMismatch,
+        Self::StoragePolicyHashMismatch,
+        Self::StorageIterationInputInvalid,
+        Self::StorageOverlayLensViolation,
+        Self::StorageRepairProposalIllegal,
+        Self::StorageInferIrEffectClassUnknown,
+        Self::StorageQuantGraphRoutingMismatch,
+        Self::StorageReservedShapeEmitted,
+        Self::StorageAliasMixedIntentComponent,
+        Self::StorageAliasIntentCardinalityViolation,
+        Self::StorageForcedRecomputeNotAllowed,
+        Self::StoragePolicyBudgetUnderflow,
+        Self::StorageAliasClassFingerprintCollision,
+    ];
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        match self {
+            Self::StorageNoAdmittingDecisionRule => 1,
+            Self::StorageBindingCoverageGap => 2,
+            Self::StorageBindingDoubleBind => 3,
+            Self::StorageRomConstWriteViolation => 4,
+            Self::StorageHramAdmissionInvariantViolation => 5,
+            Self::StorageRecomputeForbiddenForObservedValue => 6,
+            Self::StoragePersistSequenceStateUnsupportedV1 => 7,
+            Self::StoragePersistBindingKindMismatch => 8,
+            Self::StoragePersistPageNotReferenced => 9,
+            Self::StorageCommitGroupEmpty => 10,
+            Self::StorageCommitGroupKindMix => 11,
+            Self::StorageCommitGroupDurabilityMix => 12,
+            Self::StorageAliasIntentMaterializationMismatch => 13,
+            Self::StorageAliasClassOverlapWithoutIntent => 14,
+            Self::StorageAliasClassMembershipFunctionalViolation => 15,
+            Self::StorageRecomputeAliasNotIsolated => 16,
+            Self::StorageLifetimeAdmissibilityViolation => 17,
+            Self::StorageForbiddenSpatialEnumLeak => 18,
+            Self::StorageDeterminismRequiresStableRules => 19,
+            Self::StorageRangePlanHashMismatch => 20,
+            Self::StorageInferIrHashMismatch => 21,
+            Self::StorageObservationPlanHashMismatch => 22,
+            Self::StorageQuantGraphHashMismatch => 23,
+            Self::StoragePolicyHashMismatch => 24,
+            Self::StorageIterationInputInvalid => 25,
+            Self::StorageOverlayLensViolation => 26,
+            Self::StorageRepairProposalIllegal => 27,
+            Self::StorageInferIrEffectClassUnknown => 28,
+            Self::StorageQuantGraphRoutingMismatch => 29,
+            Self::StorageReservedShapeEmitted => 30,
+            Self::StorageAliasMixedIntentComponent => 31,
+            Self::StorageAliasIntentCardinalityViolation => 32,
+            Self::StorageForcedRecomputeNotAllowed => 33,
+            Self::StoragePolicyBudgetUnderflow => 34,
+            Self::StorageAliasClassFingerprintCollision => 35,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self.number() {
+            1 => "STORE-001",
+            2 => "STORE-002",
+            3 => "STORE-003",
+            4 => "STORE-004",
+            5 => "STORE-005",
+            6 => "STORE-006",
+            7 => "STORE-007",
+            8 => "STORE-008",
+            9 => "STORE-009",
+            10 => "STORE-010",
+            11 => "STORE-011",
+            12 => "STORE-012",
+            13 => "STORE-013",
+            14 => "STORE-014",
+            15 => "STORE-015",
+            16 => "STORE-016",
+            17 => "STORE-017",
+            18 => "STORE-018",
+            19 => "STORE-019",
+            20 => "STORE-020",
+            21 => "STORE-021",
+            22 => "STORE-022",
+            23 => "STORE-023",
+            24 => "STORE-024",
+            25 => "STORE-025",
+            26 => "STORE-026",
+            27 => "STORE-027",
+            28 => "STORE-028",
+            29 => "STORE-029",
+            30 => "STORE-030",
+            31 => "STORE-031",
+            32 => "STORE-032",
+            33 => "STORE-033",
+            34 => "STORE-034",
+            35 => "STORE-035",
+            _ => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::StorageNoAdmittingDecisionRule => "StorageNoAdmittingDecisionRule",
+            Self::StorageBindingCoverageGap => "StorageBindingCoverageGap",
+            Self::StorageBindingDoubleBind => "StorageBindingDoubleBind",
+            Self::StorageRomConstWriteViolation => "StorageRomConstWriteViolation",
+            Self::StorageHramAdmissionInvariantViolation => {
+                "StorageHramAdmissionInvariantViolation"
+            }
+            Self::StorageRecomputeForbiddenForObservedValue => {
+                "StorageRecomputeForbiddenForObservedValue"
+            }
+            Self::StoragePersistSequenceStateUnsupportedV1 => {
+                "StoragePersistSequenceStateUnsupportedV1"
+            }
+            Self::StoragePersistBindingKindMismatch => "StoragePersistBindingKindMismatch",
+            Self::StoragePersistPageNotReferenced => "StoragePersistPageNotReferenced",
+            Self::StorageCommitGroupEmpty => "StorageCommitGroupEmpty",
+            Self::StorageCommitGroupKindMix => "StorageCommitGroupKindMix",
+            Self::StorageCommitGroupDurabilityMix => "StorageCommitGroupDurabilityMix",
+            Self::StorageAliasIntentMaterializationMismatch => {
+                "StorageAliasIntentMaterializationMismatch"
+            }
+            Self::StorageAliasClassOverlapWithoutIntent => "StorageAliasClassOverlapWithoutIntent",
+            Self::StorageAliasClassMembershipFunctionalViolation => {
+                "StorageAliasClassMembershipFunctionalViolation"
+            }
+            Self::StorageRecomputeAliasNotIsolated => "StorageRecomputeAliasNotIsolated",
+            Self::StorageLifetimeAdmissibilityViolation => "StorageLifetimeAdmissibilityViolation",
+            Self::StorageForbiddenSpatialEnumLeak => "StorageForbiddenSpatialEnumLeak",
+            Self::StorageDeterminismRequiresStableRules => "StorageDeterminismRequiresStableRules",
+            Self::StorageRangePlanHashMismatch => "StorageRangePlanHashMismatch",
+            Self::StorageInferIrHashMismatch => "StorageInferIrHashMismatch",
+            Self::StorageObservationPlanHashMismatch => "StorageObservationPlanHashMismatch",
+            Self::StorageQuantGraphHashMismatch => "StorageQuantGraphHashMismatch",
+            Self::StoragePolicyHashMismatch => "StoragePolicyHashMismatch",
+            Self::StorageIterationInputInvalid => "StorageIterationInputInvalid",
+            Self::StorageOverlayLensViolation => "StorageOverlayLensViolation",
+            Self::StorageRepairProposalIllegal => "StorageRepairProposalIllegal",
+            Self::StorageInferIrEffectClassUnknown => "StorageInferIrEffectClassUnknown",
+            Self::StorageQuantGraphRoutingMismatch => "StorageQuantGraphRoutingMismatch",
+            Self::StorageReservedShapeEmitted => "StorageReservedShapeEmitted",
+            Self::StorageAliasMixedIntentComponent => "StorageAliasMixedIntentComponent",
+            Self::StorageAliasIntentCardinalityViolation => {
+                "StorageAliasIntentCardinalityViolation"
+            }
+            Self::StorageForcedRecomputeNotAllowed => "StorageForcedRecomputeNotAllowed",
+            Self::StoragePolicyBudgetUnderflow => "StoragePolicyBudgetUnderflow",
+            Self::StorageAliasClassFingerprintCollision => "StorageAliasClassFingerprintCollision",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum StoragePlanDiagnosticProvenance {
+    ValueClassification {
+        value_id: u32,
+        producer_node: Option<u32>,
+        value_role: Option<String>,
+        value_format: Option<String>,
+    },
+    ValueProducer {
+        value_id: u32,
+        producer_node: u32,
+    },
+    BindingSet {
+        value_id: u32,
+        binding_count: u32,
+    },
+    ProducerOp {
+        value_id: u32,
+        producer_node: u32,
+        op_tag: String,
+    },
+    BudgetSet {
+        values: Vec<u32>,
+        observed_bytes: u32,
+        budget_bytes: u32,
+    },
+    ObservationCheckpoint {
+        value_id: u32,
+        semantic_anchor: String,
+        checkpoint_id: u32,
+    },
+    SequenceState {
+        value_id: u32,
+        state_slot_id: u32,
+        layer_id: u16,
+    },
+    PersistBinding {
+        value_id: u32,
+        persist_page_id: u32,
+        commit_group_id: u32,
+        persist_kind: String,
+        expected: String,
+    },
+    PersistPage {
+        persist_page_id: u32,
+    },
+    CommitGroup {
+        commit_group_id: u32,
+    },
+    CommitGroupKind {
+        commit_group_id: u32,
+        kinds: Vec<String>,
+        allowed_table: String,
+    },
+    CommitGroupDurability {
+        commit_group_id: u32,
+        durabilities: Vec<String>,
+    },
+    AliasMaterialization {
+        alias_class_id: u32,
+        members: Vec<u32>,
+        intent: String,
+        materializations: Vec<String>,
+    },
+    AliasOverlap {
+        alias_class_id: u32,
+        members: Vec<u32>,
+    },
+    AliasMembership {
+        value_id: u32,
+        alias_class_id: u32,
+    },
+    RecomputeAlias {
+        value_id: u32,
+        alias_class_id: u32,
+    },
+    LifetimeAdmissibility {
+        value_id: u32,
+        computed_lifetime: String,
+        min_lifetime: String,
+        max_lifetime: String,
+        source: String,
+    },
+    JsonPath {
+        json_path: String,
+        field_or_tag: String,
+    },
+    RuleInstability {
+        rule_id: u32,
+        evidence: String,
+    },
+    HashMismatch {
+        product: String,
+        recorded: Hash256,
+        computed: Hash256,
+    },
+    Iteration {
+        iteration: u32,
+        ceiling: u32,
+    },
+    OverlayLens {
+        value_id: u32,
+        materialization: String,
+        forced_override: bool,
+    },
+    RepairProposal {
+        proposal_id: String,
+        delta: String,
+        locks_bounds: String,
+    },
+    EffectClass {
+        effect_id: u32,
+        effect_class: String,
+    },
+    RoutingMismatch {
+        layer_id: u16,
+        expected_entry: String,
+    },
+    AliasMixedIntent {
+        members: Vec<u32>,
+        edge_count: u32,
+        intents: Vec<String>,
+    },
+    AliasCardinality {
+        alias_class_id: u32,
+        intent: String,
+        members: Vec<u32>,
+    },
+    ForcedRecompute {
+        value_id: u32,
+        failed_predicates: Vec<String>,
+    },
+    PolicyBudget {
+        storage_class: String,
+        soft_bytes: u32,
+        reserved_bytes: u32,
+    },
+    FingerprintCollision {
+        first_payload_hash: Hash256,
+        second_payload_hash: Hash256,
     },
 }
 
