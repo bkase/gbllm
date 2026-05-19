@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 # gbllm pre-commit hook
-# Fast self-cert: format + workspace clippy/test on the main feature set.
+# Fast self-cert: format + clippy + low-latency lib/bin tests.
 # The full feature-combo matrix (gbf-train and gbf-test qat / qat-ablation,
-# gbf-experiments phase-a / ablation, gbf-cli falsify, etc.) runs in CI, not here.
+# gbf-experiments phase-a / ablation, gbf-cli falsify, doctests, and broad
+# integration/evidence sweeps) runs in CI or targeted review scripts, not here.
 set -euo pipefail
 
 staged=$(git diff --cached --name-only --diff-filter=ACMR || true)
+
+gbf_test_qat_fast_targets=(
+    --lib
+    --test architecture
+    --test export_determinism
+    --test loss_tests
+    --test model_tests
+    --test oracle_agreement
+    --test phase_tests
+    --test qat_tests
+    --test ternary_tests
+)
 
 # Stage 1: formatting (instant)
 if ! cargo fmt --check --all; then
@@ -37,14 +50,24 @@ if ! cargo clippy -p gbf-test --no-default-features --features qat -- -D warning
     exit 1
 fi
 
-# Stage 4: test workspace main feature set.
-if ! cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features; then
+# Stage 4: fast test gates. Keep broad integration tests and doctests out of
+# pre-commit; they are high-value in CI but too slow/noisy for every commit.
+if ! cargo test --workspace --exclude gbf-cli --exclude gbf-train --exclude gbf-experiments --exclude gbf-test --all-features --lib --bins; then
     echo "pre-commit: tests failed."
     exit 1
 fi
-if ! cargo test -p gbf-test --no-default-features --features qat; then
+if ! cargo test -p gbf-test --no-default-features --features qat "${gbf_test_qat_fast_targets[@]}"; then
     echo "pre-commit: tests failed."
     exit 1
+fi
+
+# Scripted debugger conformance is valuable but specialized. Run it when the
+# staged change touches the ASM/runtime/debug surface it protects.
+if grep -qE '^(gbf-asm/|gbf-runtime/|gbf-debug/|gbf-test/tests/runtime_asm_conformance\.rs|docs/review/t-a8\.8b/)' <<<"$staged"; then
+    if ! cargo test -p gbf-test --no-default-features --features qat --test runtime_asm_conformance; then
+        echo "pre-commit: runtime/ASM conformance tests failed."
+        exit 1
+    fi
 fi
 
 # Sync beads if br is available
