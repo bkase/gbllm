@@ -108,18 +108,18 @@ a routing table mapping common bead types to recommended persona sets.
 
 **Harness assignments at a glance** (full detail in `REVIEWERS.md`):
 
-| #  | Persona                                  | Harnesses                |
-|----|------------------------------------------|--------------------------|
-| P1 | Architecture & Boundary Steward          | claude + codex           |
-| P2 | Code Cleanliness / Idiomatic Rust        | claude + codex + gemini  |
-| P3 | AI Researcher / Experimenter Analyzer    | claude + gemini          |
-| P4 | QA / Test Engineer                       | gemini + codex           |
-| P5 | Proof-of-Work Detective (always-on)      | gemini + claude          |
-| P6 | RFC Scope Sentinel (always-on)           | gemini + claude          |
-| P7 | Numerical & Determinism Reviewer         | codex + gemini           |
-| P8 | Public Contract / Schema Stability       | gemini + claude          |
-| P9 | Performance & Resource Reviewer          | gemini + claude          |
-| P10| Observability & Telemetry Reviewer       | gemini + claude          |
+| #   | Persona                               | Harnesses               |
+| --- | ------------------------------------- | ----------------------- |
+| P1  | Architecture & Boundary Steward       | claude + codex          |
+| P2  | Code Cleanliness / Idiomatic Rust     | claude + codex + gemini |
+| P3  | AI Researcher / Experimenter Analyzer | claude + gemini         |
+| P4  | QA / Test Engineer                    | gemini + codex          |
+| P5  | Proof-of-Work Detective (always-on)   | gemini + claude         |
+| P6  | RFC Scope Sentinel (always-on)        | gemini + claude         |
+| P7  | Numerical & Determinism Reviewer      | codex + gemini          |
+| P8  | Public Contract / Schema Stability    | gemini + claude         |
+| P9  | Performance & Resource Reviewer       | gemini + claude         |
+| P10 | Observability & Telemetry Reviewer    | gemini + claude         |
 
 When a persona names two or three harnesses, **run all of them** — the
 multi-harness assignment is an explicit cross-check. Disagreement between
@@ -146,12 +146,12 @@ git push                # Push to remote
 - Always sync before ending session
 - When asking external coding agents for architecture/correctness/code-quality
   review, run them through ACPX instead of scraping or driving a PTY. Use
-  `bunx acpx@latest`, one-shot `exec`, `--cwd /Users/bkase/Documents/gbllm`,
+  `acpx`, one-shot `exec`, `--cwd /Users/bkase/Documents/gbllm`,
   `--approve-all`, `--format text`, `--suppress-reads`, and a bounded timeout.
   Tested review commands:
-  - Gemini: `bunx acpx@latest --agent 'gemini --skip-trust -m gemini-3.1-pro-preview --acp' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<prompt>"`.
-  - Claude: `bunx acpx@latest --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 claude exec "<prompt>"`.
-  - Codex: current local `codex` does not expose a native `--acp` flag. Use the Zed Codex ACP adapter with Codex yolo/search-equivalent config overrides: `bunx acpx@latest --agent 'npx -y @zed-industries/codex-acp -c sandbox_mode=danger-full-access -c approval_policy=never -c web_search_mode=live' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<prompt>"`.
+  - Gemini: `acpx --agent 'gemini --skip-trust -m gemini-3.1-pro-preview --acp' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<prompt>"`.
+  - Claude: `acpx --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 claude exec "<prompt>"`.
+  - Codex: current local `codex` does not expose a native `--acp` flag. Use the Zed Codex ACP adapter with Codex yolo/search-equivalent config overrides: `acpx --agent 'npx -y @zed-industries/codex-acp -c sandbox_mode=danger-full-access -c approval_policy=never -c web_search_mode=live' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<prompt>"`.
 - For PR bodies with Markdown, always use `gh pr edit/create --body-file - <<'EOF'`.
 
 ### Training Loss Beads
