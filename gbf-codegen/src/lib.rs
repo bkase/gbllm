@@ -24,6 +24,7 @@ pub mod schedule;
 pub mod stage_cache;
 pub mod storage;
 pub mod storage_plan;
+pub mod storage_plan_test_infra;
 pub mod validate;
 pub mod window;
 

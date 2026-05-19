@@ -4,22 +4,34 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gbf_foundation::{CanonicalJson, CanonicalJsonError};
 use gbf_policy::StoragePlanDiagnosticCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::s3::infer_ir::ValueId;
 use crate::storage_plan::alias_engine::{
     AliasCandidateEdge, AliasSeedBinding, build_alias_classes,
 };
+use crate::storage_plan::invariants::{
+    StoragePlanConsistencyContext, StoragePlanConsistencyView,
+    validate_storage_plan_self_consistency,
+};
+use crate::storage_plan::lifetime::{
+    LifetimeBound, LifetimeBoundSource, LifetimeBounds, lifetime_bounds,
+};
 use crate::storage_plan::persist::{PersistBindingInput, resolve_persist_bindings};
-use crate::storage_plan::predicates::{PredicateEnv, ValueRole, recompute_allowed};
+use crate::storage_plan::predicates::{
+    PredicateEnv, ValueRole, recompute_allowed, value_format_of,
+};
 use crate::storage_plan::types::{
-    AbstractLiveRange, AliasClass, AliasClassFingerprint, AliasClassId, AliasIntent,
-    BindingJustification, CommitGroupDecl, CommitGroupId, CommitGroupReason, DecisionRuleId,
-    Materialization, PersistKind, PersistPageDecl, PersistPageId, StorageBinding,
-    StoragePlanInputIdentity,
+    AbstractLiveRange, AdmittingPredicateId, AliasClass, AliasClassFingerprint, AliasClassId,
+    AliasClassProvenance, AliasIntent, BindingJustification, BindingProvenance, CommitGroupDecl,
+    CommitGroupId, CommitGroupProvenance, CommitGroupReason, DecisionRuleId, LifetimeClass,
+    Materialization, PersistKind, PersistPageDecl, PersistPageId, PersistPageProvenance,
+    PersistPageSource, StorageBinding, StoragePlanInputHashes, StoragePlanInputIdentity,
+    StorageProvenance,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoragePlanCoreInput {
     pub input_identity: StoragePlanInputIdentity,
     pub predicate_env: PredicateEnv,
@@ -29,7 +41,8 @@ pub struct StoragePlanCoreInput {
     pub fail_before_result: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoragePlanCoreValue {
     pub value: ValueId,
     pub materialization: Materialization,
@@ -60,9 +73,10 @@ pub struct StoragePlanCoreResult {
     pub alias_classes: BTreeMap<AliasClassId, AliasClass>,
     pub persist_pages: BTreeMap<PersistPageId, PersistPageDecl>,
     pub commit_groups: BTreeMap<CommitGroupId, CommitGroupDecl>,
+    pub provenance: StorageProvenance,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoragePlanCoreSummary {
     pub bindings: u32,
@@ -112,12 +126,39 @@ pub fn build_storage_plan_core(input: &StoragePlanCoreInput) -> StoragePlanCoreO
         assign_alias_class_ids(&mut bindings, &alias_classes);
     }
 
-    let result = StoragePlanCoreResult {
+    let mut result = StoragePlanCoreResult {
         bindings,
         alias_classes,
         persist_pages: persist_resolution.persist_pages,
         commit_groups: persist_resolution.commit_groups,
+        provenance: StorageProvenance {
+            bindings: BTreeMap::new(),
+            alias_classes: BTreeMap::new(),
+            persist_pages: BTreeMap::new(),
+            commit_groups: BTreeMap::new(),
+        },
     };
+    result.provenance = build_storage_provenance(input, &result);
+
+    let consistency_context = consistency_context(input, &result);
+    let consistency_bindings: Vec<_> = result.bindings.values().cloned().collect();
+    let consistency_json = serde_json::to_value(SerializableResult::from(&result))
+        .expect("storage plan result serializes for self-consistency");
+    let consistency_diagnostics = validate_storage_plan_self_consistency(
+        &consistency_context,
+        StoragePlanConsistencyView {
+            input_identity: &input.input_identity,
+            bindings: &consistency_bindings,
+            alias_classes: &result.alias_classes,
+            persist_pages: &result.persist_pages,
+            commit_groups: &result.commit_groups,
+            json_value: Some(&consistency_json),
+        },
+    );
+    if let Some(code) = first_storage_plan_code(&consistency_diagnostics) {
+        return failed_output(input.input_identity.clone(), code);
+    }
+
     let summary = StoragePlanCoreSummary {
         bindings: result.bindings.len() as u32,
         alias_classes: result.alias_classes.len() as u32,
@@ -269,6 +310,156 @@ fn assign_alias_class_ids(
     }
 }
 
+fn build_storage_provenance(
+    input: &StoragePlanCoreInput,
+    result: &StoragePlanCoreResult,
+) -> StorageProvenance {
+    let role_by_value: BTreeMap<_, _> = input
+        .values
+        .iter()
+        .map(|value| (value.value, value.role))
+        .collect();
+    let reason_by_group: BTreeMap<_, _> = input
+        .values
+        .iter()
+        .filter_map(|value| match value.materialization {
+            Materialization::Persist { commit_group, .. } => {
+                Some((commit_group, value.commit_group_reason?))
+            }
+            Materialization::Recompute | Materialization::Materialize { .. } => None,
+        })
+        .collect();
+
+    StorageProvenance {
+        bindings: result
+            .bindings
+            .iter()
+            .map(|(value, binding)| {
+                let decision_rule = match binding.justification {
+                    BindingJustification::DecisionRule(rule) => rule,
+                    BindingJustification::ForcedRecompute => DecisionRuleId(33),
+                };
+                (
+                    *value,
+                    BindingProvenance::new(
+                        AdmittingPredicateId(decision_rule.0),
+                        decision_rule,
+                        false,
+                        vec![],
+                        role_by_value.get(value).copied(),
+                        value_format_of(&input.predicate_env, *value).cloned(),
+                    ),
+                )
+            })
+            .collect(),
+        alias_classes: result
+            .alias_classes
+            .iter()
+            .map(|(id, class)| (*id, AliasClassProvenance::new(class.intent(), Vec::new())))
+            .collect(),
+        persist_pages: result
+            .persist_pages
+            .iter()
+            .map(|(id, page)| {
+                (
+                    *id,
+                    PersistPageProvenance {
+                        source: persist_page_source(*id, page.kind),
+                    },
+                )
+            })
+            .collect(),
+        commit_groups: result
+            .commit_groups
+            .keys()
+            .map(|id| {
+                (
+                    *id,
+                    CommitGroupProvenance::new(
+                        reason_by_group
+                            .get(id)
+                            .copied()
+                            .unwrap_or(CommitGroupReason::Independent),
+                        Vec::new(),
+                    ),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn persist_page_source(id: PersistPageId, kind: PersistKind) -> PersistPageSource {
+    match kind {
+        PersistKind::SequenceState => PersistPageSource::SequenceStateSlot {
+            layer: 0,
+            slot: id.0,
+        },
+        PersistKind::Continuation => PersistPageSource::Continuation,
+        PersistKind::Transcript => PersistPageSource::Transcript { family: id.0 },
+        PersistKind::Harness => PersistPageSource::Harness { family: id.0 },
+        PersistKind::Trace => PersistPageSource::Trace { family: id.0 },
+    }
+}
+
+fn consistency_context(
+    input: &StoragePlanCoreInput,
+    result: &StoragePlanCoreResult,
+) -> StoragePlanConsistencyContext {
+    StoragePlanConsistencyContext {
+        expected_values: input.values.iter().map(|value| value.value).collect(),
+        lifetime_bounds: input
+            .values
+            .iter()
+            .map(|value| {
+                let bounds = match result
+                    .bindings
+                    .get(&value.value)
+                    .map(|binding| &binding.materialization)
+                {
+                    Some(Materialization::Persist { .. }) => persistent_lifetime_bounds(),
+                    _ => lifetime_bounds(&input.predicate_env, value.value),
+                };
+                (value.value, bounds)
+            })
+            .collect(),
+        expected_input_hashes: input_hashes_from_identity(&input.input_identity),
+    }
+}
+
+fn persistent_lifetime_bounds() -> LifetimeBounds {
+    LifetimeBounds {
+        min_required: LifetimeBound {
+            lifetime: LifetimeClass::Persistent,
+            source: LifetimeBoundSource::Persistence,
+        },
+        max_admissible: LifetimeBound {
+            lifetime: LifetimeClass::Persistent,
+            source: LifetimeBoundSource::Persistence,
+        },
+    }
+}
+
+fn input_hashes_from_identity(identity: &StoragePlanInputIdentity) -> StoragePlanInputHashes {
+    StoragePlanInputHashes {
+        quant_graph_hash: identity.quant_graph_hash,
+        infer_ir_hash: identity.infer_ir_hash,
+        observation_plan_hash: identity.observation_plan_hash,
+        range_plan_hash: identity.range_plan_hash,
+        policy_hash: identity.policy_hash,
+    }
+}
+
+fn first_storage_plan_code(
+    diagnostics: &[gbf_policy::ValidationDiagnostic],
+) -> Option<StoragePlanDiagnosticCode> {
+    diagnostics
+        .iter()
+        .find_map(|diagnostic| match &diagnostic.code {
+            gbf_policy::ValidationCode::StoragePlan { code, .. } => Some(*code),
+            _ => None,
+        })
+}
+
 #[derive(Serialize)]
 struct SerializableOutput {
     input_identity: StoragePlanInputIdentity,
@@ -284,6 +475,7 @@ struct SerializableResult {
     alias_classes: BTreeMap<String, SerializableAliasClass>,
     persist_pages: BTreeMap<String, PersistPageDecl>,
     commit_groups: BTreeMap<String, CommitGroupDecl>,
+    provenance: SerializableProvenance,
 }
 
 #[derive(Serialize)]
@@ -297,6 +489,14 @@ struct SerializableAliasClass {
     fingerprint: AliasClassFingerprint,
     members: Vec<u32>,
     intent: AliasIntent,
+}
+
+#[derive(Serialize)]
+struct SerializableProvenance {
+    bindings: BTreeMap<String, BindingProvenance>,
+    alias_classes: BTreeMap<String, AliasClassProvenance>,
+    persist_pages: BTreeMap<String, PersistPageProvenance>,
+    commit_groups: BTreeMap<String, CommitGroupProvenance>,
 }
 
 impl From<&StoragePlanCoreOutput> for SerializableOutput {
@@ -355,6 +555,32 @@ impl From<&StoragePlanCoreResult> for SerializableResult {
                 .iter()
                 .map(|(id, group)| (id.0.to_string(), group.clone()))
                 .collect(),
+            provenance: SerializableProvenance {
+                bindings: result
+                    .provenance
+                    .bindings
+                    .iter()
+                    .map(|(value, provenance)| (value.get().to_string(), provenance.clone()))
+                    .collect(),
+                alias_classes: result
+                    .provenance
+                    .alias_classes
+                    .iter()
+                    .map(|(id, provenance)| (id.0.to_string(), provenance.clone()))
+                    .collect(),
+                persist_pages: result
+                    .provenance
+                    .persist_pages
+                    .iter()
+                    .map(|(id, provenance)| (id.0.to_string(), provenance.clone()))
+                    .collect(),
+                commit_groups: result
+                    .provenance
+                    .commit_groups
+                    .iter()
+                    .map(|(id, provenance)| (id.0.to_string(), provenance.clone()))
+                    .collect(),
+            },
         }
     }
 }
@@ -454,6 +680,66 @@ mod tests {
         assert!(output.summary.is_none());
     }
 
+    #[test]
+    fn provenance_maps_are_source_of_truth_not_inline_on_plan_items() {
+        let output = build_storage_plan_core(&fixture_input(BTreeSet::new(), false));
+        let result = output.result.expect("driver succeeds");
+
+        assert_eq!(
+            result
+                .provenance
+                .bindings
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            result.bindings.keys().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result
+                .provenance
+                .alias_classes
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            result.alias_classes.keys().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result
+                .provenance
+                .persist_pages
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            result.persist_pages.keys().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result
+                .provenance
+                .commit_groups
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            result.commit_groups.keys().copied().collect::<Vec<_>>()
+        );
+
+        let binding_json = serde_json::to_value(result.bindings.values().next().expect("binding"))
+            .expect("binding serializes");
+        let class_json = serde_json::to_value(result.alias_classes.values().next().expect("class"))
+            .expect("class serializes");
+        let page_json = serde_json::to_value(result.persist_pages.values().next())
+            .expect("optional page serializes");
+        let group_json = serde_json::to_value(result.commit_groups.values().next())
+            .expect("optional group serializes");
+        let plan_json =
+            serde_json::to_value(SerializableResult::from(&result)).expect("result serializes");
+
+        assert!(!json_has_key(&binding_json, "provenance"));
+        assert!(!json_has_key(&class_json, "provenance"));
+        assert!(!json_has_key(&page_json, "provenance"));
+        assert!(!json_has_key(&group_json, "provenance"));
+        assert!(json_has_key(&plan_json, "provenance"));
+    }
+
     fn fixture_input(forced: BTreeSet<ValueId>, fail_before_result: bool) -> StoragePlanCoreInput {
         let mut env = PredicateEnv::new();
         for value in [1, 2, 3] {
@@ -540,6 +826,21 @@ mod tests {
             determinism: DeterminismClass::Deterministic,
             schema: ReportSchemaId::from("storage_plan.v1"),
             schema_version: SemVer::new(1, 0, 0),
+        }
+    }
+
+    fn json_has_key(value: &serde_json::Value, key: &str) -> bool {
+        match value {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .any(|(field, nested)| field == key || json_has_key(nested, key)),
+            serde_json::Value::Array(values) => {
+                values.iter().any(|nested| json_has_key(nested, key))
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => false,
         }
     }
 }

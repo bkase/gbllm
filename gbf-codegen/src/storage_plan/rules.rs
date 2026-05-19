@@ -114,8 +114,8 @@ pub struct DecisionRuleManifestEntry {
     pub id: DecisionRuleId,
     pub name: String,
     pub priority: u32,
-    pub semantic_predicate_id: String,
-    pub semantic_outcome_id: String,
+    pub predicate_semantics: String,
+    pub outcome_semantics: String,
     pub rfc_revision: String,
 }
 
@@ -284,8 +284,8 @@ fn decision_rule_manifest_entry(rule: &DecisionRule) -> DecisionRuleManifestEntr
         id: rule.id,
         name: rule.name.to_owned(),
         priority: rule.priority,
-        semantic_predicate_id: semantic_predicate_id(rule.id).to_owned(),
-        semantic_outcome_id: semantic_outcome_id(rule.id).to_owned(),
+        predicate_semantics: semantic_predicate_id(rule.id).to_owned(),
+        outcome_semantics: semantic_outcome_id(rule.id).to_owned(),
         rfc_revision: DECISION_RULE_SET_RFC_REVISION.to_owned(),
     }
 }
@@ -1320,7 +1320,7 @@ mod tests {
         assert!(
             String::from_utf8(first)
                 .expect("canonical JSON is utf8")
-                .contains("\"semantic_predicate_id\":\"RenormLoopScratch\"")
+                .contains("\"predicate_semantics\":\"RenormLoopScratch\"")
         );
     }
 

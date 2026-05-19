@@ -1,8 +1,11 @@
 //! Stage 6 `StoragePlan` types and helpers.
 
 pub mod alias_engine;
+pub mod cache;
 pub mod diagnostics;
 pub mod driver;
+pub mod emitter;
+pub mod invariants;
 pub mod lifetime;
 pub mod persist;
 pub mod policy_view;
@@ -11,8 +14,11 @@ pub mod rules;
 pub mod types;
 
 pub use alias_engine::*;
+pub use cache::*;
 pub use diagnostics::*;
 pub use driver::*;
+pub use emitter::*;
+pub use invariants::*;
 pub use lifetime::*;
 pub use persist::*;
 pub use policy_view::*;

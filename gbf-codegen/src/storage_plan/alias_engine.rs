@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gbf_foundation::CanonicalJson;
 use gbf_policy::StoragePlanDiagnosticCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::s3::infer_ir::{NodeId, ValueId};
 use crate::storage_plan::lifetime::{LiveRangeError, abstract_live_ranges_disjoint};
@@ -22,7 +22,8 @@ pub struct AliasSeedBinding {
     pub role: ValueRole,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AliasCandidateEdge {
     pub left: ValueId,
     pub right: ValueId,

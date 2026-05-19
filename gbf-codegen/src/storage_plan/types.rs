@@ -1,13 +1,14 @@
 //! Core public type surface for Stage 6 `StoragePlan`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::{error::Error, fmt};
 
 use crate::s1::quant_graph::{DeterminismClass, QuantGraph, quant_graph_self_hash};
 use crate::s3::infer_ir::{GbInferIR, NodeId, ValueId, infer_ir_self_hash};
 use crate::s4::observation_plan::{ObservationPlan, observation_plan_self_hash};
 use crate::s5::range_plan::{RangePlan, range_plan_self_hash};
-use gbf_foundation::{CanonicalJsonError, DomainHash, Hash256, SemVer};
+use crate::storage_plan::predicates::{ValueFormat, ValueRole};
+use gbf_foundation::{CanonicalJsonError, DomainHash, EvidenceRef, Hash256, SemVer};
 use gbf_policy::ResolvedCompilePolicy;
 use gbf_report::ReportSchemaId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -362,7 +363,7 @@ pub enum AliasIntent {
     PersistRotation,
 }
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize)]
 pub struct AliasClass {
     id: AliasClassId,
     fingerprint: AliasClassFingerprint,
@@ -627,6 +628,101 @@ pub enum CommitGroupReason {
     ContinuationOnly,
     Independent,
     OrderedRecoverable,
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+pub struct AdmittingPredicateId(pub u32);
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageProvenance {
+    pub bindings: BTreeMap<ValueId, BindingProvenance>,
+    pub alias_classes: BTreeMap<AliasClassId, AliasClassProvenance>,
+    pub persist_pages: BTreeMap<PersistPageId, PersistPageProvenance>,
+    pub commit_groups: BTreeMap<CommitGroupId, CommitGroupProvenance>,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingProvenance {
+    pub admitting_predicate: AdmittingPredicateId,
+    pub decision_rule: DecisionRuleId,
+    pub policy_refinement_applied: bool,
+    pub evidence: Vec<EvidenceRef>,
+    pub op_output_role: Option<ValueRole>,
+    pub op_output_format: Option<ValueFormat>,
+}
+
+impl BindingProvenance {
+    #[must_use]
+    pub fn new(
+        admitting_predicate: AdmittingPredicateId,
+        decision_rule: DecisionRuleId,
+        policy_refinement_applied: bool,
+        mut evidence: Vec<EvidenceRef>,
+        op_output_role: Option<ValueRole>,
+        op_output_format: Option<ValueFormat>,
+    ) -> Self {
+        evidence.sort();
+        Self {
+            admitting_predicate,
+            decision_rule,
+            policy_refinement_applied,
+            evidence,
+            op_output_role,
+            op_output_format,
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AliasClassProvenance {
+    pub admitting_intent: AliasIntent,
+    pub evidence: Vec<EvidenceRef>,
+}
+
+impl AliasClassProvenance {
+    #[must_use]
+    pub fn new(admitting_intent: AliasIntent, mut evidence: Vec<EvidenceRef>) -> Self {
+        evidence.sort();
+        Self {
+            admitting_intent,
+            evidence,
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistPageProvenance {
+    pub source: PersistPageSource,
+}
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum PersistPageSource {
+    SequenceStateSlot { layer: u16, slot: u32 },
+    Continuation,
+    Transcript { family: u32 },
+    Harness { family: u32 },
+    Trace { family: u32 },
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitGroupProvenance {
+    pub reason: CommitGroupReason,
+    pub evidence: Vec<EvidenceRef>,
+}
+
+impl CommitGroupProvenance {
+    #[must_use]
+    pub fn new(reason: CommitGroupReason, mut evidence: Vec<EvidenceRef>) -> Self {
+        evidence.sort();
+        Self { reason, evidence }
+    }
 }
 
 #[derive(Serialize)]
