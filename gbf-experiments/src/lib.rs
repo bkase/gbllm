@@ -110,3 +110,7 @@ pub mod s3;
 /// Gutenberg promotion experiment modules.
 #[cfg(feature = "s4")]
 pub mod s4;
+
+/// Pick-and-Fit experiment modules.
+#[cfg(any(feature = "s5-default", feature = "s5-no-log"))]
+pub mod s5;
