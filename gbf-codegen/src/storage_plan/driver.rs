@@ -6,7 +6,7 @@ use gbf_foundation::{CanonicalJson, CanonicalJsonError, EvidenceRef, Hash256};
 use gbf_policy::{StoragePlanDiagnosticCode, StoragePlanDiagnosticProvenance};
 use serde::{Deserialize, Serialize};
 
-use crate::s3::infer_ir::ValueId;
+use crate::s3::infer_ir::{NodeId, ValueId};
 use crate::storage_plan::alias_engine::{
     AliasCandidateEdge, AliasSeedBinding, build_alias_classes,
 };
@@ -36,6 +36,7 @@ use crate::storage_plan::types::{
 pub struct StoragePlanCoreInput {
     pub input_identity: StoragePlanInputIdentity,
     pub predicate_env: PredicateEnv,
+    pub topological_order: Vec<NodeId>,
     pub values: Vec<StoragePlanCoreValue>,
     pub alias_edges: Vec<AliasCandidateEdge>,
     pub alias_forced_recompute_values: BTreeSet<ValueId>,
@@ -349,20 +350,7 @@ fn construct_alias_classes(
     bindings: &BTreeMap<ValueId, StorageBinding>,
 ) -> Result<BTreeMap<AliasClassId, AliasClass>, StoragePlanDiagnosticCode> {
     let seeds = alias_seed_bindings(input, bindings);
-    let order = input
-        .values
-        .iter()
-        .flat_map(|value| {
-            [
-                value.live_range.def_node,
-                value
-                    .live_range
-                    .last_use_node
-                    .unwrap_or(value.live_range.def_node),
-            ]
-        })
-        .collect::<Vec<_>>();
-    build_alias_classes(&seeds, &input.alias_edges, &order)
+    build_alias_classes(&seeds, &input.alias_edges, &input.topological_order)
         .map(classes_by_id)
         .map_err(|error| error.code)
 }
@@ -731,6 +719,26 @@ mod tests {
     }
 
     #[test]
+    fn alias_overlap_uses_canonical_topology_not_values_iteration_order() {
+        let mut input = fixture_input(BTreeSet::new(), false);
+        let mut later_listed = hot_value(1);
+        later_listed.live_range = live_range(2, 5);
+        let mut earlier_listed = hot_value(2);
+        earlier_listed.live_range = live_range(3, 4);
+        input.values = vec![earlier_listed, later_listed];
+        input.topological_order = (1..=6).map(NodeId::new).collect();
+        input.alias_edges = vec![edge(1, 2, AliasIntent::ScratchReuse)];
+
+        let output = build_storage_plan_core(&input);
+
+        assert_eq!(output.outcome, StoragePlanCoreOutcome::Failed);
+        assert_eq!(
+            output.diagnostics,
+            vec![StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent]
+        );
+    }
+
+    #[test]
     fn persist_rotation_pair_predicate_has_persist_pages_available_before_alias() {
         let mut input = fixture_input(BTreeSet::new(), false);
         input.values = vec![
@@ -987,6 +995,7 @@ mod tests {
         StoragePlanCoreInput {
             input_identity: identity(),
             predicate_env: env,
+            topological_order: (1..=8).map(NodeId::new).collect(),
             values: vec![hot_value(1), hot_value(2), hot_value(3)],
             alias_edges: vec![
                 edge(1, 2, AliasIntent::ScratchReuse),

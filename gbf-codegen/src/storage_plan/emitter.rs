@@ -616,6 +616,7 @@ mod tests {
         StoragePlanCoreInput {
             input_identity: identity(),
             predicate_env: env,
+            topological_order: (1..=4).map(NodeId::new).collect(),
             values: vec![
                 StoragePlanCoreValue {
                     value: ValueId::new(1),

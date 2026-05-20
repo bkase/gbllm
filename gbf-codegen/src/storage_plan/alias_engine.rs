@@ -11,7 +11,7 @@ use crate::storage_plan::lifetime::{LiveRangeError, abstract_live_ranges_disjoin
 use crate::storage_plan::predicates::ValueRole;
 use crate::storage_plan::types::{
     AbstractLiveRange, AliasClass, AliasClassError, AliasClassFingerprint, AliasClassId,
-    AliasIntent, LifetimeClass, Materialization, NonEmptySortedSet, StorageClass,
+    AliasIntent, LifetimeClass, Materialization, NonEmptySortedSet, PersistKind, StorageClass,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,12 +168,67 @@ pub fn pp_ping_pong(left: &AliasSeedBinding, right: &AliasSeedBinding, typed_pai
         && typed_pair
 }
 
+pub fn pp_resume_overlap(
+    survivor: &AliasSeedBinding,
+    slice: &AliasSeedBinding,
+    resume_boundary: bool,
+) -> bool {
+    is_hot_resume_window(survivor) && is_hot_slice(slice) && resume_boundary
+}
+
+pub fn pp_persist_rotation(
+    left: &AliasSeedBinding,
+    right: &AliasSeedBinding,
+    left_kind: PersistKind,
+    right_kind: PersistKind,
+    rotation_pair_declared: bool,
+) -> bool {
+    let (
+        Materialization::Persist {
+            page: left_page,
+            commit_group: left_group,
+        },
+        Materialization::Persist {
+            page: right_page,
+            commit_group: right_group,
+        },
+    ) = (&left.materialization, &right.materialization)
+    else {
+        return false;
+    };
+
+    left_group == right_group
+        && left_page != right_page
+        && left_kind == right_kind
+        && rotation_pair_declared
+}
+
 fn is_wram_hot_slice(binding: &AliasSeedBinding) -> bool {
     matches!(
         binding.materialization,
         Materialization::Materialize {
             class: StorageClass::WramHot,
             lifetime: LifetimeClass::Slice
+        }
+    )
+}
+
+fn is_hot_slice(binding: &AliasSeedBinding) -> bool {
+    matches!(
+        binding.materialization,
+        Materialization::Materialize {
+            class: StorageClass::WramHot | StorageClass::HramHot,
+            lifetime: LifetimeClass::Slice
+        }
+    )
+}
+
+fn is_hot_resume_window(binding: &AliasSeedBinding) -> bool {
+    matches!(
+        binding.materialization,
+        Materialization::Materialize {
+            class: StorageClass::WramHot | StorageClass::HramHot,
+            lifetime: LifetimeClass::ResumeWindow
         }
     )
 }
@@ -358,6 +413,7 @@ impl UnionFind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage_plan::types::{CommitGroupId, PersistPageId};
     #[test]
     fn mixed_intent_component_rejects_store_031() {
         let bindings = bindings([1, 2, 3]);
@@ -488,6 +544,64 @@ mod tests {
         assert!(pp_scratch_reuse(&left, &right, &order).expect("predicate computes"));
     }
 
+    #[test]
+    fn resume_overlap_predicate_requires_resume_window_slice_hot_pair_and_boundary() {
+        let mut survivor = binding(1, ValueRole::Activation);
+        survivor.materialization = Materialization::Materialize {
+            class: StorageClass::HramHot,
+            lifetime: LifetimeClass::ResumeWindow,
+        };
+        let slice = binding(2, ValueRole::Activation);
+
+        assert!(pp_resume_overlap(&survivor, &slice, true));
+        assert!(!pp_resume_overlap(&survivor, &slice, false));
+        assert!(!pp_resume_overlap(&slice, &survivor, true));
+    }
+
+    #[test]
+    fn persist_rotation_predicate_requires_same_group_distinct_pages_kind_and_declaration() {
+        let left = persist_binding(1, 1, 7);
+        let right = persist_binding(2, 2, 7);
+        let same_page = persist_binding(3, 1, 7);
+        let other_group = persist_binding(4, 3, 8);
+
+        assert!(pp_persist_rotation(
+            &left,
+            &right,
+            PersistKind::Trace,
+            PersistKind::Trace,
+            true,
+        ));
+        assert!(!pp_persist_rotation(
+            &left,
+            &right,
+            PersistKind::Trace,
+            PersistKind::Harness,
+            true,
+        ));
+        assert!(!pp_persist_rotation(
+            &left,
+            &right,
+            PersistKind::Trace,
+            PersistKind::Trace,
+            false,
+        ));
+        assert!(!pp_persist_rotation(
+            &left,
+            &same_page,
+            PersistKind::Trace,
+            PersistKind::Trace,
+            true,
+        ));
+        assert!(!pp_persist_rotation(
+            &left,
+            &other_group,
+            PersistKind::Trace,
+            PersistKind::Trace,
+            true,
+        ));
+    }
+
     fn bindings<const N: usize>(values: [u32; N]) -> Vec<AliasSeedBinding> {
         values
             .into_iter()
@@ -512,6 +626,18 @@ mod tests {
             },
             live_range: live_range(value * 2, Some(value * 2 + 1)),
             role,
+        }
+    }
+
+    fn persist_binding(value: u32, page: u32, group: u32) -> AliasSeedBinding {
+        AliasSeedBinding {
+            value: ValueId::new(value),
+            materialization: Materialization::Persist {
+                page: PersistPageId(page),
+                commit_group: CommitGroupId(group),
+            },
+            live_range: live_range(value * 2, Some(value * 2 + 1)),
+            role: ValueRole::OutputToken,
         }
     }
 

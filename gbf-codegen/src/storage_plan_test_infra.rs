@@ -276,7 +276,8 @@ pub mod synth {
     }
 
     fn storage_plan_core_input(builder: InputBuilder) -> StoragePlanCoreInput {
-        let identity = storage_plan_inputs(builder.clone()).input_identity();
+        let inputs = storage_plan_inputs(builder.clone());
+        let identity = inputs.input_identity();
         let mut env = PredicateEnv::new()
             .with_recompute_promotion(builder.promotion_level.into())
             .with_wram_hot_per_value_eligibility_ceiling(32)
@@ -351,9 +352,11 @@ pub mod synth {
             });
         }
 
+        let topological_order = synthetic_core_topological_order(&inputs.infer_ir, &values);
         StoragePlanCoreInput {
             input_identity: identity,
             predicate_env: env,
+            topological_order,
             values,
             alias_edges,
             alias_forced_recompute_values: BTreeSet::new(),
@@ -668,6 +671,31 @@ pub mod synth {
             lifetime_class: lifetime,
             checkpoint_stable: false,
         }
+    }
+
+    fn synthetic_core_topological_order(
+        infer_ir: &GbInferIR,
+        values: &[StoragePlanCoreValue],
+    ) -> Vec<NodeId> {
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        for node in &infer_ir.nodes {
+            if seen.insert(node.node_id) {
+                order.push(node.node_id);
+            }
+        }
+        let mut synthetic_only = BTreeSet::new();
+        for value in values {
+            synthetic_only.insert(value.live_range.def_node);
+            if let Some(first_use) = value.live_range.first_use_node {
+                synthetic_only.insert(first_use);
+            }
+            if let Some(last_use) = value.live_range.last_use_node {
+                synthetic_only.insert(last_use);
+            }
+        }
+        order.extend(synthetic_only.into_iter().filter(|node| seen.insert(*node)));
+        order
     }
 
     fn sized_activation_facts(size: u32) -> PredicateValueFacts {
@@ -1481,6 +1509,7 @@ pub mod sc_violations {
         StoragePlanCoreInput {
             input_identity: synth::minimal_singleton_core_input().input_identity,
             predicate_env: adjust_env(env),
+            topological_order: topological_order_for_values(&values),
             values,
             alias_edges,
             alias_forced_recompute_values,
@@ -1497,6 +1526,23 @@ pub mod sc_violations {
             persist_kind: None,
             commit_group_reason: None,
         }
+    }
+
+    fn topological_order_for_values(values: &[StoragePlanCoreValue]) -> Vec<NodeId> {
+        values
+            .iter()
+            .flat_map(|value| {
+                [
+                    value.live_range.def_node,
+                    value
+                        .live_range
+                        .last_use_node
+                        .unwrap_or(value.live_range.def_node),
+                ]
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     fn persist_value(
