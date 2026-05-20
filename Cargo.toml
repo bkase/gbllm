@@ -51,14 +51,23 @@ insta = { version = "=1.47.2" }
 predicates = { version = "=3.1.4" }
 pretty_assertions = { version = "=1.4.1" }
 proptest = { version = "=1.11.0" }
+regex = { version = "=1.12.3" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.149" }
 safetensors = { version = "=0.7.0" }
 sha2 = { version = "=0.10.9" }
 tempfile = { version = "=3.27.0" }
 static_assertions = { version = "=1.1.0" }
+bzip2 = { version = "=0.4.4" }
+flate2 = { version = "=1.1.9" }
+tar = { version = "=0.4.45" }
+time = { version = "=0.3.47", features = ["formatting", "parsing"] }
 toml = { version = "=1.1.2" }
 tracing = { version = "=0.1.44" }
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt", "json"] }
 tracing-test = { version = "=0.2.6" }
 trybuild = { version = "=1.0.116" }
+ureq = { version = "=2.12.1" }
+url = { version = "=2.5.8" }
+xml-rs = { version = "=0.8.28" }
+zip = { version = "=0.6.6" }

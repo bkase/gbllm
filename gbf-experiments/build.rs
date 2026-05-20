@@ -33,6 +33,9 @@ fn validate_experiment_build_selection() {
     let s2_full = env::var_os("CARGO_FEATURE_S2_FULL").is_some();
     let s2_ablation = env::var_os("CARGO_FEATURE_S2_ABLATION").is_some();
     let s3 = env::var_os("CARGO_FEATURE_S3").is_some();
+    let s4 = env::var_os("CARGO_FEATURE_S4").is_some();
+    let s4_full = env::var_os("CARGO_FEATURE_S4_FULL").is_some();
+    let s4_falsify = env::var_os("CARGO_FEATURE_S4_FALSIFY").is_some();
     let s3_oracle_real = env::var_os("CARGO_FEATURE_S3_ORACLE_REAL").is_some();
     let s3_oracle_fallback = env::var_os("CARGO_FEATURE_S3_ORACLE_FALLBACK").is_some();
 
@@ -42,6 +45,9 @@ fn validate_experiment_build_selection() {
     if s3_oracle_real && s3_oracle_fallback {
         panic!("s3-oracle-real and s3-oracle-fallback are mutually exclusive");
     }
+    if s4_full && s4_falsify {
+        panic!("S4 feature mutex violated: s4-full and s4-falsify are mutually exclusive");
+    }
 
     match (phase_a, ablation) {
         (true, false) | (false, true) => {}
@@ -49,8 +55,10 @@ fn validate_experiment_build_selection() {
             panic!("gbf-experiments features phase-a and ablation are mutually exclusive");
         }
         (false, false) => {
-            if !s2_full && !s2_ablation && !s3 {
-                panic!("gbf-experiments requires at least one S1, S2, or S3 experiment feature");
+            if !s2_full && !s2_ablation && !s3 && !s4 {
+                panic!(
+                    "gbf-experiments requires at least one S1, S2, S3, or S4 experiment feature"
+                );
             }
         }
     }

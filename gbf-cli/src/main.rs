@@ -55,6 +55,12 @@ enum GbfCommand {
         #[command(subcommand)]
         command: gbf_experiments::s3::cli::S3Command,
     },
+    /// S4 Gutenberg promotion experiment workflows.
+    #[cfg(feature = "s4")]
+    S4 {
+        #[command(subcommand)]
+        command: gbf_experiments::s4::cli::S4Command,
+    },
 }
 
 fn main() -> ExitCode {
@@ -70,6 +76,8 @@ fn main() -> ExitCode {
             let s2_logging = s2_logging(&cli);
             #[cfg(feature = "s3")]
             let s3_logging = s3_logging(&cli);
+            #[cfg(feature = "s4")]
+            let s4_logging = s4_logging(&cli);
             match cli.command {
                 #[cfg(any(
                     feature = "phase-a",
@@ -99,6 +107,13 @@ fn main() -> ExitCode {
                     gbf_experiments::s3::cli::S3Cli {
                         command,
                         logging: s3_logging,
+                    },
+                )),
+                #[cfg(feature = "s4")]
+                GbfCommand::S4 { command } => exit_code(gbf_experiments::s4::cli::run(
+                    gbf_experiments::s4::cli::S4Cli {
+                        command,
+                        logging: s4_logging,
                     },
                 )),
             }
@@ -155,6 +170,29 @@ fn s3_logging(cli: &GbfCli) -> gbf_experiments::s3::cli::S3CliLogging {
         _ => S3CliLogLevel::Info,
     };
     S3CliLogging {
+        format,
+        level,
+        log_file: cli.log_file.clone(),
+        capture_events: cli.capture_events.clone(),
+    }
+}
+
+#[cfg(feature = "s4")]
+fn s4_logging(cli: &GbfCli) -> gbf_experiments::s4::cli::S4CliLogging {
+    use gbf_experiments::s4::cli::{S4CliLogFormat, S4CliLogLevel, S4CliLogging};
+    let format = match cli.log_format.as_str() {
+        "json" => S4CliLogFormat::Json,
+        _ => S4CliLogFormat::Pretty,
+    };
+    let level = match cli.log_level.as_str() {
+        "off" => S4CliLogLevel::Off,
+        "error" => S4CliLogLevel::Error,
+        "warn" => S4CliLogLevel::Warn,
+        "debug" => S4CliLogLevel::Debug,
+        "trace" => S4CliLogLevel::Trace,
+        _ => S4CliLogLevel::Info,
+    };
+    S4CliLogging {
         format,
         level,
         log_file: cli.log_file.clone(),

@@ -1,0 +1,48 @@
+name: S4 Preregistration
+
+on:
+  pull_request:
+    paths:
+      - "fixtures/preregistration/s4.toml"
+      - "history/rfcs/F-S4-gutenberg-promotion.md"
+      - "experiments/S4/**"
+      - "docs/experiments/S4-report.md"
+      - "scripts/s4_preregistration_check.sh"
+      - "scripts/tests/s4_preregistration_check_test.sh"
+      - ".github/workflows/s4-preregistration.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: s4-preregistration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  s4-preregistration:
+    name: S4 preregistration gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run S4 preregistration pre-result dry-run check
+        shell: bash
+        run: scripts/s4_preregistration_check.sh --dry-run --output artifacts/s4-preregistration.json
+
+      - name: Run S4 preregistration regression test
+        shell: bash
+        run: scripts/tests/s4_preregistration_check_test.sh
+
+      - name: Upload S4 preregistration artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s4-preregistration-artifacts
+          path: |
+            artifacts/s4-preregistration.json
+          if-no-files-found: warn
+          retention-days: 14

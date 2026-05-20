@@ -1,0 +1,8 @@
+Opening notes.
+*** START OF THE PROJECT GUTENBERG EBOOK LAST FOOTER WINS ***
+First body line.
+*** END OF THE PROJECT GUTENBERG EBOOK LAST FOOTER WINS ***
+Errata that should remain because the last footer wins.
+
+*** END OF THE PROJECT GUTENBERG EBOOK LAST FOOTER WINS ***
+Trailer after selected footer.

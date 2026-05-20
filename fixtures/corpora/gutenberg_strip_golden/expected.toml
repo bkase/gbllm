@@ -1,0 +1,79 @@
+schema = "gutenberg_strip_golden_expected.v1"
+case_count = 10
+
+[[cases]]
+book_id = 1
+name = "standard_the"
+source_path = "0001_standard_the.txt"
+source_sha256 = "sha256:28169f587e8f35d2afae71d4765561f6a2c91e4c7b38395234a65e878c0f0493"
+expected_post_strip_sha256 = "sha256:c3b31c42f097dc9cbbf36975a4fbf20bdb92907654e7965004642fe484f7e731"
+expected_body = "Alpha line.\nBeta line.\n"
+
+[[cases]]
+book_id = 2
+name = "bom_crlf_this"
+source_path = "0002_bom_crlf_this.txt"
+source_sha256 = "sha256:68e2b41a4d70394c435a8a761c40872c62fb717ae3ae3f2c037b8cdfef11262e"
+expected_post_strip_sha256 = "sha256:07cdaf4e029303fd2ad5389d92b23cbe50faecc4edbca2e92dd73c735f85ebb6"
+expected_body = "Carriage returns become LF.\nSecond body line.\n"
+
+[[cases]]
+book_id = 3
+name = "bare_lowercase_tabs"
+source_path = "0003_bare_lowercase_tabs.txt"
+source_sha256 = "sha256:b5fd4c0c92c52651b743ce39f8105e23a274b5bde54ea258487fa7abe417fd36"
+expected_post_strip_sha256 = "sha256:b40b25dd0d8baa56b70bf72ebbb58895def5c1fd6f43f12763313903318ae132"
+expected_body = "Bare marker body survives.\nTabs before markers are horizontal whitespace.\n"
+
+[[cases]]
+book_id = 4
+name = "last_footer_wins"
+source_path = "0004_last_footer_wins.txt"
+source_sha256 = "sha256:ab5c1aee47d3d311166659bd50f4e371ba38b797149f9cb29896941300ba9a5b"
+expected_post_strip_sha256 = "sha256:12b04f8c68072f4db02d850864563c243f11b507b2a9bd916c2599bf7d8fd307"
+expected_body = "First body line.\n*** END OF THE PROJECT GUTENBERG EBOOK LAST FOOTER WINS ***\nErrata that should remain because the last footer wins.\n"
+
+[[cases]]
+book_id = 5
+name = "preserve_body_whitespace"
+source_path = "0005_preserve_body_whitespace.txt"
+source_sha256 = "sha256:ca288833ff915a5217b551db525c18c1fb0062ab2787f2f1562063da68d5d8c5"
+expected_post_strip_sha256 = "sha256:64a56cafe6fe8c8abe9f2fcacbef19ee69a6bf307ad030cc0d8a2803c73de7c5"
+expected_body = "\n  Leading spaces stay.\nTrailing spaces stay.\n"
+
+[[cases]]
+book_id = 6
+name = "nfc_body"
+source_path = "0006_nfc_body.txt"
+source_sha256 = "sha256:e2f14d60a7b9a73cfe94c049af626a9208e352ac1381b11ab6bc6aa217e83fe7"
+expected_post_strip_sha256 = "sha256:778acac0ca13638bb73d91e5c4c13537adc677627655dfcf450bc69416194580"
+expected_body = "Café must normalize to composed NFC.\n"
+
+[[cases]]
+book_id = 7
+name = "missing_header"
+source_path = "0007_missing_header.txt"
+source_sha256 = "sha256:0738d4514ea8b0046507eb44595e692464f15fd817ee8cdfaffd00e1684521ae"
+expected_drop_reason = "gutenberg_marker_missing"
+
+[[cases]]
+book_id = 8
+name = "missing_footer"
+source_path = "0008_missing_footer.txt"
+source_sha256 = "sha256:ef40543d2cda83d30a831690abbdb5f46bfc27c8956ea1fe579237ec37846f2e"
+expected_drop_reason = "gutenberg_marker_missing"
+
+[[cases]]
+book_id = 9
+name = "footer_before_header"
+source_path = "0009_footer_before_header.txt"
+source_sha256 = "sha256:104b162200381a4dd4c3c4fdc2b4f41a20fb5e41994fac7c03fc4b79cd48b964"
+expected_drop_reason = "gutenberg_marker_missing"
+
+[[cases]]
+book_id = 10
+name = "body_contains_marker_text"
+source_path = "0010_body_contains_marker_text.txt"
+source_sha256 = "sha256:4c95e7fdb02fa06501bce221fecbb629a77ea43324cbf3bf0f92dfac0cabf76f"
+expected_post_strip_sha256 = "sha256:a2622be51a91c1edf0a19ba35ab0a00ba874027b8d5c2953d325a3d1573661ec"
+expected_body = "This line mentions START OF THE PROJECT GUTENBERG EBOOK without stars.\nThis line mentions END OF THE PROJECT GUTENBERG EBOOK without stars.\n"

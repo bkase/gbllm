@@ -1515,6 +1515,18 @@ Consequence of Refuted:
   is unaffected.
 ```
 
+Post-preregistration gate-hardening note:
+  The frozen H3 block above remains P-1..P-8 because
+  `fixtures/preregistration/s4.toml` pins lines 1225..1516. Later S4
+  implementation hardening, reflected in D8, §8 Pr-Ok-1, §15 O12, and the
+  `gbf s4 promote` schema, adds the emitted rejection diagnostics
+  `P1_v0success_not_passing`, `P8_repetition_manifest_mismatch`, and
+  `P9_non_explicit_artifact_selector`. The pre-frozen
+  `PromotionGateRejectionReason` sketch in §2 omits those names, but the
+  post-frozen implementation/schema contract includes them in canonical
+  order. Those additions are closure/schema amendments and must not be
+  treated as a rewrite of the preregistered prediction hash.
+
 Hypothesis composition rules are formalized in §11 (Outcome algebra).
 
 ---
@@ -2031,22 +2043,43 @@ operation s4_promote
 PromotionGateInputs :=
   {
     c_TS:                  S3CheckpointArtifact      ; ternary, from S3
-    c_TS_v0success:        S3V0SuccessArtifact       ; from S3
-    c_TS_oracle_agreement: S3OracleAgreementArtifact ; from S3
+    c_TS_v0success:        Null | S3V0SuccessArtifact       ; from S3
+    c_TS_oracle_agreement: Null | S3OracleAgreementArtifact ; from S3
     gb_manifest:           GutenbergManifest         ; from §5
     contamination_report:  CrossCorpusReport         ; from §7
-    baseline_gutenberg:    KnBaselineProduct         ; from §6.2
+    baseline_gutenberg:    Null | KnBaselineProduct         ; from §6.2
     repetition_collapse_check: RepetitionCheckArtifact ; from S3
+  }
+
+PromotionGateArtifactRef :=
+  {
+    artifact_path:      String       ; explicit path, never "latest"
+    artifact_self_hash: Hash256
+  }
+
+PromotionGateInputBindings :=
+  {
+    c_TS:                       PromotionGateArtifactRef
+    c_TS_v0success:             Null | PromotionGateArtifactRef
+    c_TS_oracle_agreement:      Null | PromotionGateArtifactRef
+    gb_manifest:                PromotionGateArtifactRef
+    contamination_report:       PromotionGateArtifactRef
+    baseline_gutenberg:         Null | PromotionGateArtifactRef
+    repetition_collapse_check:  PromotionGateArtifactRef
   }
 
 PromotionGateProduct :=
   {
     schema:                      "s4_promotion_gate.v1"
+    input_artifacts:             PromotionGateInputBindings
     tinystories_manifest_self_hash: Hash256
     gutenberg_manifest_self_hash: Hash256
     c_TS_checkpoint_self_hash:   Hash256
+    c_TS_v0success_self_hash:    Null | Hash256
+    c_TS_oracle_agreement_self_hash: Null | Hash256
     contamination_self_hash:     Hash256
-    baseline_gutenberg_self_hash: Hash256
+    baseline_gutenberg_self_hash: Null | Hash256
+    repetition_collapse_check_self_hash: Hash256
     outcome:                     PromotionGateOutcome
     promotion_gate_self_hash:    Hash256
   }
@@ -2109,7 +2142,11 @@ Postconditions:
               P-8: repetition_collapse_check.self_hash round-trips,
                    repetition_collapse_check.checkpoint_self_hash =
                      c_TS.checkpoint_self_hash,
+                   repetition_collapse_check.tinystories_manifest_self_hash =
+                     tinystories_manifest_self_hash,
                    and repetition_collapse_check.outcome = Pass
+              P-9: every PromotionGateArtifactRef uses an explicit artifact
+                   path and no path component is the selector "latest"
             else outcome = Rejected with reasons enumerated.
   Pr-Ok-2   Same inputs => same PromotionGateOutcome bytes under
             S1CanonicalJson encoding (referential transparency).
@@ -2651,6 +2688,8 @@ S4CorpusQuality (JSON) :=
     schema:                          "s4_corpus_quality.v1"
     gutenberg_manifest_self_hash:    Hash256
     tinystories_manifest_self_hash:  Hash256
+    drop_counts:                     GutenbergDropCounts
+    retained_book_count:             u32
     per_corpus:
       [
         {
@@ -2663,9 +2702,17 @@ S4CorpusQuality (JSON) :=
           charset_coverage_count:   u64    ; distinct charset_v1 ids seen
         }
       ]
+    kn_baseline_pointer:             DeferredArtifactPointer
+    contamination_outcome_pointer:   DeferredArtifactPointer
     corpus_quality_self_hash:        Hash256
   }
 ```
+
+`drop_counts` mirrors the `gutenberg_manifest.v1` `drop_count_*`
+fields. `retained_book_count` is
+`train_book_count + val_book_count` after all recoverable corpus drops.
+The deferred pointers record the owner bead/path for downstream artifacts
+that are not produced by the corpus build step.
 
 ## 12.6 s4_contamination_report.v1
 
@@ -2695,8 +2742,9 @@ S4OracleAgreementReport (JSON) :=
     tinystories_manifest_self_hash: Hash256
     gutenberg_manifest_self_hash: Hash256
     seed:                         0
-    checkpoint_sha:               Hash256
+    checkpoint_self_hash:         Hash256
     corpus_val_sha:               Hash256
+    workload_manifest_self_hash:  Hash256
     fixture_set_self_hash:        Hash256       ; from S3
     bpc_live:                     BpcValue
     bpc_denotational:             BpcValue
@@ -2704,16 +2752,37 @@ S4OracleAgreementReport (JSON) :=
     gap_live_vs_denotational:     f64
     gap_live_vs_artifact:         f64
     gap_denotational_vs_artifact: f64
+    per_token:                    [ { token: u64,
+                                      target_token_id: u8,
+                                      bpc_live: BpcValue,
+                                      bpc_denotational: BpcValue,
+                                      bpc_artifact: BpcValue,
+                                      gap_live_vs_denotational: f64,
+                                      gap_live_vs_artifact: f64,
+                                      gap_denotational_vs_artifact: f64 } ]
     s3_tolerance_self_hash:       Hash256       ; pinned tolerances
-    outcome:                      Agree | Disagree
+    outcome:                      S4OracleAgreementOutcome
     oracle_agreement_self_hash:   Hash256
   }
+
+S4OracleAgreementOutcome :=
+  | { kind: "Agree" }
+  | { kind: "Disagree",
+      failing_token: u64,         ; first token exceeding tolerance
+      max_gap: f64 }              ; largest pairwise bpc gap there
 
 Invariants:
   S4-O-Self-Hash        round-trips.
   S4-O-S3InheritedTol   tolerance values used to compute outcome are the
                         S3-pinned values; recomputing the tolerance hash
                         from S3 must match s3_tolerance_self_hash.
+                        S4 compares per-token bpc gaps. The inherited
+                        scalar budgets are S3's pinned per-token
+                        agreement tolerances: live-vs-denotational uses
+                        live_phase_a_vs_bundle, live-vs-artifact uses
+                        live_phase_d_vs_artifact, and the denotational-
+                        vs-artifact budget is max(phase_a, phase_d)
+                        because S3 has no direct bundle-vs-artifact gate.
 ```
 
 ## 12.9 s4_fp_reference.v1
@@ -2744,12 +2813,18 @@ S4CorpusProgressionReport :=
     schema:                         "s4_corpus_progression.v1"
     tinystories_manifest_self_hash: Hash256
     gutenberg_manifest_self_hash:   Hash256
+    promotion_gate_self_hash:       Hash256?   ; sibling back-reference
     schedule:                       CorpusProgressionScheduleSnapshot
     corpus_progression_self_hash:   Hash256
   }
 
 Invariants:
   S4-CP-Self-Hash       corpus_progression_self_hash round-trips.
+                        promotion_gate_self_hash is omitted from this
+                        report's own self-hash to avoid a two-artifact
+                        hash cycle; the sibling promotion gate includes
+                        corpus_progression_self_hash and this field
+                        completes the reverse reference.
   S4-CP-Edge            exactly one edge exists:
                         {from: TinyStories, to: Gutenberg,
                          gate: G_TS->Gutenberg}.
@@ -2784,6 +2859,19 @@ Front-matter:
       score_self_hash:              Null | Hash256,
       oracle_agreement_self_hash:   Null | Hash256
     }]
+  hypothesis_statuses:
+    Map[Hypothesis -> HypothesisStatus] := {
+      "H1":                         HypothesisStatus,
+      "H2":                         HypothesisStatus,
+      "H3":                         HypothesisStatus,
+      "H4":                         HypothesisStatus,
+      "H5":                         HypothesisStatus,
+      "H6":                         HypothesisStatus,
+      "H7":                         HypothesisStatus
+    }
+                                  ; canonical verifier outcomes for H1..H7.
+                                  ; Keys are exactly the hypothesis labels;
+                                  ; no missing, duplicate, or extra keys.
   generated_at:           RFC3339 UTC, informational only, excluded from
                           report hash.
                           Report generation may read the host clock only
@@ -3059,6 +3147,12 @@ O5  Falsification suite
     Six deliberately-broken implementations must each produce the
     expected Refuted verdict on the corresponding hypothesis:
 
+    Scope note:
+      S4 v1's normative O5 suite is F1-broken-S4 through
+      F6-broken-S4 only. Any older planning or bead text that names
+      F1-broken-S4 through F9-broken-S4 was a pre-O5 draft and is
+      superseded by the six cases below.
+
       F1-broken: gutenberg_manifest_lossy_decompression
                   (a unicode-stripping decompressor that silently drops
                    non-ASCII bytes during NFC normalization)
@@ -3182,13 +3276,13 @@ O11 Promotion gate referential transparency
 O12 Promotion gate predicate matrix
     H3 is not established by the implementation under test evaluating
     itself. gbf-experiments must provide a small, independent
-    PromotionGateReferenceEvaluator that computes P-1..P-8 from parsed
+    PromotionGateReferenceEvaluator that computes P-1..P-9 from parsed
     artifacts without calling the production s4_promote implementation.
 
     Required tests:
       1. canonical positive bundle:
            reference = Promoted and production = Promoted.
-      2. for every k in {P1, P2, P3, P4, P5, P6, P7, P8}:
+      2. for every k in {P1, P2, P3, P4, P5, P6, P7, P8, P9}:
            construct exactly one minimally-broken bundle;
            reference rejects with reason including Pk;
            production rejects with reason including Pk;
@@ -3287,8 +3381,8 @@ Then:
       under S1CanonicalJson + canonical replay.
     - The promotion gate G_TS->Gutenberg implements D8 exactly over the
       tested input space: it accepted the canonical c_TS_ref only because
-      P-1..P-8 held, and it rejected the deliberately-broken variants
-      under §15 O5 with the expected reasons. (Implementation soundness
+      P-1..P-9 held, and it rejected the deliberately-broken variants
+      under §15 O12 with the expected reasons. (Implementation soundness
       over the tested inputs, not a formal proof over all malformed
       bundles.)
     - Continuation training from c_TS under D9 (warm-weight, cold-
@@ -3473,6 +3567,12 @@ gbf-experiments  (existing workspace crate; new s4 module)
       S4-R-Self-Hash, S4-R-Predictions, S4-R-AllHypotheses, S4-R-
       ClosureArtifacts, and binds the pre-registration commit history
       per O1.
+      Structured report lifecycle events use the S4 names
+      `s4::report::emission_started`, `s4::report::r_validator_passed`,
+      and `s4::report::emission_complete`; older bead notes using generic
+      `report_written` / `report.validators_run` names refer to the same
+      emitter lifecycle class inherited from earlier slices, not additional
+      S4 report schemas.
 
     gbf_experiments::s4::cli
       Public entrypoint(s) for replay. The CLI surface is the canonical
@@ -3700,10 +3800,20 @@ network-disabled.
 
 ```text
 scripts/s4_preregistration_check.sh implements §15 O1:
-  1. predictions_section_hash matches the exact markdown bytes of the
-     "Pre-registered predictions" section in predictions_commit, after
-     normalizing line endings to LF and excluding surrounding markdown
-     sections. S1CanonicalJson is not applied to markdown body text.
+  1. predictions_section_hash matches the canonical preregistration payload
+     recorded by fixtures/preregistration/s4.toml. The payload is the
+     S1CanonicalJson-style canonical JSON object:
+
+       {
+         "path": "history/rfcs/F-S4-gutenberg-promotion.md",
+         "start_line": predictions_line_start,
+         "end_line": predictions_line_end,
+         "section": <LF-normalized markdown line range>
+       }
+
+     The line range freezes the H1..H7 statement/prediction/falsification
+     block in §3. Any post-preregistration edit to that range changes the
+     hash and the checker reports the offending diff hunk.
   2. predictions_commit is a strict ancestor of first_result_commit;
   3. first_result_commit is the earliest commit introducing any
      gutenberg_manifest_self_hash, checkpoint_self_hash,
@@ -3719,20 +3829,32 @@ this script exits non-zero.
 ## 18.6 CI gates that block bd-2hmm closure
 
 ```text
-cargo test -p gbf-experiments
-cargo test -p gbf-experiments --features falsify --test s4_falsification
-cargo test -p gbf-experiments --test s4_corpus_oracle
-cargo test -p gbf-experiments --test s4_canonical_json
-cargo test -p gbf-experiments --test s4_integration
-cargo test -p gbf-data --test gutenberg_loader
-cargo test -p gbf-data --test gutenberg_split
+cargo test -p gbf-artifact --test gutenberg_manifest_s4
 cargo test -p gbf-data --test gutenberg_stripper
-cargo build -p gbf-experiments --no-default-features --features ablation
+cargo test -p gbf-cli --features s4 --test s4_cli_s4
+cargo test -p gbf-experiments --features s4 --test feature_compile_s4
+cargo test -p gbf-experiments --features s4 --test gutenberg_smoke_fixture_s4
+cargo test -p gbf-experiments --features s4 --test integration_s4
+cargo test -p gbf-experiments --features s4 --test promotion_gate_s4
+cargo test -p gbf-experiments --features s4 --test s4_baseline
+cargo test -p gbf-experiments --features s4 --test s4_contamination
+cargo test -p gbf-experiments --features s4 --test s4_corpus_oracle
+cargo test -p gbf-experiments --features s4 --test s4_corpus_progression
+cargo test -p gbf-experiments --features s4-falsify --test s4_falsification
+cargo test -p gbf-experiments --features s4 --test s4_oracle_agreement
+cargo test -p gbf-experiments --features s4 --test s4_report
+cargo test -p gbf-experiments --features s4 --test s4_run_artifacts
+cargo test -p gbf-experiments --features s4 --test s4_score
+cargo test -p gbf-experiments --features s4 --test s4_train_scheduler
+cargo test -p gbf-experiments --features s4 --test s4_verifier
+CARGO_INCREMENTAL=0 cargo test -p gbf-experiments --test s4_run_artifacts
+  (default-feature compile gate; expected to run 0 tests because the file is
+   cfg-gated on feature s4)
 scripts/s4_preregistration_check.sh
 scripts/s4_determinism_check.sh
   (replays seed 0 and asserts byte equality of safetensors and
    run_log_self_hash; satisfies the O2 CI smoke test only)
-scripts/s4_full_replay_check.sh
+scripts/s4_full_determinism_check.sh
   (replays all five seeds and asserts byte equality of canonical-tensor
    payloads plus all report-pinned s4_*.v1 self-hashes; required for
    bd-2hmm closure and H6 Confirmed)
@@ -3742,11 +3864,12 @@ scripts/s4_isolation_check.sh
    [0,1] and [1,0] produce identical per-seed hashes, and that
    seed128("s4-init-batch", 0) is not equal to seed128("s1-batch", 0)
    or seed128("s3-batch", 0); satisfies O9 and O10)
-scripts/s4_promotion_gate_check.sh
-  (runs s4_promote against the S3 ternary checkpoint twice with
-   byte-identical input bundles and asserts byte-identical
-   PromotionGateProduct; also runs the independent P1..P8 predicate
-   matrix from O12; satisfies O11 and O12)
+scripts/s4_api_drift_check.sh
+scripts/tests/s4_preregistration_check_test.sh
+scripts/tests/s4_ci_scripts_test.sh
+  (script-level smoke coverage for S4 workflow wiring, dry-run report
+   emission, and the promotion-gate predicate matrix exercised through
+   gbf s4 promote plus promotion_gate_s4)
 ```
 
 ---
@@ -3804,8 +3927,8 @@ F-S4 Promote to Gutenberg is correct when:
     HardFail blocks closure.
 
 3.  The promotion gate G_TS->Gutenberg accepts the S3 ternary checkpoint
-    c_TS exactly when D8 P-1..P-8 all hold; the gate is sound under the
-    six deliberately-broken substitutes of §15 O5.
+    c_TS exactly when D8 P-1..P-9 all hold; the gate is sound under the
+    §15 O12 predicate matrix and the F3-broken substitute of §15 O5.
 
 4.  Continuation training from c_TS under D9 (warm weights, cold AdamW
     state, warm QAT shadow weights, Phase::D) on gutenberg_train under

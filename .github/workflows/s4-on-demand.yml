@@ -1,0 +1,73 @@
+name: S4 On-Demand Gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref or SHA to reproduce"
+        required: true
+        default: "main"
+      seed_list:
+        description: "Comma-separated S4 seed list"
+        required: false
+        default: "0,1,2,3,4"
+      pass_version:
+        description: "S4 pass version"
+        required: false
+        default: "0.4.0"
+
+concurrency:
+  group: s4-on-demand-${{ github.event.inputs.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  s4-on-demand:
+    name: S4 on-demand determinism smoke and scaffolding gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      S4_SEED_LIST: ${{ github.event.inputs.seed_list }}
+      S4_PASS_VERSION: ${{ github.event.inputs.pass_version }}
+      S4_ARTIFACT_DIR: experiments/S4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - name: Run S4 on-demand determinism smoke and dry-run scaffolding gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/s4-on-demand "$S4_ARTIFACT_DIR"
+
+          run_capture_ndjson() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s4-on-demand/${name}.stdout") \
+              2> >(tee "artifacts/s4-on-demand/${name}.ndjson" >&2)
+          }
+
+          run_capture_ndjson s4-preregistration scripts/s4_preregistration_check.sh --dry-run --output artifacts/s4-on-demand/s4-preregistration.json
+          run_capture_ndjson s4-determinism scripts/s4_determinism_check.sh --artifact-dir "$S4_ARTIFACT_DIR" --report-path artifacts/s4-on-demand/s4-determinism.json
+          run_capture_ndjson s4-full-determinism scripts/s4_full_determinism_check.sh --dry-run --artifact-dir "$S4_ARTIFACT_DIR" --report-path artifacts/s4-on-demand/s4-full-determinism.json
+          run_capture_ndjson s4-isolation scripts/s4_isolation_check.sh --dry-run --artifact-dir "$S4_ARTIFACT_DIR" --report-path artifacts/s4-on-demand/s4-isolation.json
+          run_capture_ndjson s4-api-drift scripts/s4_api_drift_check.sh --dry-run --report-path artifacts/s4-on-demand/s4-api-drift.json
+
+      - name: Upload S4 on-demand artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s4-on-demand-artifacts
+          path: |
+            artifacts/s4-on-demand/**/*.stdout
+            artifacts/s4-on-demand/**/*.ndjson
+            artifacts/s4-on-demand/*.json
+            experiments/S4/**
+            docs/experiments/S4-report.md
+          if-no-files-found: warn
+          retention-days: 30
