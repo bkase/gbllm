@@ -9,7 +9,7 @@ use crate::s4::observation_plan::{ObservationPlan, observation_plan_self_hash};
 use crate::s5::range_plan::{RangePlan, range_plan_self_hash};
 use crate::storage_plan::predicates::{ValueFormat, ValueRole};
 use gbf_foundation::{CanonicalJsonError, DomainHash, EvidenceRef, Hash256, SemVer};
-use gbf_policy::ResolvedCompilePolicy;
+use gbf_policy::{ResolvedCompilePolicy, StoragePlanDiagnosticCode};
 use gbf_report::ReportSchemaId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -86,6 +86,30 @@ impl StoragePlanInputIdentity {
             schema_version: STORAGE_PLAN_SCHEMA_VERSION,
         }
     }
+
+    #[must_use]
+    pub fn hash_for_product(&self, product: StoragePlanInputProduct) -> Hash256 {
+        match product {
+            StoragePlanInputProduct::QuantGraph => self.quant_graph_hash,
+            StoragePlanInputProduct::InferIr => self.infer_ir_hash,
+            StoragePlanInputProduct::ObservationPlan => self.observation_plan_hash,
+            StoragePlanInputProduct::RangePlan => self.range_plan_hash,
+            StoragePlanInputProduct::Policy => self.policy_hash,
+        }
+    }
+}
+
+impl StoragePlanInputHashes {
+    #[must_use]
+    pub fn hash_for_product(&self, product: StoragePlanInputProduct) -> Hash256 {
+        match product {
+            StoragePlanInputProduct::QuantGraph => self.quant_graph_hash,
+            StoragePlanInputProduct::InferIr => self.infer_ir_hash,
+            StoragePlanInputProduct::ObservationPlan => self.observation_plan_hash,
+            StoragePlanInputProduct::RangePlan => self.range_plan_hash,
+            StoragePlanInputProduct::Policy => self.policy_hash,
+        }
+    }
 }
 
 pub fn canonicalize_inputs(inputs: &StoragePlanInputs) -> Result<(), StoragePlanInputDiagnostic> {
@@ -131,38 +155,25 @@ pub fn validate_storage_plan_input_hashes(
     recorded: &StoragePlanInputHashes,
     computed: &StoragePlanInputHashes,
 ) -> Result<(), StoragePlanInputDiagnostic> {
-    check_recorded_hash(
-        StoragePlanInputDiagnosticCode::Store020RangePlan,
-        StoragePlanInputProduct::RangePlan,
-        recorded.range_plan_hash,
-        computed.range_plan_hash,
-    )?;
-    check_recorded_hash(
-        StoragePlanInputDiagnosticCode::Store021InferIr,
-        StoragePlanInputProduct::InferIr,
-        recorded.infer_ir_hash,
-        computed.infer_ir_hash,
-    )?;
-    check_recorded_hash(
-        StoragePlanInputDiagnosticCode::Store022ObservationPlan,
-        StoragePlanInputProduct::ObservationPlan,
-        recorded.observation_plan_hash,
-        computed.observation_plan_hash,
-    )?;
-    check_recorded_hash(
-        StoragePlanInputDiagnosticCode::Store023QuantGraph,
-        StoragePlanInputProduct::QuantGraph,
-        recorded.quant_graph_hash,
-        computed.quant_graph_hash,
-    )?;
-    check_recorded_hash(
-        StoragePlanInputDiagnosticCode::Store024Policy,
-        StoragePlanInputProduct::Policy,
-        recorded.policy_hash,
-        computed.policy_hash,
-    )
+    for spec in STORAGE_PLAN_INPUT_HASH_MISMATCH_SPECS {
+        check_recorded_hash(
+            spec.input_code,
+            spec.product,
+            recorded.hash_for_product(spec.product),
+            computed.hash_for_product(spec.product),
+        )?;
+    }
+
+    Ok(())
 }
 
+/// Stage-6-local policy hash for the F-B8 input identity contract.
+///
+/// RFC F-B8 names this field `policy_hash = policy.canonical_hash`, but the
+/// current policy crate exposes resolved policies rather than a single
+/// canonical policy product hash owner. Until that owner exists in gbf-policy,
+/// this domain-separated hash is the explicit Stage 6 contract and the only
+/// bridge point callers should use.
 pub fn resolved_compile_policy_hash(
     policy: &ResolvedCompilePolicy,
 ) -> Result<Hash256, CanonicalJsonError> {
@@ -242,6 +253,47 @@ pub enum StoragePlanInputProduct {
     RangePlan,
     Policy,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoragePlanInputHashMismatchSpec {
+    pub input_code: StoragePlanInputDiagnosticCode,
+    pub storage_code: StoragePlanDiagnosticCode,
+    pub product: StoragePlanInputProduct,
+    pub identity_field: &'static str,
+}
+
+pub const STORAGE_PLAN_INPUT_HASH_MISMATCH_SPECS: [StoragePlanInputHashMismatchSpec; 5] = [
+    StoragePlanInputHashMismatchSpec {
+        input_code: StoragePlanInputDiagnosticCode::Store020RangePlan,
+        storage_code: StoragePlanDiagnosticCode::StorageRangePlanHashMismatch,
+        product: StoragePlanInputProduct::RangePlan,
+        identity_field: "range_plan",
+    },
+    StoragePlanInputHashMismatchSpec {
+        input_code: StoragePlanInputDiagnosticCode::Store021InferIr,
+        storage_code: StoragePlanDiagnosticCode::StorageInferIrHashMismatch,
+        product: StoragePlanInputProduct::InferIr,
+        identity_field: "infer_ir",
+    },
+    StoragePlanInputHashMismatchSpec {
+        input_code: StoragePlanInputDiagnosticCode::Store022ObservationPlan,
+        storage_code: StoragePlanDiagnosticCode::StorageObservationPlanHashMismatch,
+        product: StoragePlanInputProduct::ObservationPlan,
+        identity_field: "observation_plan",
+    },
+    StoragePlanInputHashMismatchSpec {
+        input_code: StoragePlanInputDiagnosticCode::Store023QuantGraph,
+        storage_code: StoragePlanDiagnosticCode::StorageQuantGraphHashMismatch,
+        product: StoragePlanInputProduct::QuantGraph,
+        identity_field: "quant_graph",
+    },
+    StoragePlanInputHashMismatchSpec {
+        input_code: StoragePlanInputDiagnosticCode::Store024Policy,
+        storage_code: StoragePlanDiagnosticCode::StoragePolicyHashMismatch,
+        product: StoragePlanInputProduct::Policy,
+        identity_field: "policy",
+    },
+];
 
 fn check_recorded_hash(
     code: StoragePlanInputDiagnosticCode,
@@ -1011,6 +1063,43 @@ mod tests {
     fn canonicalize_input_hashes_accepts_matching_hashes() {
         let hashes = input_hashes();
         validate_storage_plan_input_hashes(&hashes, &hashes).expect("matching hashes canonicalize");
+    }
+
+    #[test]
+    fn store_020_to_024_mapping_bridges_input_precheck_and_invariants() {
+        let pairs: Vec<_> = STORAGE_PLAN_INPUT_HASH_MISMATCH_SPECS
+            .iter()
+            .map(|spec| (spec.input_code.as_str(), spec.storage_code.as_str()))
+            .collect();
+
+        assert_eq!(
+            pairs,
+            vec![
+                ("STORE-020", "STORE-020"),
+                ("STORE-021", "STORE-021"),
+                ("STORE-022", "STORE-022"),
+                ("STORE-023", "STORE-023"),
+                ("STORE-024", "STORE-024"),
+            ]
+        );
+    }
+
+    #[test]
+    fn policy_hash_contract_is_stage6_local_until_policy_owner_exists() {
+        let policy = crate::storage_plan_test_infra::synth::minimal_singleton_inputs().policy;
+        let expected = DomainHash::new(
+            "gbf-codegen",
+            "ResolvedCompilePolicy",
+            STORAGE_PLAN_SCHEMA_ID,
+            "1.0.0",
+        )
+        .hash(&policy)
+        .expect("policy hashes with Stage 6 domain");
+
+        assert_eq!(
+            resolved_compile_policy_hash(&policy).expect("policy hash computes"),
+            expected
+        );
     }
 
     fn input_hashes() -> StoragePlanInputHashes {

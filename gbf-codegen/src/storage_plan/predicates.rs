@@ -44,12 +44,24 @@ pub enum FloatPrecision {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ValueFormat {
-    QuantInt { quant_format_id: QuantFormatId },
-    FloatRef { precision: FloatPrecision },
-    IntAccum { width_bits: u16 },
-    TokenIdDomain { vocab_size: u32 },
+    QuantInt {
+        quant_format_id: QuantFormatId,
+    },
+    FloatRef {
+        precision: FloatPrecision,
+    },
+    /// Integer accumulator width, in bits. RFC F-B8 pins this as `u8`
+    /// because Stage 6 only distinguishes small scalar accumulator domains.
+    IntAccum {
+        width_bits: u8,
+    },
+    TokenIdDomain {
+        vocab_size: u32,
+    },
     Flag,
-    ConstTensorRef { tensor_id: TensorId },
+    ConstTensorRef {
+        tensor_id: TensorId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -96,6 +108,13 @@ impl PredicateValueFacts {
     }
 }
 
+/// Predicate facts and precomputed rule surfaces for Stage 6.
+///
+/// This environment intentionally includes the RFC F-B8 §11 predicate surface
+/// needed by the full decision-rule set, including persistence, trace,
+/// transcript, HRAM admission, recompute-cost, and lifetime facts. Individual
+/// task beads may close only a subset of these helpers, but downstream rules
+/// must still use this typed surface rather than rereading upstream products.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PredicateEnv {
@@ -316,6 +335,11 @@ pub fn value_format_of(env: &PredicateEnv, value: ValueId) -> Option<&ValueForma
     env.facts(value).and_then(|facts| facts.format.as_ref())
 }
 
+/// Returns true for scalar values whose role and format may be placed in HRAM.
+///
+/// This predicate is shape-only. Size and budget admission are enforced by
+/// `precompute_hram_admitted_set`, which produces the explicit admitted set
+/// consumed by DR-12.
 #[must_use]
 pub fn is_hot_scalar(env: &PredicateEnv, value: ValueId) -> bool {
     let Some(facts) = env.facts(value) else {
@@ -664,6 +688,15 @@ mod tests {
 
         assert!(is_hot_scalar(&env, hot));
         assert!(!is_hot_scalar(&env, cold));
+    }
+
+    #[test]
+    fn int_accum_width_bits_is_rfc_u8_surface() {
+        let ValueFormat::IntAccum { width_bits } = (ValueFormat::IntAccum { width_bits: 16 })
+        else {
+            unreachable!("constructed IntAccum")
+        };
+        let _: u8 = width_bits;
     }
 
     #[test]

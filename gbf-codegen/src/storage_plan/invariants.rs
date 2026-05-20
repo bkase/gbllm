@@ -15,8 +15,8 @@ use crate::storage_plan::diagnostics::storage_plan_diagnostic;
 use crate::storage_plan::lifetime::{LifetimeBounds, validate_lifetime_bounds};
 use crate::storage_plan::types::{
     AliasClass, AliasClassId, AliasIntent, CommitGroupDecl, CommitGroupId, Materialization,
-    PersistPageDecl, PersistPageId, StorageBinding, StoragePlanInputHashes,
-    StoragePlanInputIdentity,
+    PersistPageDecl, PersistPageId, STORAGE_PLAN_INPUT_HASH_MISMATCH_SPECS, StorageBinding,
+    StoragePlanInputHashes, StoragePlanInputIdentity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,41 +274,15 @@ fn check_input_identity(
     identity: &StoragePlanInputIdentity,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    push_hash_mismatch(
-        diagnostics,
-        StoragePlanDiagnosticCode::StorageRangePlanHashMismatch,
-        "range_plan",
-        identity.range_plan_hash,
-        context.expected_input_hashes.range_plan_hash,
-    );
-    push_hash_mismatch(
-        diagnostics,
-        StoragePlanDiagnosticCode::StorageInferIrHashMismatch,
-        "infer_ir",
-        identity.infer_ir_hash,
-        context.expected_input_hashes.infer_ir_hash,
-    );
-    push_hash_mismatch(
-        diagnostics,
-        StoragePlanDiagnosticCode::StorageObservationPlanHashMismatch,
-        "observation_plan",
-        identity.observation_plan_hash,
-        context.expected_input_hashes.observation_plan_hash,
-    );
-    push_hash_mismatch(
-        diagnostics,
-        StoragePlanDiagnosticCode::StorageQuantGraphHashMismatch,
-        "quant_graph",
-        identity.quant_graph_hash,
-        context.expected_input_hashes.quant_graph_hash,
-    );
-    push_hash_mismatch(
-        diagnostics,
-        StoragePlanDiagnosticCode::StoragePolicyHashMismatch,
-        "policy",
-        identity.policy_hash,
-        context.expected_input_hashes.policy_hash,
-    );
+    for spec in STORAGE_PLAN_INPUT_HASH_MISMATCH_SPECS {
+        push_hash_mismatch(
+            diagnostics,
+            spec.storage_code,
+            spec.identity_field,
+            identity.hash_for_product(spec.product),
+            context.expected_input_hashes.hash_for_product(spec.product),
+        );
+    }
 }
 
 fn push_hash_mismatch(
