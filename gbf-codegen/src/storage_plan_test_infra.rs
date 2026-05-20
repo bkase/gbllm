@@ -289,15 +289,7 @@ pub mod synth {
                 persist_kind: None,
                 commit_group_reason: None,
             });
-            env = env.with_value(
-                value,
-                PredicateValueFacts::new(
-                    ValueRole::ExpertWeight,
-                    ValueFormat::ConstTensorRef {
-                        tensor_id: TensorId::new(next),
-                    },
-                ),
-            );
+            env = env.with_value(value, expert_weight_facts(next));
             next += 1;
         }
 
@@ -683,6 +675,17 @@ pub mod synth {
         let mut facts =
             PredicateValueFacts::new(ValueRole::Scratch, ValueFormat::IntAccum { width_bits: 16 });
         facts.logical_size = Some(2);
+        facts
+    }
+
+    fn expert_weight_facts(tensor: u32) -> PredicateValueFacts {
+        let mut facts = PredicateValueFacts::new(
+            ValueRole::ExpertWeight,
+            ValueFormat::ConstTensorRef {
+                tensor_id: TensorId::new(tensor),
+            },
+        );
+        facts.lifetime_estimate = Some(LifetimeClass::Persistent);
         facts
     }
 }

@@ -42,6 +42,20 @@ pub fn compute_abstract_live_range_with_checkpoints(
     checkpoint_stable_values: &BTreeSet<ValueId>,
     value: ValueId,
 ) -> Result<AbstractLiveRange, LiveRangeError> {
+    compute_abstract_live_range_with_predicates(
+        iir,
+        checkpoint_stable_values,
+        &PredicateEnv::new(),
+        value,
+    )
+}
+
+pub fn compute_abstract_live_range_with_predicates(
+    iir: &GbInferIR,
+    checkpoint_stable_values: &BTreeSet<ValueId>,
+    env: &PredicateEnv,
+    value: ValueId,
+) -> Result<AbstractLiveRange, LiveRangeError> {
     let nodes: Vec<_> = iir
         .nodes
         .iter()
@@ -52,10 +66,24 @@ pub fn compute_abstract_live_range_with_checkpoints(
         })
         .collect();
 
-    compute_abstract_live_range_from_nodes(
+    compute_abstract_live_range_from_nodes_with_predicates(
         &nodes,
         checkpoint_stable_values,
-        &BTreeMap::new(),
+        env,
+        value,
+    )
+}
+
+pub fn compute_abstract_live_range_from_nodes_with_predicates(
+    nodes: &[AbstractDefUseNode],
+    checkpoint_stable_values: &BTreeSet<ValueId>,
+    env: &PredicateEnv,
+    value: ValueId,
+) -> Result<AbstractLiveRange, LiveRangeError> {
+    compute_abstract_live_range_from_nodes(
+        nodes,
+        checkpoint_stable_values,
+        &BTreeMap::from([(value, effective_lifetime_estimate(env, value))]),
         value,
     )
 }
@@ -66,10 +94,9 @@ pub fn compute_abstract_live_range_from_nodes(
     lifetime_estimates: &BTreeMap<ValueId, LifetimeClass>,
     value: ValueId,
 ) -> Result<AbstractLiveRange, LiveRangeError> {
-    let (def_index, def_node) = nodes
+    let def_node = nodes
         .iter()
-        .enumerate()
-        .find_map(|(index, node)| node.outputs.contains(&value).then_some((index, node.node)))
+        .find_map(|node| node.outputs.contains(&value).then_some(node.node))
         .ok_or(LiveRangeError::MissingDef { value })?;
     let mut uses = nodes
         .iter()
@@ -84,7 +111,7 @@ pub fn compute_abstract_live_range_from_nodes(
     let lifetime_class = lifetime_estimates
         .get(&value)
         .cloned()
-        .unwrap_or_else(|| infer_lifetime_from_interval(def_index, last_use, checkpoint_stable));
+        .unwrap_or_else(|| effective_lifetime_estimate(&PredicateEnv::new(), value));
 
     Ok(AbstractLiveRange {
         def_node,
@@ -147,45 +174,62 @@ pub struct LifetimeBounds {
 }
 
 pub fn min_required_lifetime(env: &PredicateEnv, value: ValueId) -> LifetimeBound {
+    let mut strictest = LifetimeBound {
+        lifetime: LifetimeClass::Slice,
+        source: LifetimeBoundSource::DefaultSlice,
+    };
+
     if is_observed_checkpoint_backing_value(env, value) {
-        return LifetimeBound {
-            lifetime: LifetimeClass::Token,
-            source: LifetimeBoundSource::ObservationStability,
-        };
+        strictest = stricter_lifetime_bound(
+            strictest,
+            LifetimeBound {
+                lifetime: LifetimeClass::Token,
+                source: LifetimeBoundSource::ObservationStability,
+            },
+        );
     }
 
     if is_immutable_graph_entity(env, value) {
-        return LifetimeBound {
-            lifetime: LifetimeClass::Persistent,
-            source: LifetimeBoundSource::ImmutableGraphEntity,
-        };
+        strictest = stricter_lifetime_bound(
+            strictest,
+            LifetimeBound {
+                lifetime: LifetimeClass::Persistent,
+                source: LifetimeBoundSource::ImmutableGraphEntity,
+            },
+        );
     }
 
     if is_persistent_role(env, value) {
-        return LifetimeBound {
-            lifetime: LifetimeClass::Persistent,
-            source: LifetimeBoundSource::Persistence,
-        };
+        strictest = stricter_lifetime_bound(
+            strictest,
+            LifetimeBound {
+                lifetime: LifetimeClass::Persistent,
+                source: LifetimeBoundSource::Persistence,
+            },
+        );
     }
 
     if value_role_of(env, value) == Some(ValueRole::RouterDecision) {
-        return LifetimeBound {
-            lifetime: LifetimeClass::Slice,
-            source: LifetimeBoundSource::RoutingStability,
-        };
+        strictest = stricter_lifetime_bound(
+            strictest,
+            LifetimeBound {
+                lifetime: LifetimeClass::Slice,
+                source: LifetimeBoundSource::RoutingStability,
+            },
+        );
     }
 
     if is_renorm_loop_scratch(env, value) {
-        return LifetimeBound {
-            lifetime: LifetimeClass::Slice,
-            source: LifetimeBoundSource::ReductionScratch,
-        };
+        strictest = stricter_lifetime_bound(
+            strictest,
+            LifetimeBound {
+                lifetime: LifetimeClass::Slice,
+                source: LifetimeBoundSource::ReductionScratch,
+            },
+        );
     }
 
-    LifetimeBound {
-        lifetime: LifetimeClass::Slice,
-        source: LifetimeBoundSource::DefaultSlice,
-    }
+    strictest
 }
 
 pub fn max_admissible_lifetime(env: &PredicateEnv, value: ValueId) -> LifetimeBound {
@@ -271,18 +315,11 @@ pub const fn lifetime_bound_source_name(source: LifetimeBoundSource) -> &'static
     }
 }
 
-fn infer_lifetime_from_interval(
-    def_index: usize,
-    last_use: Option<(usize, NodeId)>,
-    checkpoint_stable: bool,
-) -> LifetimeClass {
-    if checkpoint_stable {
-        return LifetimeClass::Token;
-    }
-
-    match last_use {
-        Some((last_use_index, _)) if last_use_index > def_index => LifetimeClass::Token,
-        _ => LifetimeClass::Slice,
+fn stricter_lifetime_bound(left: LifetimeBound, right: LifetimeBound) -> LifetimeBound {
+    if right.lifetime > left.lifetime {
+        right
+    } else {
+        left
     }
 }
 
@@ -334,7 +371,7 @@ mod tests {
     use super::*;
     use crate::s1::quant_graph::TensorId;
     use crate::storage_plan::predicates::{
-        PredicateValueFacts, QuantFormatId, ValueFormat, ValueRole,
+        PredicateValueFacts, QuantFormatId, ValueFormat, ValueRole, effective_lifetime_estimate,
     };
     use crate::storage_plan::types::StorageClass;
 
@@ -376,6 +413,31 @@ mod tests {
 
         assert!(abstract_live_ranges_disjoint(&topological_order, &first, &second).unwrap());
         assert!(abstract_live_ranges_overlap(&topological_order, &first, &overlapping).unwrap());
+    }
+
+    #[test]
+    fn abstract_live_range_uses_effective_lifetime_not_interval_topology() {
+        let value = ValueId::new(12);
+        let nodes = vec![node(1, [], [value]), node(2, [value], [])];
+        let mut facts = activation_facts();
+        facts.lifetime_estimate = Some(LifetimeClass::Slice);
+        let env = PredicateEnv::new().with_value(value, facts);
+
+        let range = compute_abstract_live_range_from_nodes_with_predicates(
+            &nodes,
+            &BTreeSet::new(),
+            &env,
+            value,
+        )
+        .expect("range computes");
+
+        assert_eq!(range.first_use_node, Some(NodeId::new(2)));
+        assert_eq!(range.last_use_node, Some(NodeId::new(2)));
+        assert_eq!(range.lifetime_class, LifetimeClass::Slice);
+        assert_eq!(
+            effective_lifetime_estimate(&env, value),
+            LifetimeClass::Slice
+        );
     }
 
     #[test]
@@ -426,6 +488,19 @@ mod tests {
     }
 
     #[test]
+    fn min_required_lifetime_uses_strictest_applicable_floor() {
+        let value = ValueId::new(55);
+        let env = PredicateEnv::new()
+            .with_value(value, const_facts(ValueRole::ExpertWeight))
+            .with_observed_checkpoint_backing_value(value);
+
+        let bound = min_required_lifetime(&env, value);
+
+        assert_eq!(bound.lifetime, LifetimeClass::Persistent);
+        assert_eq!(bound.source, LifetimeBoundSource::ImmutableGraphEntity);
+    }
+
+    #[test]
     fn pure_intermediate_uses_slice_floor_and_def_use_upper_bound() {
         let value = ValueId::new(6);
         let mut facts = activation_facts();
@@ -439,33 +514,37 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_routed_ffn_witness_lifetimes_are_within_bounds() {
-        let expert = ValueId::new(7);
-        let activation = ValueId::new(8);
-        let mut activation_facts = activation_facts();
-        activation_facts.lifetime_estimate = Some(LifetimeClass::Token);
-        let env = PredicateEnv::new()
-            .with_value(expert, const_facts(ValueRole::ExpertWeight))
-            .with_value(activation, activation_facts);
+    fn tiny_routed_ffn_fixture_lifetimes_are_within_bounds() {
+        let input = crate::storage_plan_test_infra::synth::tiny_routed_ffn_core_input();
+        let roles: BTreeMap<_, _> = input
+            .values
+            .iter()
+            .map(|value| (value.value, value.role))
+            .collect();
 
-        validate_lifetime_bounds(
-            expert,
-            &Materialization::Materialize {
-                class: StorageClass::RomConst,
-                lifetime: LifetimeClass::Persistent,
-            },
-            &lifetime_bounds(&env, expert),
-        )
-        .expect("expert witness is admissible");
-        validate_lifetime_bounds(
-            activation,
-            &Materialization::Materialize {
-                class: StorageClass::WramHot,
-                lifetime: LifetimeClass::Token,
-            },
-            &lifetime_bounds(&env, activation),
-        )
-        .expect("activation witness is admissible");
+        assert_eq!(roles.get(&ValueId::new(10)), Some(&ValueRole::ExpertWeight));
+        assert_eq!(roles.get(&ValueId::new(11)), Some(&ValueRole::ExpertWeight));
+        assert_eq!(
+            roles.get(&ValueId::new(12)),
+            Some(&ValueRole::RouterDecision)
+        );
+        assert_eq!(roles.get(&ValueId::new(13)), Some(&ValueRole::Scratch));
+        assert_eq!(roles.get(&ValueId::new(14)), Some(&ValueRole::Scratch));
+
+        for value in &input.values {
+            assert_eq!(
+                value.live_range.lifetime_class,
+                effective_lifetime_estimate(&input.predicate_env, value.value),
+                "fixture live range lifetime should come from effective_lifetime_estimate for {:?}",
+                value.value
+            );
+            validate_lifetime_bounds(
+                value.value,
+                &value.materialization,
+                &lifetime_bounds(&input.predicate_env, value.value),
+            )
+            .expect("canonical routed-FFN fixture value lifetime is admissible");
+        }
     }
 
     fn node<I, O>(node: u32, inputs: I, outputs: O) -> AbstractDefUseNode
