@@ -6,7 +6,9 @@ use gbf_report::ReportSchemaId;
 use serde::{Deserialize, Serialize};
 
 use crate::s1::quant_graph::DeterminismClass;
-use crate::storage_plan::rules::{DecisionRuleSetManifest, decision_rule_set_manifest};
+use crate::storage_plan::rules::{
+    DECISION_RULE_SET_MANIFEST_SCHEMA, DecisionRuleSetManifest, decision_rule_set_manifest,
+};
 use crate::storage_plan::types::{
     CommitGroupReason, DurabilityClass, PersistKind, PersistSchemaPin, STORAGE_PLAN_SCHEMA_ID,
     STORAGE_PLAN_SCHEMA_VERSION, StoragePlanInputIdentity, StoragePlanInputs,
@@ -74,11 +76,12 @@ pub fn storage_plan_cache_key_inputs(
 pub fn storage_plan_cache_key(
     inputs: &StoragePlanCacheKeyInputs,
 ) -> Result<StoragePlanCacheKey, CanonicalJsonError> {
+    let schema_version = STORAGE_PLAN_SCHEMA_VERSION.to_string();
     DomainHash::new(
         "gbf-codegen",
         "StageCacheKey",
         STORAGE_PLAN_SCHEMA_ID,
-        "1.0.0",
+        schema_version.as_str(),
     )
     .hash(inputs)
     .map(StoragePlanCacheKey)
@@ -93,7 +96,7 @@ pub fn decision_rule_set_hash_for(
 ) -> Result<Hash256, CanonicalJsonError> {
     manifest_hash(
         "DecisionRuleSetManifest",
-        "storage_plan.decision_rule_set.v1",
+        DECISION_RULE_SET_MANIFEST_SCHEMA,
         manifest,
     )
 }
@@ -419,7 +422,10 @@ where
 #[cfg(test)]
 mod tests {
     use gbf_foundation::Hash256;
-    use gbf_policy::{StoragePlanDiagnosticCode, StoragePlanDiagnosticProvenance, ValidationCode};
+    use gbf_policy::{
+        StoragePlanDiagnosticCode, StoragePlanDiagnosticProvenance, ValidationCode,
+        ValidationDiagnostic,
+    };
 
     use super::*;
     use crate::storage_plan::diagnostics::storage_plan_diagnostic;
@@ -459,8 +465,13 @@ mod tests {
             StoragePlanCacheKeyInputs::from_input_identity(&identity()).expect("first inputs");
         let second =
             StoragePlanCacheKeyInputs::from_input_identity(&identity()).expect("second inputs");
+        let decision_manifest = decision_rule_set_manifest();
 
         assert_eq!(first, second);
+        assert_eq!(
+            decision_manifest.schema,
+            ReportSchemaId::from(DECISION_RULE_SET_MANIFEST_SCHEMA)
+        );
         assert_eq!(
             persist_compat_manifest().allowed_cross_kind_sets.len(),
             7,
@@ -499,6 +510,29 @@ mod tests {
             .expect("key");
         let diagnostics = vec![
             storage_plan_diagnostic(
+                StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed,
+                StoragePlanDiagnosticProvenance::ForcedRecompute {
+                    value_id: 42,
+                    failed_predicates: vec![
+                        "recompute_allowed".to_owned(),
+                        "recompute_cost_within_cycle_ceiling".to_owned(),
+                    ],
+                },
+                vec![],
+            )
+            .expect("diagnostic"),
+            storage_plan_diagnostic(
+                StoragePlanDiagnosticCode::StorageNoAdmittingDecisionRule,
+                StoragePlanDiagnosticProvenance::ValueClassification {
+                    value_id: 2,
+                    producer_node: Some(9),
+                    value_role: Some("Intermediate".to_owned()),
+                    value_format: Some("Scalar".to_owned()),
+                },
+                vec![],
+            )
+            .expect("diagnostic"),
+            storage_plan_diagnostic(
                 StoragePlanDiagnosticCode::StorageBindingCoverageGap,
                 StoragePlanDiagnosticProvenance::ValueProducer {
                     value_id: 7,
@@ -508,28 +542,45 @@ mod tests {
             )
             .expect("diagnostic"),
         ];
+        let mut sorted_diagnostics = diagnostics.clone();
+        sorted_diagnostics.sort_by_key(diagnostic_store_code);
         let memo = StageCacheFailureMemo {
             key,
             diagnostics,
             report_hash: hash(10),
         };
         let replay = StoragePlanStageCacheReplay::<String>::FailureMemo(memo.clone());
+        let replayed = replay.replay_failure().expect("failure memo diagnostics");
 
-        assert!(matches!(
-            replay.replay_failure().and_then(|items| items.first()),
-            Some(diagnostic)
-                if matches!(
-                    diagnostic.code,
-                    ValidationCode::StoragePlan {
-                        code: StoragePlanDiagnosticCode::StorageBindingCoverageGap,
-                        ..
-                    }
-                )
-        ));
+        assert_eq!(replayed.len(), 3);
+        assert_eq!(
+            replayed
+                .iter()
+                .map(diagnostic_store_code)
+                .collect::<Vec<_>>(),
+            vec![
+                StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed,
+                StoragePlanDiagnosticCode::StorageNoAdmittingDecisionRule,
+                StoragePlanDiagnosticCode::StorageBindingCoverageGap,
+            ],
+            "cache replay preserves insertion order instead of resorting diagnostics"
+        );
+        assert_ne!(
+            CanonicalJson::to_vec(&memo.diagnostics).expect("memo diagnostics bytes"),
+            CanonicalJson::to_vec(&sorted_diagnostics).expect("sorted diagnostics bytes"),
+            "fixture order must remain intentionally non-sorted"
+        );
         assert_eq!(
             failure_memo_diagnostic_bytes(&memo).expect("first bytes"),
             failure_memo_diagnostic_bytes(&memo).expect("second bytes")
         );
+    }
+
+    fn diagnostic_store_code(diagnostic: &ValidationDiagnostic) -> StoragePlanDiagnosticCode {
+        match diagnostic.code {
+            ValidationCode::StoragePlan { code, .. } => code,
+            _ => panic!("expected storage-plan diagnostic"),
+        }
     }
 
     fn identity() -> StoragePlanInputIdentity {

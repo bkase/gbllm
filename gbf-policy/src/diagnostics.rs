@@ -713,9 +713,11 @@ pub enum StoragePlanDiagnosticProvenance {
         expected: String,
     },
     PersistPage {
+        invariant: String,
         persist_page_id: u32,
     },
     CommitGroup {
+        invariant: String,
         commit_group_id: u32,
     },
     CommitGroupKind {
@@ -738,6 +740,7 @@ pub enum StoragePlanDiagnosticProvenance {
         members: Vec<u32>,
     },
     AliasMembership {
+        invariant: String,
         value_id: u32,
         alias_class_id: u32,
     },

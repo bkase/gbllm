@@ -548,6 +548,11 @@ pub fn recompute_cost_within_cycle_ceiling(env: &PredicateEnv, value: ValueId) -
 }
 
 #[must_use]
+pub fn recompute_cost_estimate(env: &PredicateEnv, value: ValueId) -> Option<u32> {
+    env.recompute_cost_estimates.get(&value).copied()
+}
+
+#[must_use]
 pub fn is_precomputed_hram_admitted(env: &PredicateEnv, value: ValueId) -> bool {
     env.precomputed_hram_admitted_values.contains(&value)
 }

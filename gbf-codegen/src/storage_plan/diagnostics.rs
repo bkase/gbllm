@@ -609,10 +609,14 @@ fn synthetic_storage_plan_provenance(
             }
         }
         StoragePlanDiagnosticCode::StoragePersistPageNotReferenced => {
-            StoragePlanDiagnosticProvenance::PersistPage { persist_page_id: 9 }
+            StoragePlanDiagnosticProvenance::PersistPage {
+                invariant: "SC7".to_owned(),
+                persist_page_id: 9,
+            }
         }
         StoragePlanDiagnosticCode::StorageCommitGroupEmpty => {
             StoragePlanDiagnosticProvenance::CommitGroup {
+                invariant: "SC8".to_owned(),
                 commit_group_id: 10,
             }
         }
@@ -645,6 +649,7 @@ fn synthetic_storage_plan_provenance(
         }
         StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation => {
             StoragePlanDiagnosticProvenance::AliasMembership {
+                invariant: "SC4".to_owned(),
                 value_id: 15,
                 alias_class_id: 16,
             }
@@ -823,7 +828,10 @@ mod tests {
 
         let mismatch = storage_plan_diagnostic(
             StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow,
-            StoragePlanDiagnosticProvenance::CommitGroup { commit_group_id: 1 },
+            StoragePlanDiagnosticProvenance::CommitGroup {
+                invariant: "SC8".to_owned(),
+                commit_group_id: 1,
+            },
             evidence(),
         )
         .expect_err("mismatched provenance schema rejects");

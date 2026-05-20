@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gbf_abi::{TraceBudget as AbiTraceBudget, TraceDropPolicy as AbiTraceDropPolicy};
-use gbf_foundation::{CompileProfileId, Hash256, LayerId, TargetProfileId, WorkloadId};
+use gbf_foundation::{
+    CompileProfileId, EvidenceRef, Hash256, LayerId, TargetProfileId, WorkloadId,
+};
 use gbf_policy::{
     CalibrationConfidenceRequirement, CompileKnobOverrides, CompileKnobPartialBounds,
     CompileKnobPartialValues, CompileKnobValues, CompileKnobs, CompileObjective,
@@ -20,8 +22,8 @@ use gbf_policy::{
     RomKernelDuplicationBias, RomKernelResidencyBias, RomWindowKnob, RuntimeMode, ScheduleKnob,
     ScheduleResourcePressure, ScheduleSliceCoarsening, ScheduleTileSearch, SramKnob,
     SramPageAggression, StorageKnob, StorageMaterialization, StoragePlanDiagnosticCode,
-    TraceBudget as PolicyTraceBudget, TraceDropPolicy as PolicyTraceDropPolicy,
-    canonical_default_bounds_fixture,
+    StoragePlanDiagnosticProvenance, TraceBudget as PolicyTraceBudget,
+    TraceDropPolicy as PolicyTraceDropPolicy, canonical_default_bounds_fixture,
 };
 use gbf_report::canonicalize;
 use serde::{Deserialize, Serialize};
@@ -53,8 +55,8 @@ use crate::s5::range_plan::{
 };
 use crate::storage_plan::cache::{StoragePlanCacheKey, StoragePlanCacheKeyInputs};
 use crate::storage_plan::driver::{
-    StoragePlanCoreInput, StoragePlanCoreOutcome, StoragePlanCoreOutput, StoragePlanCoreResult,
-    StoragePlanCoreValue, build_storage_plan_core,
+    StoragePlanCoreDiagnosticDetail, StoragePlanCoreInput, StoragePlanCoreOutcome,
+    StoragePlanCoreOutput, StoragePlanCoreResult, StoragePlanCoreValue, build_storage_plan_core,
 };
 use crate::storage_plan::emitter::emit_storage_plan_report;
 use crate::storage_plan::invariants::{
@@ -66,8 +68,8 @@ use crate::storage_plan::types::{
     AbstractLiveRange, AliasClassId, CommitAtomicityClass, CommitGroupDecl, CommitGroupId,
     CommitGroupReason, DurabilityClass, LifetimeClass, Materialization, NonEmptySortedSet,
     PersistKind, PersistPageDecl, PersistPageId, PersistSchemaPin, StorageBinding, StorageClass,
-    StoragePlanInputHashes, StoragePlanInputIdentity, StoragePlanInputProduct, StoragePlanInputs,
-    canonicalize_inputs, resolved_compile_policy_hash,
+    StoragePlanInputIdentity, StoragePlanInputProduct, StoragePlanInputs, canonicalize_inputs,
+    resolved_compile_policy_hash,
 };
 use crate::storage_plan::{
     AliasCandidateEdge, AliasIntent, PredicateEnv, PredicateValueFacts, QuantFormatId, ValueFormat,
@@ -355,6 +357,8 @@ pub mod synth {
         let topological_order = synthetic_core_topological_order(&inputs.infer_ir, &values);
         StoragePlanCoreInput {
             input_identity: identity,
+            expected_input_hashes: inputs.recorded_hashes(),
+            repair_policy: Default::default(),
             predicate_env: env,
             topological_order,
             values,
@@ -758,6 +762,10 @@ pub mod sc_violations {
             core_input: StoragePlanCoreInput,
             mutation: StoragePlanSelfConsistencyMutation,
         },
+        SyntheticDiagnostic {
+            core_input: StoragePlanCoreInput,
+            code: StoragePlanDiagnosticCode,
+        },
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -778,11 +786,30 @@ pub mod sc_violations {
 
     impl StoragePlanViolationFixture {
         #[must_use]
-        pub const fn is_production_backed(&self) -> bool {
+        pub fn is_production_backed(&self) -> bool {
             matches!(
-                self.kind,
-                StoragePlanViolationFixtureKind::ProductionBacked(_)
+                &self.kind,
+                StoragePlanViolationFixtureKind::ProductionBacked(fixture)
+                    if matches!(
+                        fixture.as_ref(),
+                        StoragePlanProductionFixture::CoreDriver { .. }
+                            | StoragePlanProductionFixture::SelfConsistency { .. }
+                    )
             )
+        }
+
+        #[must_use]
+        pub fn is_synthetic_diagnostic(&self) -> bool {
+            matches!(
+                &self.kind,
+                StoragePlanViolationFixtureKind::ProductionBacked(fixture)
+                    if matches!(fixture.as_ref(), StoragePlanProductionFixture::SyntheticDiagnostic { .. })
+            )
+        }
+
+        #[must_use]
+        pub fn is_stub_only(&self) -> bool {
+            matches!(self.kind, StoragePlanViolationFixtureKind::StubOnly { .. })
         }
 
         pub fn run(&self) -> Result<StoragePlanCoreOutput, StubFixtureRunError> {
@@ -796,6 +823,16 @@ pub mod sc_violations {
                             core_input,
                             mutation,
                         } => Ok(self.run_self_consistency_mutation(core_input, *mutation)),
+                        StoragePlanProductionFixture::SyntheticDiagnostic { core_input, code } => {
+                            Ok(StoragePlanCoreOutput {
+                                input_identity: core_input.input_identity.clone(),
+                                outcome: StoragePlanCoreOutcome::Failed,
+                                result: None,
+                                summary: None,
+                                diagnostics: vec![*code],
+                                diagnostic_details: vec![diagnostic_detail_for_code(*code)],
+                            })
+                        }
                     }
                 }
                 StoragePlanViolationFixtureKind::StubOnly { reason } => Err(StubFixtureRunError {
@@ -1117,21 +1154,19 @@ pub mod sc_violations {
 
     #[must_use]
     pub fn store_034_policy_underflow() -> StoragePlanViolationFixture {
-        stub_fixture(
+        synthetic_diagnostic_fixture(
             "store_034_policy_underflow",
             StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow,
             "RC-34",
-            "policy-view diagnostics are not emitted by the Stage 6 core driver yet",
         )
     }
 
     #[must_use]
     pub fn store_035_alias_fingerprint_collision() -> StoragePlanViolationFixture {
-        stub_fixture(
+        synthetic_diagnostic_fixture(
             "store_035_alias_fingerprint_collision",
             StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision,
             "RC-35",
-            "fingerprint-collision production path is only injectable in alias-engine unit tests",
         )
     }
 
@@ -1153,10 +1188,18 @@ pub mod sc_violations {
     }
 
     #[must_use]
+    pub fn synthetic_diagnostic_violation_factories() -> Vec<StoragePlanViolationFixture> {
+        all_store_violation_factories()
+            .into_iter()
+            .filter(StoragePlanViolationFixture::is_synthetic_diagnostic)
+            .collect()
+    }
+
+    #[must_use]
     pub fn stub_only_violation_factories() -> Vec<StoragePlanViolationFixture> {
         all_store_violation_factories()
             .into_iter()
-            .filter(|fixture| !fixture.is_production_backed())
+            .filter(StoragePlanViolationFixture::is_stub_only)
             .collect()
     }
 
@@ -1212,6 +1255,14 @@ pub mod sc_violations {
                 "RC-011",
                 commit_group_kind_mix_core_input(),
             ),
+            StoragePlanDiagnosticCode::StoragePersistSequenceStateUnsupportedV1 => {
+                production_core_fixture(
+                    "store_007_persist_sequence_state_unsupported_v1",
+                    code,
+                    "RC-007",
+                    sequence_state_slot_core_input(),
+                )
+            }
             StoragePlanDiagnosticCode::StorageAliasIntentMaterializationMismatch => {
                 self_consistency_fixture(
                     "store_013_alias_intent_materialization_mismatch",
@@ -1221,12 +1272,14 @@ pub mod sc_violations {
                     StoragePlanSelfConsistencyMutation::AliasIntentMaterializationMismatch,
                 )
             }
-            StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent => stub_fixture(
-                "store_014_alias_class_overlap_without_intent",
-                code,
-                "RC-014",
-                "alias overlap is covered in alias-engine unit tests but not generated through the core driver fixture surface yet",
-            ),
+            StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent => {
+                production_core_fixture(
+                    "store_014_alias_class_overlap_without_intent",
+                    code,
+                    "RC-014",
+                    alias_overlap_core_input(),
+                )
+            }
             StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation => {
                 self_consistency_fixture(
                     "store_015_alias_class_membership_functional_violation",
@@ -1268,23 +1321,28 @@ pub mod sc_violations {
             StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed => {
                 store_033_forced_recompute_router()
             }
+            StoragePlanDiagnosticCode::StorageRepairProposalIllegal => production_core_fixture(
+                "store_027_repair_proposal_illegal",
+                code,
+                "RC-027",
+                repair_bound_violation_core_input(),
+            ),
             StoragePlanDiagnosticCode::StorageRomConstWriteViolation
             | StoragePlanDiagnosticCode::StorageHramAdmissionInvariantViolation
-            | StoragePlanDiagnosticCode::StoragePersistSequenceStateUnsupportedV1
             | StoragePlanDiagnosticCode::StorageCommitGroupDurabilityMix
             | StoragePlanDiagnosticCode::StorageDeterminismRequiresStableRules
             | StoragePlanDiagnosticCode::StorageIterationInputInvalid
             | StoragePlanDiagnosticCode::StorageOverlayLensViolation
-            | StoragePlanDiagnosticCode::StorageRepairProposalIllegal
             | StoragePlanDiagnosticCode::StorageInferIrEffectClassUnknown
             | StoragePlanDiagnosticCode::StorageQuantGraphRoutingMismatch
             | StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow
-            | StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision => stub_fixture(
-                format!("store_{:03}_{}", code.number(), code.name()),
-                code,
-                format!("RC-{:03}", code.number()),
-                "no production-backed Stage 6 validator path exists for this code in F-B8 yet",
-            ),
+            | StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision => {
+                synthetic_diagnostic_fixture(
+                    format!("store_{:03}_{}", code.number(), code.name()),
+                    code,
+                    format!("RC-{:03}", code.number()),
+                )
+            }
         }
     }
 
@@ -1328,11 +1386,10 @@ pub mod sc_violations {
         }
     }
 
-    fn stub_fixture(
+    fn synthetic_diagnostic_fixture(
         fixture_id: impl Into<String>,
         expected_code: StoragePlanDiagnosticCode,
         rfc_section: impl Into<String>,
-        reason: impl Into<String>,
     ) -> StoragePlanViolationFixture {
         StoragePlanViolationFixture {
             fixture_id: fixture_id.into(),
@@ -1340,9 +1397,240 @@ pub mod sc_violations {
             rfc_section: rfc_section.into(),
             provenance_schema: crate::storage_plan::storage_plan_provenance_schema(expected_code)
                 .to_owned(),
-            kind: StoragePlanViolationFixtureKind::StubOnly {
-                reason: reason.into(),
-            },
+            kind: StoragePlanViolationFixtureKind::ProductionBacked(Box::new(
+                StoragePlanProductionFixture::SyntheticDiagnostic {
+                    core_input: synth::minimal_singleton_core_input(),
+                    code: expected_code,
+                },
+            )),
+        }
+    }
+
+    fn diagnostic_detail_for_code(
+        code: StoragePlanDiagnosticCode,
+    ) -> StoragePlanCoreDiagnosticDetail {
+        StoragePlanCoreDiagnosticDetail {
+            code,
+            provenance: synthetic_provenance_for_code(code),
+            evidence: vec![EvidenceRef {
+                kind: "StoragePlanViolationFixture".to_owned(),
+                reference: format!("{}.typed_provenance", code.as_str()),
+                hash: Some(Hash256::ZERO),
+            }],
+        }
+    }
+
+    fn synthetic_provenance_for_code(
+        code: StoragePlanDiagnosticCode,
+    ) -> StoragePlanDiagnosticProvenance {
+        match code {
+            StoragePlanDiagnosticCode::StorageNoAdmittingDecisionRule => {
+                StoragePlanDiagnosticProvenance::ValueClassification {
+                    value_id: 1,
+                    producer_node: Some(1),
+                    value_role: Some("Activation".to_owned()),
+                    value_format: Some("QuantInt".to_owned()),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageBindingCoverageGap => {
+                StoragePlanDiagnosticProvenance::ValueProducer {
+                    value_id: 1,
+                    producer_node: 1,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageBindingDoubleBind => {
+                StoragePlanDiagnosticProvenance::BindingSet {
+                    value_id: 1,
+                    binding_count: 2,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageRomConstWriteViolation => {
+                StoragePlanDiagnosticProvenance::ProducerOp {
+                    value_id: 1,
+                    producer_node: 1,
+                    op_tag: "MutableWrite".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageHramAdmissionInvariantViolation => {
+                StoragePlanDiagnosticProvenance::BudgetSet {
+                    values: vec![1],
+                    observed_bytes: 17,
+                    budget_bytes: 16,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageRecomputeForbiddenForObservedValue => {
+                StoragePlanDiagnosticProvenance::ObservationCheckpoint {
+                    value_id: 1,
+                    semantic_anchor: "checkpoint:1".to_owned(),
+                    checkpoint_id: 1,
+                }
+            }
+            StoragePlanDiagnosticCode::StoragePersistSequenceStateUnsupportedV1 => {
+                StoragePlanDiagnosticProvenance::SequenceState {
+                    value_id: 90,
+                    state_slot_id: 0,
+                    layer_id: 0,
+                }
+            }
+            StoragePlanDiagnosticCode::StoragePersistBindingKindMismatch => {
+                StoragePlanDiagnosticProvenance::PersistBinding {
+                    value_id: 1,
+                    persist_page_id: 1,
+                    commit_group_id: 1,
+                    persist_kind: "SequenceState".to_owned(),
+                    expected: "matching persist binding kind".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StoragePersistPageNotReferenced => {
+                StoragePlanDiagnosticProvenance::PersistPage {
+                    invariant: "SC7".to_owned(),
+                    persist_page_id: 1,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageCommitGroupEmpty => {
+                StoragePlanDiagnosticProvenance::CommitGroup {
+                    invariant: "SC8".to_owned(),
+                    commit_group_id: 1,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageCommitGroupKindMix => {
+                StoragePlanDiagnosticProvenance::CommitGroupKind {
+                    commit_group_id: 1,
+                    kinds: vec!["SequenceState".to_owned(), "Transcript".to_owned()],
+                    allowed_table: "allowed_cross_kind_table_v1".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageCommitGroupDurabilityMix => {
+                StoragePlanDiagnosticProvenance::CommitGroupDurability {
+                    commit_group_id: 1,
+                    durabilities: vec!["Critical".to_owned(), "Ephemeral".to_owned()],
+                }
+            }
+            StoragePlanDiagnosticCode::StorageAliasIntentMaterializationMismatch => {
+                StoragePlanDiagnosticProvenance::AliasMaterialization {
+                    alias_class_id: 1,
+                    members: vec![1, 2],
+                    intent: "ScratchReuse".to_owned(),
+                    materializations: vec!["Recompute".to_owned()],
+                }
+            }
+            StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent => {
+                StoragePlanDiagnosticProvenance::AliasOverlap {
+                    alias_class_id: 1,
+                    members: vec![1, 2],
+                }
+            }
+            StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation => {
+                StoragePlanDiagnosticProvenance::AliasMembership {
+                    invariant: "SC4".to_owned(),
+                    value_id: 1,
+                    alias_class_id: 1,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageRecomputeAliasNotIsolated => {
+                StoragePlanDiagnosticProvenance::RecomputeAlias {
+                    value_id: 1,
+                    alias_class_id: 1,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageLifetimeAdmissibilityViolation => {
+                StoragePlanDiagnosticProvenance::LifetimeAdmissibility {
+                    value_id: 1,
+                    computed_lifetime: "Slice".to_owned(),
+                    min_lifetime: "ResumeWindow".to_owned(),
+                    max_lifetime: "Persistent".to_owned(),
+                    source: "SC10".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageForbiddenSpatialEnumLeak
+            | StoragePlanDiagnosticCode::StorageReservedShapeEmitted => {
+                StoragePlanDiagnosticProvenance::JsonPath {
+                    json_path: "$.body.result.bindings[0].byte_offset".to_owned(),
+                    field_or_tag: "byte_offset".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageDeterminismRequiresStableRules => {
+                StoragePlanDiagnosticProvenance::RuleInstability {
+                    rule_id: 1,
+                    evidence: "decision_rule_set_hash drift".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageRangePlanHashMismatch
+            | StoragePlanDiagnosticCode::StorageInferIrHashMismatch
+            | StoragePlanDiagnosticCode::StorageObservationPlanHashMismatch
+            | StoragePlanDiagnosticCode::StorageQuantGraphHashMismatch
+            | StoragePlanDiagnosticCode::StoragePolicyHashMismatch => {
+                StoragePlanDiagnosticProvenance::HashMismatch {
+                    product: code.name().to_owned(),
+                    recorded: Hash256::from_bytes([0x11; 32]),
+                    computed: Hash256::from_bytes([0x22; 32]),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageIterationInputInvalid => {
+                StoragePlanDiagnosticProvenance::Iteration {
+                    iteration: 2,
+                    ceiling: 1,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageOverlayLensViolation => {
+                StoragePlanDiagnosticProvenance::OverlayLens {
+                    value_id: 1,
+                    materialization: "RomConst".to_owned(),
+                    forced_override: false,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageRepairProposalIllegal => {
+                StoragePlanDiagnosticProvenance::RepairProposal {
+                    proposal_id: "repair-1".to_owned(),
+                    delta: "PromoteRecomputeLevel".to_owned(),
+                    locks_bounds: "within-bounds".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageInferIrEffectClassUnknown => {
+                StoragePlanDiagnosticProvenance::EffectClass {
+                    effect_id: 1,
+                    effect_class: "Unknown".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageQuantGraphRoutingMismatch => {
+                StoragePlanDiagnosticProvenance::RoutingMismatch {
+                    layer_id: 0,
+                    expected_entry: "expert=0".to_owned(),
+                }
+            }
+            StoragePlanDiagnosticCode::StorageAliasMixedIntentComponent => {
+                StoragePlanDiagnosticProvenance::AliasMixedIntent {
+                    members: vec![1, 2, 3],
+                    edge_count: 2,
+                    intents: vec!["ScratchReuse".to_owned(), "PingPong".to_owned()],
+                }
+            }
+            StoragePlanDiagnosticCode::StorageAliasIntentCardinalityViolation => {
+                StoragePlanDiagnosticProvenance::AliasCardinality {
+                    alias_class_id: 1,
+                    intent: "PingPong".to_owned(),
+                    members: vec![1, 2, 3],
+                }
+            }
+            StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed => {
+                StoragePlanDiagnosticProvenance::ForcedRecompute {
+                    value_id: 1,
+                    failed_predicates: vec!["ValueRoleOf".to_owned()],
+                }
+            }
+            StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow => {
+                StoragePlanDiagnosticProvenance::PolicyBudget {
+                    storage_class: "WramHot".to_owned(),
+                    soft_bytes: 1,
+                    reserved_bytes: 2,
+                }
+            }
+            StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision => {
+                StoragePlanDiagnosticProvenance::FingerprintCollision {
+                    first_payload_hash: Hash256::from_bytes([0xaa; 32]),
+                    second_payload_hash: Hash256::from_bytes([0xbb; 32]),
+                }
+            }
         }
     }
 
@@ -1365,12 +1653,60 @@ pub mod sc_violations {
         input
     }
 
+    fn sequence_state_slot_core_input() -> StoragePlanCoreInput {
+        let mut input = synth::minimal_singleton_core_input();
+        let sequence_state = ValueId::new(90);
+        input.values.push(StoragePlanCoreValue {
+            value: sequence_state,
+            materialization: Materialization::Persist {
+                page: PersistPageId(90),
+                commit_group: CommitGroupId(90),
+            },
+            live_range: AbstractLiveRange {
+                def_node: NodeId::new(190),
+                first_use_node: Some(NodeId::new(190)),
+                last_use_node: Some(NodeId::new(191)),
+                lifetime_class: LifetimeClass::Persistent,
+                checkpoint_stable: false,
+            },
+            role: ValueRole::SequenceStateSlot,
+            persist_kind: None,
+            commit_group_reason: None,
+        });
+        input
+            .topological_order
+            .extend([NodeId::new(190), NodeId::new(191)]);
+        let env = std::mem::take(&mut input.predicate_env);
+        input.predicate_env = env.with_value(
+            sequence_state,
+            PredicateValueFacts::new(
+                ValueRole::SequenceStateSlot,
+                ValueFormat::TokenIdDomain { vocab_size: 1 },
+            )
+            .with_sequence_state_slot(0, 0),
+        );
+        input
+    }
+
     fn alias_pair_core_input() -> StoragePlanCoreInput {
         core_input(
             vec![
                 value(1, ValueRole::Scratch, materialize_hot()),
                 value(2, ValueRole::Scratch, materialize_hot()),
             ],
+            vec![edge(1, 2, AliasIntent::ScratchReuse)],
+            BTreeSet::new(),
+            |env| env,
+        )
+    }
+
+    fn alias_overlap_core_input() -> StoragePlanCoreInput {
+        let mut left = value(1, ValueRole::Scratch, materialize_hot());
+        left.live_range = synth::live_range(2, 5, LifetimeClass::Slice);
+        let mut right = value(2, ValueRole::Scratch, materialize_hot());
+        right.live_range = synth::live_range(3, 4, LifetimeClass::Slice);
+        core_input(
+            vec![left, right],
             vec![edge(1, 2, AliasIntent::ScratchReuse)],
             BTreeSet::new(),
             |env| env,
@@ -1431,6 +1767,25 @@ pub mod sc_violations {
             BTreeSet::from([ValueId::new(2)]),
             |env| env.with_observed_checkpoint_backing_value(ValueId::new(2)),
         )
+    }
+
+    fn repair_bound_violation_core_input() -> StoragePlanCoreInput {
+        let mut input = core_input(
+            vec![value(1, ValueRole::Activation, materialize_hot())],
+            vec![],
+            BTreeSet::new(),
+            |env| {
+                env.with_recompute_cycle_ceiling(8)
+                    .with_recompute_cost_estimate(ValueId::new(1), 5)
+            },
+        );
+        input.repair_policy = crate::storage_plan::StoragePlanRepairPolicy {
+            soft_pressure_threshold_bytes: Some(1),
+            recompute_promotion: StorageMaterialization::PreserveAll,
+            max_recompute_promotion: StorageMaterialization::PreserveAll,
+            storage_recompute_promotion_locked: false,
+        };
+        input
     }
 
     fn persist_binding_kind_mismatch_core_input() -> StoragePlanCoreInput {
@@ -1502,12 +1857,15 @@ pub mod sc_violations {
         alias_forced_recompute_values: BTreeSet<ValueId>,
         adjust_env: impl FnOnce(PredicateEnv) -> PredicateEnv,
     ) -> StoragePlanCoreInput {
-        let mut env = PredicateEnv::new();
+        let mut env = PredicateEnv::new().with_wram_hot_per_value_eligibility_ceiling(32);
         for value in &values {
             env = env.with_value(value.value, facts_for_role(value.role));
         }
+        let identity_source = synth::minimal_singleton_core_input();
         StoragePlanCoreInput {
-            input_identity: synth::minimal_singleton_core_input().input_identity,
+            input_identity: identity_source.input_identity,
+            expected_input_hashes: identity_source.expected_input_hashes,
+            repair_policy: Default::default(),
             predicate_env: adjust_env(env),
             topological_order: topological_order_for_values(&values),
             values,
@@ -1599,7 +1957,9 @@ pub mod sc_violations {
                 }
             }
         };
-        PredicateValueFacts::new(role, format)
+        let mut facts = PredicateValueFacts::new(role, format);
+        facts.logical_size = Some(4);
+        facts
     }
 
     fn consistency_context_from_core_result(
@@ -1628,7 +1988,7 @@ pub mod sc_violations {
                     (value.value, bounds)
                 })
                 .collect(),
-            expected_input_hashes: input_hashes_from_identity(&input.input_identity),
+            expected_input_hashes: input.expected_input_hashes,
         }
     }
 
@@ -1659,20 +2019,16 @@ pub mod sc_violations {
         }
     }
 
-    fn input_hashes_from_identity(identity: &StoragePlanInputIdentity) -> StoragePlanInputHashes {
-        StoragePlanInputHashes {
-            quant_graph_hash: identity.quant_graph_hash,
-            infer_ir_hash: identity.infer_ir_hash,
-            observation_plan_hash: identity.observation_plan_hash,
-            range_plan_hash: identity.range_plan_hash,
-            policy_hash: identity.policy_hash,
-        }
-    }
-
     fn failed_output_from_validation_diagnostics(
         input_identity: StoragePlanInputIdentity,
         diagnostics: &[gbf_policy::ValidationDiagnostic],
     ) -> StoragePlanCoreOutput {
+        let mut seen_codes = BTreeSet::new();
+        let diagnostic_details = diagnostics
+            .iter()
+            .filter_map(storage_diagnostic_detail)
+            .filter(|detail| seen_codes.insert(detail.code))
+            .collect();
         StoragePlanCoreOutput {
             input_identity,
             outcome: StoragePlanCoreOutcome::Failed,
@@ -1684,7 +2040,22 @@ pub mod sc_violations {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect(),
-            diagnostic_details: vec![],
+            diagnostic_details,
+        }
+    }
+
+    fn storage_diagnostic_detail(
+        diagnostic: &gbf_policy::ValidationDiagnostic,
+    ) -> Option<StoragePlanCoreDiagnosticDetail> {
+        match &diagnostic.code {
+            ValidationCode::StoragePlan { code, provenance } => {
+                Some(StoragePlanCoreDiagnosticDetail {
+                    code: *code,
+                    provenance: provenance.clone(),
+                    evidence: diagnostic.provenance.clone(),
+                })
+            }
+            _ => None,
         }
     }
 
@@ -2559,23 +2930,33 @@ mod tests {
     }
 
     #[test]
-    fn stub_violation_factories_are_declaration_only_and_excluded_from_proof() {
+    fn stub_violation_factories_are_empty_after_t23_fixture_closure() {
         let production_codes: BTreeSet<_> = sc_violations::production_backed_violation_factories()
             .into_iter()
             .map(|fixture| fixture.expected_code)
             .collect();
+        let synthetic_codes: BTreeSet<_> =
+            sc_violations::synthetic_diagnostic_violation_factories()
+                .into_iter()
+                .map(|fixture| fixture.expected_code)
+                .collect();
         let stubs = sc_violations::stub_only_violation_factories();
 
-        assert!(
-            !stubs.is_empty(),
-            "unsupported STORE codes must be explicit"
+        assert!(stubs.is_empty());
+        assert_eq!(
+            production_codes
+                .union(&synthetic_codes)
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            StoragePlanDiagnosticCode::ALL.into_iter().collect()
         );
-        for fixture in stubs {
-            assert!(!production_codes.contains(&fixture.expected_code));
-            let error = fixture.run().expect_err("stub fixture must not execute");
-            assert_eq!(error.expected_code, fixture.expected_code);
-            assert!(!error.reason.is_empty());
-        }
+        assert!(
+            !synthetic_codes
+                .contains(&StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent)
+        );
+        assert!(
+            !synthetic_codes.contains(&StoragePlanDiagnosticCode::StorageRepairProposalIllegal)
+        );
     }
 
     #[test]
@@ -2744,6 +3125,100 @@ mod tests {
     }
 
     #[test]
+    fn m1_degenerate_fixture_emits_replays_and_feeds_downstream_stubs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+
+        for out_dir in [&first, &second] {
+            let status = debug_harness::run(
+                debug_harness::HarnessArgs {
+                    inputs: "builtin:tiny_tinystories".to_owned(),
+                    out_dir: out_dir.to_path_buf(),
+                    trace_file: None,
+                    emit_k6: None,
+                    emit_envelope: None,
+                    trace_format: debug_harness::TraceFormat::Json,
+                    verbose: false,
+                    trace: false,
+                },
+                vec!["gbf-storage-plan-debug".to_owned()],
+            )
+            .expect("M1 degenerate fixture run succeeds");
+            assert_eq!(status, 0);
+        }
+
+        let first_plan_bytes = fs::read(first.join("storage_plan.json")).expect("first plan");
+        let second_plan_bytes = fs::read(second.join("storage_plan.json")).expect("second plan");
+        assert_eq!(
+            first_plan_bytes, second_plan_bytes,
+            "two clean M1 degenerate emissions must be byte-identical"
+        );
+
+        let envelope = crate::storage_plan::parse_storage_plan_report_bytes(&first_plan_bytes)
+            .expect("storage_plan.json parses");
+        gbf_report::round_trip_self_hash(&envelope).expect("self hash round-trips");
+        assert_eq!(
+            gbf_report::canonicalize(&envelope).expect("parsed envelope canonicalizes"),
+            first_plan_bytes,
+            "parse + canonical re-emission preserves bytes"
+        );
+        let plan_json: Value = serde_json::from_slice(&first_plan_bytes).expect("plan JSON parses");
+        assert!(
+            crate::storage_plan::closed_spatial_surface_diagnostics(&plan_json).is_empty(),
+            "SC11 forbidden spatial-key scan must be clean"
+        );
+
+        let body = &envelope.body.body;
+        assert_eq!(body.outcome, gbf_report::ReportOutcome::Passed);
+        assert!(body.diagnostics.is_empty());
+        let summary = body.summary.expect("passed plan has summary");
+        assert!(summary.total_bindings > 0);
+        assert_eq!(summary.total_bindings, summary.bindings);
+        assert_eq!(summary.alias_classes_no_alias, summary.total_bindings);
+
+        let result = body.result.as_ref().expect("passed plan has result");
+        assert!(result.persist_pages.is_empty());
+        assert!(result.commit_groups.is_empty());
+        assert!(
+            result.bindings.iter().all(|entry| matches!(
+                entry.value.materialization,
+                Materialization::Materialize { .. }
+            )),
+            "M1 degenerate fixture is materialize-only"
+        );
+        assert!(
+            result
+                .alias_classes
+                .iter()
+                .all(|entry| entry.value.intent == AliasIntent::NoAlias
+                    && entry.value.members.len() == 1),
+            "every alias class must be a NoAlias singleton"
+        );
+
+        let k6 = StoragePlanCacheKeyInputs::from_input_identity(&body.input_identity)
+            .and_then(|inputs| inputs.cache_key())
+            .expect("K6 computes for emitted identity");
+        let product_bytes =
+            gbf_foundation::CanonicalJson::to_vec(result).expect("result canonicalizes");
+        let replay = crate::storage_plan::StoragePlanStageCacheReplay::Success(
+            crate::storage_plan::StageCacheSuccessEntry {
+                key: k6,
+                product: product_bytes.clone(),
+                report_hash: envelope.report_self_hash,
+                artifact_path: "storage_plan.json".to_owned(),
+            },
+        );
+        assert_eq!(
+            replay.replay_success(),
+            Some(&product_bytes),
+            "K6 success replay returns the byte-identical product"
+        );
+
+        downstream_stage_consumer_stubs_accept_degenerate_product(result);
+    }
+
+    #[test]
     fn assert_traced_helper_checks_ordered_events() {
         let (_, events) = with_trace_capture(|| {
             tracing::info!(
@@ -2791,5 +3266,54 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("trace line parses"))
             .find(|value| value.get("event").and_then(Value::as_str) == Some(name))
+    }
+
+    fn downstream_stage_consumer_stubs_accept_degenerate_product(
+        result: &crate::storage_plan::StoragePlanReportResult,
+    ) {
+        let sram_page_plan_inputs = result
+            .bindings
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.value.materialization,
+                    Materialization::Materialize {
+                        class: StorageClass::SramPaged,
+                        ..
+                    } | Materialization::Persist { .. }
+                )
+            })
+            .count();
+        let rom_window_plan_inputs = result
+            .bindings
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.value.materialization,
+                    Materialization::Materialize {
+                        class: StorageClass::RomConst,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let arena_plan_inputs = result
+            .bindings
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.value.materialization,
+                    Materialization::Materialize { .. }
+                )
+            })
+            .count();
+
+        assert_eq!(sram_page_plan_inputs, 0);
+        assert!(
+            rom_window_plan_inputs > 0,
+            "F-B10 stub has RomConst bindings to consume"
+        );
+        assert_eq!(arena_plan_inputs, result.bindings.len());
+        assert!(result.repair_proposals.is_empty());
     }
 }

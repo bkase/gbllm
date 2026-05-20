@@ -101,6 +101,7 @@ mod tests {
             alias_classes: BTreeMap::new(),
             persist_pages: BTreeMap::new(),
             commit_groups: BTreeMap::new(),
+            repair_proposals: Vec::new(),
             provenance: StorageProvenance {
                 bindings: BTreeMap::from([(
                     binding.value,

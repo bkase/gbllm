@@ -701,6 +701,7 @@ pub struct BindingProvenance {
     pub admitting_predicate: AdmittingPredicateId,
     pub decision_rule: DecisionRuleId,
     pub policy_refinement_applied: bool,
+    #[serde(deserialize_with = "deserialize_sorted_evidence")]
     pub evidence: Vec<EvidenceRef>,
     pub op_output_role: Option<ValueRole>,
     pub op_output_format: Option<ValueFormat>,
@@ -732,6 +733,7 @@ impl BindingProvenance {
 #[serde(deny_unknown_fields)]
 pub struct AliasClassProvenance {
     pub admitting_intent: AliasIntent,
+    #[serde(deserialize_with = "deserialize_sorted_evidence")]
     pub evidence: Vec<EvidenceRef>,
 }
 
@@ -766,6 +768,7 @@ pub enum PersistPageSource {
 #[serde(deny_unknown_fields)]
 pub struct CommitGroupProvenance {
     pub reason: CommitGroupReason,
+    #[serde(deserialize_with = "deserialize_sorted_evidence")]
     pub evidence: Vec<EvidenceRef>,
 }
 
@@ -775,6 +778,15 @@ impl CommitGroupProvenance {
         evidence.sort();
         Self { reason, evidence }
     }
+}
+
+fn deserialize_sorted_evidence<'de, D>(deserializer: D) -> Result<Vec<EvidenceRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut evidence = Vec::<EvidenceRef>::deserialize(deserializer)?;
+    evidence.sort();
+    Ok(evidence)
 }
 
 #[derive(Serialize)]

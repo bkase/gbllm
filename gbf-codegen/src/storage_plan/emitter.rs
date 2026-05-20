@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::s3::infer_ir::{NodeId, ValueId};
 use crate::storage_plan::diagnostics::storage_plan_diagnostic;
+use crate::storage_plan::driver::RepairProposal;
 use crate::storage_plan::driver::{
     StoragePlanCoreDiagnosticDetail, StoragePlanCoreOutcome, StoragePlanCoreOutput,
     StoragePlanCoreResult, StoragePlanCoreSummary,
@@ -54,7 +55,7 @@ pub struct StoragePlanReportResult {
     pub alias_classes: Vec<SortedEntry<AliasClassId, AliasClassJson>>,
     pub persist_pages: Vec<SortedEntry<PersistPageId, PersistPageDeclJson>>,
     pub commit_groups: Vec<SortedEntry<CommitGroupId, CommitGroupDeclJson>>,
-    pub repair_proposals: Vec<RepairProposalJson>,
+    pub repair_proposals: Vec<RepairProposal>,
     pub provenance: StorageProvenanceJson,
 }
 
@@ -110,14 +111,6 @@ pub struct CommitGroupDeclJson {
     pub members: Vec<PersistPageId>,
     pub kind_set: Vec<PersistKind>,
     pub atomicity: CommitAtomicityClass,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RepairProposalJson {
-    pub source: String,
-    pub reason: String,
-    pub proposal_id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,7 +221,7 @@ impl StoragePlanReportResult {
             alias_classes: sorted_entries(&result.alias_classes, AliasClassJson::from_alias_class),
             persist_pages: sorted_entries(&result.persist_pages, PersistPageDeclJson::from_decl),
             commit_groups: sorted_entries(&result.commit_groups, CommitGroupDeclJson::from_decl),
-            repair_proposals: Vec::new(),
+            repair_proposals: result.repair_proposals.clone(),
             provenance: StorageProvenanceJson::from_provenance(&result.provenance),
         }
     }
@@ -398,22 +391,37 @@ fn diagnostic_for_code(code: StoragePlanDiagnosticCode) -> ValidationDiagnostic 
                 field_or_tag: code.name().to_owned(),
             }
         }
-        _ => {
-            return ValidationDiagnostic::hard(
-                ValidationOrigin::StoragePlanConstruction,
-                ValidationCode::StoragePlan {
-                    code,
-                    provenance: StoragePlanDiagnosticProvenance::Iteration {
-                        iteration: 0,
-                        ceiling: 0,
-                    },
-                },
-                ValidationDetail::Field {
-                    field: code.as_str().into(),
-                },
-                vec![],
-            );
+        StoragePlanDiagnosticCode::StoragePersistBindingKindMismatch => {
+            StoragePlanDiagnosticProvenance::PersistBinding {
+                value_id: 0,
+                persist_page_id: 0,
+                commit_group_id: 0,
+                persist_kind: "Unknown".to_owned(),
+                expected: "consistent persist page kind".to_owned(),
+            }
         }
+        StoragePlanDiagnosticCode::StorageCommitGroupKindMix => {
+            StoragePlanDiagnosticProvenance::CommitGroupKind {
+                commit_group_id: 0,
+                kinds: vec!["Unknown".to_owned()],
+                allowed_table: "persist_commit_group_kind_sets.v1".to_owned(),
+            }
+        }
+        StoragePlanDiagnosticCode::StorageAliasMixedIntentComponent => {
+            StoragePlanDiagnosticProvenance::AliasMixedIntent {
+                members: Vec::new(),
+                edge_count: 0,
+                intents: Vec::new(),
+            }
+        }
+        StoragePlanDiagnosticCode::StorageAliasIntentCardinalityViolation => {
+            StoragePlanDiagnosticProvenance::AliasCardinality {
+                alias_class_id: 0,
+                intent: "Unknown".to_owned(),
+                members: Vec::new(),
+            }
+        }
+        _ => return report_invariant(code.as_str()),
     };
     storage_plan_diagnostic(code, provenance, vec![])
         .unwrap_or_else(|_| report_invariant("diagnostics"))
@@ -422,7 +430,27 @@ fn diagnostic_for_code(code: StoragePlanDiagnosticCode) -> ValidationDiagnostic 
 fn reject_forbidden_surface(
     envelope: &StoragePlanReportEnvelope,
 ) -> Result<(), StoragePlanEmitError> {
-    let value = serde_json::to_value(envelope)?;
+    let mut value = serde_json::to_value(envelope)?;
+    // SC11 guards the public StoragePlan product surface. Diagnostics must be
+    // allowed to name the forbidden key or tag that caused STORE-018.
+    if let Some(body) = value
+        .get_mut("body")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        body.insert(
+            "diagnostics".to_owned(),
+            serde_json::Value::Array(Vec::new()),
+        );
+        if let Some(nested_body) = body
+            .get_mut("body")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            nested_body.insert(
+                "diagnostics".to_owned(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
+    }
     let diagnostics = closed_spatial_surface_diagnostics(&value);
     if diagnostics.is_empty() {
         Ok(())
@@ -510,16 +538,21 @@ mod tests {
     use std::collections::BTreeSet;
 
     use gbf_foundation::{Hash256, SemVer};
+    use gbf_policy::StorageMaterialization;
     use gbf_report::ReportSchemaId;
     use serde_json::Value;
 
     use super::*;
     use crate::s1::quant_graph::DeterminismClass;
-    use crate::storage_plan::driver::build_storage_plan_core;
+    use crate::storage_plan::driver::{
+        KnobDelta, PlanningStage, RepairReason, StoragePlanRepairPolicy, build_storage_plan_core,
+    };
     use crate::storage_plan::predicates::{
         PredicateEnv, PredicateValueFacts, QuantFormatId, ValueFormat, ValueRole,
     };
-    use crate::storage_plan::types::{LifetimeClass, PersistKind, StorageClass};
+    use crate::storage_plan::types::{
+        LifetimeClass, PersistKind, StorageClass, StoragePlanInputHashes,
+    };
     use crate::storage_plan::{CommitGroupReason, StoragePlanCoreInput, StoragePlanCoreValue};
 
     #[test]
@@ -560,6 +593,43 @@ mod tests {
         assert!(body.summary.is_none());
         assert!(!body.diagnostics.is_empty());
         round_trip_self_hash(&parsed).expect("self hash round trip");
+    }
+
+    #[test]
+    fn repair_proposals_round_trip_when_non_empty() {
+        let mut input = fixture_input(false);
+        input.repair_policy = StoragePlanRepairPolicy {
+            soft_pressure_threshold_bytes: Some(1),
+            recompute_promotion: StorageMaterialization::PreserveAll,
+            max_recompute_promotion: StorageMaterialization::RecomputePureValues,
+            storage_recompute_promotion_locked: false,
+        };
+        let env = std::mem::take(&mut input.predicate_env)
+            .with_recompute_cycle_ceiling(16)
+            .with_recompute_cost_estimate(ValueId::new(1), 3)
+            .with_recompute_cost_estimate(ValueId::new(4), 5);
+        input.predicate_env = env;
+
+        let output = build_storage_plan_core(&input);
+        let bytes = emit_storage_plan_json_bytes(&output).expect("emit succeeds");
+        let parsed = parse_storage_plan_report_bytes(&bytes).expect("parse succeeds");
+        let proposal = &parsed
+            .body
+            .body
+            .result
+            .as_ref()
+            .expect("result")
+            .repair_proposals[0];
+
+        assert_eq!(proposal.source, PlanningStage::StoragePlan);
+        assert_eq!(proposal.reason, RepairReason::PromoteRecompute);
+        assert!(matches!(
+            proposal.tighten.changes.as_slice(),
+            [KnobDelta::PromoteRecomputeLevel {
+                to: StorageMaterialization::RecomputePureValues
+            }]
+        ));
+        assert_eq!(canonicalize(&parsed).expect("canonicalizes"), bytes);
     }
 
     #[test]
@@ -604,7 +674,7 @@ mod tests {
     }
 
     fn fixture_input(fail_before_result: bool) -> StoragePlanCoreInput {
-        let mut env = PredicateEnv::new();
+        let mut env = PredicateEnv::new().with_wram_hot_per_value_eligibility_ceiling(32);
         for (value, facts) in [
             (1, facts(ValueRole::Activation)),
             (2, facts(ValueRole::ExpertWeight)),
@@ -615,6 +685,8 @@ mod tests {
         }
         StoragePlanCoreInput {
             input_identity: identity(),
+            expected_input_hashes: input_hashes(),
+            repair_policy: Default::default(),
             predicate_env: env,
             topological_order: (1..=4).map(NodeId::new).collect(),
             values: vec![
@@ -670,12 +742,17 @@ mod tests {
     }
 
     fn facts(role: ValueRole) -> PredicateValueFacts {
-        PredicateValueFacts::new(
-            role,
-            ValueFormat::QuantInt {
+        let format = match role {
+            ValueRole::ExpertWeight => ValueFormat::ConstTensorRef {
+                tensor_id: crate::s1::quant_graph::TensorId::new(1),
+            },
+            _ => ValueFormat::QuantInt {
                 quant_format_id: QuantFormatId(1),
             },
-        )
+        };
+        let mut facts = PredicateValueFacts::new(role, format);
+        facts.logical_size = Some(4);
+        facts
     }
 
     fn live_range(value: u32) -> AbstractLiveRange {
@@ -698,6 +775,16 @@ mod tests {
             determinism: DeterminismClass::Deterministic,
             schema: ReportSchemaId::from(STORAGE_PLAN_SCHEMA_ID),
             schema_version: SemVer::new(1, 0, 0),
+        }
+    }
+
+    fn input_hashes() -> StoragePlanInputHashes {
+        StoragePlanInputHashes {
+            quant_graph_hash: hash(1),
+            infer_ir_hash: hash(2),
+            observation_plan_hash: hash(3),
+            range_plan_hash: hash(4),
+            policy_hash: hash(5),
         }
     }
 

@@ -2,6 +2,7 @@
 
 use gbf_foundation::{CanonicalJson, CanonicalJsonError};
 use gbf_policy::StoragePlanDiagnosticCode;
+use gbf_report::ReportSchemaId;
 use serde::{Deserialize, Serialize};
 
 use crate::s3::infer_ir::ValueId;
@@ -104,7 +105,7 @@ pub struct DecisionRuleFiringProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionRuleSetManifest {
-    pub schema: String,
+    pub schema: ReportSchemaId,
     pub rfc_revision: String,
     pub rules: Vec<DecisionRuleManifestEntry>,
 }
@@ -267,7 +268,7 @@ pub fn evaluate_decision_rules(
 #[must_use]
 pub fn decision_rule_set_manifest() -> DecisionRuleSetManifest {
     DecisionRuleSetManifest {
-        schema: DECISION_RULE_SET_MANIFEST_SCHEMA.to_owned(),
+        schema: ReportSchemaId::from(DECISION_RULE_SET_MANIFEST_SCHEMA),
         rfc_revision: DECISION_RULE_SET_RFC_REVISION.to_owned(),
         rules: DECISION_RULES
             .iter()

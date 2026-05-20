@@ -141,6 +141,7 @@ fn check_alias_classes(
     for (id, class) in alias_classes {
         if class.id() != id {
             diagnostics.push(alias_membership_diagnostic(
+                "SC3",
                 class
                     .members()
                     .iter()
@@ -154,7 +155,7 @@ fn check_alias_classes(
         for member in class.members() {
             match binding_by_value.get(member) {
                 Some(binding) if binding.alias_class == *id => {}
-                _ => diagnostics.push(alias_membership_diagnostic(*member, *id)),
+                _ => diagnostics.push(alias_membership_diagnostic("SC4", *member, *id)),
             }
         }
     }
@@ -168,6 +169,7 @@ fn check_alias_membership(
     for binding in bindings {
         if !alias_classes.contains_key(&binding.alias_class) {
             diagnostics.push(alias_membership_diagnostic(
+                "SC4",
                 binding.value,
                 binding.alias_class,
             ));
@@ -226,6 +228,7 @@ fn check_persist_pages(
             diagnostics.push(diagnostic(
                 StoragePlanDiagnosticCode::StoragePersistPageNotReferenced,
                 StoragePlanDiagnosticProvenance::PersistPage {
+                    invariant: "SC7".to_owned(),
                     persist_page_id: id.0,
                 },
             ));
@@ -242,9 +245,11 @@ fn check_commit_groups(
     for (id, group) in commit_groups {
         let referenced = members_by_group.get(id).cloned().unwrap_or_default();
         if group.id != *id || referenced.is_empty() || group.members.as_btree_set() != &referenced {
+            let invariant = if referenced.is_empty() { "SC8" } else { "SC9" };
             diagnostics.push(diagnostic(
                 StoragePlanDiagnosticCode::StorageCommitGroupEmpty,
                 StoragePlanDiagnosticProvenance::CommitGroup {
+                    invariant: invariant.to_owned(),
                     commit_group_id: id.0,
                 },
             ));
@@ -358,6 +363,8 @@ fn json_path_diagnostic(path: &str, field_or_tag: &str) -> ValidationDiagnostic 
 }
 
 fn forbidden_stage6_spatial_surface() -> BTreeSet<String> {
+    // SC11 is an exact-key/tag scan over the canonical Stage 6 JSON spelling.
+    // Case variants are not aliases unless the public schema adopts them.
     [
         closed_key(&["byte_", "offset"]),
         closed_key(&["byte_", "alignment"]),
@@ -424,10 +431,15 @@ fn referenced_pages_by_group<'a>(
     by_group
 }
 
-fn alias_membership_diagnostic(value: ValueId, alias_class: AliasClassId) -> ValidationDiagnostic {
+fn alias_membership_diagnostic(
+    invariant: &str,
+    value: ValueId,
+    alias_class: AliasClassId,
+) -> ValidationDiagnostic {
     diagnostic(
         StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation,
         StoragePlanDiagnosticProvenance::AliasMembership {
+            invariant: invariant.to_owned(),
             value_id: value.get(),
             alias_class_id: alias_class.0,
         },
@@ -446,21 +458,22 @@ fn diagnostic(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use gbf_foundation::Hash256;
-    use gbf_policy::{ValidationCode, ValidationDetail, ValidationOrigin};
-    use gbf_report::{ReportBody, ReportEnvelope, ReportOutcome};
-    use serde::{Deserialize, Serialize};
+    use gbf_foundation::{EvidenceRef, Hash256};
+    use gbf_policy::{StoragePlanDiagnosticProvenance, ValidationCode, ValidationDiagnostic};
+    use gbf_report::{ReportEnvelope, ReportOutcome};
     use serde_json::json;
 
     use super::*;
     use crate::s1::quant_graph::DeterminismClass;
     use crate::s3::infer_ir::{NodeId, ValueId};
+    use crate::storage_plan::emitter::{StoragePlanReportBody, StoragePlanReportEnvelopeBody};
     use crate::storage_plan::lifetime::{LifetimeBound, LifetimeBoundSource};
     use crate::storage_plan::types::{
-        AbstractLiveRange, AliasClass, BindingJustification, CommitAtomicityClass, CommitGroupId,
-        DecisionRuleId, DurabilityClass, LifetimeClass, NonEmptySortedSet, PersistKind,
-        PersistPageId, PersistSchemaPin, STORAGE_PLAN_SCHEMA_ID, STORAGE_PLAN_SCHEMA_VERSION,
-        StorageClass,
+        AbstractLiveRange, AdmittingPredicateId, AliasClass, AliasClassError, AliasClassProvenance,
+        BindingJustification, BindingProvenance, CommitAtomicityClass, CommitGroupId,
+        CommitGroupProvenance, CommitGroupReason, DecisionRuleId, DurabilityClass, LifetimeClass,
+        NonEmptySortedSet, PersistKind, PersistPageId, PersistSchemaPin, STORAGE_PLAN_SCHEMA_ID,
+        STORAGE_PLAN_SCHEMA_VERSION, StorageClass,
     };
 
     #[test]
@@ -516,6 +529,7 @@ mod tests {
             &diagnostics,
             StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation,
         );
+        assert_has_provenance_invariant(&diagnostics, "SC3");
     }
 
     #[test]
@@ -554,6 +568,27 @@ mod tests {
             &diagnostics,
             StoragePlanDiagnosticCode::StorageRecomputeAliasNotIsolated,
         );
+    }
+
+    #[test]
+    fn sc5_singleton_recompute_requires_noalias_intent() {
+        let accepted =
+            AliasClass::from_members(AliasClassId(9), [ValueId::new(9)], AliasIntent::NoAlias)
+                .expect("singleton NoAlias class is valid");
+        assert_eq!(accepted.intent(), AliasIntent::NoAlias);
+
+        let rejected = AliasClass::from_members(
+            AliasClassId(10),
+            [ValueId::new(10)],
+            AliasIntent::ScratchReuse,
+        )
+        .expect_err("singleton non-NoAlias must not bypass SC5 isolation");
+        assert!(matches!(
+            rejected,
+            AliasClassError::SingletonMustBeNoAlias {
+                intent: AliasIntent::ScratchReuse
+            }
+        ));
     }
 
     #[test]
@@ -601,6 +636,7 @@ mod tests {
             &diagnostics,
             StoragePlanDiagnosticCode::StoragePersistPageNotReferenced,
         );
+        assert_has_provenance_invariant(&diagnostics, "SC7");
     }
 
     #[test]
@@ -624,6 +660,7 @@ mod tests {
             &diagnostics,
             StoragePlanDiagnosticCode::StorageCommitGroupEmpty,
         );
+        assert_has_provenance_invariant(&diagnostics, "SC8");
     }
 
     #[test]
@@ -643,6 +680,7 @@ mod tests {
             &diagnostics,
             StoragePlanDiagnosticCode::StorageCommitGroupEmpty,
         );
+        assert_has_provenance_invariant(&diagnostics, "SC9");
     }
 
     #[test]
@@ -696,7 +734,9 @@ mod tests {
         let legal = json!({
             "class": "WramHot",
             "other": ["SramPaged", "RomConst"],
-            "note": closed_key(&["byte_", "offset", "_suffix"])
+            "note": closed_key(&["byte_", "offset", "_suffix"]),
+            "case_variant_key": { "ByteOffset": 4 },
+            "case_variant_tag": closed_key(&["overlay", "id"])
         });
         let illegal = json!({
             "class": "WramHot",
@@ -729,11 +769,23 @@ mod tests {
 
     #[test]
     fn sc12_report_hash_is_envelope_level_and_not_body_level() {
-        let body = TinyStoragePlanBody {
-            input_identity: identity(),
-            result: Some("ok".to_owned()),
+        let body = StoragePlanReportEnvelopeBody {
+            body: StoragePlanReportBody {
+                outcome: ReportOutcome::Failed,
+                result: None,
+                diagnostics: vec![diagnostic(
+                    StoragePlanDiagnosticCode::StorageRangePlanHashMismatch,
+                    StoragePlanDiagnosticProvenance::HashMismatch {
+                        product: "range_plan_hash".to_owned(),
+                        recorded: hash(0x99),
+                        computed: hash(0x04),
+                    },
+                )],
+                input_identity: identity(),
+                summary: None,
+            },
         };
-        let envelope = ReportEnvelope::new(ReportOutcome::Passed, body.clone())
+        let envelope = ReportEnvelope::new(ReportOutcome::Failed, body.clone())
             .expect("envelope")
             .with_computed_self_hash()
             .expect("self hash");
@@ -741,8 +793,53 @@ mod tests {
         validate_storage_plan_report_self_hash(&envelope).expect("self hash validates");
         assert!(
             !serialized_body_contains_report_self_hash(&body).expect("body serializes"),
-            "storage plan body must not duplicate the envelope self hash"
+            "production storage plan body must not duplicate the envelope self hash"
         );
+    }
+
+    #[test]
+    fn provenance_evidence_is_sorted_after_construction_and_deserialization() {
+        let unsorted_evidence = vec![evidence("proof", "z"), evidence("proof", "a")];
+
+        let binding = BindingProvenance::new(
+            AdmittingPredicateId(1),
+            DecisionRuleId(1),
+            false,
+            unsorted_evidence.clone(),
+            None,
+            None,
+        );
+        let alias = AliasClassProvenance::new(AliasIntent::NoAlias, unsorted_evidence.clone());
+        let group =
+            CommitGroupProvenance::new(CommitGroupReason::Independent, unsorted_evidence.clone());
+
+        assert_sorted(&binding.evidence);
+        assert_sorted(&alias.evidence);
+        assert_sorted(&group.evidence);
+
+        let binding: BindingProvenance = serde_json::from_value(json!({
+            "admitting_predicate": 1,
+            "decision_rule": 1,
+            "policy_refinement_applied": false,
+            "evidence": unsorted_evidence,
+            "op_output_role": null,
+            "op_output_format": null
+        }))
+        .expect("binding provenance deserializes");
+        let alias: AliasClassProvenance = serde_json::from_value(json!({
+            "admitting_intent": "NoAlias",
+            "evidence": [evidence("proof", "z"), evidence("proof", "a")]
+        }))
+        .expect("alias provenance deserializes");
+        let group: CommitGroupProvenance = serde_json::from_value(json!({
+            "reason": "Independent",
+            "evidence": [evidence("proof", "z"), evidence("proof", "a")]
+        }))
+        .expect("commit group provenance deserializes");
+
+        assert_sorted(&binding.evidence);
+        assert_sorted(&alias.evidence);
+        assert_sorted(&group.evidence);
     }
 
     #[derive(Debug, Clone)]
@@ -898,38 +995,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct TinyStoragePlanBody {
-        input_identity: StoragePlanInputIdentity,
-        result: Option<String>,
-    }
-
-    impl ReportBody for TinyStoragePlanBody {
-        const REPORT_TYPE: &'static str = "StoragePlan";
-        const SCHEMA_ID: &'static str = STORAGE_PLAN_SCHEMA_ID;
-        const SCHEMA_VERSION: &'static str = "1.0.0";
-
-        fn validate_semantics(
-            &self,
-            outcome: ReportOutcome,
-        ) -> Result<(), Vec<ValidationDiagnostic>> {
-            match (outcome, self.result.is_some()) {
-                (ReportOutcome::Passed, true) | (ReportOutcome::Failed, false) => Ok(()),
-                _ => Err(vec![ValidationDiagnostic::hard(
-                    ValidationOrigin::StoragePlanConstruction,
-                    ValidationCode::ReportSemanticInvariantViolated {
-                        field: "result".into(),
-                    },
-                    ValidationDetail::Field {
-                        field: "result".into(),
-                    },
-                    vec![],
-                )]),
-            }
-        }
-    }
-
     fn identity() -> StoragePlanInputIdentity {
         StoragePlanInputIdentity {
             quant_graph_hash: hash(1),
@@ -964,6 +1029,49 @@ mod tests {
                 ValidationCode::StoragePlan { code, .. } if code == expected
             )),
             "missing {expected:?} in {diagnostics:#?}"
+        );
+    }
+
+    fn assert_has_provenance_invariant(diagnostics: &[ValidationDiagnostic], invariant: &str) {
+        assert!(
+            diagnostics
+                .iter()
+                .filter_map(storage_plan_provenance)
+                .any(|provenance| provenance_invariant(provenance) == Some(invariant)),
+            "missing provenance invariant {invariant} in {diagnostics:#?}"
+        );
+    }
+
+    fn storage_plan_provenance(
+        diagnostic: &ValidationDiagnostic,
+    ) -> Option<&StoragePlanDiagnosticProvenance> {
+        match &diagnostic.code {
+            ValidationCode::StoragePlan { provenance, .. } => Some(provenance),
+            _ => None,
+        }
+    }
+
+    fn provenance_invariant(provenance: &StoragePlanDiagnosticProvenance) -> Option<&str> {
+        match provenance {
+            StoragePlanDiagnosticProvenance::AliasMembership { invariant, .. }
+            | StoragePlanDiagnosticProvenance::PersistPage { invariant, .. }
+            | StoragePlanDiagnosticProvenance::CommitGroup { invariant, .. } => Some(invariant),
+            _ => None,
+        }
+    }
+
+    fn evidence(kind: &str, reference: &str) -> EvidenceRef {
+        EvidenceRef {
+            kind: kind.to_owned(),
+            reference: reference.to_owned(),
+            hash: None,
+        }
+    }
+
+    fn assert_sorted(evidence: &[EvidenceRef]) {
+        assert!(
+            evidence.windows(2).all(|window| window[0] <= window[1]),
+            "evidence is not sorted: {evidence:#?}"
         );
     }
 }
