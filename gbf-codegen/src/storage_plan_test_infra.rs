@@ -1224,6 +1224,7 @@ pub mod debug_harness {
                     result: None,
                     summary: None,
                     diagnostics: vec![code],
+                    diagnostic_details: vec![],
                 },
                 None => build_storage_plan_core(&fixture.core_input),
             };

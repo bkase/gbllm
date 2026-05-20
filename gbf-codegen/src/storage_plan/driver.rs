@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gbf_foundation::{CanonicalJson, CanonicalJsonError};
-use gbf_policy::StoragePlanDiagnosticCode;
+use gbf_foundation::{CanonicalJson, CanonicalJsonError, EvidenceRef, Hash256};
+use gbf_policy::{StoragePlanDiagnosticCode, StoragePlanDiagnosticProvenance};
 use serde::{Deserialize, Serialize};
 
 use crate::s3::infer_ir::ValueId;
@@ -19,7 +19,8 @@ use crate::storage_plan::lifetime::{
 };
 use crate::storage_plan::persist::{PersistBindingInput, resolve_persist_bindings};
 use crate::storage_plan::predicates::{
-    PredicateEnv, ValueRole, recompute_allowed, value_format_of,
+    PredicateEnv, RecomputeAllowedFailurePredicate, ValueRole, recompute_allowed,
+    recompute_allowed_failure_predicates, value_format_of,
 };
 use crate::storage_plan::types::{
     AbstractLiveRange, AdmittingPredicateId, AliasClass, AliasClassFingerprint, AliasClassId,
@@ -59,6 +60,7 @@ pub struct StoragePlanCoreOutput {
     pub result: Option<StoragePlanCoreResult>,
     pub summary: Option<StoragePlanCoreSummary>,
     pub diagnostics: Vec<StoragePlanDiagnosticCode>,
+    pub diagnostic_details: Vec<StoragePlanCoreDiagnosticDetail>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -74,6 +76,13 @@ pub struct StoragePlanCoreResult {
     pub persist_pages: BTreeMap<PersistPageId, PersistPageDecl>,
     pub commit_groups: BTreeMap<CommitGroupId, CommitGroupDecl>,
     pub provenance: StorageProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StoragePlanCoreDiagnosticDetail {
+    pub code: StoragePlanDiagnosticCode,
+    pub provenance: StoragePlanDiagnosticProvenance,
+    pub evidence: Vec<EvidenceRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,9 +118,9 @@ pub fn build_storage_plan_core(input: &StoragePlanCoreInput) -> StoragePlanCoreO
     if !input.alias_forced_recompute_values.is_empty() {
         for value in &input.alias_forced_recompute_values {
             if !recompute_allowed(&input.predicate_env, *value) {
-                return failed_output(
+                return failed_output_with_detail(
                     input.input_identity.clone(),
-                    StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed,
+                    forced_recompute_rejection_detail(input, *value),
                 );
             }
             if let Some(binding) = bindings.get_mut(value) {
@@ -172,6 +181,7 @@ pub fn build_storage_plan_core(input: &StoragePlanCoreInput) -> StoragePlanCoreO
         result: Some(result),
         summary: Some(summary),
         diagnostics: vec![],
+        diagnostic_details: vec![],
     }
 }
 
@@ -191,6 +201,112 @@ fn failed_output(
         result: None,
         summary: None,
         diagnostics: vec![code],
+        diagnostic_details: vec![],
+    }
+}
+
+fn failed_output_with_detail(
+    input_identity: StoragePlanInputIdentity,
+    detail: StoragePlanCoreDiagnosticDetail,
+) -> StoragePlanCoreOutput {
+    StoragePlanCoreOutput {
+        input_identity,
+        outcome: StoragePlanCoreOutcome::Failed,
+        result: None,
+        summary: None,
+        diagnostics: vec![detail.code],
+        diagnostic_details: vec![detail],
+    }
+}
+
+fn forced_recompute_rejection_detail(
+    input: &StoragePlanCoreInput,
+    value: ValueId,
+) -> StoragePlanCoreDiagnosticDetail {
+    let failed_predicates = recompute_allowed_failure_predicates(&input.predicate_env, value);
+    let evidence = recompute_allowed_failure_evidence(&failed_predicates);
+    if failed_predicates
+        .contains(&RecomputeAllowedFailurePredicate::IsObservedCheckpointBackingValue)
+    {
+        StoragePlanCoreDiagnosticDetail {
+            code: StoragePlanDiagnosticCode::StorageRecomputeForbiddenForObservedValue,
+            provenance: StoragePlanDiagnosticProvenance::ObservationCheckpoint {
+                value_id: value.get(),
+                semantic_anchor: recompute_allowed_failure_anchor(&failed_predicates),
+                checkpoint_id: 0,
+            },
+            evidence,
+        }
+    } else {
+        StoragePlanCoreDiagnosticDetail {
+            code: StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed,
+            provenance: StoragePlanDiagnosticProvenance::ForcedRecompute {
+                value_id: value.get(),
+                failed_predicates: failed_predicates
+                    .iter()
+                    .map(|predicate| recompute_allowed_failure_predicate_id(*predicate).to_owned())
+                    .collect(),
+            },
+            evidence,
+        }
+    }
+}
+
+fn recompute_allowed_failure_anchor(
+    failed_predicates: &BTreeSet<RecomputeAllowedFailurePredicate>,
+) -> String {
+    let joined = failed_predicates
+        .iter()
+        .map(|predicate| recompute_allowed_failure_predicate_id(*predicate))
+        .collect::<Vec<_>>()
+        .join("+");
+    format!("DR-1b.RecomputeAllowed.{joined}")
+}
+
+fn recompute_allowed_failure_evidence(
+    failed_predicates: &BTreeSet<RecomputeAllowedFailurePredicate>,
+) -> Vec<EvidenceRef> {
+    failed_predicates
+        .iter()
+        .map(|predicate| EvidenceRef {
+            kind: "StoragePlanPredicateEvidence".to_owned(),
+            reference: format!(
+                "DR-1b.RecomputeAllowed.{}=failed",
+                recompute_allowed_failure_predicate_id(*predicate)
+            ),
+            hash: Some(Hash256::ZERO),
+        })
+        .collect()
+}
+
+fn recompute_allowed_success_evidence() -> Vec<EvidenceRef> {
+    [
+        "ValueRoleOf",
+        "IsPureValue",
+        "IsObservedCheckpointBackingValue",
+        "IsSequenceStateSlot",
+        "EffectiveLifetimeEstimate",
+    ]
+    .into_iter()
+    .map(|predicate| EvidenceRef {
+        kind: "StoragePlanPredicateEvidence".to_owned(),
+        reference: format!("DR-1.RecomputeAllowed.{predicate}=passed"),
+        hash: Some(Hash256::ZERO),
+    })
+    .collect()
+}
+
+const fn recompute_allowed_failure_predicate_id(
+    predicate: RecomputeAllowedFailurePredicate,
+) -> &'static str {
+    match predicate {
+        RecomputeAllowedFailurePredicate::ValueRoleOf => "ValueRoleOf",
+        RecomputeAllowedFailurePredicate::IsPureValue => "IsPureValue",
+        RecomputeAllowedFailurePredicate::IsObservedCheckpointBackingValue => {
+            "IsObservedCheckpointBackingValue"
+        }
+        RecomputeAllowedFailurePredicate::IsSequenceStateSlot => "IsSequenceStateSlot",
+        RecomputeAllowedFailurePredicate::EffectiveLifetimeEstimate => "EffectiveLifetimeEstimate",
     }
 }
 
@@ -337,7 +453,11 @@ fn build_storage_provenance(
             .map(|(value, binding)| {
                 let decision_rule = match binding.justification {
                     BindingJustification::DecisionRule(rule) => rule,
-                    BindingJustification::ForcedRecompute => DecisionRuleId(33),
+                    BindingJustification::ForcedRecompute => DecisionRuleId(1),
+                };
+                let evidence = match binding.justification {
+                    BindingJustification::DecisionRule(_) => Vec::new(),
+                    BindingJustification::ForcedRecompute => recompute_allowed_success_evidence(),
                 };
                 (
                     *value,
@@ -345,7 +465,7 @@ fn build_storage_provenance(
                         AdmittingPredicateId(decision_rule.0),
                         decision_rule,
                         false,
-                        vec![],
+                        evidence,
                         role_by_value.get(value).copied(),
                         value_format_of(&input.predicate_env, *value).cloned(),
                     ),
@@ -467,6 +587,7 @@ struct SerializableOutput {
     result: Option<SerializableResult>,
     summary: Option<StoragePlanCoreSummary>,
     diagnostics: Vec<String>,
+    diagnostic_details: Vec<StoragePlanCoreDiagnosticDetail>,
 }
 
 #[derive(Serialize)]
@@ -511,6 +632,7 @@ impl From<&StoragePlanCoreOutput> for SerializableOutput {
                 .iter()
                 .map(|code| code.as_str().to_owned())
                 .collect(),
+            diagnostic_details: output.diagnostic_details.clone(),
         }
     }
 }
@@ -588,6 +710,7 @@ impl From<&StoragePlanCoreResult> for SerializableResult {
 #[cfg(test)]
 mod tests {
     use gbf_foundation::{Hash256, SemVer};
+    use gbf_policy::{StoragePlanDiagnosticProvenance, ValidationCode};
     use gbf_report::ReportSchemaId;
 
     use super::*;
@@ -668,6 +791,122 @@ mod tests {
                 .members()
                 .as_btree_set()
                 .contains(&ValueId::new(3))
+        );
+    }
+
+    #[test]
+    fn forced_recompute_success_uses_dr_1_provenance_not_store_033() {
+        let forced = BTreeSet::from([ValueId::new(2)]);
+        let input = fixture_input(forced, false);
+        let output = build_storage_plan_core(&input);
+        let result = output.result.expect("driver succeeds");
+        let provenance = &result.provenance.bindings[&ValueId::new(2)];
+
+        assert_eq!(
+            result.bindings[&ValueId::new(2)].justification,
+            BindingJustification::ForcedRecompute
+        );
+        assert_eq!(provenance.decision_rule, DecisionRuleId(1));
+        assert_eq!(provenance.admitting_predicate, AdmittingPredicateId(1));
+        assert_ne!(provenance.decision_rule, DecisionRuleId(33));
+        assert!(
+            provenance.evidence.iter().any(|evidence| {
+                evidence.reference == "DR-1.RecomputeAllowed.ValueRoleOf=passed"
+            })
+        );
+        assert!(provenance.evidence.iter().any(|evidence| {
+            evidence.reference == "DR-1.RecomputeAllowed.EffectiveLifetimeEstimate=passed"
+        }));
+    }
+
+    #[test]
+    fn forced_recompute_router_rejection_carries_failed_predicates_to_report() {
+        let forced_value = ValueId::new(2);
+        let mut input = fixture_input(BTreeSet::from([forced_value]), false);
+        input.predicate_env = input.predicate_env.with_value(
+            forced_value,
+            PredicateValueFacts::new(
+                ValueRole::RouterDecision,
+                ValueFormat::TokenIdDomain { vocab_size: 8 },
+            ),
+        );
+        input.values[1].role = ValueRole::RouterDecision;
+
+        let output = build_storage_plan_core(&input);
+
+        assert_eq!(output.outcome, StoragePlanCoreOutcome::Failed);
+        assert_eq!(
+            output.diagnostics,
+            vec![StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed]
+        );
+        assert_eq!(output.diagnostic_details.len(), 1);
+        match &output.diagnostic_details[0].provenance {
+            StoragePlanDiagnosticProvenance::ForcedRecompute {
+                value_id,
+                failed_predicates,
+            } => {
+                assert_eq!(*value_id, forced_value.get());
+                assert_eq!(failed_predicates, &vec!["ValueRoleOf".to_owned()]);
+            }
+            other => panic!("expected forced recompute provenance, got {other:?}"),
+        }
+
+        let envelope =
+            crate::storage_plan::emit_storage_plan_report(&output).expect("report emits");
+        match &envelope.body.body.diagnostics[0].code {
+            ValidationCode::StoragePlan { code, provenance } => {
+                assert_eq!(
+                    *code,
+                    StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed
+                );
+                assert!(matches!(
+                    provenance,
+                    StoragePlanDiagnosticProvenance::ForcedRecompute {
+                        value_id: 2,
+                        failed_predicates,
+                    } if failed_predicates == &vec!["ValueRoleOf".to_owned()]
+                ));
+            }
+            other => panic!("expected storage plan diagnostic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forced_recompute_observed_value_rejection_names_recompute_allowed_anchor() {
+        let forced_value = ValueId::new(2);
+        let mut input = fixture_input(BTreeSet::from([forced_value]), false);
+        input.predicate_env = input
+            .predicate_env
+            .with_observed_checkpoint_backing_value(forced_value);
+
+        let output = build_storage_plan_core(&input);
+
+        assert_eq!(output.outcome, StoragePlanCoreOutcome::Failed);
+        assert_eq!(
+            output.diagnostics,
+            vec![StoragePlanDiagnosticCode::StorageRecomputeForbiddenForObservedValue]
+        );
+        match &output.diagnostic_details[0].provenance {
+            StoragePlanDiagnosticProvenance::ObservationCheckpoint {
+                value_id,
+                semantic_anchor,
+                checkpoint_id,
+            } => {
+                assert_eq!(*value_id, forced_value.get());
+                assert_eq!(*checkpoint_id, 0);
+                assert!(semantic_anchor.contains("DR-1b.RecomputeAllowed"));
+                assert!(semantic_anchor.contains("IsObservedCheckpointBackingValue"));
+            }
+            other => panic!("expected observation checkpoint provenance, got {other:?}"),
+        }
+        assert!(
+            output.diagnostic_details[0]
+                .evidence
+                .iter()
+                .any(|evidence| {
+                    evidence.reference
+                        == "DR-1b.RecomputeAllowed.IsObservedCheckpointBackingValue=failed"
+                })
         );
     }
 

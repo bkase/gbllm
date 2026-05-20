@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::s3::infer_ir::{NodeId, ValueId};
 use crate::storage_plan::diagnostics::storage_plan_diagnostic;
 use crate::storage_plan::driver::{
-    StoragePlanCoreOutcome, StoragePlanCoreOutput, StoragePlanCoreResult, StoragePlanCoreSummary,
+    StoragePlanCoreDiagnosticDetail, StoragePlanCoreOutcome, StoragePlanCoreOutput,
+    StoragePlanCoreResult, StoragePlanCoreSummary,
 };
 use crate::storage_plan::invariants::closed_spatial_surface_diagnostics;
 use crate::storage_plan::types::{
@@ -183,16 +184,37 @@ impl StoragePlanReportBody {
             result: output.result.as_ref().map(|result| {
                 StoragePlanReportResult::from_core_result(&output.input_identity, result)
             }),
-            diagnostics: output
-                .diagnostics
-                .iter()
-                .copied()
-                .map(diagnostic_for_code)
-                .collect(),
+            diagnostics: diagnostics_from_core_output(output),
             input_identity: output.input_identity.clone(),
             summary: output.summary,
         }
     }
+}
+
+fn diagnostics_from_core_output(output: &StoragePlanCoreOutput) -> Vec<ValidationDiagnostic> {
+    if output.diagnostic_details.is_empty() {
+        output
+            .diagnostics
+            .iter()
+            .copied()
+            .map(diagnostic_for_code)
+            .collect()
+    } else {
+        output
+            .diagnostic_details
+            .iter()
+            .map(diagnostic_for_detail)
+            .collect()
+    }
+}
+
+fn diagnostic_for_detail(detail: &StoragePlanCoreDiagnosticDetail) -> ValidationDiagnostic {
+    storage_plan_diagnostic(
+        detail.code,
+        detail.provenance.clone(),
+        detail.evidence.clone(),
+    )
+    .unwrap_or_else(|_| report_invariant("diagnostics"))
 }
 
 impl StoragePlanReportResult {
