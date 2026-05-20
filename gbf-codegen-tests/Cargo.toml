@@ -6,6 +6,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-gbf-codegen = { path = "../gbf-codegen" }
+gbf-codegen = { path = "../gbf-codegen", features = ["test-infra"] }
 serde_json.workspace = true
 tracing.workspace = true

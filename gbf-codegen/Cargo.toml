@@ -30,6 +30,11 @@ semantic_equivalence_check = []
 stage-cache = []
 test-infra = []
 
+[[bin]]
+name = "gbf-storage-plan-debug"
+path = "src/bin/gbf-storage-plan-debug.rs"
+required-features = ["test-infra"]
+
 [dev-dependencies]
 gbf-verify = { path = "../gbf-verify" }
 proptest.workspace = true

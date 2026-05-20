@@ -23,6 +23,7 @@ use gbf_policy::{
     TraceBudget as PolicyTraceBudget, TraceDropPolicy as PolicyTraceDropPolicy,
     canonical_default_bounds_fixture,
 };
+use gbf_report::canonicalize;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tracing::field::{Field, Visit};
@@ -55,15 +56,24 @@ use crate::storage_plan::driver::{
     StoragePlanCoreInput, StoragePlanCoreOutcome, StoragePlanCoreOutput, StoragePlanCoreResult,
     StoragePlanCoreValue, build_storage_plan_core,
 };
-use crate::storage_plan::emitter::emit_storage_plan_json_bytes;
+use crate::storage_plan::emitter::emit_storage_plan_report;
+use crate::storage_plan::invariants::{
+    StoragePlanConsistencyContext, StoragePlanConsistencyView,
+    validate_storage_plan_self_consistency,
+};
+use crate::storage_plan::lifetime::{LifetimeBound, LifetimeBoundSource, LifetimeBounds};
 use crate::storage_plan::types::{
-    AbstractLiveRange, LifetimeClass, Materialization, StorageClass, StoragePlanInputIdentity,
-    StoragePlanInputs, canonicalize_inputs, resolved_compile_policy_hash,
+    AbstractLiveRange, AliasClassId, CommitAtomicityClass, CommitGroupDecl, CommitGroupId,
+    CommitGroupReason, DurabilityClass, LifetimeClass, Materialization, NonEmptySortedSet,
+    PersistKind, PersistPageDecl, PersistPageId, PersistSchemaPin, StorageBinding, StorageClass,
+    StoragePlanInputHashes, StoragePlanInputIdentity, StoragePlanInputProduct, StoragePlanInputs,
+    canonicalize_inputs, resolved_compile_policy_hash,
 };
 use crate::storage_plan::{
     AliasCandidateEdge, AliasIntent, PredicateEnv, PredicateValueFacts, QuantFormatId, ValueFormat,
     ValueRole,
 };
+use gbf_policy::ValidationCode;
 
 pub mod synth {
     use super::*;
@@ -700,20 +710,272 @@ pub mod sc_violations {
         pub expected_code: StoragePlanDiagnosticCode,
         pub rfc_section: String,
         pub provenance_schema: String,
-        pub core_input: StoragePlanCoreInput,
+        pub kind: StoragePlanViolationFixtureKind,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum StoragePlanViolationFixtureKind {
+        ProductionBacked(Box<StoragePlanProductionFixture>),
+        StubOnly { reason: String },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum StoragePlanProductionFixture {
+        CoreDriver {
+            core_input: StoragePlanCoreInput,
+        },
+        SelfConsistency {
+            core_input: StoragePlanCoreInput,
+            mutation: StoragePlanSelfConsistencyMutation,
+        },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum StoragePlanSelfConsistencyMutation {
+        BindingCoverageGap,
+        BindingDoubleBind,
+        RecomputeAliasNotIsolated,
+        LifetimeTooShort,
+        LifetimeTooLong,
+        ForbiddenSpatialKey,
+        PersistPageNotReferenced,
+        CommitGroupEmpty,
+        AliasClassMembershipMiss,
+        AliasIntentMaterializationMismatch,
+        InputHashMismatch { product: StoragePlanInputProduct },
     }
 
     impl StoragePlanViolationFixture {
         #[must_use]
-        pub fn run(&self) -> StoragePlanCoreOutput {
-            let mut output = build_storage_plan_core(&self.core_input);
-            if output.outcome == StoragePlanCoreOutcome::Succeeded {
-                output.outcome = StoragePlanCoreOutcome::Failed;
-                output.result = None;
-                output.summary = None;
-                output.diagnostics = vec![self.expected_code];
+        pub const fn is_production_backed(&self) -> bool {
+            matches!(
+                self.kind,
+                StoragePlanViolationFixtureKind::ProductionBacked(_)
+            )
+        }
+
+        pub fn run(&self) -> Result<StoragePlanCoreOutput, StubFixtureRunError> {
+            match &self.kind {
+                StoragePlanViolationFixtureKind::ProductionBacked(fixture) => {
+                    match fixture.as_ref() {
+                        StoragePlanProductionFixture::CoreDriver { core_input } => {
+                            Ok(build_storage_plan_core(core_input))
+                        }
+                        StoragePlanProductionFixture::SelfConsistency {
+                            core_input,
+                            mutation,
+                        } => Ok(self.run_self_consistency_mutation(core_input, *mutation)),
+                    }
+                }
+                StoragePlanViolationFixtureKind::StubOnly { reason } => Err(StubFixtureRunError {
+                    fixture_id: self.fixture_id.clone(),
+                    expected_code: self.expected_code,
+                    reason: reason.clone(),
+                }),
             }
-            output
+        }
+
+        fn run_self_consistency_mutation(
+            &self,
+            core_input: &StoragePlanCoreInput,
+            mutation: StoragePlanSelfConsistencyMutation,
+        ) -> StoragePlanCoreOutput {
+            let output = build_storage_plan_core(core_input);
+            let Some(mut result) = output.result else {
+                return output;
+            };
+            let mut context = consistency_context_from_core_result(core_input, &result);
+            let mut json_value = None;
+            let mut binding_override = None;
+            apply_self_consistency_mutation(
+                mutation,
+                &mut result,
+                &mut context,
+                &mut json_value,
+                &mut binding_override,
+            );
+            let bindings: Vec<_> =
+                binding_override.unwrap_or_else(|| result.bindings.values().cloned().collect());
+            let diagnostics = validate_storage_plan_self_consistency(
+                &context,
+                StoragePlanConsistencyView {
+                    input_identity: &core_input.input_identity,
+                    bindings: &bindings,
+                    alias_classes: &result.alias_classes,
+                    persist_pages: &result.persist_pages,
+                    commit_groups: &result.commit_groups,
+                    json_value: json_value.as_ref(),
+                },
+            );
+            failed_output_from_validation_diagnostics(
+                core_input.input_identity.clone(),
+                &diagnostics,
+            )
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StubFixtureRunError {
+        pub fixture_id: String,
+        pub expected_code: StoragePlanDiagnosticCode,
+        pub reason: String,
+    }
+
+    impl std::fmt::Display for StubFixtureRunError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{} is declaration-only for {}: {}",
+                self.fixture_id,
+                self.expected_code.as_str(),
+                self.reason
+            )
+        }
+    }
+
+    impl std::error::Error for StubFixtureRunError {}
+
+    fn apply_self_consistency_mutation(
+        mutation: StoragePlanSelfConsistencyMutation,
+        result: &mut StoragePlanCoreResult,
+        context: &mut StoragePlanConsistencyContext,
+        json_value: &mut Option<Value>,
+        binding_override: &mut Option<Vec<StorageBinding>>,
+    ) {
+        match mutation {
+            StoragePlanSelfConsistencyMutation::BindingCoverageGap => {
+                let removed = result
+                    .bindings
+                    .keys()
+                    .next()
+                    .copied()
+                    .expect("fixture has a binding");
+                result.bindings.remove(&removed);
+                result.alias_classes.clear();
+            }
+            StoragePlanSelfConsistencyMutation::BindingDoubleBind => {
+                let binding = result
+                    .bindings
+                    .values()
+                    .next()
+                    .cloned()
+                    .expect("fixture has a binding");
+                let mut bindings = result.bindings.values().cloned().collect::<Vec<_>>();
+                bindings.push(binding);
+                *binding_override = Some(bindings);
+            }
+            StoragePlanSelfConsistencyMutation::RecomputeAliasNotIsolated => {
+                let binding = result
+                    .bindings
+                    .get_mut(&ValueId::new(1))
+                    .expect("fixture has value 1");
+                binding.materialization = Materialization::Recompute;
+            }
+            StoragePlanSelfConsistencyMutation::LifetimeTooShort => {
+                let value = ValueId::new(1);
+                result
+                    .bindings
+                    .get_mut(&value)
+                    .expect("fixture has value 1")
+                    .materialization = Materialization::Materialize {
+                    class: StorageClass::WramHot,
+                    lifetime: LifetimeClass::Slice,
+                };
+                context.lifetime_bounds.insert(
+                    value,
+                    bounds(LifetimeClass::Token, LifetimeClass::Persistent),
+                );
+            }
+            StoragePlanSelfConsistencyMutation::LifetimeTooLong => {
+                let value = ValueId::new(1);
+                result
+                    .bindings
+                    .get_mut(&value)
+                    .expect("fixture has value 1")
+                    .materialization = Materialization::Materialize {
+                    class: StorageClass::WramHot,
+                    lifetime: LifetimeClass::Persistent,
+                };
+                context
+                    .lifetime_bounds
+                    .insert(value, bounds(LifetimeClass::Slice, LifetimeClass::Token));
+            }
+            StoragePlanSelfConsistencyMutation::ForbiddenSpatialKey => {
+                *json_value = Some(serde_json::json!({ "byte_offset": 0 }));
+            }
+            StoragePlanSelfConsistencyMutation::PersistPageNotReferenced => {
+                result.persist_pages.insert(
+                    PersistPageId(99),
+                    persist_page(PersistPageId(99), PersistKind::Trace),
+                );
+            }
+            StoragePlanSelfConsistencyMutation::CommitGroupEmpty => {
+                result.commit_groups.insert(
+                    CommitGroupId(99),
+                    CommitGroupDecl {
+                        id: CommitGroupId(99),
+                        members: NonEmptySortedSet::new([PersistPageId(99)])
+                            .expect("fixture commit group is non-empty"),
+                        kind_set: BTreeSet::from([PersistKind::Trace]),
+                        atomicity: CommitAtomicityClass::AllOrNothing,
+                    },
+                );
+            }
+            StoragePlanSelfConsistencyMutation::AliasClassMembershipMiss => {
+                result
+                    .bindings
+                    .get_mut(&ValueId::new(1))
+                    .expect("fixture has value 1")
+                    .alias_class = AliasClassId(99);
+            }
+            StoragePlanSelfConsistencyMutation::AliasIntentMaterializationMismatch => {
+                let binding = result
+                    .bindings
+                    .get_mut(&ValueId::new(1))
+                    .expect("fixture has value 1");
+                binding.materialization = Materialization::Persist {
+                    page: PersistPageId(1),
+                    commit_group: CommitGroupId(1),
+                };
+                result.persist_pages.insert(
+                    PersistPageId(1),
+                    persist_page(PersistPageId(1), PersistKind::Trace),
+                );
+                result.commit_groups.insert(
+                    CommitGroupId(1),
+                    CommitGroupDecl {
+                        id: CommitGroupId(1),
+                        members: NonEmptySortedSet::new([PersistPageId(1)])
+                            .expect("fixture commit group is non-empty"),
+                        kind_set: BTreeSet::from([PersistKind::Trace]),
+                        atomicity: CommitAtomicityClass::AllOrNothing,
+                    },
+                );
+                context.lifetime_bounds.insert(
+                    ValueId::new(1),
+                    bounds(LifetimeClass::Persistent, LifetimeClass::Persistent),
+                );
+            }
+            StoragePlanSelfConsistencyMutation::InputHashMismatch { product } => match product {
+                StoragePlanInputProduct::QuantGraph => {
+                    context.expected_input_hashes.quant_graph_hash = hash(0xfe);
+                }
+                StoragePlanInputProduct::InferIr => {
+                    context.expected_input_hashes.infer_ir_hash = hash(0xfe);
+                }
+                StoragePlanInputProduct::ObservationPlan => {
+                    context.expected_input_hashes.observation_plan_hash = hash(0xfe);
+                }
+                StoragePlanInputProduct::RangePlan => {
+                    context.expected_input_hashes.range_plan_hash = hash(0xfe);
+                }
+                StoragePlanInputProduct::Policy => {
+                    context.expected_input_hashes.policy_hash = hash(0xfe);
+                }
+            },
         }
     }
 
@@ -721,10 +983,12 @@ pub mod sc_violations {
     /// ValueProducer. RFC section: F-B8 self-consistency SC1.
     #[must_use]
     pub fn sc1_binding_coverage_gap() -> StoragePlanViolationFixture {
-        fixture(
+        self_consistency_fixture(
             "sc1_binding_coverage_gap",
             StoragePlanDiagnosticCode::StorageBindingCoverageGap,
             "SC1",
+            synth::minimal_singleton_core_input(),
+            StoragePlanSelfConsistencyMutation::BindingCoverageGap,
         )
     }
 
@@ -732,10 +996,12 @@ pub mod sc_violations {
     /// RecomputeAlias. RFC section: F-B8 self-consistency SC5.
     #[must_use]
     pub fn sc5_recompute_alias_violation() -> StoragePlanViolationFixture {
-        fixture(
+        self_consistency_fixture(
             "sc5_recompute_alias_violation",
             StoragePlanDiagnosticCode::StorageRecomputeAliasNotIsolated,
             "SC5",
+            alias_pair_core_input(),
+            StoragePlanSelfConsistencyMutation::RecomputeAliasNotIsolated,
         )
     }
 
@@ -743,10 +1009,12 @@ pub mod sc_violations {
     /// schema: LifetimeAdmissibility. RFC section: F-B8 self-consistency SC10.
     #[must_use]
     pub fn sc10_lifetime_lower_bound() -> StoragePlanViolationFixture {
-        fixture(
+        self_consistency_fixture(
             "sc10_lifetime_lower_bound",
             StoragePlanDiagnosticCode::StorageLifetimeAdmissibilityViolation,
             "SC10",
+            synth::minimal_singleton_core_input(),
+            StoragePlanSelfConsistencyMutation::LifetimeTooShort,
         )
     }
 
@@ -754,10 +1022,12 @@ pub mod sc_violations {
     /// Provenance schema: LifetimeAdmissibility. RFC section: F-B8 SC10.
     #[must_use]
     pub fn sc10_lifetime_upper_bound() -> StoragePlanViolationFixture {
-        fixture(
+        self_consistency_fixture(
             "sc10_lifetime_upper_bound",
             StoragePlanDiagnosticCode::StorageLifetimeAdmissibilityViolation,
             "SC10",
+            synth::minimal_singleton_core_input(),
+            StoragePlanSelfConsistencyMutation::LifetimeTooLong,
         )
     }
 
@@ -765,10 +1035,12 @@ pub mod sc_violations {
     /// JsonPath. RFC section: F-B8 self-consistency SC11.
     #[must_use]
     pub fn sc11_forbidden_key_leak() -> StoragePlanViolationFixture {
-        fixture(
+        self_consistency_fixture(
             "sc11_forbidden_key_leak",
             StoragePlanDiagnosticCode::StorageForbiddenSpatialEnumLeak,
             "SC11",
+            synth::minimal_singleton_core_input(),
+            StoragePlanSelfConsistencyMutation::ForbiddenSpatialKey,
         )
     }
 
@@ -777,55 +1049,61 @@ pub mod sc_violations {
     /// JsonPath. RFC section: F-B8 self-consistency SC12.
     #[must_use]
     pub fn sc12_envelope_recursion() -> StoragePlanViolationFixture {
-        fixture(
+        production_core_fixture(
             "sc12_envelope_recursion",
             StoragePlanDiagnosticCode::StorageReservedShapeEmitted,
             "SC12",
+            reserved_shape_core_input(),
         )
     }
 
     #[must_use]
     pub fn store_031_mixed_intent_component() -> StoragePlanViolationFixture {
-        fixture(
+        production_core_fixture(
             "store_031_mixed_intent_component",
             StoragePlanDiagnosticCode::StorageAliasMixedIntentComponent,
             "RC-31",
+            mixed_intent_core_input(),
         )
     }
 
     #[must_use]
     pub fn store_032_pingpong_three_members() -> StoragePlanViolationFixture {
-        fixture(
+        production_core_fixture(
             "store_032_pingpong_three_members",
             StoragePlanDiagnosticCode::StorageAliasIntentCardinalityViolation,
             "RC-32",
+            pingpong_three_member_core_input(),
         )
     }
 
     #[must_use]
     pub fn store_033_forced_recompute_router() -> StoragePlanViolationFixture {
-        fixture(
+        production_core_fixture(
             "store_033_forced_recompute_router",
             StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed,
             "RC-33",
+            forced_recompute_router_core_input(),
         )
     }
 
     #[must_use]
     pub fn store_034_policy_underflow() -> StoragePlanViolationFixture {
-        fixture(
+        stub_fixture(
             "store_034_policy_underflow",
             StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow,
             "RC-34",
+            "policy-view diagnostics are not emitted by the Stage 6 core driver yet",
         )
     }
 
     #[must_use]
     pub fn store_035_alias_fingerprint_collision() -> StoragePlanViolationFixture {
-        fixture(
+        stub_fixture(
             "store_035_alias_fingerprint_collision",
             StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision,
             "RC-35",
+            "fingerprint-collision production path is only injectable in alias-engine unit tests",
         )
     }
 
@@ -834,20 +1112,159 @@ pub mod sc_violations {
         StoragePlanDiagnosticCode::ALL
             .iter()
             .copied()
-            .map(|code| {
-                fixture(
-                    format!("store_{:03}_{}", code.number(), code.name()),
-                    code,
-                    format!("RC-{:03}", code.number()),
-                )
-            })
+            .map(factory_for_code)
             .collect()
     }
 
-    fn fixture(
+    #[must_use]
+    pub fn production_backed_violation_factories() -> Vec<StoragePlanViolationFixture> {
+        all_store_violation_factories()
+            .into_iter()
+            .filter(StoragePlanViolationFixture::is_production_backed)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn stub_only_violation_factories() -> Vec<StoragePlanViolationFixture> {
+        all_store_violation_factories()
+            .into_iter()
+            .filter(|fixture| !fixture.is_production_backed())
+            .collect()
+    }
+
+    fn factory_for_code(code: StoragePlanDiagnosticCode) -> StoragePlanViolationFixture {
+        match code {
+            StoragePlanDiagnosticCode::StorageNoAdmittingDecisionRule => production_core_fixture(
+                "store_001_no_admitting_decision_rule",
+                code,
+                "RC-001",
+                fail_before_result_core_input(),
+            ),
+            StoragePlanDiagnosticCode::StorageBindingCoverageGap => sc1_binding_coverage_gap(),
+            StoragePlanDiagnosticCode::StorageBindingDoubleBind => self_consistency_fixture(
+                "store_003_binding_double_bind",
+                code,
+                "SC1",
+                synth::minimal_singleton_core_input(),
+                StoragePlanSelfConsistencyMutation::BindingDoubleBind,
+            ),
+            StoragePlanDiagnosticCode::StorageRecomputeForbiddenForObservedValue => {
+                production_core_fixture(
+                    "store_006_recompute_forbidden_for_observed_value",
+                    code,
+                    "DR-1b",
+                    forced_recompute_observed_core_input(),
+                )
+            }
+            StoragePlanDiagnosticCode::StoragePersistBindingKindMismatch => {
+                production_core_fixture(
+                    "store_008_persist_binding_kind_mismatch",
+                    code,
+                    "RC-008",
+                    persist_binding_kind_mismatch_core_input(),
+                )
+            }
+            StoragePlanDiagnosticCode::StoragePersistPageNotReferenced => self_consistency_fixture(
+                "store_009_persist_page_not_referenced",
+                code,
+                "SC7",
+                synth::minimal_singleton_core_input(),
+                StoragePlanSelfConsistencyMutation::PersistPageNotReferenced,
+            ),
+            StoragePlanDiagnosticCode::StorageCommitGroupEmpty => self_consistency_fixture(
+                "store_010_commit_group_empty",
+                code,
+                "SC8",
+                synth::minimal_singleton_core_input(),
+                StoragePlanSelfConsistencyMutation::CommitGroupEmpty,
+            ),
+            StoragePlanDiagnosticCode::StorageCommitGroupKindMix => production_core_fixture(
+                "store_011_commit_group_kind_mix",
+                code,
+                "RC-011",
+                commit_group_kind_mix_core_input(),
+            ),
+            StoragePlanDiagnosticCode::StorageAliasIntentMaterializationMismatch => {
+                self_consistency_fixture(
+                    "store_013_alias_intent_materialization_mismatch",
+                    code,
+                    "SC6",
+                    alias_pair_core_input(),
+                    StoragePlanSelfConsistencyMutation::AliasIntentMaterializationMismatch,
+                )
+            }
+            StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent => stub_fixture(
+                "store_014_alias_class_overlap_without_intent",
+                code,
+                "RC-014",
+                "alias overlap is covered in alias-engine unit tests but not generated through the core driver fixture surface yet",
+            ),
+            StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation => {
+                self_consistency_fixture(
+                    "store_015_alias_class_membership_functional_violation",
+                    code,
+                    "SC4",
+                    synth::minimal_singleton_core_input(),
+                    StoragePlanSelfConsistencyMutation::AliasClassMembershipMiss,
+                )
+            }
+            StoragePlanDiagnosticCode::StorageRecomputeAliasNotIsolated => {
+                sc5_recompute_alias_violation()
+            }
+            StoragePlanDiagnosticCode::StorageLifetimeAdmissibilityViolation => {
+                sc10_lifetime_lower_bound()
+            }
+            StoragePlanDiagnosticCode::StorageForbiddenSpatialEnumLeak => sc11_forbidden_key_leak(),
+            StoragePlanDiagnosticCode::StorageRangePlanHashMismatch => {
+                input_hash_fixture(code, StoragePlanInputProduct::RangePlan)
+            }
+            StoragePlanDiagnosticCode::StorageInferIrHashMismatch => {
+                input_hash_fixture(code, StoragePlanInputProduct::InferIr)
+            }
+            StoragePlanDiagnosticCode::StorageObservationPlanHashMismatch => {
+                input_hash_fixture(code, StoragePlanInputProduct::ObservationPlan)
+            }
+            StoragePlanDiagnosticCode::StorageQuantGraphHashMismatch => {
+                input_hash_fixture(code, StoragePlanInputProduct::QuantGraph)
+            }
+            StoragePlanDiagnosticCode::StoragePolicyHashMismatch => {
+                input_hash_fixture(code, StoragePlanInputProduct::Policy)
+            }
+            StoragePlanDiagnosticCode::StorageReservedShapeEmitted => sc12_envelope_recursion(),
+            StoragePlanDiagnosticCode::StorageAliasMixedIntentComponent => {
+                store_031_mixed_intent_component()
+            }
+            StoragePlanDiagnosticCode::StorageAliasIntentCardinalityViolation => {
+                store_032_pingpong_three_members()
+            }
+            StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed => {
+                store_033_forced_recompute_router()
+            }
+            StoragePlanDiagnosticCode::StorageRomConstWriteViolation
+            | StoragePlanDiagnosticCode::StorageHramAdmissionInvariantViolation
+            | StoragePlanDiagnosticCode::StoragePersistSequenceStateUnsupportedV1
+            | StoragePlanDiagnosticCode::StorageCommitGroupDurabilityMix
+            | StoragePlanDiagnosticCode::StorageDeterminismRequiresStableRules
+            | StoragePlanDiagnosticCode::StorageIterationInputInvalid
+            | StoragePlanDiagnosticCode::StorageOverlayLensViolation
+            | StoragePlanDiagnosticCode::StorageRepairProposalIllegal
+            | StoragePlanDiagnosticCode::StorageInferIrEffectClassUnknown
+            | StoragePlanDiagnosticCode::StorageQuantGraphRoutingMismatch
+            | StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow
+            | StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision => stub_fixture(
+                format!("store_{:03}_{}", code.number(), code.name()),
+                code,
+                format!("RC-{:03}", code.number()),
+                "no production-backed Stage 6 validator path exists for this code in F-B8 yet",
+            ),
+        }
+    }
+
+    fn production_core_fixture(
         fixture_id: impl Into<String>,
         expected_code: StoragePlanDiagnosticCode,
         rfc_section: impl Into<String>,
+        core_input: StoragePlanCoreInput,
     ) -> StoragePlanViolationFixture {
         StoragePlanViolationFixture {
             fixture_id: fixture_id.into(),
@@ -855,7 +1272,382 @@ pub mod sc_violations {
             rfc_section: rfc_section.into(),
             provenance_schema: crate::storage_plan::storage_plan_provenance_schema(expected_code)
                 .to_owned(),
-            core_input: synth::minimal_singleton_core_input(),
+            kind: StoragePlanViolationFixtureKind::ProductionBacked(Box::new(
+                StoragePlanProductionFixture::CoreDriver { core_input },
+            )),
+        }
+    }
+
+    fn self_consistency_fixture(
+        fixture_id: impl Into<String>,
+        expected_code: StoragePlanDiagnosticCode,
+        rfc_section: impl Into<String>,
+        core_input: StoragePlanCoreInput,
+        mutation: StoragePlanSelfConsistencyMutation,
+    ) -> StoragePlanViolationFixture {
+        StoragePlanViolationFixture {
+            fixture_id: fixture_id.into(),
+            expected_code,
+            rfc_section: rfc_section.into(),
+            provenance_schema: crate::storage_plan::storage_plan_provenance_schema(expected_code)
+                .to_owned(),
+            kind: StoragePlanViolationFixtureKind::ProductionBacked(Box::new(
+                StoragePlanProductionFixture::SelfConsistency {
+                    core_input,
+                    mutation,
+                },
+            )),
+        }
+    }
+
+    fn stub_fixture(
+        fixture_id: impl Into<String>,
+        expected_code: StoragePlanDiagnosticCode,
+        rfc_section: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> StoragePlanViolationFixture {
+        StoragePlanViolationFixture {
+            fixture_id: fixture_id.into(),
+            expected_code,
+            rfc_section: rfc_section.into(),
+            provenance_schema: crate::storage_plan::storage_plan_provenance_schema(expected_code)
+                .to_owned(),
+            kind: StoragePlanViolationFixtureKind::StubOnly {
+                reason: reason.into(),
+            },
+        }
+    }
+
+    fn input_hash_fixture(
+        code: StoragePlanDiagnosticCode,
+        product: StoragePlanInputProduct,
+    ) -> StoragePlanViolationFixture {
+        self_consistency_fixture(
+            format!("store_{:03}_{}", code.number(), code.name()),
+            code,
+            format!("RC-{:03}", code.number()),
+            synth::minimal_singleton_core_input(),
+            StoragePlanSelfConsistencyMutation::InputHashMismatch { product },
+        )
+    }
+
+    fn fail_before_result_core_input() -> StoragePlanCoreInput {
+        let mut input = synth::minimal_singleton_core_input();
+        input.fail_before_result = true;
+        input
+    }
+
+    fn alias_pair_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![
+                value(1, ValueRole::Scratch, materialize_hot()),
+                value(2, ValueRole::Scratch, materialize_hot()),
+            ],
+            vec![edge(1, 2, AliasIntent::ScratchReuse)],
+            BTreeSet::new(),
+            |env| env,
+        )
+    }
+
+    fn mixed_intent_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![
+                value(1, ValueRole::Scratch, materialize_hot()),
+                value(2, ValueRole::Scratch, materialize_hot()),
+                value(3, ValueRole::Scratch, materialize_hot()),
+            ],
+            vec![
+                edge(1, 2, AliasIntent::ScratchReuse),
+                edge(2, 3, AliasIntent::PingPong),
+            ],
+            BTreeSet::new(),
+            |env| env,
+        )
+    }
+
+    fn pingpong_three_member_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![
+                value(1, ValueRole::Activation, materialize_hot()),
+                value(2, ValueRole::Activation, materialize_hot()),
+                value(3, ValueRole::Activation, materialize_hot()),
+            ],
+            vec![
+                edge(1, 2, AliasIntent::PingPong),
+                edge(2, 3, AliasIntent::PingPong),
+            ],
+            BTreeSet::new(),
+            |env| env,
+        )
+    }
+
+    fn forced_recompute_router_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![
+                value(1, ValueRole::Activation, materialize_hot()),
+                value(2, ValueRole::RouterDecision, materialize_hot()),
+            ],
+            vec![],
+            BTreeSet::from([ValueId::new(2)]),
+            |env| env,
+        )
+    }
+
+    fn forced_recompute_observed_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![
+                value(1, ValueRole::Activation, materialize_hot()),
+                value(2, ValueRole::Activation, materialize_hot()),
+            ],
+            vec![],
+            BTreeSet::from([ValueId::new(2)]),
+            |env| env.with_observed_checkpoint_backing_value(ValueId::new(2)),
+        )
+    }
+
+    fn persist_binding_kind_mismatch_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![persist_value(
+                1,
+                PersistPageId(1),
+                CommitGroupId(1),
+                PersistKind::Trace,
+                CommitGroupReason::SequenceStateWithTranscript,
+            )],
+            vec![],
+            BTreeSet::new(),
+            |env| env,
+        )
+    }
+
+    fn commit_group_kind_mix_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![
+                persist_value(
+                    1,
+                    PersistPageId(1),
+                    CommitGroupId(1),
+                    PersistKind::Trace,
+                    CommitGroupReason::Independent,
+                ),
+                persist_value(
+                    2,
+                    PersistPageId(2),
+                    CommitGroupId(1),
+                    PersistKind::Harness,
+                    CommitGroupReason::Independent,
+                ),
+            ],
+            vec![],
+            BTreeSet::new(),
+            |env| env,
+        )
+    }
+
+    fn reserved_shape_core_input() -> StoragePlanCoreInput {
+        core_input(
+            vec![
+                persist_value(
+                    1,
+                    PersistPageId(1),
+                    CommitGroupId(1),
+                    PersistKind::SequenceState,
+                    CommitGroupReason::ContinuationWithSequenceState,
+                ),
+                persist_value(
+                    2,
+                    PersistPageId(2),
+                    CommitGroupId(1),
+                    PersistKind::Continuation,
+                    CommitGroupReason::ContinuationWithSequenceState,
+                ),
+            ],
+            vec![],
+            BTreeSet::new(),
+            |env| env,
+        )
+    }
+
+    fn core_input(
+        values: Vec<StoragePlanCoreValue>,
+        alias_edges: Vec<AliasCandidateEdge>,
+        alias_forced_recompute_values: BTreeSet<ValueId>,
+        adjust_env: impl FnOnce(PredicateEnv) -> PredicateEnv,
+    ) -> StoragePlanCoreInput {
+        let mut env = PredicateEnv::new();
+        for value in &values {
+            env = env.with_value(value.value, facts_for_role(value.role));
+        }
+        StoragePlanCoreInput {
+            input_identity: synth::minimal_singleton_core_input().input_identity,
+            predicate_env: adjust_env(env),
+            values,
+            alias_edges,
+            alias_forced_recompute_values,
+            fail_before_result: false,
+        }
+    }
+
+    fn value(id: u32, role: ValueRole, materialization: Materialization) -> StoragePlanCoreValue {
+        StoragePlanCoreValue {
+            value: ValueId::new(id),
+            materialization,
+            live_range: synth::live_range(id * 3, id * 3 + 1, LifetimeClass::Slice),
+            role,
+            persist_kind: None,
+            commit_group_reason: None,
+        }
+    }
+
+    fn persist_value(
+        id: u32,
+        page: PersistPageId,
+        commit_group: CommitGroupId,
+        kind: PersistKind,
+        reason: CommitGroupReason,
+    ) -> StoragePlanCoreValue {
+        StoragePlanCoreValue {
+            value: ValueId::new(id),
+            materialization: Materialization::Persist { page, commit_group },
+            live_range: synth::live_range(id * 3, id * 3 + 1, LifetimeClass::Persistent),
+            role: ValueRole::Activation,
+            persist_kind: Some(kind),
+            commit_group_reason: Some(reason),
+        }
+    }
+
+    fn materialize_hot() -> Materialization {
+        Materialization::Materialize {
+            class: StorageClass::WramHot,
+            lifetime: LifetimeClass::Slice,
+        }
+    }
+
+    fn edge(left: u32, right: u32, intent: AliasIntent) -> AliasCandidateEdge {
+        AliasCandidateEdge {
+            left: ValueId::new(left),
+            right: ValueId::new(right),
+            intent,
+        }
+    }
+
+    fn facts_for_role(role: ValueRole) -> PredicateValueFacts {
+        let format = match role {
+            ValueRole::RouterDecision | ValueRole::InputToken | ValueRole::OutputToken => {
+                ValueFormat::TokenIdDomain { vocab_size: 8 }
+            }
+            ValueRole::ExpertWeight
+            | ValueRole::RouterWeight
+            | ValueRole::EmbeddingTable
+            | ValueRole::LogitProj
+            | ValueRole::NormParam
+            | ValueRole::DecodeConst
+            | ValueRole::LutFragment => ValueFormat::ConstTensorRef {
+                tensor_id: TensorId::new(0),
+            },
+            ValueRole::Accumulator | ValueRole::Scratch => ValueFormat::IntAccum { width_bits: 16 },
+            ValueRole::SequenceStateSlot => ValueFormat::Flag,
+            ValueRole::Activation | ValueRole::RouterScore | ValueRole::FfnIntermediate => {
+                ValueFormat::QuantInt {
+                    quant_format_id: QuantFormatId(1),
+                }
+            }
+        };
+        PredicateValueFacts::new(role, format)
+    }
+
+    fn consistency_context_from_core_result(
+        input: &StoragePlanCoreInput,
+        result: &StoragePlanCoreResult,
+    ) -> StoragePlanConsistencyContext {
+        StoragePlanConsistencyContext {
+            expected_values: input.values.iter().map(|value| value.value).collect(),
+            lifetime_bounds: input
+                .values
+                .iter()
+                .map(|value| {
+                    let bounds = match result
+                        .bindings
+                        .get(&value.value)
+                        .map(|binding| &binding.materialization)
+                    {
+                        Some(Materialization::Persist { .. }) => {
+                            bounds(LifetimeClass::Persistent, LifetimeClass::Persistent)
+                        }
+                        _ => crate::storage_plan::lifetime::lifetime_bounds(
+                            &input.predicate_env,
+                            value.value,
+                        ),
+                    };
+                    (value.value, bounds)
+                })
+                .collect(),
+            expected_input_hashes: input_hashes_from_identity(&input.input_identity),
+        }
+    }
+
+    fn bounds(min: LifetimeClass, max: LifetimeClass) -> LifetimeBounds {
+        LifetimeBounds {
+            min_required: LifetimeBound {
+                lifetime: min,
+                source: LifetimeBoundSource::DefaultSlice,
+            },
+            max_admissible: LifetimeBound {
+                lifetime: max,
+                source: LifetimeBoundSource::DefaultSlice,
+            },
+        }
+    }
+
+    fn persist_page(id: PersistPageId, kind: PersistKind) -> PersistPageDecl {
+        PersistPageDecl {
+            id,
+            kind,
+            durability: DurabilityClass::BestEffort,
+            schema_pin: PersistSchemaPin {
+                state_schema: 3,
+                requires_semantic_state_hash: false,
+                requires_resume_abi_hash: false,
+                requires_build_identity_hash: true,
+            },
+        }
+    }
+
+    fn input_hashes_from_identity(identity: &StoragePlanInputIdentity) -> StoragePlanInputHashes {
+        StoragePlanInputHashes {
+            quant_graph_hash: identity.quant_graph_hash,
+            infer_ir_hash: identity.infer_ir_hash,
+            observation_plan_hash: identity.observation_plan_hash,
+            range_plan_hash: identity.range_plan_hash,
+            policy_hash: identity.policy_hash,
+        }
+    }
+
+    fn failed_output_from_validation_diagnostics(
+        input_identity: StoragePlanInputIdentity,
+        diagnostics: &[gbf_policy::ValidationDiagnostic],
+    ) -> StoragePlanCoreOutput {
+        StoragePlanCoreOutput {
+            input_identity,
+            outcome: StoragePlanCoreOutcome::Failed,
+            result: None,
+            summary: None,
+            diagnostics: diagnostics
+                .iter()
+                .filter_map(storage_code)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            diagnostic_details: vec![],
+        }
+    }
+
+    fn storage_code(
+        diagnostic: &gbf_policy::ValidationDiagnostic,
+    ) -> Option<StoragePlanDiagnosticCode> {
+        match &diagnostic.code {
+            ValidationCode::StoragePlan { code, .. } => Some(*code),
+            _ => None,
         }
     }
 }
@@ -1218,25 +2010,22 @@ pub mod debug_harness {
             .map_err(|error| HarnessError::Emit(error.to_string()))?;
         let correlation_id = cache_key_prefix(cache_key);
 
-        let output = tracing::subscriber::with_default(subscriber, || {
+        let (output, storage_plan_bytes) = tracing::subscriber::with_default(subscriber, || {
             emit_harness_start(&fixture.input_identity, &correlation_id, &args);
-            let output = match fixture.failure_code {
-                Some(code) => StoragePlanCoreOutput {
-                    input_identity: fixture.input_identity.clone(),
-                    outcome: StoragePlanCoreOutcome::Failed,
-                    result: None,
-                    summary: None,
-                    diagnostics: vec![code],
-                    diagnostic_details: vec![],
-                },
+            let output = match &fixture.violation_fixture {
+                Some(violation) => violation
+                    .run()
+                    .map_err(|error| HarnessError::Emit(error.to_string()))?,
                 None => build_storage_plan_core(&fixture.core_input),
             };
-            emit_harness_complete(&output, &correlation_id);
-            output
-        });
+            let envelope = emit_storage_plan_report(&output)
+                .map_err(|error| HarnessError::Emit(error.to_string()))?;
+            emit_harness_complete(&output, &correlation_id, &envelope.report_self_hash);
+            let bytes =
+                canonicalize(&envelope).map_err(|error| HarnessError::Emit(error.to_string()))?;
+            Ok::<_, HarnessError>((output, bytes))
+        })?;
 
-        let storage_plan_bytes = emit_storage_plan_json_bytes(&output)
-            .map_err(|error| HarnessError::Emit(error.to_string()))?;
         fs::write(&plan_file, storage_plan_bytes)?;
         fs::write(&k6_file, format!("{correlation_id}\n"))?;
         write_summary(&summary_file, &output)?;
@@ -1249,7 +2038,7 @@ pub mod debug_harness {
                 command_line,
                 env_vars: captured_env_vars(),
                 build_identity_hash: build_identity_hash(),
-                ts: timestamp_string(),
+                ts: normalized_debug_timestamp().to_owned(),
                 fixture_id: fixture.fixture_id,
                 outcome: match output.outcome {
                     StoragePlanCoreOutcome::Succeeded => "Passed",
@@ -1276,7 +2065,7 @@ pub mod debug_harness {
         fixture_id: String,
         input_identity: StoragePlanInputIdentity,
         core_input: StoragePlanCoreInput,
-        failure_code: Option<StoragePlanDiagnosticCode>,
+        violation_fixture: Option<sc_violations::StoragePlanViolationFixture>,
     }
 
     fn load_fixture(spec: &str) -> Result<LoadedFixture, HarnessError> {
@@ -1288,12 +2077,13 @@ pub mod debug_harness {
             "tiny_tinystories" => loaded("tiny_tinystories", synth::tiny_tinystories_core_input()),
             "tiny_routed_ffn" => loaded("tiny_routed_ffn", synth::tiny_routed_ffn_core_input()),
             "sc11_forbidden_key_leak" => {
+                let violation_fixture = sc_violations::sc11_forbidden_key_leak();
                 let core_input = synth::minimal_singleton_core_input();
                 Ok(LoadedFixture {
                     fixture_id: "sc11_forbidden_key_leak".to_owned(),
                     input_identity: core_input.input_identity.clone(),
                     core_input,
-                    failure_code: Some(StoragePlanDiagnosticCode::StorageForbiddenSpatialEnumLeak),
+                    violation_fixture: Some(violation_fixture),
                 })
             }
             _ => load_path_fixture(Path::new(spec)),
@@ -1308,7 +2098,7 @@ pub mod debug_harness {
             fixture_id: fixture_id.into(),
             input_identity: core_input.input_identity.clone(),
             core_input,
-            failure_code: None,
+            violation_fixture: None,
         })
     }
 
@@ -1368,7 +2158,11 @@ pub mod debug_harness {
         );
     }
 
-    fn emit_harness_complete(output: &StoragePlanCoreOutput, correlation_id: &str) {
+    fn emit_harness_complete(
+        output: &StoragePlanCoreOutput,
+        correlation_id: &str,
+        report_self_hash: &Hash256,
+    ) {
         if let Some(result) = &output.result {
             emit_result_trace(result, correlation_id);
         }
@@ -1386,7 +2180,7 @@ pub mod debug_harness {
             target: trace_catalog::TRACE_TARGET,
             event = trace_catalog::ENVELOPE_HASHED,
             correlation_id,
-            report_self_hash = "pending",
+            report_self_hash = %report_self_hash,
             outcome = match output.outcome {
                 StoragePlanCoreOutcome::Succeeded => "Passed",
                 StoragePlanCoreOutcome::Failed => "Failed",
@@ -1641,6 +2435,10 @@ pub fn timestamp_string() -> String {
     format!("unix:{}.{:09}", duration.as_secs(), duration.subsec_nanos())
 }
 
+pub const fn normalized_debug_timestamp() -> &'static str {
+    "unix:0.000000000"
+}
+
 fn captured_env_vars() -> BTreeMap<String, String> {
     ["GBF_F_B8_LOG", "RUST_LOG"]
         .into_iter()
@@ -1689,6 +2487,61 @@ mod tests {
     }
 
     #[test]
+    fn production_backed_violation_factories_run_validators_exactly() {
+        let factories = sc_violations::production_backed_violation_factories();
+        assert!(
+            factories.len() > 1,
+            "production proof must cover more than the SC11 fixture"
+        );
+
+        for fixture in factories {
+            let output = fixture.run().expect("production fixture runs");
+
+            assert_eq!(
+                output.outcome,
+                StoragePlanCoreOutcome::Failed,
+                "{} should fail through production validation",
+                fixture.fixture_id
+            );
+            assert_eq!(
+                output.diagnostics,
+                vec![fixture.expected_code],
+                "{} emitted unexpected diagnostics",
+                fixture.fixture_id
+            );
+        }
+    }
+
+    #[test]
+    fn stub_violation_factories_are_declaration_only_and_excluded_from_proof() {
+        let production_codes: BTreeSet<_> = sc_violations::production_backed_violation_factories()
+            .into_iter()
+            .map(|fixture| fixture.expected_code)
+            .collect();
+        let stubs = sc_violations::stub_only_violation_factories();
+
+        assert!(
+            !stubs.is_empty(),
+            "unsupported STORE codes must be explicit"
+        );
+        for fixture in stubs {
+            assert!(!production_codes.contains(&fixture.expected_code));
+            let error = fixture.run().expect_err("stub fixture must not execute");
+            assert_eq!(error.expected_code, fixture.expected_code);
+            assert!(!error.reason.is_empty());
+        }
+    }
+
+    #[test]
+    fn sc11_violation_factory_runs_production_validator_exactly() {
+        let fixture = sc_violations::sc11_forbidden_key_leak();
+        let output = fixture.run().expect("SC11 production fixture runs");
+
+        assert_eq!(output.outcome, StoragePlanCoreOutcome::Failed);
+        assert_eq!(output.diagnostics, vec![fixture.expected_code]);
+    }
+
+    #[test]
     fn tracing_catalog_coverage_fixture_emits_every_event_name() {
         let (_, events) = with_trace_capture(|| {
             trace_catalog::emit_catalog_fixture_events("abc123");
@@ -1731,6 +2584,31 @@ mod tests {
         ] {
             assert!(pass_dir.join(file).is_file(), "missing {file}");
         }
+        let plan_bytes = fs::read(pass_dir.join("storage_plan.json")).expect("plan reads");
+        let plan = crate::storage_plan::parse_storage_plan_report_bytes(&plan_bytes)
+            .expect("storage plan report parses");
+        let envelope_hashed = trace_event(
+            &pass_dir.join("trace.jsonl"),
+            trace_catalog::ENVELOPE_HASHED,
+        )
+        .expect("envelope hashed trace exists");
+        let expected_report_self_hash = plan.report_self_hash.to_string();
+        assert_eq!(
+            envelope_hashed
+                .get("fields")
+                .and_then(Value::as_object)
+                .and_then(|fields| fields.get("report_self_hash"))
+                .and_then(Value::as_str),
+            Some(expected_report_self_hash.as_str())
+        );
+        assert_ne!(
+            envelope_hashed
+                .get("fields")
+                .and_then(Value::as_object)
+                .and_then(|fields| fields.get("report_self_hash"))
+                .and_then(Value::as_str),
+            Some("pending")
+        );
 
         let fail_dir = temp.path().join("fail");
         let fail_status = debug_harness::run(
@@ -1816,6 +2694,7 @@ mod tests {
             serde_json::from_slice(&envelope_bytes).expect("envelope parses");
         let encoded = serde_json::to_vec_pretty(&envelope).expect("envelope reserializes");
         assert_eq!(encoded, envelope_bytes);
+        assert_eq!(envelope.ts, normalized_debug_timestamp());
     }
 
     #[test]
@@ -1858,5 +2737,13 @@ mod tests {
                 value
             })
             .collect()
+    }
+
+    fn trace_event(path: &Path, name: &str) -> Option<Value> {
+        fs::read_to_string(path)
+            .expect("trace reads")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("trace line parses"))
+            .find(|value| value.get("event").and_then(Value::as_str) == Some(name))
     }
 }
