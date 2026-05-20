@@ -4,8 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Instant;
 
-use gbf_foundation::{CompileProfileId, Hash256, SemVer};
-use gbf_policy::{ProbeImportanceClass, ReductionPlanCeiling, ValidationDiagnostic};
+use gbf_foundation::{CompileProfileId, FieldPath, Hash256, SemVer};
+use gbf_policy::{
+    ProbeImportanceClass, ReductionPlanCeiling, ValidationCode, ValidationDetail,
+    ValidationDiagnostic, ValidationOrigin,
+};
 use gbf_report::report_schemas::{
     artifact_validation_v1, infer_ir_v1, policy_resolution_v1, quant_graph_v1, static_budget_v1,
 };
@@ -17,10 +20,13 @@ use gbf_store::stage_cache::{
     ComponentDigestSet, ComponentId, FeatureFlag, StageCache as StoreStageCache, StageCacheError,
     StageCacheKey, StageId, StageKey, compose_key,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::arena::ArenaPlanCacheKey;
 use crate::budget::StaticBudgetReport;
+use crate::overlay_plan::OverlayPlanCacheKey;
 use crate::policy::{PolicyResolutionStageFailure, ResolvedPolicyProduct};
 use crate::s1::quant_graph::{PASS_VERSION_QUANT_GRAPH, QuantGraphProduct};
 use crate::s3::infer_ir::{
@@ -42,10 +48,16 @@ use crate::s5::range_plan::{
     RangePlanStageOutput, ReductionCeilingProvenanceTag, ReductionPlan, range_cert_body_hash,
     range_plan_self_hash, range_policy_projection_hash,
 };
+use crate::schedule::{ResourceStateCacheKey, SchedulePackCacheKey};
+use crate::schedule_cost::ScheduleCostCacheKey;
+use crate::sram_page_plan::SramPagePlanCacheKey;
+use crate::storage_plan::StoragePlanCacheKey;
 use crate::validate::{
     CachedValidationProduct, CachedValidationProductRehydrateError, ValidatedInputHashes,
     ValidationStageFailure,
 };
+use crate::window::RomWindowPlanCacheKey;
+use gbf_report::build::{BuildReportPackageEntry, BuildReportPackageError};
 
 pub const PASS_VERSION_VALIDATE: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_RESOLVE: SemVer = SemVer::new(2, 0, 0);
@@ -54,6 +66,12 @@ pub const PASS_VERSION_BUDGET: SemVer = SemVer::new(1, 1, 0);
 pub const PASS_VERSION_INFER_IR_STAGE3: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_OBSERVATION_PLAN: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_RANGE_PLAN: SemVer = SemVer::new(1, 0, 0);
+pub const CACHE_STATUS_SCHEMA_ID: &str = "cache_status.v1";
+pub const CACHE_STATUS_SCHEMA_VERSION: &str = "1.0.0";
+pub const CACHE_STATUS_STAGE_IDS: [&str; 16] = [
+    "0", "0.5", "1", "2", "3", "4", "5", "6", "7", "8", "8.5", "9", "10", "10.5", "11", "12",
+];
+pub const CACHE_STATUS_REPORT_FILE_NAME: &str = "cache_status.json";
 
 const STAGE0_VALIDATE_SUCCESS_ID: &str = "gbf-codegen.stage0.validate.success";
 const STAGE0_VALIDATE_FAILURE_ID: &str = "gbf-codegen.stage0.validate.failure";
@@ -69,6 +87,24 @@ const STAGE4_OBSERVATION_PLAN_SUCCESS_ID: &str = "observation_plan.v1.success";
 const STAGE4_OBSERVATION_PLAN_FAILURE_ID: &str = "observation_plan.v1.failure";
 const STAGE5_RANGE_PLAN_SUCCESS_ID: &str = "range_plan.v1.success";
 const STAGE5_RANGE_PLAN_FAILURE_ID: &str = "range_plan.v1.failure";
+const STAGE6_STORAGE_PLAN_SUCCESS_ID: &str = "gbf-codegen.stage6.storage_plan.success";
+const STAGE6_STORAGE_PLAN_FAILURE_ID: &str = "gbf-codegen.stage6.storage_plan.failure";
+const STAGE7_SRAM_PAGE_PLAN_SUCCESS_ID: &str = "gbf-codegen.stage7.sram_page_plan.success";
+const STAGE7_SRAM_PAGE_PLAN_FAILURE_ID: &str = "gbf-codegen.stage7.sram_page_plan.failure";
+const STAGE8_ROM_WINDOW_PLAN_SUCCESS_ID: &str = "gbf-codegen.stage8.rom_window_plan.success";
+const STAGE8_ROM_WINDOW_PLAN_FAILURE_ID: &str = "gbf-codegen.stage8.rom_window_plan.failure";
+const STAGE85_OVERLAY_PLAN_SUCCESS_ID: &str = "gbf-codegen.stage8_5.overlay_plan.success";
+const STAGE85_OVERLAY_PLAN_FAILURE_ID: &str = "gbf-codegen.stage8_5.overlay_plan.failure";
+const STAGE9_ARENA_PLAN_SUCCESS_ID: &str = "gbf-codegen.stage9.arena_plan.success";
+const STAGE9_ARENA_PLAN_FAILURE_ID: &str = "gbf-codegen.stage9.arena_plan.failure";
+const STAGE10_SCHEDULE_PACK_SUCCESS_ID: &str = "gbf-codegen.stage10.schedule_pack.success";
+const STAGE10_SCHEDULE_PACK_FAILURE_ID: &str = "gbf-codegen.stage10.schedule_pack.failure";
+const STAGE105_RESOURCE_STATE_SUCCESS_ID: &str = "gbf-codegen.stage10_5.resource_state.success";
+const STAGE105_RESOURCE_STATE_FAILURE_ID: &str = "gbf-codegen.stage10_5.resource_state.failure";
+const STAGE11_SCHEDULE_COST_SUCCESS_ID: &str = "gbf-codegen.stage11.schedule_cost.success";
+const STAGE11_SCHEDULE_COST_FAILURE_ID: &str = "gbf-codegen.stage11.schedule_cost.failure";
+const STAGE12_BACKEND_SUCCESS_ID: &str = "gbf-codegen.stage12.backend.success";
+const STAGE12_BACKEND_FAILURE_ID: &str = "gbf-codegen.stage12.backend.failure";
 pub const STAGE3_CACHE_LOOKUP_EVENT: &str = "stage3.cache.lookup";
 pub const STAGE3_CACHE_AUDIT_REWRAP_EVENT: &str = "stage3.cache.audit_rewrap";
 pub const STAGE4_DRIVER_CACHE_LOOKUP_EVENT: &str = "stage4.driver.cache_lookup";
@@ -129,6 +165,541 @@ pub enum Stage5CellKind {
     Success,
     FailureMemo,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreBackedStageCellKind {
+    Success,
+    FailureMemo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage12BackendCacheKeyMaterial {
+    pub schedule_pack_self_hash: Hash256,
+    pub resource_state_cert_self_hash: Hash256,
+    pub schedule_cost_report_self_hash: Hash256,
+    pub runtime_nucleus_hash: Hash256,
+    pub cartridge_header_hash: Hash256,
+    pub backend_policy_projection_hash: Hash256,
+    pub pass_version_backend: String,
+    pub crate_feature_set_hash: Hash256,
+}
+
+impl Stage12BackendCacheKeyMaterial {
+    #[must_use]
+    pub fn new(
+        schedule_pack_self_hash: Hash256,
+        resource_state_cert_self_hash: Hash256,
+        schedule_cost_report_self_hash: Hash256,
+        runtime_nucleus_hash: Hash256,
+        cartridge_header_hash: Hash256,
+        backend_policy_projection_hash: Hash256,
+    ) -> Self {
+        Self {
+            schedule_pack_self_hash,
+            resource_state_cert_self_hash,
+            schedule_cost_report_self_hash,
+            runtime_nucleus_hash,
+            cartridge_header_hash,
+            backend_policy_projection_hash,
+            pass_version_backend: "stage12/v1".to_owned(),
+            crate_feature_set_hash: crate_feature_set_hash(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreBackedStageSuccessCell<P> {
+    pub stage_id: StageId,
+    pub product: P,
+    pub product_self_hash: Hash256,
+    pub report_self_hash: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreBackedStageFailureMemoCell {
+    pub stage_id: StageId,
+    pub diagnostics: Vec<ValidationDiagnostic>,
+    pub report_self_hash: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreBackedStageReplay<P> {
+    Success(StoreBackedStageSuccessCell<P>),
+    FailureMemo(StoreBackedStageFailureMemoCell),
+    Miss,
+    Stale { reason: StoreBackedStageStaleReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreBackedStageCacheKeys {
+    pub stage_id: StageId,
+    pub success_key: StageKey,
+    pub failure_memo_key: StageKey,
+}
+
+impl StoreBackedStageCacheKeys {
+    #[must_use]
+    pub fn new(
+        stage_id: impl Into<StageId>,
+        success_key: StageKey,
+        failure_memo_key: StageKey,
+    ) -> Self {
+        Self {
+            stage_id: stage_id.into(),
+            success_key,
+            failure_memo_key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StoreBackedStageExpectedHashes {
+    pub product_self_hash: Option<Hash256>,
+    pub success_report_self_hash: Option<Hash256>,
+    pub failure_report_self_hash: Option<Hash256>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreBackedStageRunResult<P> {
+    Success {
+        product: P,
+        product_self_hash: Hash256,
+        report_self_hash: Hash256,
+    },
+    FailureMemo {
+        diagnostics: Vec<ValidationDiagnostic>,
+        report_self_hash: Hash256,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreBackedStageRunOutput<P> {
+    Success {
+        product: P,
+        product_self_hash: Hash256,
+        report_self_hash: Hash256,
+        status_entry: StageCacheStatusEntry,
+        replayed: bool,
+    },
+    FailureMemo {
+        diagnostics: Vec<ValidationDiagnostic>,
+        report_self_hash: Hash256,
+        status_entry: StageCacheStatusEntry,
+        replayed: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreBackedStageStaleReason {
+    DecodeFailed {
+        message: String,
+    },
+    StageIdMismatch {
+        expected: StageId,
+        observed: StageId,
+    },
+    ProductHashMismatch {
+        expected: Hash256,
+        observed: Hash256,
+    },
+    ReportHashMismatch {
+        expected: Hash256,
+        observed: Hash256,
+    },
+}
+
+#[derive(Debug)]
+pub enum CacheStatusCollectionError {
+    DuplicateStage { stage_id: StageId },
+    CacheStatusReport(CacheStatusReportError),
+    ReportEnvelope(ReportEnvelopeError),
+    ReportSelfHash(ReportSelfHashError),
+    Canonical(gbf_report::CanonicalJsonError),
+    BuildReportPackage(BuildReportPackageError),
+}
+
+impl fmt::Display for CacheStatusCollectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateStage { stage_id } => {
+                write!(f, "duplicate cache-status collection entry for {stage_id}")
+            }
+            Self::CacheStatusReport(error) => write!(f, "{error}"),
+            Self::ReportEnvelope(error) => write!(f, "{error}"),
+            Self::ReportSelfHash(error) => write!(f, "{error}"),
+            Self::Canonical(error) => write!(f, "{error}"),
+            Self::BuildReportPackage(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for CacheStatusCollectionError {}
+
+impl From<CacheStatusReportError> for CacheStatusCollectionError {
+    fn from(value: CacheStatusReportError) -> Self {
+        Self::CacheStatusReport(value)
+    }
+}
+
+impl From<ReportEnvelopeError> for CacheStatusCollectionError {
+    fn from(value: ReportEnvelopeError) -> Self {
+        Self::ReportEnvelope(value)
+    }
+}
+
+impl From<ReportSelfHashError> for CacheStatusCollectionError {
+    fn from(value: ReportSelfHashError) -> Self {
+        Self::ReportSelfHash(value)
+    }
+}
+
+impl From<gbf_report::CanonicalJsonError> for CacheStatusCollectionError {
+    fn from(value: gbf_report::CanonicalJsonError) -> Self {
+        Self::Canonical(value)
+    }
+}
+
+impl From<BuildReportPackageError> for CacheStatusCollectionError {
+    fn from(value: BuildReportPackageError) -> Self {
+        Self::BuildReportPackage(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CacheStatusCollector {
+    per_stage: BTreeMap<StageId, StageCacheStatusEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStatus {
+    Hit,
+    Miss,
+    Stale,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStatusResultKind {
+    Product,
+    FailureMemo,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CacheStatusKey(String);
+
+impl CacheStatusKey {
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn from_hash(hash: Hash256) -> Self {
+        Self(hash.to_string())
+    }
+
+    #[must_use]
+    pub fn from_store_cache_key(key: StageCacheKey) -> Self {
+        Self(key.to_string())
+    }
+
+    #[must_use]
+    pub fn from_stage_key(key: &StageKey) -> Self {
+        Self::from_store_cache_key(compose_key(key))
+    }
+
+    #[must_use]
+    pub fn not_applicable(stage_id: &StageId, input_identity_hash: Hash256) -> Self {
+        #[derive(Serialize)]
+        struct NotApplicableKeyMaterial<'a> {
+            stage_id: &'a str,
+            input_identity_hash: Hash256,
+            status: CacheStatus,
+        }
+
+        Self::from_hash(canonical_hash(
+            "gbf-codegen:cache-status-not-applicable-key.v1",
+            &NotApplicableKeyMaterial {
+                stage_id: stage_id.as_str(),
+                input_identity_hash,
+                status: CacheStatus::NotApplicable,
+            },
+        ))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CacheStatusKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageCacheStatusEntry {
+    pub stage_id: StageId,
+    pub k_key: CacheStatusKey,
+    pub status: CacheStatus,
+    pub result_kind: CacheStatusResultKind,
+    pub input_identity_hash: Hash256,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_self_hash: Option<Hash256>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_self_hash: Option<Hash256>,
+}
+
+impl StageCacheStatusEntry {
+    #[must_use]
+    pub fn completed(
+        stage_id: impl Into<StageId>,
+        k_key: CacheStatusKey,
+        status: CacheStatus,
+        input_identity_hash: Hash256,
+        product_self_hash: Hash256,
+        report_self_hash: Hash256,
+    ) -> Self {
+        Self {
+            stage_id: stage_id.into(),
+            k_key,
+            status,
+            result_kind: CacheStatusResultKind::Product,
+            input_identity_hash,
+            product_self_hash: Some(product_self_hash),
+            report_self_hash: Some(report_self_hash),
+        }
+    }
+
+    #[must_use]
+    pub fn failed(
+        stage_id: impl Into<StageId>,
+        k_key: CacheStatusKey,
+        status: CacheStatus,
+        input_identity_hash: Hash256,
+        report_self_hash: Hash256,
+    ) -> Self {
+        Self {
+            stage_id: stage_id.into(),
+            k_key,
+            status,
+            result_kind: CacheStatusResultKind::FailureMemo,
+            input_identity_hash,
+            product_self_hash: None,
+            report_self_hash: Some(report_self_hash),
+        }
+    }
+
+    #[must_use]
+    pub fn not_applicable(stage_id: impl Into<StageId>, input_identity_hash: Hash256) -> Self {
+        let stage_id = stage_id.into();
+        Self {
+            k_key: CacheStatusKey::not_applicable(&stage_id, input_identity_hash),
+            stage_id,
+            status: CacheStatus::NotApplicable,
+            result_kind: CacheStatusResultKind::NotApplicable,
+            input_identity_hash,
+            product_self_hash: None,
+            report_self_hash: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheStatusReportBody {
+    pub per_stage: BTreeMap<StageId, StageCacheStatusEntry>,
+    pub build_summary: CacheStatusBuildSummary,
+}
+
+impl CacheStatusReportBody {
+    pub fn from_entries(
+        entries: impl IntoIterator<Item = StageCacheStatusEntry>,
+    ) -> Result<Self, CacheStatusReportError> {
+        let mut per_stage = BTreeMap::new();
+        for entry in entries {
+            let stage_id = entry.stage_id.clone();
+            if per_stage.insert(stage_id.clone(), entry).is_some() {
+                return Err(CacheStatusReportError::DuplicateStage { stage_id });
+            }
+        }
+        let body = Self {
+            build_summary: summarize_cache_status_entries(per_stage.values()),
+            per_stage,
+        };
+        body.validate()?;
+        Ok(body)
+    }
+
+    pub fn validate(&self) -> Result<(), CacheStatusReportError> {
+        validate_cache_status_report_body(self)
+    }
+}
+
+impl ReportBody for CacheStatusReportBody {
+    const REPORT_TYPE: &'static str = "CacheStatusReport";
+    const SCHEMA_ID: &'static str = CACHE_STATUS_SCHEMA_ID;
+    const SCHEMA_VERSION: &'static str = CACHE_STATUS_SCHEMA_VERSION;
+
+    fn validate_semantics(&self, outcome: ReportOutcome) -> Result<(), Vec<ValidationDiagnostic>> {
+        if outcome != ReportOutcome::Passed {
+            return Err(vec![cache_status_validation_diagnostic(
+                &CacheStatusReportError::OutcomeNotPassed { outcome },
+            )]);
+        }
+        self.validate()
+            .map_err(|error| vec![cache_status_validation_diagnostic(&error)])
+    }
+}
+
+pub type CacheStatusReportEnvelope = ReportEnvelope<CacheStatusReportBody>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheStatusBuildSummary {
+    pub total_stages: u16,
+    pub hit_count: u16,
+    pub miss_count: u16,
+    pub stale_count: u16,
+    pub not_applicable_count: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheStatusReportError {
+    DuplicateStage {
+        stage_id: StageId,
+    },
+    StageSetIncomplete {
+        missing: Vec<StageId>,
+    },
+    StageSetUnexpected {
+        unexpected: Vec<StageId>,
+    },
+    EntryStageIdMismatch {
+        map_stage_id: StageId,
+        entry_stage_id: StageId,
+    },
+    TotalsInconsistent {
+        expected: CacheStatusBuildSummary,
+        observed: CacheStatusBuildSummary,
+    },
+    ReportHashAbsentForTerminalStage {
+        stage_id: StageId,
+    },
+    ProductHashAbsentForProductStage {
+        stage_id: StageId,
+    },
+    ProductHashPresentForFailureMemo {
+        stage_id: StageId,
+    },
+    ProductHashPresentForNotApplicable {
+        stage_id: StageId,
+    },
+    ReportHashPresentForNotApplicable {
+        stage_id: StageId,
+    },
+    ResultKindMismatchForStatus {
+        stage_id: StageId,
+        status: CacheStatus,
+        result_kind: CacheStatusResultKind,
+    },
+    OutcomeNotPassed {
+        outcome: ReportOutcome,
+    },
+}
+
+impl CacheStatusReportError {
+    fn field_path(&self) -> FieldPath {
+        let field = match self {
+            Self::DuplicateStage { .. }
+            | Self::StageSetIncomplete { .. }
+            | Self::StageSetUnexpected { .. } => "body.per_stage",
+            Self::EntryStageIdMismatch { .. } => "body.per_stage.*.stage_id",
+            Self::TotalsInconsistent { .. } => "body.build_summary",
+            Self::ReportHashAbsentForTerminalStage { .. } => "body.per_stage.*.report_self_hash",
+            Self::ProductHashAbsentForProductStage { .. } => "body.per_stage.*.product_self_hash",
+            Self::ProductHashPresentForFailureMemo { .. } => "body.per_stage.*.product_self_hash",
+            Self::ProductHashPresentForNotApplicable { .. } => "body.per_stage.*.product_self_hash",
+            Self::ReportHashPresentForNotApplicable { .. } => "body.per_stage.*.report_self_hash",
+            Self::ResultKindMismatchForStatus { .. } => "body.per_stage.*.result_kind",
+            Self::OutcomeNotPassed { .. } => "outcome",
+        };
+        FieldPath::from(field)
+    }
+}
+
+impl fmt::Display for CacheStatusReportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateStage { stage_id } => {
+                write!(f, "duplicate cache-status entry for stage {stage_id}")
+            }
+            Self::StageSetIncomplete { missing } => {
+                write!(f, "cache-status report is missing stages {missing:?}")
+            }
+            Self::StageSetUnexpected { unexpected } => {
+                write!(
+                    f,
+                    "cache-status report has unexpected stages {unexpected:?}"
+                )
+            }
+            Self::EntryStageIdMismatch {
+                map_stage_id,
+                entry_stage_id,
+            } => write!(
+                f,
+                "cache-status map key {map_stage_id} does not match entry stage_id {entry_stage_id}"
+            ),
+            Self::TotalsInconsistent { expected, observed } => write!(
+                f,
+                "cache-status summary mismatch: expected {expected:?}, observed {observed:?}"
+            ),
+            Self::ReportHashAbsentForTerminalStage { stage_id } => write!(
+                f,
+                "cache-status terminal stage {stage_id} is missing report_self_hash"
+            ),
+            Self::ProductHashAbsentForProductStage { stage_id } => write!(
+                f,
+                "cache-status product stage {stage_id} is missing product_self_hash"
+            ),
+            Self::ProductHashPresentForFailureMemo { stage_id } => write!(
+                f,
+                "cache-status failure-memo stage {stage_id} carries product_self_hash"
+            ),
+            Self::ProductHashPresentForNotApplicable { stage_id } => write!(
+                f,
+                "cache-status not-applicable stage {stage_id} carries product_self_hash"
+            ),
+            Self::ReportHashPresentForNotApplicable { stage_id } => write!(
+                f,
+                "cache-status not-applicable stage {stage_id} carries report_self_hash"
+            ),
+            Self::ResultKindMismatchForStatus {
+                stage_id,
+                status,
+                result_kind,
+            } => write!(
+                f,
+                "cache-status stage {stage_id} status {status:?} is inconsistent with result_kind {result_kind:?}"
+            ),
+            Self::OutcomeNotPassed { outcome } => {
+                write!(f, "cache-status report has non-passed outcome {outcome:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CacheStatusReportError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -561,6 +1132,18 @@ pub enum CodegenStageCacheError {
         expected: &'static str,
         observed: &'static str,
     },
+    StageCacheKey {
+        stage_id: &'static str,
+        message: String,
+    },
+    StageEmit {
+        stage_id: &'static str,
+        message: String,
+    },
+    StageOutputInvariant {
+        stage_id: &'static str,
+        message: String,
+    },
 }
 
 impl fmt::Display for CodegenStageCacheError {
@@ -576,6 +1159,15 @@ impl fmt::Display for CodegenStageCacheError {
             Self::UnexpectedCell { expected, observed } => {
                 write!(f, "expected {expected} cache cell, observed {observed}")
             }
+            Self::StageCacheKey { stage_id, message } => {
+                write!(f, "stage {stage_id} cache key failed: {message}")
+            }
+            Self::StageEmit { stage_id, message } => {
+                write!(f, "stage {stage_id} report emission failed: {message}")
+            }
+            Self::StageOutputInvariant { stage_id, message } => {
+                write!(f, "stage {stage_id} output invariant failed: {message}")
+            }
         }
     }
 }
@@ -590,7 +1182,10 @@ impl std::error::Error for CodegenStageCacheError {
             Self::CachedValidationProduct(err) => Some(err),
             Self::CachedReportBytes(err) => Some(err),
             Self::CachedPolicyProduct(err) => Some(err),
-            Self::UnexpectedCell { .. } => None,
+            Self::UnexpectedCell { .. }
+            | Self::StageCacheKey { .. }
+            | Self::StageEmit { .. }
+            | Self::StageOutputInvariant { .. } => None,
         }
     }
 }
@@ -918,6 +1513,141 @@ pub fn stage5_range_plan_store_key_with_pass_version(
         },
         material,
         pass_version,
+    )
+}
+
+#[must_use]
+pub fn stage6_storage_plan_store_key(
+    cache_key: StoragePlanCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE6_STORAGE_PLAN_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE6_STORAGE_PLAN_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage7_sram_page_plan_store_key(
+    cache_key: SramPagePlanCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE7_SRAM_PAGE_PLAN_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE7_SRAM_PAGE_PLAN_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage8_rom_window_plan_store_key(
+    cache_key: RomWindowPlanCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE8_ROM_WINDOW_PLAN_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE8_ROM_WINDOW_PLAN_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage85_overlay_plan_store_key(
+    cache_key: OverlayPlanCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE85_OVERLAY_PLAN_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE85_OVERLAY_PLAN_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage9_arena_plan_store_key(
+    cache_key: ArenaPlanCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE9_ARENA_PLAN_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE9_ARENA_PLAN_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage10_schedule_pack_store_key(
+    cache_key: SchedulePackCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE10_SCHEDULE_PACK_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE10_SCHEDULE_PACK_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage105_resource_state_store_key(
+    cache_key: ResourceStateCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE105_RESOURCE_STATE_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE105_RESOURCE_STATE_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage11_schedule_cost_store_key(
+    cache_key: ScheduleCostCacheKey,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    downstream_stage_store_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE11_SCHEDULE_COST_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE11_SCHEDULE_COST_FAILURE_ID,
+        },
+        cache_key.0,
+        SemVer::new(1, 0, 0),
+    )
+}
+
+#[must_use]
+pub fn stage12_backend_store_key(
+    material: &Stage12BackendCacheKeyMaterial,
+    cell_kind: StoreBackedStageCellKind,
+) -> StageKey {
+    stage_key(
+        match cell_kind {
+            StoreBackedStageCellKind::Success => STAGE12_BACKEND_SUCCESS_ID,
+            StoreBackedStageCellKind::FailureMemo => STAGE12_BACKEND_FAILURE_ID,
+        },
+        material,
+        SemVer::new(1, 0, 0),
     )
 }
 
@@ -1559,6 +2289,273 @@ pub fn put_stage5_failure_memo(
     )
 }
 
+pub fn get_store_backed_stage_success<P>(
+    cache: &StoreStageCache<'_>,
+    key: &StageKey,
+    expected_stage_id: impl Into<StageId>,
+    expected_product_self_hash: Option<Hash256>,
+    expected_report_self_hash: Option<Hash256>,
+) -> Result<StoreBackedStageReplay<P>, CodegenStageCacheError>
+where
+    P: DeserializeOwned,
+{
+    let expected_stage_id = expected_stage_id.into();
+    let Some(bytes) = cache.get(key)? else {
+        return Ok(StoreBackedStageReplay::Miss);
+    };
+    let cell: StoreBackedStageSuccessCell<P> = match serde_json::from_slice(&bytes) {
+        Ok(cell) => cell,
+        Err(error) => {
+            return Ok(StoreBackedStageReplay::Stale {
+                reason: StoreBackedStageStaleReason::DecodeFailed {
+                    message: error.to_string(),
+                },
+            });
+        }
+    };
+    if cell.stage_id != expected_stage_id {
+        return Ok(StoreBackedStageReplay::Stale {
+            reason: StoreBackedStageStaleReason::StageIdMismatch {
+                expected: expected_stage_id,
+                observed: cell.stage_id,
+            },
+        });
+    }
+    if let Some(expected) = expected_product_self_hash
+        && cell.product_self_hash != expected
+    {
+        return Ok(StoreBackedStageReplay::Stale {
+            reason: StoreBackedStageStaleReason::ProductHashMismatch {
+                expected,
+                observed: cell.product_self_hash,
+            },
+        });
+    }
+    if let Some(expected) = expected_report_self_hash
+        && cell.report_self_hash != expected
+    {
+        return Ok(StoreBackedStageReplay::Stale {
+            reason: StoreBackedStageStaleReason::ReportHashMismatch {
+                expected,
+                observed: cell.report_self_hash,
+            },
+        });
+    }
+    Ok(StoreBackedStageReplay::Success(cell))
+}
+
+pub fn get_store_backed_stage_failure_memo(
+    cache: &StoreStageCache<'_>,
+    key: &StageKey,
+    expected_stage_id: impl Into<StageId>,
+    expected_report_self_hash: Option<Hash256>,
+) -> Result<StoreBackedStageReplay<()>, CodegenStageCacheError> {
+    let expected_stage_id = expected_stage_id.into();
+    let Some(bytes) = cache.get(key)? else {
+        return Ok(StoreBackedStageReplay::Miss);
+    };
+    let cell: StoreBackedStageFailureMemoCell = match serde_json::from_slice(&bytes) {
+        Ok(cell) => cell,
+        Err(error) => {
+            return Ok(StoreBackedStageReplay::Stale {
+                reason: StoreBackedStageStaleReason::DecodeFailed {
+                    message: error.to_string(),
+                },
+            });
+        }
+    };
+    if cell.stage_id != expected_stage_id {
+        return Ok(StoreBackedStageReplay::Stale {
+            reason: StoreBackedStageStaleReason::StageIdMismatch {
+                expected: expected_stage_id,
+                observed: cell.stage_id,
+            },
+        });
+    }
+    if let Some(expected) = expected_report_self_hash
+        && cell.report_self_hash != expected
+    {
+        return Ok(StoreBackedStageReplay::Stale {
+            reason: StoreBackedStageStaleReason::ReportHashMismatch {
+                expected,
+                observed: cell.report_self_hash,
+            },
+        });
+    }
+    Ok(StoreBackedStageReplay::FailureMemo(cell))
+}
+
+pub fn put_store_backed_stage_success<P>(
+    cache: &StoreStageCache<'_>,
+    key: &StageKey,
+    stage_id: impl Into<StageId>,
+    product: P,
+    product_self_hash: Hash256,
+    report_self_hash: Hash256,
+) -> Result<StageCacheKey, CodegenStageCacheError>
+where
+    P: Serialize,
+{
+    put_cell(
+        cache,
+        key,
+        &StoreBackedStageSuccessCell {
+            stage_id: stage_id.into(),
+            product,
+            product_self_hash,
+            report_self_hash,
+        },
+    )
+}
+
+pub fn put_store_backed_stage_failure_memo(
+    cache: &StoreStageCache<'_>,
+    key: &StageKey,
+    stage_id: impl Into<StageId>,
+    diagnostics: Vec<ValidationDiagnostic>,
+    report_self_hash: Hash256,
+) -> Result<StageCacheKey, CodegenStageCacheError> {
+    put_cell(
+        cache,
+        key,
+        &StoreBackedStageFailureMemoCell {
+            stage_id: stage_id.into(),
+            diagnostics,
+            report_self_hash,
+        },
+    )
+}
+
+pub fn run_store_backed_stage_with_cache<P, F>(
+    cache: &StoreStageCache<'_>,
+    keys: &StoreBackedStageCacheKeys,
+    input_identity_hash: Hash256,
+    expected_hashes: StoreBackedStageExpectedHashes,
+    run_stage: F,
+) -> Result<StoreBackedStageRunOutput<P>, CodegenStageCacheError>
+where
+    P: Serialize + DeserializeOwned,
+    F: FnOnce() -> Result<StoreBackedStageRunResult<P>, CodegenStageCacheError>,
+{
+    let mut stale_seen = false;
+    match get_store_backed_stage_success::<P>(
+        cache,
+        &keys.success_key,
+        keys.stage_id.clone(),
+        expected_hashes.product_self_hash,
+        expected_hashes.success_report_self_hash,
+    )? {
+        StoreBackedStageReplay::Success(cell) => {
+            let status_entry = cache_status_completed_entry_from_stage_key(
+                keys.stage_id.clone(),
+                &keys.success_key,
+                CacheStatus::Hit,
+                input_identity_hash,
+                cell.product_self_hash,
+                cell.report_self_hash,
+            );
+            return Ok(StoreBackedStageRunOutput::Success {
+                product: cell.product,
+                product_self_hash: cell.product_self_hash,
+                report_self_hash: cell.report_self_hash,
+                status_entry,
+                replayed: true,
+            });
+        }
+        StoreBackedStageReplay::FailureMemo(_) => unreachable!("success key returned failure memo"),
+        StoreBackedStageReplay::Miss => {}
+        StoreBackedStageReplay::Stale { .. } => stale_seen = true,
+    }
+
+    match get_store_backed_stage_failure_memo(
+        cache,
+        &keys.failure_memo_key,
+        keys.stage_id.clone(),
+        expected_hashes.failure_report_self_hash,
+    )? {
+        StoreBackedStageReplay::FailureMemo(cell) => {
+            let status_entry = StageCacheStatusEntry::failed(
+                keys.stage_id.clone(),
+                CacheStatusKey::from_stage_key(&keys.failure_memo_key),
+                CacheStatus::Hit,
+                input_identity_hash,
+                cell.report_self_hash,
+            );
+            return Ok(StoreBackedStageRunOutput::FailureMemo {
+                diagnostics: cell.diagnostics,
+                report_self_hash: cell.report_self_hash,
+                status_entry,
+                replayed: true,
+            });
+        }
+        StoreBackedStageReplay::Success(_) => unreachable!("failure key returned success cell"),
+        StoreBackedStageReplay::Miss => {}
+        StoreBackedStageReplay::Stale { .. } => stale_seen = true,
+    }
+
+    let status = if stale_seen {
+        CacheStatus::Stale
+    } else {
+        CacheStatus::Miss
+    };
+    match run_stage()? {
+        StoreBackedStageRunResult::Success {
+            product,
+            product_self_hash,
+            report_self_hash,
+        } => {
+            put_store_backed_stage_success(
+                cache,
+                &keys.success_key,
+                keys.stage_id.clone(),
+                &product,
+                product_self_hash,
+                report_self_hash,
+            )?;
+            let status_entry = cache_status_completed_entry_from_stage_key(
+                keys.stage_id.clone(),
+                &keys.success_key,
+                status,
+                input_identity_hash,
+                product_self_hash,
+                report_self_hash,
+            );
+            Ok(StoreBackedStageRunOutput::Success {
+                product,
+                product_self_hash,
+                report_self_hash,
+                status_entry,
+                replayed: false,
+            })
+        }
+        StoreBackedStageRunResult::FailureMemo {
+            diagnostics,
+            report_self_hash,
+        } => {
+            put_store_backed_stage_failure_memo(
+                cache,
+                &keys.failure_memo_key,
+                keys.stage_id.clone(),
+                diagnostics.clone(),
+                report_self_hash,
+            )?;
+            let status_entry = StageCacheStatusEntry::failed(
+                keys.stage_id.clone(),
+                CacheStatusKey::from_stage_key(&keys.failure_memo_key),
+                status,
+                input_identity_hash,
+                report_self_hash,
+            );
+            Ok(StoreBackedStageRunOutput::FailureMemo {
+                diagnostics,
+                report_self_hash,
+                status_entry,
+                replayed: false,
+            })
+        }
+    }
+}
+
 #[must_use]
 pub fn materialize_stage0_cached_report(cell: &Stage0CacheCell) -> CachedReportBytes {
     match cell {
@@ -1762,6 +2759,222 @@ pub fn rewrap_stage5_cached_failure(
 }
 
 #[must_use]
+pub fn cache_status_stage_ids() -> BTreeSet<StageId> {
+    CACHE_STATUS_STAGE_IDS
+        .iter()
+        .copied()
+        .map(StageId::from)
+        .collect()
+}
+
+#[must_use]
+pub fn is_cache_status_stage_id(stage_id: &StageId) -> bool {
+    CACHE_STATUS_STAGE_IDS
+        .iter()
+        .any(|expected| stage_id.as_str() == *expected)
+}
+
+#[must_use]
+pub fn cache_status_completed_entry_from_stage_key(
+    stage_id: impl Into<StageId>,
+    stage_key: &StageKey,
+    status: CacheStatus,
+    input_identity_hash: Hash256,
+    product_self_hash: Hash256,
+    report_self_hash: Hash256,
+) -> StageCacheStatusEntry {
+    StageCacheStatusEntry::completed(
+        stage_id,
+        CacheStatusKey::from_stage_key(stage_key),
+        status,
+        input_identity_hash,
+        product_self_hash,
+        report_self_hash,
+    )
+}
+
+pub fn cache_status_report_envelope(
+    body: CacheStatusReportBody,
+) -> Result<CacheStatusReportEnvelope, CodegenStageCacheError> {
+    Ok(ReportEnvelope::new(ReportOutcome::Passed, body)?.with_computed_self_hash()?)
+}
+
+impl CacheStatusCollector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(
+        &mut self,
+        entry: StageCacheStatusEntry,
+    ) -> Result<(), CacheStatusCollectionError> {
+        let stage_id = entry.stage_id.clone();
+        if self.per_stage.insert(stage_id.clone(), entry).is_some() {
+            return Err(CacheStatusCollectionError::DuplicateStage { stage_id });
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<CacheStatusReportBody, CacheStatusCollectionError> {
+        Ok(CacheStatusReportBody::from_entries(
+            self.per_stage.into_values(),
+        )?)
+    }
+
+    pub fn finish_filling_not_applicable(
+        mut self,
+        default_input_identity_hash: Hash256,
+    ) -> Result<CacheStatusReportBody, CacheStatusCollectionError> {
+        for stage_id in cache_status_stage_ids() {
+            self.per_stage.entry(stage_id.clone()).or_insert_with(|| {
+                StageCacheStatusEntry::not_applicable(stage_id, default_input_identity_hash)
+            });
+        }
+        self.finish()
+    }
+}
+
+/// Build the canonical `cache_status.json` report-package entry.
+///
+/// This is the F-B17 handoff into `gbf-report`'s minimal build-report package
+/// writer; downstream backend code can add the returned entry to its package
+/// without reserializing or rehashing the report.
+pub fn cache_status_report_package_entry(
+    body: CacheStatusReportBody,
+) -> Result<BuildReportPackageEntry, CacheStatusCollectionError> {
+    let envelope = ReportEnvelope::new(ReportOutcome::Passed, body)?.with_computed_self_hash()?;
+    let canonical_bytes = canonicalize_report(&envelope)?;
+    Ok(BuildReportPackageEntry::new(
+        CACHE_STATUS_REPORT_FILE_NAME,
+        envelope.report_self_hash,
+        canonical_bytes,
+    )?)
+}
+
+fn validate_cache_status_report_body(
+    body: &CacheStatusReportBody,
+) -> Result<(), CacheStatusReportError> {
+    let expected = cache_status_stage_ids();
+    let observed: BTreeSet<StageId> = body.per_stage.keys().cloned().collect();
+    let missing: Vec<StageId> = expected.difference(&observed).cloned().collect();
+    if !missing.is_empty() {
+        return Err(CacheStatusReportError::StageSetIncomplete { missing });
+    }
+    let unexpected: Vec<StageId> = observed.difference(&expected).cloned().collect();
+    if !unexpected.is_empty() {
+        return Err(CacheStatusReportError::StageSetUnexpected { unexpected });
+    }
+
+    for (stage_id, entry) in &body.per_stage {
+        if stage_id != &entry.stage_id {
+            return Err(CacheStatusReportError::EntryStageIdMismatch {
+                map_stage_id: stage_id.clone(),
+                entry_stage_id: entry.stage_id.clone(),
+            });
+        }
+        match (entry.status, entry.result_kind) {
+            (CacheStatus::NotApplicable, CacheStatusResultKind::NotApplicable) => {
+                if entry.product_self_hash.is_some() {
+                    return Err(CacheStatusReportError::ProductHashPresentForNotApplicable {
+                        stage_id: stage_id.clone(),
+                    });
+                }
+                if entry.report_self_hash.is_some() {
+                    return Err(CacheStatusReportError::ReportHashPresentForNotApplicable {
+                        stage_id: stage_id.clone(),
+                    });
+                }
+            }
+            (
+                CacheStatus::Hit | CacheStatus::Miss | CacheStatus::Stale,
+                CacheStatusResultKind::Product,
+            ) => {
+                if entry.report_self_hash.is_none() {
+                    return Err(CacheStatusReportError::ReportHashAbsentForTerminalStage {
+                        stage_id: stage_id.clone(),
+                    });
+                }
+                if entry.product_self_hash.is_none() {
+                    return Err(CacheStatusReportError::ProductHashAbsentForProductStage {
+                        stage_id: stage_id.clone(),
+                    });
+                }
+            }
+            (
+                CacheStatus::Hit | CacheStatus::Miss | CacheStatus::Stale,
+                CacheStatusResultKind::FailureMemo,
+            ) => {
+                if entry.report_self_hash.is_none() {
+                    return Err(CacheStatusReportError::ReportHashAbsentForTerminalStage {
+                        stage_id: stage_id.clone(),
+                    });
+                }
+                if entry.product_self_hash.is_some() {
+                    return Err(CacheStatusReportError::ProductHashPresentForFailureMemo {
+                        stage_id: stage_id.clone(),
+                    });
+                }
+            }
+            _ => {
+                return Err(CacheStatusReportError::ResultKindMismatchForStatus {
+                    stage_id: stage_id.clone(),
+                    status: entry.status,
+                    result_kind: entry.result_kind,
+                });
+            }
+        }
+    }
+
+    let expected_summary = summarize_cache_status_entries(body.per_stage.values());
+    if body.build_summary != expected_summary {
+        return Err(CacheStatusReportError::TotalsInconsistent {
+            expected: expected_summary,
+            observed: body.build_summary,
+        });
+    }
+
+    Ok(())
+}
+
+fn summarize_cache_status_entries<'a>(
+    entries: impl IntoIterator<Item = &'a StageCacheStatusEntry>,
+) -> CacheStatusBuildSummary {
+    let mut summary = CacheStatusBuildSummary {
+        total_stages: 0,
+        hit_count: 0,
+        miss_count: 0,
+        stale_count: 0,
+        not_applicable_count: 0,
+    };
+    for entry in entries {
+        summary.total_stages = summary
+            .total_stages
+            .checked_add(1)
+            .expect("cache-status stage count fits u16");
+        match entry.status {
+            CacheStatus::Hit => summary.hit_count += 1,
+            CacheStatus::Miss => summary.miss_count += 1,
+            CacheStatus::Stale => summary.stale_count += 1,
+            CacheStatus::NotApplicable => summary.not_applicable_count += 1,
+        }
+    }
+    summary
+}
+
+fn cache_status_validation_diagnostic(error: &CacheStatusReportError) -> ValidationDiagnostic {
+    let field = error.field_path();
+    ValidationDiagnostic::hard(
+        ValidationOrigin::Schema,
+        ValidationCode::ReportSemanticInvariantViolated {
+            field: field.clone(),
+        },
+        ValidationDetail::Field { field },
+        Vec::new(),
+    )
+}
+
+#[must_use]
 pub fn artifact_validation_schema_hash() -> Hash256 {
     schema_hash(
         artifact_validation_v1::SCHEMA_ID,
@@ -1887,6 +3100,25 @@ fn stage_key<T: Serialize>(stage_id: &str, material: &T, pass_version: SemVer) -
         // F-B2 Stage 0/0.5 keys are wholly captured in the canonical material hash above.
         // `global` stays zero so gbf-store receives one deterministic component instead of
         // duplicating the same digest in both StageKey halves.
+        global: Hash256::ZERO,
+        feature_flags: BTreeSet::<FeatureFlag>::new(),
+        pass_version,
+    }
+}
+
+fn downstream_stage_store_key(
+    stage_id: &'static str,
+    typed_cache_key: Hash256,
+    pass_version: SemVer,
+) -> StageKey {
+    StageKey {
+        stage_id: StageId::from_static(stage_id),
+        shard_local: ComponentDigestSet {
+            components: BTreeMap::from([(
+                ComponentId::from_static("typed_stage_cache_key"),
+                typed_cache_key,
+            )]),
+        },
         global: Hash256::ZERO,
         feature_flags: BTreeSet::<FeatureFlag>::new(),
         pass_version,
@@ -2676,6 +3908,705 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn cache_status_report_shape_has_exact_stage_ids_and_summary() {
+        let report = synthetic_cache_status_report().expect("cache-status report");
+        let observed: BTreeSet<&str> = report.per_stage.keys().map(StageId::as_str).collect();
+        let expected: BTreeSet<&str> = CACHE_STATUS_STAGE_IDS.iter().copied().collect();
+
+        assert_eq!(observed, expected);
+        assert_eq!(report.per_stage.len(), 16);
+        assert_eq!(
+            report.build_summary,
+            CacheStatusBuildSummary {
+                total_stages: 16,
+                hit_count: 4,
+                miss_count: 4,
+                stale_count: 4,
+                not_applicable_count: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn cache_status_report_serializes_snake_case_statuses_and_null_hashes() {
+        let report = synthetic_cache_status_report().expect("cache-status report");
+        let value = serde_json::to_value(&report).expect("cache-status serializes");
+
+        assert_eq!(
+            value["per_stage"]["0.5"]["status"],
+            serde_json::json!("miss")
+        );
+        assert_eq!(
+            value["per_stage"]["0.5"]["result_kind"],
+            serde_json::json!("product")
+        );
+        assert_eq!(
+            value["per_stage"]["8.5"]["status"],
+            serde_json::json!("not_applicable")
+        );
+        assert_eq!(
+            value["per_stage"]["8.5"]["result_kind"],
+            serde_json::json!("not_applicable")
+        );
+        assert!(value["per_stage"]["8.5"].get("product_self_hash").is_none());
+        assert!(value["per_stage"]["8.5"].get("report_self_hash").is_none());
+    }
+
+    #[test]
+    fn cache_status_report_rejects_stage_set_and_summary_drift() {
+        let report = synthetic_cache_status_report().expect("cache-status report");
+        let mut missing = report.per_stage.clone();
+        missing.remove(&StageId::from("10.5"));
+        assert!(matches!(
+            CacheStatusReportBody::from_entries(missing.into_values()),
+            Err(CacheStatusReportError::StageSetIncomplete { missing }) if missing == vec![StageId::from("10.5")]
+        ));
+
+        let mut unexpected = report.per_stage.clone();
+        unexpected.insert(
+            StageId::from("13"),
+            StageCacheStatusEntry::not_applicable("13", hash(0x13)),
+        );
+        assert!(matches!(
+            CacheStatusReportBody::from_entries(unexpected.into_values()),
+            Err(CacheStatusReportError::StageSetUnexpected { unexpected }) if unexpected == vec![StageId::from("13")]
+        ));
+
+        let mut inconsistent = report.clone();
+        inconsistent.build_summary.hit_count += 1;
+        assert!(matches!(
+            inconsistent.validate(),
+            Err(CacheStatusReportError::TotalsInconsistent { .. })
+        ));
+    }
+
+    #[test]
+    fn cache_status_report_enforces_hash_presence_rules() {
+        let mut report = synthetic_cache_status_report().expect("cache-status report");
+        let stage0 = report
+            .per_stage
+            .get_mut(&StageId::from("0"))
+            .expect("stage 0 present");
+        stage0.report_self_hash = None;
+        assert!(matches!(
+            report.validate(),
+            Err(CacheStatusReportError::ReportHashAbsentForTerminalStage { stage_id })
+                if stage_id == StageId::from("0")
+        ));
+
+        let mut report = synthetic_cache_status_report().expect("cache-status report");
+        let stage0 = report
+            .per_stage
+            .get_mut(&StageId::from("0"))
+            .expect("stage 0 present");
+        stage0.product_self_hash = None;
+        assert!(matches!(
+            report.validate(),
+            Err(CacheStatusReportError::ProductHashAbsentForProductStage { stage_id })
+                if stage_id == StageId::from("0")
+        ));
+
+        let mut report = synthetic_cache_status_report().expect("cache-status report");
+        let stage1 = report
+            .per_stage
+            .get_mut(&StageId::from("1"))
+            .expect("stage 1 present");
+        assert_eq!(stage1.result_kind, CacheStatusResultKind::FailureMemo);
+        stage1.product_self_hash = Some(hash(0xa1));
+        assert!(matches!(
+            report.validate(),
+            Err(CacheStatusReportError::ProductHashPresentForFailureMemo { stage_id })
+                if stage_id == StageId::from("1")
+        ));
+
+        let mut report = synthetic_cache_status_report().expect("cache-status report");
+        let stage85 = report
+            .per_stage
+            .get_mut(&StageId::from("8.5"))
+            .expect("stage 8.5 present");
+        stage85.product_self_hash = Some(hash(0xa8));
+        assert!(matches!(
+            report.validate(),
+            Err(CacheStatusReportError::ProductHashPresentForNotApplicable { stage_id })
+                if stage_id == StageId::from("8.5")
+        ));
+
+        let mut report = synthetic_cache_status_report().expect("cache-status report");
+        let stage85 = report
+            .per_stage
+            .get_mut(&StageId::from("8.5"))
+            .expect("stage 8.5 present");
+        stage85.report_self_hash = Some(hash(0xa9));
+        assert!(matches!(
+            report.validate(),
+            Err(CacheStatusReportError::ReportHashPresentForNotApplicable { stage_id })
+                if stage_id == StageId::from("8.5")
+        ));
+
+        let mut report = synthetic_cache_status_report().expect("cache-status report");
+        let stage85 = report
+            .per_stage
+            .get_mut(&StageId::from("8.5"))
+            .expect("stage 8.5 present");
+        stage85.result_kind = CacheStatusResultKind::FailureMemo;
+        assert!(matches!(
+            report.validate(),
+            Err(CacheStatusReportError::ResultKindMismatchForStatus { stage_id, .. })
+                if stage_id == StageId::from("8.5")
+        ));
+    }
+
+    #[test]
+    fn cache_status_report_round_trips_and_self_hashes_deterministically() {
+        let report = synthetic_cache_status_report().expect("cache-status report");
+        let envelope =
+            cache_status_report_envelope(report.clone()).expect("cache-status envelope hashes");
+        let first_bytes = canonicalize_report(&envelope).expect("cache-status canonicalizes");
+        let second_envelope =
+            cache_status_report_envelope(report).expect("second cache-status envelope hashes");
+        let second_bytes =
+            canonicalize_report(&second_envelope).expect("second cache-status canonicalizes");
+
+        assert_eq!(first_bytes, second_bytes);
+        assert_eq!(envelope.report_self_hash, second_envelope.report_self_hash);
+
+        let parsed: CacheStatusReportEnvelope =
+            serde_json::from_slice(&first_bytes).expect("cache-status report round trips");
+        assert_eq!(parsed, envelope);
+    }
+
+    #[test]
+    fn cache_status_entry_uses_existing_store_stage_key_when_available() {
+        let material = stage0_material();
+        let stage_key = stage0_validation_store_key(&material, Stage0CellKind::Success);
+        let entry = cache_status_completed_entry_from_stage_key(
+            "0",
+            &stage_key,
+            CacheStatus::Hit,
+            hash(0xf0),
+            hash(0xf1),
+            hash(0xf2),
+        );
+
+        assert_eq!(entry.stage_id, StageId::from("0"));
+        assert_eq!(entry.k_key.as_str(), compose_key(&stage_key).to_string());
+        assert_eq!(entry.product_self_hash, Some(hash(0xf1)));
+        assert_eq!(entry.report_self_hash, Some(hash(0xf2)));
+    }
+
+    #[test]
+    fn downstream_stage_store_keys_cover_stages_6_through_12() {
+        let mut composed = BTreeSet::new();
+        let repeat_cases = downstream_store_key_cases();
+        for ((stage_id, success, failure, changed), (_, repeat_success, _, _)) in
+            downstream_store_key_cases().into_iter().zip(repeat_cases)
+        {
+            assert!(is_cache_status_stage_id(&StageId::from(stage_id)));
+            assert_ne!(compose_key(&success), compose_key(&failure));
+            assert_ne!(compose_key(&success), compose_key(&changed));
+            assert_eq!(compose_key(&success), compose_key(&repeat_success));
+            assert!(composed.insert(compose_key(&success)));
+            assert!(composed.insert(compose_key(&failure)));
+        }
+    }
+
+    #[test]
+    fn store_backed_stage_wrappers_replay_success_failure_memo_and_stale_for_6_through_12() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        for (index, (stage_id, success_key, failure_key, _)) in
+            downstream_store_key_cases().into_iter().enumerate()
+        {
+            let product_hash = hash(0x20 + index as u8);
+            let success_report_hash = hash(0x30 + index as u8);
+            put_store_backed_stage_success(
+                &cache,
+                &success_key,
+                stage_id,
+                format!("stage-{stage_id}-product"),
+                product_hash,
+                success_report_hash,
+            )
+            .expect("put stage success");
+
+            let replay = get_store_backed_stage_success::<String>(
+                &cache,
+                &success_key,
+                stage_id,
+                Some(product_hash),
+                Some(success_report_hash),
+            )
+            .expect("get stage success");
+            let StoreBackedStageReplay::Success(cell) = replay else {
+                panic!("expected success replay for stage {stage_id}");
+            };
+            assert_eq!(cell.product, format!("stage-{stage_id}-product"));
+
+            let stale = get_store_backed_stage_success::<String>(
+                &cache,
+                &success_key,
+                stage_id,
+                Some(hash(0x40 + index as u8)),
+                Some(success_report_hash),
+            )
+            .expect("get stale stage success");
+            assert!(matches!(
+                stale,
+                StoreBackedStageReplay::Stale {
+                    reason: StoreBackedStageStaleReason::ProductHashMismatch { .. }
+                }
+            ));
+
+            let failure_report_hash = hash(0x50 + index as u8);
+            put_store_backed_stage_failure_memo(
+                &cache,
+                &failure_key,
+                stage_id,
+                vec![hard_diagnostic()],
+                failure_report_hash,
+            )
+            .expect("put stage failure memo");
+            let replay = get_store_backed_stage_failure_memo(
+                &cache,
+                &failure_key,
+                stage_id,
+                Some(failure_report_hash),
+            )
+            .expect("get stage failure memo");
+            let StoreBackedStageReplay::FailureMemo(cell) = replay else {
+                panic!("expected failure memo replay for stage {stage_id}");
+            };
+            assert_eq!(cell.diagnostics.len(), 1);
+        }
+
+        let poison_key = stage7_sram_page_plan_store_key(
+            SramPagePlanCacheKey(hash(0x71)),
+            StoreBackedStageCellKind::Success,
+        );
+        cache.put(&poison_key, b"not-json").expect("poison cell");
+        assert!(matches!(
+            get_store_backed_stage_success::<String>(&cache, &poison_key, "7", None, None)
+                .expect("poisoned success is represented as stale"),
+            StoreBackedStageReplay::Stale {
+                reason: StoreBackedStageStaleReason::DecodeFailed { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn store_backed_stage_run_driver_covers_success_failure_and_stale_for_6_through_12() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        for (index, keys) in downstream_store_runner_cases().into_iter().enumerate() {
+            let product_hash = hash(0x80 + index as u8);
+            let success_report_hash = hash(0x90 + index as u8);
+            let first = run_store_backed_stage_with_cache(
+                &cache,
+                &keys,
+                hash(0xa0 + index as u8),
+                StoreBackedStageExpectedHashes::default(),
+                || {
+                    Ok(StoreBackedStageRunResult::Success {
+                        product: format!("stage-{}-product", keys.stage_id),
+                        product_self_hash: product_hash,
+                        report_self_hash: success_report_hash,
+                    })
+                },
+            )
+            .expect("first stage run stores success");
+            let StoreBackedStageRunOutput::Success {
+                product,
+                status_entry,
+                replayed,
+                ..
+            } = first
+            else {
+                panic!("expected first run success for stage {}", keys.stage_id);
+            };
+            assert_eq!(product, format!("stage-{}-product", keys.stage_id));
+            assert_eq!(status_entry.stage_id, keys.stage_id);
+            assert_eq!(status_entry.status, CacheStatus::Miss);
+            assert_eq!(status_entry.result_kind, CacheStatusResultKind::Product);
+            assert!(!replayed);
+
+            let hit = run_store_backed_stage_with_cache::<String, _>(
+                &cache,
+                &keys,
+                hash(0xb0 + index as u8),
+                StoreBackedStageExpectedHashes {
+                    product_self_hash: Some(product_hash),
+                    success_report_self_hash: Some(success_report_hash),
+                    failure_report_self_hash: None,
+                },
+                || {
+                    panic!(
+                        "stage {} success cache hit should not recompute",
+                        keys.stage_id
+                    )
+                },
+            )
+            .expect("success cache hit replays");
+            let StoreBackedStageRunOutput::Success {
+                product,
+                status_entry,
+                replayed,
+                ..
+            } = hit
+            else {
+                panic!("expected success hit for stage {}", keys.stage_id);
+            };
+            assert_eq!(product, format!("stage-{}-product", keys.stage_id));
+            assert_eq!(status_entry.status, CacheStatus::Hit);
+            assert_eq!(status_entry.input_identity_hash, hash(0xb0 + index as u8));
+            assert_eq!(
+                status_entry.k_key,
+                CacheStatusKey::from_stage_key(&keys.success_key)
+            );
+            assert!(replayed);
+
+            let stale_product_hash = hash(0xc0 + index as u8);
+            let stale_report_hash = hash(0xd0 + index as u8);
+            let stale = run_store_backed_stage_with_cache(
+                &cache,
+                &keys,
+                hash(0xe0 + index as u8),
+                StoreBackedStageExpectedHashes {
+                    product_self_hash: Some(hash(0xf0 + index as u8)),
+                    success_report_self_hash: Some(success_report_hash),
+                    failure_report_self_hash: None,
+                },
+                || {
+                    Ok(StoreBackedStageRunResult::Success {
+                        product: format!("stage-{}-fresh-product", keys.stage_id),
+                        product_self_hash: stale_product_hash,
+                        report_self_hash: stale_report_hash,
+                    })
+                },
+            )
+            .expect("stale success cache recomputes");
+            let StoreBackedStageRunOutput::Success {
+                product,
+                status_entry,
+                replayed,
+                ..
+            } = stale
+            else {
+                panic!(
+                    "expected stale recompute success for stage {}",
+                    keys.stage_id
+                );
+            };
+            assert_eq!(product, format!("stage-{}-fresh-product", keys.stage_id));
+            assert_eq!(status_entry.status, CacheStatus::Stale);
+            assert_eq!(status_entry.product_self_hash, Some(stale_product_hash));
+            assert!(!replayed);
+
+            let failure_keys = StoreBackedStageCacheKeys::new(
+                keys.stage_id.clone(),
+                keys.success_key,
+                keys.failure_memo_key,
+            );
+            let failure_report_hash = hash(0x40 + index as u8);
+            let failure = run_store_backed_stage_with_cache::<String, _>(
+                &cache,
+                &failure_keys,
+                hash(0x41 + index as u8),
+                StoreBackedStageExpectedHashes {
+                    product_self_hash: Some(hash(0x42 + index as u8)),
+                    success_report_self_hash: Some(stale_report_hash),
+                    failure_report_self_hash: Some(hash(0x43 + index as u8)),
+                },
+                || {
+                    Ok(StoreBackedStageRunResult::FailureMemo {
+                        diagnostics: vec![hard_diagnostic()],
+                        report_self_hash: failure_report_hash,
+                    })
+                },
+            )
+            .expect("stale miss recomputes to failure memo");
+            let StoreBackedStageRunOutput::FailureMemo {
+                diagnostics,
+                status_entry,
+                replayed,
+                ..
+            } = failure
+            else {
+                panic!(
+                    "expected failure memo recompute for stage {}",
+                    failure_keys.stage_id
+                );
+            };
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(status_entry.status, CacheStatus::Stale);
+            assert_eq!(status_entry.result_kind, CacheStatusResultKind::FailureMemo);
+            assert_eq!(status_entry.product_self_hash, None);
+            assert_eq!(status_entry.report_self_hash, Some(failure_report_hash));
+            assert!(!replayed);
+
+            let failure_hit = run_store_backed_stage_with_cache::<String, _>(
+                &cache,
+                &failure_keys,
+                hash(0x44 + index as u8),
+                StoreBackedStageExpectedHashes {
+                    product_self_hash: Some(hash(0x45 + index as u8)),
+                    success_report_self_hash: Some(stale_report_hash),
+                    failure_report_self_hash: Some(failure_report_hash),
+                },
+                || {
+                    panic!(
+                        "stage {} failure memo hit should not recompute",
+                        failure_keys.stage_id
+                    )
+                },
+            )
+            .expect("failure memo cache hit replays");
+            let StoreBackedStageRunOutput::FailureMemo {
+                diagnostics,
+                status_entry,
+                replayed,
+                ..
+            } = failure_hit
+            else {
+                panic!(
+                    "expected failure memo hit for stage {}",
+                    failure_keys.stage_id
+                );
+            };
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(status_entry.status, CacheStatus::Hit);
+            assert_eq!(
+                status_entry.k_key,
+                CacheStatusKey::from_stage_key(&failure_keys.failure_memo_key)
+            );
+            assert!(replayed);
+        }
+    }
+
+    #[test]
+    fn cache_status_collector_emits_backend_package_entry() {
+        let mut collector = CacheStatusCollector::new();
+        for entry in synthetic_cache_status_report()
+            .expect("cache-status report")
+            .per_stage
+            .into_values()
+        {
+            collector.record(entry).expect("record entry");
+        }
+
+        let report = collector.finish().expect("finish collector");
+        let package_entry =
+            cache_status_report_package_entry(report).expect("cache-status package entry");
+        let parsed: CacheStatusReportEnvelope =
+            serde_json::from_slice(&package_entry.canonical_bytes)
+                .expect("package entry is cache-status envelope");
+
+        assert_eq!(package_entry.relative_path, CACHE_STATUS_REPORT_FILE_NAME);
+        assert_eq!(package_entry.report_self_hash, parsed.report_self_hash);
+        assert_eq!(parsed.body.per_stage.len(), 16);
+        assert_eq!(
+            package_entry.canonical_bytes,
+            canonicalize_report(&parsed).expect("parsed package entry recanonicalizes")
+        );
+
+        let package = gbf_report::build::BuildReportPackage::from_entries([package_entry.clone()])
+            .expect("cache-status entry is accepted by build report package");
+        let output_dir = tempfile::tempdir().expect("package output dir");
+        package
+            .write_to_dir(output_dir.path())
+            .expect("cache-status package writes");
+        assert_eq!(
+            std::fs::read(output_dir.path().join(CACHE_STATUS_REPORT_FILE_NAME))
+                .expect("cache-status package file reads"),
+            package_entry.canonical_bytes
+        );
+    }
+
+    #[test]
+    fn cache_status_collector_can_fill_missing_terminal_stages_as_not_applicable() {
+        let mut collector = CacheStatusCollector::new();
+        collector
+            .record(StageCacheStatusEntry::completed(
+                "0",
+                CacheStatusKey::from_hash(hash(0xc0)),
+                CacheStatus::Hit,
+                hash(0xc1),
+                hash(0xc2),
+                hash(0xc3),
+            ))
+            .expect("record stage 0");
+
+        let report = collector
+            .finish_filling_not_applicable(hash(0xcf))
+            .expect("finish with not-applicable fill");
+
+        assert_eq!(report.per_stage.len(), 16);
+        assert_eq!(report.build_summary.hit_count, 1);
+        assert_eq!(report.build_summary.not_applicable_count, 15);
+        assert_eq!(
+            report.per_stage[&StageId::from("12")].status,
+            CacheStatus::NotApplicable
+        );
+    }
+
+    #[test]
+    fn f_b17_all_stage_key_adapters_have_typed_input_bundle_conformance() {
+        let cases = stage_key_conformance_cases();
+        assert_eq!(cases.len(), CACHE_STATUS_STAGE_IDS.len());
+
+        let mut observed_stage_ids = BTreeSet::new();
+        for case in cases {
+            observed_stage_ids.insert(case.stage_id);
+            assert_eq!(
+                compose_key(&case.base),
+                compose_key(&case.repeat),
+                "stage {} key must repeat deterministically",
+                case.stage_id
+            );
+            assert_ne!(
+                compose_key(&case.base),
+                compose_key(&case.changed_load_bearing),
+                "stage {} key must change when a load-bearing input changes",
+                case.stage_id
+            );
+        }
+
+        assert_eq!(
+            observed_stage_ids,
+            CACHE_STATUS_STAGE_IDS.into_iter().collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn f_b17_key_material_excludes_known_audit_side_channels() {
+        let stage1_value =
+            serde_json::to_value(stage1_material()).expect("stage1 key material serializes");
+        assert!(stage1_value.get("sequence_semantics_hash").is_none());
+
+        let stage3_value =
+            serde_json::to_value(stage3_material()).expect("stage3 key material serializes");
+        assert!(stage3_value.get("policy_resolution_self_hash").is_none());
+        assert!(stage3_value.get("compile_request_hash").is_none());
+
+        let stage4_value =
+            serde_json::to_value(stage4_material()).expect("stage4 key material serializes");
+        assert!(stage4_value.get("compile_request_hash").is_none());
+        assert!(stage4_value.get("artifact_aux_hash").is_none());
+
+        let stage5_value =
+            serde_json::to_value(stage5_material()).expect("stage5 key material serializes");
+        assert!(stage5_value.get("compile_request_hash").is_none());
+        assert!(stage5_value.get("artifact_aux_hash").is_none());
+    }
+
+    #[test]
+    fn f_b17_cross_stage_drift_changes_direct_consumers_without_report_identity_overinvalidating() {
+        let stage4_base = stage4_material();
+        let mut changed_stage4_upstream = stage4_base.clone();
+        changed_stage4_upstream.infer_ir_self_hash = hash(0xaa);
+        assert_ne!(
+            compose_key(&stage4_observation_plan_store_key(
+                &stage4_base,
+                Stage4CellKind::Success,
+            )),
+            compose_key(&stage4_observation_plan_store_key(
+                &changed_stage4_upstream,
+                Stage4CellKind::Success,
+            )),
+            "Stage 3 InferIR product drift must invalidate Stage 4"
+        );
+
+        let stage12_base = stage12_material();
+        let mut changed_stage12_upstream = stage12_base.clone();
+        changed_stage12_upstream.schedule_pack_self_hash = hash(0xab);
+        assert_ne!(
+            compose_key(&stage12_backend_store_key(
+                &stage12_base,
+                StoreBackedStageCellKind::Success,
+            )),
+            compose_key(&stage12_backend_store_key(
+                &changed_stage12_upstream,
+                StoreBackedStageCellKind::Success,
+            )),
+            "Stage 10 schedule-pack drift must invalidate Stage 12"
+        );
+
+        let stage6_key = stage6_storage_plan_store_key(
+            StoragePlanCacheKey(hash(0xac)),
+            StoreBackedStageCellKind::Success,
+        );
+        let first_status = cache_status_completed_entry_from_stage_key(
+            "6",
+            &stage6_key,
+            CacheStatus::Hit,
+            hash(0xad),
+            hash(0xae),
+            hash(0xaf),
+        );
+        let second_status = cache_status_completed_entry_from_stage_key(
+            "6",
+            &stage6_key,
+            CacheStatus::Hit,
+            hash(0xb0),
+            hash(0xae),
+            hash(0xaf),
+        );
+        assert_eq!(first_status.k_key, second_status.k_key);
+        assert_ne!(
+            first_status.input_identity_hash,
+            second_status.input_identity_hash
+        );
+    }
+
+    #[test]
+    fn f_b17_stage_6_through_12_modules_expose_concrete_cache_runner_symbols() {
+        type Runner<I, O> =
+            for<'a, 's> fn(
+                &'a StageCache<'s>,
+                &I,
+                StoreBackedStageExpectedHashes,
+            )
+                -> Result<StoreBackedStageRunOutput<O>, CodegenStageCacheError>;
+        type Stage12Runner = for<'a, 's, 'i> fn(
+            &'a StageCache<'s>,
+            &crate::rom::Stage12BackendInputs<'i>,
+            StoreBackedStageExpectedHashes,
+        ) -> Result<
+            StoreBackedStageRunOutput<crate::rom::Stage12BackendProduct>,
+            CodegenStageCacheError,
+        >;
+
+        let _stage6: Runner<
+            crate::storage_plan::StoragePlanCoreInput,
+            crate::storage_plan::StoragePlanReportResult,
+        > = crate::storage_plan::run_storage_plan_with_cache;
+        let _stage7: Runner<
+            crate::sram_page_plan::SramPagePlanInputs,
+            crate::sram_page_plan::SramPagePlan,
+        > = crate::sram_page_plan::run_sram_page_plan_with_cache;
+        let _stage8: Runner<crate::window::RomWindowPlanInputs, crate::window::RomWindowPlan> =
+            crate::window::run_rom_window_plan_with_cache;
+        let _stage85: Runner<
+            crate::overlay_plan::OverlayPlanInputs,
+            crate::overlay_plan::OverlayPlanResult,
+        > = crate::overlay_plan::run_overlay_plan_with_cache;
+        let _stage9: Runner<crate::arena::ArenaPlanInputs, crate::arena::ArenaPlanResult> =
+            crate::arena::run_arena_plan_with_cache;
+        let _stage10: Runner<
+            crate::schedule::SchedulePackInputs,
+            crate::schedule::SchedulePackResult,
+        > = crate::schedule::run_schedule_pack_with_cache;
+        let _stage105: Runner<
+            crate::schedule::SchedulePack,
+            crate::schedule::ResourceStateCertificate,
+        > = crate::schedule::run_resource_state_validation_with_cache;
+        let _stage11: Runner<
+            crate::schedule_cost::ScheduleCostInputs,
+            gbf_policy::ScheduleCostReport,
+        > = crate::schedule_cost::run_schedule_cost_with_cache;
+        let _stage12: Stage12Runner = crate::rom::run_stage12_backend_with_cache;
+    }
 
     #[test]
     fn stage_cache_key_validate_is_deterministic() {
@@ -4321,6 +6252,323 @@ mod tests {
         ));
 
         assert_ne!(none_key, zero_key);
+    }
+
+    fn synthetic_cache_status_report() -> Result<CacheStatusReportBody, CacheStatusReportError> {
+        let entries = CACHE_STATUS_STAGE_IDS
+            .iter()
+            .enumerate()
+            .map(|(index, stage_id)| {
+                let input_identity_hash = hash(0x30 + index as u8);
+                let status = match *stage_id {
+                    "0" | "3" | "6" | "10" => CacheStatus::Hit,
+                    "0.5" | "4" | "7" | "11" => CacheStatus::Miss,
+                    "1" | "5" | "8" | "10.5" => CacheStatus::Stale,
+                    "2" | "8.5" | "9" | "12" => CacheStatus::NotApplicable,
+                    _ => unreachable!("synthetic fixture only uses cache-status stage ids"),
+                };
+                match status {
+                    CacheStatus::Hit | CacheStatus::Miss => StageCacheStatusEntry::completed(
+                        *stage_id,
+                        CacheStatusKey::from_hash(hash(0x50 + index as u8)),
+                        status,
+                        input_identity_hash,
+                        hash(0x70 + index as u8),
+                        hash(0x90 + index as u8),
+                    ),
+                    CacheStatus::Stale => StageCacheStatusEntry::failed(
+                        *stage_id,
+                        CacheStatusKey::from_hash(hash(0x50 + index as u8)),
+                        CacheStatus::Stale,
+                        input_identity_hash,
+                        hash(0x90 + index as u8),
+                    ),
+                    CacheStatus::NotApplicable => {
+                        StageCacheStatusEntry::not_applicable(*stage_id, input_identity_hash)
+                    }
+                }
+            });
+        CacheStatusReportBody::from_entries(entries)
+    }
+
+    fn stage12_material() -> Stage12BackendCacheKeyMaterial {
+        Stage12BackendCacheKeyMaterial::new(
+            hash(0xd0),
+            hash(0xd1),
+            hash(0xd2),
+            hash(0xd3),
+            hash(0xd4),
+            hash(0xd5),
+        )
+    }
+
+    fn changed_stage12_material() -> Stage12BackendCacheKeyMaterial {
+        Stage12BackendCacheKeyMaterial::new(
+            hash(0xe0),
+            hash(0xd1),
+            hash(0xd2),
+            hash(0xd3),
+            hash(0xd4),
+            hash(0xd5),
+        )
+    }
+
+    fn downstream_store_key_cases() -> Vec<(&'static str, StageKey, StageKey, StageKey)> {
+        vec![
+            (
+                "6",
+                stage6_storage_plan_store_key(
+                    StoragePlanCacheKey(hash(0x60)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage6_storage_plan_store_key(
+                    StoragePlanCacheKey(hash(0x60)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage6_storage_plan_store_key(
+                    StoragePlanCacheKey(hash(0x61)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "7",
+                stage7_sram_page_plan_store_key(
+                    SramPagePlanCacheKey(hash(0x70)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage7_sram_page_plan_store_key(
+                    SramPagePlanCacheKey(hash(0x70)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage7_sram_page_plan_store_key(
+                    SramPagePlanCacheKey(hash(0x71)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "8",
+                stage8_rom_window_plan_store_key(
+                    RomWindowPlanCacheKey(hash(0x80)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage8_rom_window_plan_store_key(
+                    RomWindowPlanCacheKey(hash(0x80)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage8_rom_window_plan_store_key(
+                    RomWindowPlanCacheKey(hash(0x81)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "8.5",
+                stage85_overlay_plan_store_key(
+                    OverlayPlanCacheKey(hash(0x85)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage85_overlay_plan_store_key(
+                    OverlayPlanCacheKey(hash(0x85)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage85_overlay_plan_store_key(
+                    OverlayPlanCacheKey(hash(0x86)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "9",
+                stage9_arena_plan_store_key(
+                    ArenaPlanCacheKey(hash(0x90)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage9_arena_plan_store_key(
+                    ArenaPlanCacheKey(hash(0x90)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage9_arena_plan_store_key(
+                    ArenaPlanCacheKey(hash(0x91)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "10",
+                stage10_schedule_pack_store_key(
+                    SchedulePackCacheKey(hash(0xa0)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage10_schedule_pack_store_key(
+                    SchedulePackCacheKey(hash(0xa0)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage10_schedule_pack_store_key(
+                    SchedulePackCacheKey(hash(0xa1)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "10.5",
+                stage105_resource_state_store_key(
+                    ResourceStateCacheKey(hash(0xa5)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage105_resource_state_store_key(
+                    ResourceStateCacheKey(hash(0xa5)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage105_resource_state_store_key(
+                    ResourceStateCacheKey(hash(0xa6)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "11",
+                stage11_schedule_cost_store_key(
+                    ScheduleCostCacheKey(hash(0xb0)),
+                    StoreBackedStageCellKind::Success,
+                ),
+                stage11_schedule_cost_store_key(
+                    ScheduleCostCacheKey(hash(0xb0)),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage11_schedule_cost_store_key(
+                    ScheduleCostCacheKey(hash(0xb1)),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+            (
+                "12",
+                stage12_backend_store_key(&stage12_material(), StoreBackedStageCellKind::Success),
+                stage12_backend_store_key(
+                    &stage12_material(),
+                    StoreBackedStageCellKind::FailureMemo,
+                ),
+                stage12_backend_store_key(
+                    &changed_stage12_material(),
+                    StoreBackedStageCellKind::Success,
+                ),
+            ),
+        ]
+    }
+
+    fn downstream_store_runner_cases() -> Vec<StoreBackedStageCacheKeys> {
+        downstream_store_key_cases()
+            .into_iter()
+            .map(|(stage_id, success_key, failure_memo_key, _)| {
+                StoreBackedStageCacheKeys::new(stage_id, success_key, failure_memo_key)
+            })
+            .collect()
+    }
+
+    struct StageKeyConformanceCase {
+        stage_id: &'static str,
+        base: StageKey,
+        repeat: StageKey,
+        changed_load_bearing: StageKey,
+    }
+
+    fn stage_key_conformance_cases() -> Vec<StageKeyConformanceCase> {
+        let stage0 = stage0_material();
+        let mut changed_stage0 = stage0.clone();
+        changed_stage0.compile_request_hash = hash(0x10);
+
+        let stage05 = stage05_material();
+        let mut changed_stage05 = stage05.clone();
+        changed_stage05.target_defaults_hash = hash(0x21);
+
+        let stage1 = stage1_material();
+        let mut changed_stage1 = stage1.clone();
+        changed_stage1.resolved_blob_index_hash = hash(0x30);
+
+        let stage2 = stage2_material(Some(hash(0x40)));
+        let mut changed_stage2 = stage2.clone();
+        changed_stage2.runtime_chrome_budget_hash = Some(hash(0x41));
+
+        let stage3 = stage3_material();
+        let mut changed_stage3 = stage3.clone();
+        changed_stage3.static_budget_self_hash = hash(0x50);
+
+        let stage4 = stage4_material();
+        let mut changed_stage4 = stage4.clone();
+        changed_stage4.probe_registry_hash = hash(0x60);
+
+        let stage5 = stage5_material();
+        let mut changed_stage5 = stage5.clone();
+        changed_stage5.range_policy_projection_hash = hash(0x70);
+
+        let mut cases = vec![
+            StageKeyConformanceCase {
+                stage_id: "0",
+                base: stage0_validation_store_key(&stage0, Stage0CellKind::Success),
+                repeat: stage0_validation_store_key(&stage0, Stage0CellKind::Success),
+                changed_load_bearing: stage0_validation_store_key(
+                    &changed_stage0,
+                    Stage0CellKind::Success,
+                ),
+            },
+            StageKeyConformanceCase {
+                stage_id: "0.5",
+                base: stage05_resolve_policy_store_key(&stage05, Stage05CellKind::Success),
+                repeat: stage05_resolve_policy_store_key(&stage05, Stage05CellKind::Success),
+                changed_load_bearing: stage05_resolve_policy_store_key(
+                    &changed_stage05,
+                    Stage05CellKind::Success,
+                ),
+            },
+            StageKeyConformanceCase {
+                stage_id: "1",
+                base: stage1_quant_graph_store_key(&stage1, Stage1CellKind::Success),
+                repeat: stage1_quant_graph_store_key(&stage1, Stage1CellKind::Success),
+                changed_load_bearing: stage1_quant_graph_store_key(
+                    &changed_stage1,
+                    Stage1CellKind::Success,
+                ),
+            },
+            StageKeyConformanceCase {
+                stage_id: "2",
+                base: stage2_static_budget_store_key(&stage2, Stage2CellKind::Success),
+                repeat: stage2_static_budget_store_key(&stage2, Stage2CellKind::Success),
+                changed_load_bearing: stage2_static_budget_store_key(
+                    &changed_stage2,
+                    Stage2CellKind::Success,
+                ),
+            },
+            StageKeyConformanceCase {
+                stage_id: "3",
+                base: stage3_infer_ir_store_key(&stage3, Stage3CellKind::Success),
+                repeat: stage3_infer_ir_store_key(&stage3, Stage3CellKind::Success),
+                changed_load_bearing: stage3_infer_ir_store_key(
+                    &changed_stage3,
+                    Stage3CellKind::Success,
+                ),
+            },
+            StageKeyConformanceCase {
+                stage_id: "4",
+                base: stage4_observation_plan_store_key(&stage4, Stage4CellKind::Success),
+                repeat: stage4_observation_plan_store_key(&stage4, Stage4CellKind::Success),
+                changed_load_bearing: stage4_observation_plan_store_key(
+                    &changed_stage4,
+                    Stage4CellKind::Success,
+                ),
+            },
+            StageKeyConformanceCase {
+                stage_id: "5",
+                base: stage5_range_plan_store_key(&stage5, Stage5CellKind::Success),
+                repeat: stage5_range_plan_store_key(&stage5, Stage5CellKind::Success),
+                changed_load_bearing: stage5_range_plan_store_key(
+                    &changed_stage5,
+                    Stage5CellKind::Success,
+                ),
+            },
+        ];
+        cases.extend(downstream_store_key_cases().into_iter().map(
+            |(stage_id, base, _, changed_load_bearing)| StageKeyConformanceCase {
+                stage_id,
+                repeat: base.clone(),
+                base,
+                changed_load_bearing,
+            },
+        ));
+        cases
     }
 
     fn store() -> (TempDir, BlobStore) {

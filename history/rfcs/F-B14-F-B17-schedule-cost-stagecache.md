@@ -3447,6 +3447,69 @@ Like every other v1 report, `cache_status.json` carries a
 `report_self_hash`. The self-hash is computed by the F-B2/F-B4 §2.4
 convention.
 
+Implementation note, 2026-05-20 narrow v1 slice: `gbf-codegen::stage_cache`
+now owns the typed `cache_status.v1` body, deterministic 16-stage set,
+summary validator, hash-presence rules, self-hashing envelope helper, and a
+store `StageKey` adapter for stages whose F-A6-backed wrappers already exist.
+Full store-backed wrappers for stages 6-12, plus final backend report-package
+aggregation, remain follow-up work rather than hidden acceptance for this
+bounded F-B17 slice.
+
+Implementation note, 2026-05-20 follow-up slice: the same module now exposes
+store-backed success/failure-memo cells for stages 6-12, typed adapters from
+the existing K6/K7/K8/K8.5/K9/K10/K10.5/K11 key newtypes, a non-circular K12
+backend key material, stale-cache replay representation for poisoned cells,
+and a `cache_status.json` package-entry emitter. This lands the F-B17 substrate
+for downstream stage drivers; stage-local call-site adoption can use these
+helpers without redefining cache cells.
+
+Implementation note, 2026-05-20/21 backend-driver slice: the first scan found
+per-stage report emitters and Stage 12 product/report helper modules, but no
+concrete `BuildReports` / `CompiledBuild` / backend report-package writer.
+`bd-3s4e` therefore added a minimal typed writer in `gbf-report::build`:
+`BuildReportPackageEntry`, `BuildReportPackage::from_entries`, and
+`BuildReportPackage::write_to_dir`. `cache_status_report_package_entry()` now
+returns that shared package-entry type, making the F-B17 `cache_status.json`
+handoff a real build-report package call-site without inventing the rest of
+the F-B15 backend driver.
+
+Implementation note, 2026-05-21 review-response slice: `cache_status.v1`
+entries now carry an explicit `result_kind` (`product`, `failure_memo`, or
+`not_applicable`) so `CS-ProductHashPresence` can be enforced without
+inferring from `Hit/Miss/Stale`. The store-backed helper tests exercise every
+downstream adapter for stages 6-12 through success replay, failure-memo replay,
+and stale mismatch replay. Concrete per-stage runner adoption remains outside
+the narrow-v1 substrate because stages 6-12 currently expose mostly pure
+builder/cache-key/report helpers rather than uniform runner call sites; `bd-30q8`
+owns the literal driver adoption plus the full per-stage TIB and cross-stage
+drift suite needed before parent `bd-1g7k` can close under the full RFC.
+
+Implementation note, 2026-05-21 `bd-30q8` slice: `gbf-codegen::stage_cache`
+now exposes a typed, callable `run_store_backed_stage_with_cache` API for
+stages 6-12. It accepts concrete success/failure-memo keys, optional expected
+product/report hashes, executes replay before recompute, stores success or
+failure-memo results, and returns the matching `StageCacheStatusEntry`. The
+same slice adds central F-B17 key-conformance coverage for the exact 16 stage
+ids, side-channel exclusion checks for audit-only inputs where local key
+materials expose that boundary, and representative cross-stage drift checks.
+This is still not full RFC closure: the codebase scan did not find uniform
+stage-run driver call sites for every stage 6-12, so literal adoption by real
+pipeline drivers remains a downstream owner task once those runner surfaces
+exist.
+
+Implementation note, 2026-05-21 literal runner-adoption slice: stages 6-11 now
+expose module-level cache-aware runner APIs around their concrete local inputs
+and builders (`run_storage_plan_with_cache`, `run_sram_page_plan_with_cache`,
+`run_rom_window_plan_with_cache`, `run_overlay_plan_with_cache`,
+`run_arena_plan_with_cache`, `run_schedule_pack_with_cache`,
+`run_resource_state_validation_with_cache`, and
+`run_schedule_cost_with_cache`). Each wrapper builds the stage-specific
+success/failure keys and calls the shared F-B17 store-backed runner substrate.
+Stage 12 still has no single backend pipeline input/report envelope, so
+`rom::Stage12BackendInputs` / `Stage12BackendProduct` is an explicit narrow-v1
+bundle over `encode_placed_rom`; callers provide the backend report/package
+hash that the cache cell and `cache_status.json` entry should bind.
+
 ### 9.6 Per-stage test obligations
 
 For each stage S, F-B17 lands the following tests:
@@ -3999,6 +4062,7 @@ problematic in JSON path notation; the convention is shared with
   "stage_id": "stage_<n>",
   "k_key": "sha256:<hex>",
   "status": "hit" | "miss" | "stale" | "not_applicable",
+  "result_kind": "product" | "failure_memo" | "not_applicable",
   "input_identity_hash": "sha256:<hex>",
   "product_self_hash": null | "sha256:<hex>",
   "report_self_hash": null | "sha256:<hex>"
@@ -4008,16 +4072,17 @@ problematic in JSON path notation; the convention is shared with
 Allowed `null` fields in `cache_status.v1`:
 
 ```text
-per_stage.*.product_self_hash       -- when status == not_applicable
-                                       OR when stage failed (no product)
-per_stage.*.report_self_hash        -- when status == not_applicable
+per_stage.*.product_self_hash       -- when result_kind == failure_memo
+                                       OR result_kind == not_applicable
+per_stage.*.report_self_hash        -- when result_kind == not_applicable
 ```
 
-`product_self_hash` may be present-but-`None` when the stage failed
-(failure-memo cache hits replay the failure report but the product
-is None). `report_self_hash` is always present except on
-`not_applicable` (failure-memo replays still produce the failure
-report).
+`status` records cache behavior; `result_kind` records what reached a
+terminal stage state. `product_self_hash` is required exactly when
+`result_kind == product`. Failure-memo cache hits replay the failure
+report but have no product, so they use `result_kind == failure_memo`
+with `product_self_hash == null` and a populated `report_self_hash`.
+`not_applicable` requires both hashes to be null.
 
 #### 10.2.3 `CacheStatusBuildSummary` shape
 

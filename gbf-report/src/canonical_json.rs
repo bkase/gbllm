@@ -38,7 +38,13 @@ const OBSERVATION_PLAN_SCHEMA: &str = "observation_plan.v1";
 const OPERATIONAL_PROBE_SCHEMA: &str = "operational_probe_schema.v1";
 const RANGE_CERT_SCHEMA: &str = "range.cert.v1";
 const RANGE_PLAN_SCHEMA: &str = "range_plan.v1";
+const REPAIR_REPORT_SCHEMA: &str = "repair_report.v1";
 const STORAGE_PLAN_SCHEMA: &str = "storage_plan.v1";
+const SRAM_PAGE_PLAN_SCHEMA: &str = "sram_page_plan.v1";
+const ROM_WINDOW_PLAN_SCHEMA: &str = "rom_window_plan.v1";
+const OVERLAY_PLAN_SCHEMA: &str = "overlay_plan.v1";
+const ARENA_PLAN_SCHEMA: &str = "arena_plan.v1";
+const SCHEDULE_COST_SCHEMA: &str = "schedule_cost.v1";
 
 /// Report schema identifier carried by every F-B2/F-B4 report envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1592,6 +1598,19 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
             path == "result" || path == "input_identity.observation_plan_self_hash"
         }
         RANGE_PLAN_SCHEMA => path == "result",
+        REPAIR_REPORT_SCHEMA => {
+            path.ends_with(".selector")
+                || path.ends_with(".field")
+                || path.ends_with(".knob_delta")
+                || path.ends_with(".resource_pressure")
+                || path.ends_with(".estimated_cost_delta")
+                || path.ends_with(".estimated_cost_delta.cycles")
+                || path.ends_with(".estimated_cost_delta.bytes")
+                || path == "report_inputs.static_budget_self_hash"
+                || path == "report_inputs.schedule_cost_self_hash"
+                || path.contains(".overrides.values.")
+                || path.contains(".overrides.bounds.")
+        }
         RANGE_CERT_SCHEMA => path == "identity.range_plan_self_hash",
         STORAGE_PLAN_SCHEMA => {
             matches!(path, "body.result" | "body.summary")
@@ -1599,6 +1618,30 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
                 || path.ends_with(".last_use_node")
                 || path.ends_with(".op_output_role")
                 || path.ends_with(".op_output_format")
+        }
+        SRAM_PAGE_PLAN_SCHEMA => matches!(path, "result" | "summary"),
+        ROM_WINDOW_PLAN_SCHEMA => {
+            matches!(path, "result" | "summary")
+                || path.ends_with(".visibility.switchable")
+                || path.ends_with(".closure")
+                || path.ends_with(".sram_page_binding")
+        }
+        OVERLAY_PLAN_SCHEMA | ARENA_PLAN_SCHEMA => path == "result",
+        SCHEDULE_COST_SCHEMA => {
+            path == "report"
+                || path.ends_with(".service")
+                || path.ends_with(".max_first_token_cycles_p95")
+                || path.ends_with(".max_checkpoint_gap_cycles_p95")
+                || path.ends_with(".max_resume_latency_cycles_p95")
+                || path.ends_with(".max_ui_jitter_frames_p99")
+                || path.ends_with(".max_cycles_per_token")
+                || path.ends_with(".max_bank_switches_per_token")
+                || path.ends_with(".max_sram_page_switches_per_token")
+                || path.ends_with(".max_rom_bytes")
+                || path.ends_with(".fallback_profile")
+                || path.ends_with(".fallback_runtime_mode")
+                || (path.ends_with(".hash")
+                    && (path.contains(".refs[") || path.contains(".evidence[")))
         }
         _ => false,
     }

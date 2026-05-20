@@ -2273,8 +2273,10 @@ iteration absorbs deterministic local tile/slice fixes while still
 failing loudly on placement / overlay / recompute / trace policy."
 
 This RFC tracks both as candidates and asks **OQ-R1** (§21) to pick.
-A `BringupFirstFit` / `--strict-first-fit` mode setting iters=0
-explicitly is mentioned as a separate setting, regardless of which
+A `BringupFirstFit` / `--strict-first-fit` mode setting iters=0 is
+implemented as a narrow policy artifact (`RepairPolicyProfile::
+BringupFirstFit` and `RepairPolicy::bringup_strict_first_fit()`).
+It is a separate setting from canonical Bringup, regardless of which
 candidate wins.
 
 #### 9.2.2 Default profile
@@ -2480,6 +2482,23 @@ At Stage 0.5 (F-B2), `RepairPolicy` is resolved as follows:
 The resolved `RepairPolicy` is recorded in `policy_resolution.json`'s
 `resolved.repair` field (already wired by F-B2/F-B4 §7.5).
 
+Implementation note (narrow-v1): the checked-in resolver consumes the
+typed profile spec directly:
+
+```rust
+pub fn resolve_initial_knobs_from_profile_spec(
+    profile: &CompileProfileSpec,
+) -> Result<CompileKnobs, InitialKnobsResolveError>;
+
+pub fn resolve_repair_policy_from_profile_spec(
+    profile: &CompileProfileSpec,
+) -> Result<RepairPolicy, InitialKnobsResolveError>;
+```
+
+Runtime chrome, objective, scheduler, and trace-budget inputs feed the
+separate `resolve_resource_pressure_thresholds(...)` path rather than
+the initial profile-spec-only knob resolver.
+
 ### 9.5 Oracle question summary for §9
 
 | ID     | Question                                                            | This RFC's candidate                                       |
@@ -2609,7 +2628,7 @@ answer is silent; the chunk-10 oracle pass should confirm.
 
 ### 10.2 Admissibility predicate
 
-A proposed `KnobDelta` is **admissible** iff all six checks pass:
+A proposed `KnobDelta` is **admissible** iff all seven checks pass:
 
 ```rust
 pub fn check_delta_admissible(
@@ -2620,7 +2639,7 @@ pub fn check_delta_admissible(
 ) -> Result<(), DeltaRejection>;
 ```
 
-The six checks, in order:
+The seven checks, in order:
 
 1. **Knob not locked.** `current.locks.is_locked(delta.knob_id())`
    must be false. Else `DeltaRejection::KnobLocked { knob }`.
@@ -2631,16 +2650,21 @@ The six checks, in order:
    `current.bounds.<corresponding-max>` (for ordered enums) or in
    `current.bounds.<corresponding-allowed-set>` (for unordered).
    Else `DeltaRejection::BeyondBounds { knob, attempted, max }`.
-4. **Monotone.** The new value's rank must be ≥ the current value's
+4. **Supported mutable surface.** In narrow-v1,
+   `UpdatePressureThreshold` is rejected as
+   `DeltaRejection::UnsupportedMutation` until bd-2n14 wires mutable
+   `ResourcePressureThresholds` into `CompileKnobs`; this avoids a
+   silently discarded pressure update.
+5. **Monotone.** The new value's rank must be ≥ the current value's
    rank (for ordered enums), or the new set must be a subset (for
    subset-removal sets) or superset (for superset-addition sets).
    Else `DeltaRejection::NotMonotone { knob, current, attempted }`.
-5. **Pure recompute (for `KnobDelta::ForceRecompute` only).** Every
+6. **Pure recompute (for `KnobDelta::ForceRecompute` only).** Every
    `ValueSelector` in the delta must reference a value whose
    `effects_out: BTreeSet<EffectClass>` is empty (no `SequenceWrite`,
    `RngAdvance`, `PersistenceCommit`, or `TraceEmit`). Else
    `DeltaRejection::EffectfulRecompute { value }`.
-6. **Invariant observability.** If `observability ==
+7. **Invariant observability.** If `observability ==
    ObservabilityMode::Invariant`, the delta must not affect any of
    `ObservationTraceDemotion`, `ObservationProbeSelection`. Else
    `DeltaRejection::InvariantObservabilityViolation { knob }`.
@@ -2655,6 +2679,7 @@ pub enum DeltaRejection {
     NotMonotone { knob: CompileKnobId, current: String, attempted: String },
     InvariantObservabilityViolation { knob: CompileKnobId },
     EffectfulRecompute { value: ValueSelector },
+    UnsupportedMutation { knob: CompileKnobId, reason: String },
 }
 ```
 
@@ -2666,10 +2691,12 @@ the next:
 1. Lock checks need no other inputs.
 2. Policy-toggle checks need `RepairPolicy`.
 3. Bounds checks need `current.bounds`.
-4. Monotone checks need `current.values`.
-5. Pure-recompute checks need `GbInferIR` effect-edge data
+4. Supported-mutable-surface checks need the current narrow-v1
+   implementation capabilities.
+5. Monotone checks need `current.values`.
+6. Pure-recompute checks need `GbInferIR` effect-edge data
    (expensive — performed last among the cheap checks).
-6. Invariant-observability is a derived check that may or may not
+7. Invariant-observability is a derived check that may or may not
    apply; checked last so the rejection type is precise.
 
 #### 10.2.2 KnobDelta-to-toggle mapping
@@ -2690,7 +2717,7 @@ the next:
 | PromoteOverlay                     | allow_overlay_promotion          |
 | NarrowTileClasses                  | (always allowed if not locked)   |
 | SetSliceCoarsening                 | (always allowed if not locked)   |
-| UpdatePressureThreshold            | (always allowed if not locked — but ScheduleResourcePressure is locked under Default/Trace/Recovery, see §9.2) |
+| UpdatePressureThreshold            | Deferred in narrow-v1; rejected as `UnsupportedMutation` until bd-2n14 wires mutable thresholds |
 
 `Oracle question (OQ-D1.c)`: are the four `allow_*` toggles
 (placement_profile_fallback, trace_demotion, overlay_promotion,
@@ -3272,6 +3299,13 @@ In that case, the stage will eventually exhaust its
 `stage_iters_remaining` budget (or the global budget), and the loop
 terminates with `*BudgetExhausted`.
 
+Implementation note (narrow-v1): `gbf-codegen::refinement_loop`
+currently records the rejection and terminates with
+`StagedFailureUnrepairable` on the first rejected proposal because the
+wrapped-stage callback interface does not yet return rejection
+feedback to the originating stage. Follow-up bead bd-2130 owns the
+full callback/alternative-proposal contract described above.
+
 #### 11.4.4 AuthorizedRelaxation requested but not policy-allowed
 
 When a `KnobDelta::AdvancePlacementProfile` would exceed bounds and
@@ -3625,10 +3659,15 @@ pub struct RepairReportBody {
     pub initial_knobs: CompileKnobsSnapshot,
     pub final_knobs: CompileKnobsSnapshot,
     pub proposals: Vec<RepairProposalRecord>,
-    pub stage_iteration_counts: BTreeMap<PlanningStage, u8>,
+    pub stage_iteration_counts: Vec<StageIterationCount>,
     pub global_iters_used: u8,
     pub termination: TerminalStateRecord,
-    pub authorized_relaxation_used: bool,
+    pub authorized_relaxation_applied: bool,
+}
+
+pub struct StageIterationCount {
+    pub stage: PlanningStage,
+    pub iterations: u8,
 }
 
 pub struct CompileKnobsSnapshot {
@@ -3663,6 +3702,14 @@ pub enum ProposalOutcome {
 }
 
 pub struct KnobDeltaSummary {
+    pub changed_knobs: BTreeSet<CompileKnobId>,
+    pub changes: Vec<KnobDelta>,
+    pub per_knob: Vec<PerKnobDeltaSummary>,
+    pub before: CompileKnobs,
+    pub after: CompileKnobs,
+}
+
+pub struct PerKnobDeltaSummary {
     pub knob: CompileKnobId,
     pub before: String,    // canonical-string of the prior value
     pub after: String,     // canonical-string of the new value
@@ -3677,6 +3724,21 @@ pub enum TerminalStateRecord {
 }
 ```
 
+Implementation note (narrow-v1): the public JSON uses a deterministic
+row list for `stage_iteration_counts` instead of a JSON object keyed by
+`PlanningStage`, preserving the order invariant while avoiding
+non-string report-facing map keys. `RepairReportInputsSection` is
+present; until Stage 0/0.5 plumbs upstream report hashes into F-B16,
+`policy_resolution_self_hash` and `artifact_validation_self_hash` use
+the zero hash as an explicit not-yet-plumbed sentinel, while optional
+static-budget/schedule-cost hashes remain `null`.
+
+`CompileKnobsSnapshot` excludes provenance and hashes
+`{values,bounds,overrides,locks}`. Narrow-v1 also retains whole
+before/after `CompileKnobs` in `KnobDeltaSummary` for debugging, while
+the RFC per-knob before/after/operation shape is emitted as
+`knobs_delta.per_knob`.
+
 #### 13.2.1 Semantic invariants
 
 * `schema == "repair_report.v1"`.
@@ -3689,15 +3751,18 @@ pub enum TerminalStateRecord {
 * For every `Accepted` outcome, the `knobs_delta.after` must match
   the corresponding chain entry in `policy_resolution.json`'s
   `compile_knobs.provenance.<knob>` final value.
-* `body.global_iters_used <= initial_state.repair_policy.max_refinement_iters`.
-* `body.stage_iteration_counts` is keyed exactly by
-  `PlanningStage` variants (no missing or extra keys for stages that
-  ran at all).
+* In narrow-v1, `body.global_iters_used` counts wrapped-stage execution
+  attempts, not just accepted deltas. Follow-up bd-1qur owns a
+  first-class `LoopState::from_profile(...)` initializer so callers do
+  not conflate this attempt budget with
+  `RepairPolicy::max_refinement_iters`.
+* `body.stage_iteration_counts` is a deterministic row list ordered by
+  `PlanningStage` for stages that ran at all.
 * `body.initial_knobs` is the `CompileKnobs` state at loop entry
   (i.e. the result of Stage 0.5 resolution).
 * `body.final_knobs` is the `CompileKnobs` state at loop exit
   (whether Converged or Failed).
-* `body.authorized_relaxation_used` is true iff at least one
+* `body.authorized_relaxation_applied` is true iff at least one
   `RepairProposalRecord.outcome == Accepted` carries a
   `knobs_delta.operation == AuthorizedRelaxation(_)`.
 

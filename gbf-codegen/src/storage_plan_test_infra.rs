@@ -441,6 +441,7 @@ pub mod synth {
                 overrides: CompileKnobOverrides {
                     values: CompileKnobPartialValues::default(),
                     bounds: CompileKnobPartialBounds::default(),
+                    ..CompileKnobOverrides::default()
                 },
                 provenance: Vec::new(),
             },

@@ -1,6 +1,6 @@
 //! Compile-request and resolved-policy schema.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -8,13 +8,15 @@ use gbf_foundation::{BlobRef, CompileProfileId, Hash256, TargetProfileId};
 use gbf_hw::calibration::CalibrationSetRef;
 use gbf_hw::target::TargetProfile;
 use serde::de::Error as _;
+use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::budget::RuntimeChromeBudget;
 use crate::canonical::domain_hash;
+use crate::diagnostics::{ReductionSiteId, TraceProbeId};
 use crate::objective::{CompileObjective, RiskPolicy};
-use crate::repair::{RepairPolicy, RepairProposalId};
+use crate::repair::{RepairPolicy, RepairPolicyProfile, RepairProposalId, RepairReason};
 
 pub use gbf_foundation::{EvidenceRef, FieldPath};
 
@@ -187,6 +189,21 @@ pub enum CompileProfileSpecLoadError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitialKnobsResolveError {
+    UnknownProfile {
+        profile: CompileProfileId,
+    },
+    MissingDefault {
+        profile: CompileProfileId,
+        field: &'static str,
+    },
+    MissingBound {
+        profile: CompileProfileId,
+        field: &'static str,
+    },
+}
+
 impl CompileProfileSpecLoadError {
     #[must_use]
     pub const fn code(&self) -> Option<&'static str> {
@@ -232,6 +249,32 @@ impl Error for CompileProfileSpecLoadError {
         }
     }
 }
+
+impl fmt::Display for InitialKnobsResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownProfile { profile } => {
+                write!(f, "unknown compile profile {}", profile.as_str())
+            }
+            Self::MissingDefault { profile, field } => {
+                write!(
+                    f,
+                    "compile profile {} is missing knob default {field}",
+                    profile.as_str()
+                )
+            }
+            Self::MissingBound { profile, field } => {
+                write!(
+                    f,
+                    "compile profile {} is missing knob bound {field}",
+                    profile.as_str()
+                )
+            }
+        }
+    }
+}
+
+impl Error for InitialKnobsResolveError {}
 
 impl From<toml::de::Error> for CompileProfileSpecLoadError {
     fn from(err: toml::de::Error) -> Self {
@@ -354,6 +397,620 @@ pub fn canonical_compile_profile_specs()
         load_compile_profile_spec(TRACE_COMPILE_PROFILE_TOML)?,
         load_compile_profile_spec(RECOVERY_COMPILE_PROFILE_TOML)?,
     ])
+}
+
+pub fn resolve_repair_policy_from_profile_spec(
+    profile: &CompileProfileSpec,
+) -> Result<RepairPolicy, InitialKnobsResolveError> {
+    Ok(RepairPolicy::for_profile(repair_policy_profile(
+        profile.id.clone(),
+    )?))
+}
+
+pub fn resolve_initial_knobs_from_profile_spec(
+    profile: &CompileProfileSpec,
+) -> Result<CompileKnobs, InitialKnobsResolveError> {
+    let profile_kind = repair_policy_profile(profile.id.clone())?;
+    let global = CompileKnobValues {
+        placement: require_default(profile, profile.knob_defaults.placement, "placement")?,
+        observation: require_default(profile, profile.knob_defaults.observation, "observation")?,
+        range: require_default(profile, profile.knob_defaults.range, "range")?,
+        storage: require_default(profile, profile.knob_defaults.storage, "storage")?,
+        sram: require_default(profile, profile.knob_defaults.sram, "sram")?,
+        rom_window: require_default(profile, profile.knob_defaults.rom_window, "rom_window")?,
+        overlay: require_default(profile, profile.knob_defaults.overlay, "overlay")?,
+        schedule: require_default(profile, profile.knob_defaults.schedule, "schedule")?,
+    };
+    let bounds = CompileKnobBounds {
+        placement: require_bound(profile, profile.knob_bounds.placement, "placement")?,
+        observation: require_bound(profile, profile.knob_bounds.observation, "observation")?,
+        range: require_bound(profile, profile.knob_bounds.range, "range")?,
+        storage: require_bound(profile, profile.knob_bounds.storage, "storage")?,
+        sram: require_bound(profile, profile.knob_bounds.sram, "sram")?,
+        rom_window: require_bound(profile, profile.knob_bounds.rom_window, "rom_window")?,
+        overlay: require_bound(profile, profile.knob_bounds.overlay, "overlay")?,
+        schedule: require_bound(profile, profile.knob_bounds.schedule, "schedule")?,
+    };
+
+    Ok(CompileKnobs {
+        global,
+        bounds,
+        locks: f_b16_profile_lock_set(profile_kind),
+        overrides: CompileKnobOverrides::default(),
+        provenance: profile_default_provenance(profile),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePressureThresholdResolution {
+    pub thresholds: ResourcePressureThresholds,
+    pub provenance: Vec<CompileKnobProvenanceEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePressureThresholds {
+    pub wram_hot: PressureLimit<ByteBudget>,
+    pub hram_hot: PressureLimit<ByteBudget>,
+    pub bank0_rom: PressureLimit<ByteBudget>,
+    pub switchable_rom_window: PressureLimit<ByteBudget>,
+    pub sram_window: PressureLimit<ByteBudget>,
+    pub slice_cycles: PressureLimit<CycleBudget>,
+    pub interrupt_latency: PressureLimit<CycleBudget>,
+    pub trace_bytes_per_frame: PressureLimit<u16>,
+    pub persist_bytes_per_frame: PressureLimit<u16>,
+    pub overlay_installs_per_frame: PressureLimit<u8>,
+    pub bank_switches_per_token: PressureLimit<u16>,
+    pub sram_page_switches_per_token: PressureLimit<u16>,
+}
+
+pub fn resolve_resource_pressure_thresholds(
+    profile: &CompileProfileSpec,
+    runtime_chrome_budget: Option<&RuntimeChromeBudget>,
+    objective: &CompileObjective,
+    trace_budget: &TraceBudget,
+) -> Result<ResourcePressureThresholdResolution, InitialKnobsResolveError> {
+    let schedule = require_default(profile, profile.knob_defaults.schedule, "schedule")?;
+    let pressure = schedule.resource_pressure;
+    let thresholds = ResourcePressureThresholds {
+        wram_hot: byte_limit(
+            runtime_chrome_budget
+                .map(wram_hot_hard_bytes)
+                .unwrap_or_else(|| {
+                    profile_default_byte_hard(pressure, ProfilePressureField::WramHot)
+                }),
+            pressure,
+        ),
+        hram_hot: byte_limit(
+            runtime_chrome_budget
+                .map(|budget| u64::from(budget.memory_caps.hram_usable_bytes))
+                .unwrap_or_else(|| {
+                    profile_default_byte_hard(pressure, ProfilePressureField::HramHot)
+                }),
+            pressure,
+        ),
+        bank0_rom: byte_limit(
+            runtime_chrome_budget
+                .map(bank0_rom_hard_bytes)
+                .unwrap_or_else(|| {
+                    profile_default_byte_hard(pressure, ProfilePressureField::Bank0Rom)
+                }),
+            pressure,
+        ),
+        switchable_rom_window: byte_limit(
+            runtime_chrome_budget
+                .map(switchable_rom_window_hard_bytes)
+                .unwrap_or_else(|| {
+                    profile_default_byte_hard(pressure, ProfilePressureField::SwitchableRomWindow)
+                }),
+            pressure,
+        ),
+        sram_window: byte_limit(
+            runtime_chrome_budget
+                .map(sram_window_hard_bytes)
+                .unwrap_or_else(|| {
+                    profile_default_byte_hard(pressure, ProfilePressureField::SramWindow)
+                }),
+            pressure,
+        ),
+        slice_cycles: cycle_limit(
+            objective
+                .max_cycles_per_token
+                .map(u64::from)
+                .unwrap_or_else(|| {
+                    profile_default_cycle_hard(pressure, ProfilePressureField::SliceCycles)
+                }),
+            pressure,
+        ),
+        interrupt_latency: cycle_limit(
+            objective
+                .service
+                .as_ref()
+                .and_then(|service| {
+                    service
+                        .max_resume_latency_cycles_p95
+                        .or(service.max_checkpoint_gap_cycles_p95)
+                        .or(service.max_first_token_cycles_p95)
+                })
+                .map(u64::from)
+                .unwrap_or_else(|| {
+                    profile_default_cycle_hard(pressure, ProfilePressureField::InterruptLatency)
+                }),
+            pressure,
+        ),
+        trace_bytes_per_frame: u16_limit(trace_budget.max_bytes_per_frame, pressure),
+        persist_bytes_per_frame: u16_limit(
+            runtime_chrome_budget
+                .map(|budget| saturating_u16(budget.sram_reserved))
+                .unwrap_or_else(|| {
+                    profile_default_u16_hard(pressure, ProfilePressureField::PersistBytesPerFrame)
+                }),
+            pressure,
+        ),
+        overlay_installs_per_frame: u8_limit(
+            profile_default_u8_hard(pressure, ProfilePressureField::OverlayInstallsPerFrame),
+            pressure,
+        ),
+        bank_switches_per_token: u16_limit(
+            objective.max_bank_switches_per_token.unwrap_or_else(|| {
+                profile_default_u16_hard(pressure, ProfilePressureField::BankSwitchesPerToken)
+            }),
+            pressure,
+        ),
+        sram_page_switches_per_token: u16_limit(
+            objective
+                .max_sram_page_switches_per_token
+                .unwrap_or_else(|| {
+                    profile_default_u16_hard(
+                        pressure,
+                        ProfilePressureField::SramPageSwitchesPerToken,
+                    )
+                }),
+            pressure,
+        ),
+    };
+
+    Ok(ResourcePressureThresholdResolution {
+        thresholds,
+        provenance: resource_pressure_provenance(
+            profile,
+            runtime_chrome_budget,
+            objective,
+            trace_budget,
+        ),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProfilePressureField {
+    WramHot,
+    HramHot,
+    Bank0Rom,
+    SwitchableRomWindow,
+    SramWindow,
+    SliceCycles,
+    InterruptLatency,
+    PersistBytesPerFrame,
+    OverlayInstallsPerFrame,
+    BankSwitchesPerToken,
+    SramPageSwitchesPerToken,
+}
+
+fn wram_hot_hard_bytes(budget: &RuntimeChromeBudget) -> u64 {
+    u64::from(
+        budget
+            .memory_caps
+            .wram_usable_bytes
+            .saturating_sub(u32::from(budget.wram_reserved)),
+    )
+}
+
+fn sram_window_hard_bytes(budget: &RuntimeChromeBudget) -> u64 {
+    u64::from(
+        budget
+            .memory_caps
+            .sram_usable_bytes
+            .saturating_sub(budget.sram_reserved),
+    )
+}
+
+fn bank0_rom_hard_bytes(budget: &RuntimeChromeBudget) -> u64 {
+    budget
+        .rom_slots
+        .iter()
+        .filter(|slot| slot.class == crate::budget::BudgetSlotClass::Bank0Free)
+        .map(slot_hard_bytes)
+        .sum()
+}
+
+fn switchable_rom_window_hard_bytes(budget: &RuntimeChromeBudget) -> u64 {
+    budget
+        .rom_slots
+        .iter()
+        .filter(|slot| slot.class != crate::budget::BudgetSlotClass::Bank0Free)
+        .map(slot_hard_bytes)
+        .sum()
+}
+
+fn slot_hard_bytes(slot: &crate::budget::RomBudgetSlot) -> u64 {
+    u64::from(
+        slot.usable_bytes
+            .saturating_sub(u32::from(slot.reserved_slack)),
+    )
+}
+
+fn byte_limit(hard: u64, pressure: ScheduleResourcePressure) -> PressureLimit<ByteBudget> {
+    PressureLimit {
+        soft: soften_u64(hard, pressure),
+        hard,
+    }
+}
+
+fn cycle_limit(hard: u64, pressure: ScheduleResourcePressure) -> PressureLimit<CycleBudget> {
+    byte_limit(hard, pressure)
+}
+
+fn u16_limit(hard: u16, pressure: ScheduleResourcePressure) -> PressureLimit<u16> {
+    PressureLimit {
+        soft: soften_u16(hard, pressure),
+        hard,
+    }
+}
+
+fn u8_limit(hard: u8, pressure: ScheduleResourcePressure) -> PressureLimit<u8> {
+    PressureLimit {
+        soft: soften_u8(hard, pressure),
+        hard,
+    }
+}
+
+fn soften_u64(hard: u64, pressure: ScheduleResourcePressure) -> u64 {
+    let numerator = match pressure {
+        ScheduleResourcePressure::Conservative => 4,
+        ScheduleResourcePressure::Balanced => 9,
+        ScheduleResourcePressure::FitFirst => 19,
+    };
+    let denominator = match pressure {
+        ScheduleResourcePressure::Conservative => 5,
+        ScheduleResourcePressure::Balanced => 10,
+        ScheduleResourcePressure::FitFirst => 20,
+    };
+    hard.saturating_mul(numerator) / denominator
+}
+
+fn soften_u16(hard: u16, pressure: ScheduleResourcePressure) -> u16 {
+    soften_u64(u64::from(hard), pressure)
+        .try_into()
+        .unwrap_or(u16::MAX)
+}
+
+fn soften_u8(hard: u8, pressure: ScheduleResourcePressure) -> u8 {
+    soften_u64(u64::from(hard), pressure)
+        .try_into()
+        .unwrap_or(u8::MAX)
+}
+
+fn saturating_u16(value: u32) -> u16 {
+    value.try_into().unwrap_or(u16::MAX)
+}
+
+fn profile_default_byte_hard(
+    pressure: ScheduleResourcePressure,
+    field: ProfilePressureField,
+) -> u64 {
+    let base = match field {
+        ProfilePressureField::WramHot => 4096,
+        ProfilePressureField::HramHot => 96,
+        ProfilePressureField::Bank0Rom => 4096,
+        ProfilePressureField::SwitchableRomWindow => 16 * 1024,
+        ProfilePressureField::SramWindow => 8 * 1024,
+        _ => 1024,
+    };
+    pressure_scaled_u64(base, pressure)
+}
+
+fn profile_default_cycle_hard(
+    pressure: ScheduleResourcePressure,
+    field: ProfilePressureField,
+) -> u64 {
+    let base = match field {
+        ProfilePressureField::SliceCycles => 8192,
+        ProfilePressureField::InterruptLatency => 2048,
+        _ => 1024,
+    };
+    pressure_scaled_u64(base, pressure)
+}
+
+fn profile_default_u16_hard(
+    pressure: ScheduleResourcePressure,
+    field: ProfilePressureField,
+) -> u16 {
+    let base = match field {
+        ProfilePressureField::PersistBytesPerFrame => 512,
+        ProfilePressureField::BankSwitchesPerToken => 8,
+        ProfilePressureField::SramPageSwitchesPerToken => 4,
+        _ => 1,
+    };
+    pressure_scaled_u64(base, pressure)
+        .try_into()
+        .unwrap_or(u16::MAX)
+}
+
+fn profile_default_u8_hard(pressure: ScheduleResourcePressure, field: ProfilePressureField) -> u8 {
+    let base = match field {
+        ProfilePressureField::OverlayInstallsPerFrame => 1,
+        _ => 1,
+    };
+    pressure_scaled_u64(base, pressure)
+        .try_into()
+        .unwrap_or(u8::MAX)
+}
+
+fn pressure_scaled_u64(base: u64, pressure: ScheduleResourcePressure) -> u64 {
+    match pressure {
+        ScheduleResourcePressure::Conservative => base,
+        ScheduleResourcePressure::Balanced => base.saturating_mul(2),
+        ScheduleResourcePressure::FitFirst => base.saturating_mul(4),
+    }
+}
+
+fn resource_pressure_provenance(
+    profile: &CompileProfileSpec,
+    runtime_chrome_budget: Option<&RuntimeChromeBudget>,
+    objective: &CompileObjective,
+    trace_budget: &TraceBudget,
+) -> Vec<CompileKnobProvenanceEntry> {
+    let runtime = runtime_chrome_budget.map(runtime_chrome_provenance);
+    let profile_default = profile_pressure_provenance(profile);
+    let scheduler = scheduler_pressure_provenance(profile);
+    let objective = objective_pressure_provenance(objective);
+    let trace = trace_budget_provenance(trace_budget);
+
+    [
+        (
+            "thresholds.wram_hot",
+            vec![
+                profile_default.clone(),
+                optional_or_profile(runtime.clone(), &profile_default),
+            ],
+        ),
+        (
+            "thresholds.hram_hot",
+            vec![
+                profile_default.clone(),
+                optional_or_profile(runtime.clone(), &profile_default),
+            ],
+        ),
+        (
+            "thresholds.bank0_rom",
+            vec![
+                profile_default.clone(),
+                optional_or_profile(runtime.clone(), &profile_default),
+            ],
+        ),
+        (
+            "thresholds.switchable_rom_window",
+            vec![
+                profile_default.clone(),
+                optional_or_profile(runtime.clone(), &profile_default),
+            ],
+        ),
+        (
+            "thresholds.sram_window",
+            vec![
+                profile_default.clone(),
+                optional_or_profile(runtime.clone(), &profile_default),
+            ],
+        ),
+        (
+            "thresholds.slice_cycles",
+            vec![
+                profile_default.clone(),
+                scheduler.clone(),
+                objective.clone(),
+            ],
+        ),
+        (
+            "thresholds.interrupt_latency",
+            vec![
+                profile_default.clone(),
+                scheduler.clone(),
+                objective.clone(),
+            ],
+        ),
+        (
+            "thresholds.trace_bytes_per_frame",
+            vec![profile_default.clone(), trace],
+        ),
+        (
+            "thresholds.persist_bytes_per_frame",
+            vec![
+                profile_default.clone(),
+                optional_or_profile(runtime.clone(), &profile_default),
+            ],
+        ),
+        (
+            "thresholds.overlay_installs_per_frame",
+            vec![profile_default.clone(), scheduler.clone()],
+        ),
+        (
+            "thresholds.bank_switches_per_token",
+            vec![
+                profile_default.clone(),
+                scheduler.clone(),
+                objective.clone(),
+            ],
+        ),
+        (
+            "thresholds.sram_page_switches_per_token",
+            vec![profile_default, scheduler, objective],
+        ),
+    ]
+    .into_iter()
+    .map(|(field, chain)| CompileKnobProvenanceEntry {
+        path: CompileKnobPath {
+            knob: CompileKnobId::ScheduleResourcePressure,
+            selector: None,
+            field: Some(FieldPath::from(field)),
+        },
+        chain,
+    })
+    .collect()
+}
+
+fn optional_or_profile(
+    source: Option<ConstraintProvenance>,
+    profile: &ConstraintProvenance,
+) -> ConstraintProvenance {
+    source.unwrap_or_else(|| profile.clone())
+}
+
+fn profile_pressure_provenance(profile: &CompileProfileSpec) -> ConstraintProvenance {
+    ConstraintProvenance {
+        source: PolicySource::ProfileDefault,
+        operation: ConstraintOperation::SeedDefault,
+        evidence: vec![EvidenceRef {
+            kind: "CompileProfileSpec".to_owned(),
+            reference: format!("{}.schedule.resource_pressure", profile.id.as_str()),
+            hash: Some(profile.defaults_hash),
+        }],
+    }
+}
+
+fn scheduler_pressure_provenance(profile: &CompileProfileSpec) -> ConstraintProvenance {
+    ConstraintProvenance {
+        source: PolicySource::ProfileDefault,
+        operation: ConstraintOperation::ApplyPreference,
+        evidence: vec![EvidenceRef {
+            kind: "ScheduleResourcePressure".to_owned(),
+            reference: profile.id.as_str().to_owned(),
+            hash: Some(profile.defaults_hash),
+        }],
+    }
+}
+
+fn runtime_chrome_provenance(budget: &RuntimeChromeBudget) -> ConstraintProvenance {
+    ConstraintProvenance {
+        source: PolicySource::TargetDefault,
+        operation: ConstraintOperation::ApplyHardConstraint,
+        evidence: vec![EvidenceRef {
+            kind: "RuntimeChromeBudget".to_owned(),
+            reference: format!("{}:{}", budget.target.as_str(), budget.profile.as_str()),
+            hash: Some(budget.runtime_nucleus_hash),
+        }],
+    }
+}
+
+fn objective_pressure_provenance(objective: &CompileObjective) -> ConstraintProvenance {
+    ConstraintProvenance {
+        source: PolicySource::CompileRequestOverride,
+        operation: ConstraintOperation::ApplyHardConstraint,
+        evidence: vec![EvidenceRef {
+            kind: "CompileObjective".to_owned(),
+            reference: format!(
+                "cycles={:?};bank_switches={:?};sram_page_switches={:?}",
+                objective.max_cycles_per_token,
+                objective.max_bank_switches_per_token,
+                objective.max_sram_page_switches_per_token
+            ),
+            hash: None,
+        }],
+    }
+}
+
+fn trace_budget_provenance(trace_budget: &TraceBudget) -> ConstraintProvenance {
+    ConstraintProvenance {
+        source: PolicySource::ProfileDefault,
+        operation: ConstraintOperation::ApplyHardConstraint,
+        evidence: vec![EvidenceRef {
+            kind: "TraceBudget".to_owned(),
+            reference: format!(
+                "events_per_slice={};bytes_per_frame={}",
+                trace_budget.max_events_per_slice, trace_budget.max_bytes_per_frame
+            ),
+            hash: None,
+        }],
+    }
+}
+
+fn repair_policy_profile(
+    profile: CompileProfileId,
+) -> Result<RepairPolicyProfile, InitialKnobsResolveError> {
+    match profile.as_str() {
+        BRINGUP_COMPILE_PROFILE_ID => Ok(RepairPolicyProfile::Bringup),
+        DEFAULT_COMPILE_PROFILE_ID => Ok(RepairPolicyProfile::Default),
+        TRACE_COMPILE_PROFILE_ID => Ok(RepairPolicyProfile::TraceInvariant),
+        RECOVERY_COMPILE_PROFILE_ID => Ok(RepairPolicyProfile::Recovery),
+        _ => Err(InitialKnobsResolveError::UnknownProfile { profile }),
+    }
+}
+
+fn require_default<T: Copy>(
+    profile: &CompileProfileSpec,
+    value: Option<T>,
+    field: &'static str,
+) -> Result<T, InitialKnobsResolveError> {
+    value.ok_or_else(|| InitialKnobsResolveError::MissingDefault {
+        profile: profile.id.clone(),
+        field,
+    })
+}
+
+fn require_bound<T: Copy>(
+    profile: &CompileProfileSpec,
+    value: Option<T>,
+    field: &'static str,
+) -> Result<T, InitialKnobsResolveError> {
+    value.ok_or_else(|| InitialKnobsResolveError::MissingBound {
+        profile: profile.id.clone(),
+        field,
+    })
+}
+
+fn profile_default_provenance(profile: &CompileProfileSpec) -> Vec<CompileKnobProvenanceEntry> {
+    [
+        CompileKnobId::Placement,
+        CompileKnobId::Observation,
+        CompileKnobId::Range,
+        CompileKnobId::Storage,
+        CompileKnobId::Sram,
+        CompileKnobId::RomWindow,
+        CompileKnobId::Overlay,
+        CompileKnobId::Schedule,
+    ]
+    .into_iter()
+    .map(|knob| CompileKnobProvenanceEntry {
+        path: CompileKnobPath {
+            knob,
+            selector: None,
+            field: Some(FieldPath::from(profile_default_field(knob))),
+        },
+        chain: vec![ConstraintProvenance {
+            source: PolicySource::ProfileDefault,
+            operation: ConstraintOperation::SeedDefault,
+            evidence: vec![EvidenceRef {
+                kind: "CompileProfileSpec".to_owned(),
+                reference: profile.id.as_str().to_owned(),
+                hash: Some(profile.defaults_hash),
+            }],
+        }],
+    })
+    .collect()
+}
+
+const fn profile_default_field(knob: CompileKnobId) -> &'static str {
+    match knob {
+        CompileKnobId::Placement => "profile_default.placement",
+        CompileKnobId::Observation => "profile_default.observation",
+        CompileKnobId::Range => "profile_default.range",
+        CompileKnobId::Storage => "profile_default.storage",
+        CompileKnobId::Sram => "profile_default.sram",
+        CompileKnobId::RomWindow => "profile_default.rom_window",
+        CompileKnobId::Overlay => "profile_default.overlay",
+        CompileKnobId::Schedule => "profile_default.schedule",
+        _ => "profile_default",
+    }
 }
 
 fn validate_compile_profile_spec_v2(
@@ -575,8 +1232,135 @@ pub struct CompileKnobPartialBounds {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompileKnobOverrides {
+    #[serde(default)]
     pub values: CompileKnobPartialValues,
+    #[serde(default)]
     pub bounds: CompileKnobPartialBounds,
+    /// Optional operational probes disabled by trace demotion.
+    ///
+    /// Semantic observations are never listed here; the loop only records
+    /// optional probe removals.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_optional_probes: BTreeSet<TraceProbeId>,
+    /// Per-kernel residency requirements inserted by repair.
+    ///
+    /// Monotone repair may insert a selector or move an existing selector to a
+    /// later residency rank. It may not delete entries or move them backward.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "map_as_pairs"
+    )]
+    pub forced_kernel_residency: BTreeMap<KernelSelector, KernelResidency>,
+    /// Pure values forced from materialize to recompute. Effectful values are
+    /// rejected by the loop before insertion.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub forced_recompute: BTreeSet<ValueSelector>,
+    /// Site-specific range-plan ceilings.
+    ///
+    /// Monotone repair may insert a selector or raise its ceiling only.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "map_as_pairs"
+    )]
+    pub reduction_ceiling_overrides: BTreeMap<ReductionSelector, ReductionPlanCeiling>,
+    /// Legal tile classes remaining after candidate narrowing.
+    ///
+    /// Monotone repair is subset-removal for existing selectors.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "map_as_pairs"
+    )]
+    pub tile_class_overrides: BTreeMap<TileSelector, BTreeSet<TileCandidateClass>>,
+}
+
+mod map_as_pairs {
+    use super::*;
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+    use std::marker::PhantomData;
+
+    pub fn serialize<K, V, S>(map: &BTreeMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: Serialize,
+        V: Serialize,
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(map.len()))?;
+        for entry in map {
+            seq.serialize_element(&entry)?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(MapVisitor {
+            marker: PhantomData,
+        })
+    }
+
+    struct MapVisitor<K, V> {
+        marker: PhantomData<(K, V)>,
+    }
+
+    impl<'de, K, V> Visitor<'de> for MapVisitor<K, V>
+    where
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+    {
+        type Value = BTreeMap<K, V>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a sequence of selector/value pairs")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut map = BTreeMap::new();
+            while let Some((key, value)) = seq.next_element()? {
+                map.insert(key, value);
+            }
+            Ok(map)
+        }
+    }
+}
+
+impl CompileKnobPartialValues {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.placement.is_none()
+            && self.observation.is_none()
+            && self.range.is_none()
+            && self.storage.is_none()
+            && self.sram.is_none()
+            && self.rom_window.is_none()
+            && self.overlay.is_none()
+            && self.schedule.is_none()
+    }
+}
+
+impl CompileKnobPartialBounds {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.placement.is_none()
+            && self.observation.is_none()
+            && self.range.is_none()
+            && self.storage.is_none()
+            && self.sram.is_none()
+            && self.rom_window.is_none()
+            && self.overlay.is_none()
+            && self.schedule.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -596,6 +1380,49 @@ pub enum CompileKnobId {
     RomWindow,
     Overlay,
     Schedule,
+    PlacementProfile,
+    ObservationTraceDemotion,
+    ObservationProbeSelection,
+    RangeReductionCeiling,
+    StorageRecomputePromotion,
+    StorageMaterializationOverrides,
+    SramPageAggression,
+    SramSpillPolicy,
+    RomKernelResidencyBias,
+    RomKernelDuplicationBias,
+    RomKernelResidencyOverrides,
+    OverlayPromotion,
+    ScheduleTileSearch,
+    ScheduleSliceCoarsening,
+    ScheduleResourcePressure,
+    StageIterationCeilings,
+}
+
+impl CompileKnobId {
+    #[must_use]
+    pub const fn top_level(self) -> Self {
+        match self {
+            Self::Placement | Self::PlacementProfile => Self::Placement,
+            Self::Observation
+            | Self::ObservationTraceDemotion
+            | Self::ObservationProbeSelection => Self::Observation,
+            Self::Range | Self::RangeReductionCeiling => Self::Range,
+            Self::Storage
+            | Self::StorageRecomputePromotion
+            | Self::StorageMaterializationOverrides => Self::Storage,
+            Self::Sram | Self::SramPageAggression | Self::SramSpillPolicy => Self::Sram,
+            Self::RomWindow
+            | Self::RomKernelResidencyBias
+            | Self::RomKernelDuplicationBias
+            | Self::RomKernelResidencyOverrides => Self::RomWindow,
+            Self::Overlay | Self::OverlayPromotion => Self::Overlay,
+            Self::Schedule
+            | Self::ScheduleTileSearch
+            | Self::ScheduleSliceCoarsening
+            | Self::ScheduleResourcePressure
+            | Self::StageIterationCeilings => Self::Schedule,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -632,7 +1459,7 @@ pub enum PolicySource {
     RepairProposal { id: RepairProposalId },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ConstraintOperation {
     SeedDefault,
@@ -641,6 +1468,222 @@ pub enum ConstraintOperation {
     ApplyHardConstraint,
     ApplyOverride,
     ApplyCalibration,
+    AppliedRepairProposal { id: RepairProposalId },
+    AuthorizedRelaxation { reason: RepairReason },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KernelSpecId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LayerId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExpertId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SectionId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ValueId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AliasClassId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum KernelSelector {
+    KernelSpec { id: KernelSpecId },
+    LayerExpert { layer: LayerId, expert: ExpertId },
+    Section { id: SectionId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ValueSelector {
+    Value { id: ValueId },
+    AliasClass { id: AliasClassId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ReductionSelector {
+    Site { id: ReductionSiteId },
+    Layer { id: LayerId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum TileSelector {
+    Kernel { id: KernelSpecId },
+    Layer { id: LayerId },
+    SliceClass { class: SliceClass },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SliceClass {
+    Micro,
+    Frame,
+    TokenBoundary,
+    TraceHeavy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(u8)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum KernelResidency {
+    ProfileDefault = 0,
+    CoResident = 1,
+    Bank0Streaming = 2,
+    WramOverlay = 3,
+    FitFirst = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum TileCandidateClass {
+    SmallWorkingSet,
+    Balanced,
+    SwitchAmortized,
+}
+
+pub type ByteBudget = u64;
+pub type CycleBudget = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PressureLimit<T> {
+    pub soft: T,
+    pub hard: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConstraintDelta {
+    pub changes: Vec<KnobDelta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecomputePurityFacts {
+    /// Values proven recomputable by the current IR/predicate surface.
+    pub pure_values: BTreeSet<ValueSelector>,
+    /// Values known to write effects or otherwise fail the current recompute
+    /// purity contract.
+    pub effectful_values: BTreeSet<ValueSelector>,
+}
+
+impl RecomputePurityFacts {
+    #[must_use]
+    pub fn allows(&self, value: &ValueSelector) -> bool {
+        self.pure_values.contains(value) && !self.effectful_values.contains(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum KnobDelta {
+    AdvancePlacementProfile {
+        to: PlacementProfile,
+    },
+    SetTraceDemotion {
+        to: ProbeCollectionLevel,
+    },
+    DisableOptionalProbes {
+        probes: BTreeSet<TraceProbeId>,
+    },
+    RaiseReductionCeiling {
+        selector: Option<ReductionSelector>,
+        to: ReductionPlanCeiling,
+    },
+    PromoteRecomputeLevel {
+        to: StorageMaterialization,
+    },
+    ForceRecompute {
+        values: BTreeSet<ValueSelector>,
+    },
+    AdvanceSramPageAggression {
+        to: SramPageAggression,
+    },
+    AdvanceKernelResidencyBias {
+        to: RomKernelResidencyBias,
+    },
+    AdvanceKernelDuplicationBias {
+        to: RomKernelDuplicationBias,
+    },
+    ForceKernelResidency {
+        selector: KernelSelector,
+        to: KernelResidency,
+    },
+    PromoteOverlay {
+        to: OverlayPromotion,
+    },
+    NarrowTileClasses {
+        selector: TileSelector,
+        remaining: BTreeSet<TileCandidateClass>,
+    },
+    SetSliceCoarsening {
+        to: ScheduleSliceCoarsening,
+    },
+    UpdatePressureThreshold {
+        update: ResourcePressureUpdate,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ResourcePressureUpdate {
+    WramHot { limit: PressureLimit<ByteBudget> },
+    HramHot { limit: PressureLimit<ByteBudget> },
+    Bank0Rom { limit: PressureLimit<ByteBudget> },
+    SwitchableRomWindow { limit: PressureLimit<ByteBudget> },
+    SramWindow { limit: PressureLimit<ByteBudget> },
+    SliceCycles { limit: PressureLimit<CycleBudget> },
+    InterruptLatency { limit: PressureLimit<CycleBudget> },
+    TraceBytesPerFrame { limit: PressureLimit<u16> },
+    PersistBytesPerFrame { limit: PressureLimit<u16> },
+    OverlayInstallsPerFrame { limit: PressureLimit<u8> },
+    BankSwitchesPerToken { limit: PressureLimit<u16> },
+    SramPageSwitchesPerToken { limit: PressureLimit<u16> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum DeltaRejection {
+    KnobLocked {
+        knob: CompileKnobId,
+    },
+    PolicyToggleDisabled {
+        knob: CompileKnobId,
+        toggle: String,
+    },
+    BeyondBounds {
+        knob: CompileKnobId,
+        attempted: String,
+        max: String,
+    },
+    NotMonotone {
+        knob: CompileKnobId,
+        current: String,
+        attempted: String,
+    },
+    InvariantObservabilityViolation {
+        knob: CompileKnobId,
+    },
+    EffectfulRecompute {
+        value: ValueSelector,
+    },
+    UnsupportedMutation {
+        knob: CompileKnobId,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -917,12 +1960,31 @@ pub struct TraceBudget {
 }
 
 pub trait MonotoneKnob {
+    #[must_use]
+    fn rank(&self) -> u8 {
+        0
+    }
+
     fn is_monotone_successor_of(&self, previous: &Self) -> bool;
+
+    #[must_use]
+    fn is_monotone_advance(from: &Self, to: &Self) -> bool {
+        from.rank() <= to.rank()
+    }
+
+    #[must_use]
+    fn is_strict_advance(from: &Self, to: &Self) -> bool {
+        from.rank() < to.rank()
+    }
 }
 
 macro_rules! monotone_enum {
     ($ty:ty) => {
         impl MonotoneKnob for $ty {
+            fn rank(&self) -> u8 {
+                *self as u8
+            }
+
             fn is_monotone_successor_of(&self, previous: &Self) -> bool {
                 self >= previous
             }
@@ -941,6 +2003,7 @@ monotone_enum!(OverlayPromotion);
 monotone_enum!(ScheduleTileSearch);
 monotone_enum!(ScheduleSliceCoarsening);
 monotone_enum!(ScheduleResourcePressure);
+monotone_enum!(KernelResidency);
 
 impl MonotoneKnob for PlacementKnob {
     fn is_monotone_successor_of(&self, previous: &Self) -> bool {
@@ -1053,6 +2116,412 @@ impl MonotoneKnob for ScheduleKnobBounds {
         self.max_tile_search <= previous.max_tile_search
             && self.max_slice_coarsening <= previous.max_slice_coarsening
             && self.max_resource_pressure <= previous.max_resource_pressure
+    }
+}
+
+impl KnobLockSet {
+    #[must_use]
+    pub fn is_locked(&self, knob: CompileKnobId) -> bool {
+        self.locked.contains(&knob) || self.locked.contains(&knob.top_level())
+    }
+}
+
+impl KnobDelta {
+    #[must_use]
+    pub const fn knob_id(&self) -> CompileKnobId {
+        match self {
+            Self::AdvancePlacementProfile { .. } => CompileKnobId::PlacementProfile,
+            Self::SetTraceDemotion { .. } => CompileKnobId::ObservationTraceDemotion,
+            Self::DisableOptionalProbes { .. } => CompileKnobId::ObservationProbeSelection,
+            Self::RaiseReductionCeiling { .. } => CompileKnobId::RangeReductionCeiling,
+            Self::PromoteRecomputeLevel { .. } => CompileKnobId::StorageRecomputePromotion,
+            Self::ForceRecompute { .. } => CompileKnobId::StorageMaterializationOverrides,
+            Self::AdvanceSramPageAggression { .. } => CompileKnobId::SramPageAggression,
+            Self::AdvanceKernelResidencyBias { .. } => CompileKnobId::RomKernelResidencyBias,
+            Self::AdvanceKernelDuplicationBias { .. } => CompileKnobId::RomKernelDuplicationBias,
+            Self::ForceKernelResidency { .. } => CompileKnobId::RomKernelResidencyOverrides,
+            Self::PromoteOverlay { .. } => CompileKnobId::OverlayPromotion,
+            Self::NarrowTileClasses { .. } => CompileKnobId::ScheduleTileSearch,
+            Self::SetSliceCoarsening { .. } => CompileKnobId::ScheduleSliceCoarsening,
+            Self::UpdatePressureThreshold { .. } => CompileKnobId::ScheduleResourcePressure,
+        }
+    }
+}
+
+pub fn check_delta_admissible(
+    delta: &KnobDelta,
+    current: &CompileKnobs,
+    policy: &RepairPolicy,
+    observability: ObservabilityMode,
+) -> Result<(), DeltaRejection> {
+    check_delta_admissible_with_recompute_purity(
+        delta,
+        current,
+        policy,
+        observability,
+        &RecomputePurityFacts::default(),
+    )
+}
+
+pub fn check_delta_admissible_with_recompute_purity(
+    delta: &KnobDelta,
+    current: &CompileKnobs,
+    policy: &RepairPolicy,
+    observability: ObservabilityMode,
+    recompute_purity: &RecomputePurityFacts,
+) -> Result<(), DeltaRejection> {
+    let knob = delta.knob_id();
+    if current.locks.is_locked(knob) {
+        return Err(DeltaRejection::KnobLocked { knob });
+    }
+
+    if let Some(toggle) = disabled_policy_toggle(delta, policy) {
+        return Err(DeltaRejection::PolicyToggleDisabled {
+            knob,
+            toggle: toggle.to_owned(),
+        });
+    }
+
+    check_delta_bounds(delta, current)?;
+    if matches!(delta, KnobDelta::UpdatePressureThreshold { .. }) {
+        return Err(DeltaRejection::UnsupportedMutation {
+            knob,
+            reason: "mutable ResourcePressureThresholds are deferred to bd-2n14".to_owned(),
+        });
+    }
+    check_delta_monotone(delta, current)?;
+    check_recompute_purity(delta, recompute_purity)?;
+
+    if observability == ObservabilityMode::Invariant
+        && matches!(
+            knob,
+            CompileKnobId::ObservationTraceDemotion | CompileKnobId::ObservationProbeSelection
+        )
+    {
+        return Err(DeltaRejection::InvariantObservabilityViolation { knob });
+    }
+
+    Ok(())
+}
+
+fn check_recompute_purity(
+    delta: &KnobDelta,
+    recompute_purity: &RecomputePurityFacts,
+) -> Result<(), DeltaRejection> {
+    let KnobDelta::ForceRecompute { values } = delta else {
+        return Ok(());
+    };
+
+    for value in values {
+        if !recompute_purity.allows(value) {
+            return Err(DeltaRejection::EffectfulRecompute {
+                value: value.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[must_use]
+pub fn f_b16_profile_lock_set(profile: RepairPolicyProfile) -> KnobLockSet {
+    let locked = match profile {
+        RepairPolicyProfile::Bringup | RepairPolicyProfile::BringupFirstFit => BTreeSet::from([
+            CompileKnobId::PlacementProfile,
+            CompileKnobId::ObservationTraceDemotion,
+            CompileKnobId::ObservationProbeSelection,
+            CompileKnobId::RangeReductionCeiling,
+            CompileKnobId::StorageRecomputePromotion,
+            CompileKnobId::StorageMaterializationOverrides,
+            CompileKnobId::SramPageAggression,
+            CompileKnobId::SramSpillPolicy,
+            CompileKnobId::RomKernelResidencyBias,
+            CompileKnobId::RomKernelDuplicationBias,
+            CompileKnobId::RomKernelResidencyOverrides,
+            CompileKnobId::OverlayPromotion,
+            CompileKnobId::ScheduleResourcePressure,
+            CompileKnobId::StageIterationCeilings,
+        ]),
+        RepairPolicyProfile::Default | RepairPolicyProfile::Recovery => BTreeSet::from([
+            CompileKnobId::ScheduleResourcePressure,
+            CompileKnobId::StageIterationCeilings,
+        ]),
+        RepairPolicyProfile::TraceInvariant => f_b16_refinement_knob_ids().into_iter().collect(),
+    };
+    KnobLockSet { locked }
+}
+
+#[must_use]
+pub const fn f_b16_refinement_knob_ids() -> [CompileKnobId; 16] {
+    [
+        CompileKnobId::PlacementProfile,
+        CompileKnobId::ObservationTraceDemotion,
+        CompileKnobId::ObservationProbeSelection,
+        CompileKnobId::RangeReductionCeiling,
+        CompileKnobId::StorageRecomputePromotion,
+        CompileKnobId::StorageMaterializationOverrides,
+        CompileKnobId::SramPageAggression,
+        CompileKnobId::SramSpillPolicy,
+        CompileKnobId::RomKernelResidencyBias,
+        CompileKnobId::RomKernelDuplicationBias,
+        CompileKnobId::RomKernelResidencyOverrides,
+        CompileKnobId::OverlayPromotion,
+        CompileKnobId::ScheduleTileSearch,
+        CompileKnobId::ScheduleSliceCoarsening,
+        CompileKnobId::ScheduleResourcePressure,
+        CompileKnobId::StageIterationCeilings,
+    ]
+}
+
+fn disabled_policy_toggle(delta: &KnobDelta, policy: &RepairPolicy) -> Option<&'static str> {
+    match delta {
+        KnobDelta::AdvancePlacementProfile { .. } if !policy.allow_placement_profile_fallback => {
+            Some("allow_placement_profile_fallback")
+        }
+        KnobDelta::SetTraceDemotion { .. } | KnobDelta::DisableOptionalProbes { .. }
+            if !policy.allow_trace_demotion =>
+        {
+            Some("allow_trace_demotion")
+        }
+        KnobDelta::PromoteRecomputeLevel { .. } | KnobDelta::ForceRecompute { .. }
+            if !policy.allow_recompute_promotion =>
+        {
+            Some("allow_recompute_promotion")
+        }
+        KnobDelta::PromoteOverlay { .. } if !policy.allow_overlay_promotion => {
+            Some("allow_overlay_promotion")
+        }
+        KnobDelta::ForceKernelResidency {
+            to: KernelResidency::WramOverlay,
+            ..
+        } if !policy.allow_overlay_promotion => Some("allow_overlay_promotion"),
+        _ => None,
+    }
+}
+
+fn check_delta_bounds(delta: &KnobDelta, current: &CompileKnobs) -> Result<(), DeltaRejection> {
+    match delta {
+        KnobDelta::AdvancePlacementProfile { to } => check_ordered_bound(
+            CompileKnobId::PlacementProfile,
+            to,
+            &current.bounds.placement.max_profile,
+        ),
+        KnobDelta::SetTraceDemotion { to } => check_ordered_bound(
+            CompileKnobId::ObservationTraceDemotion,
+            to,
+            &current.bounds.observation.max_probe_level,
+        ),
+        KnobDelta::RaiseReductionCeiling { to, .. } => check_ordered_bound(
+            CompileKnobId::RangeReductionCeiling,
+            to,
+            &current.bounds.range.max_reduction_ceiling,
+        ),
+        KnobDelta::PromoteRecomputeLevel { to } => check_ordered_bound(
+            CompileKnobId::StorageRecomputePromotion,
+            to,
+            &current.bounds.storage.max_materialization,
+        ),
+        KnobDelta::AdvanceSramPageAggression { to } => check_ordered_bound(
+            CompileKnobId::SramPageAggression,
+            to,
+            &current.bounds.sram.max_page_aggression,
+        ),
+        KnobDelta::AdvanceKernelResidencyBias { to } => check_ordered_bound(
+            CompileKnobId::RomKernelResidencyBias,
+            to,
+            &current.bounds.rom_window.max_kernel_residency_bias,
+        ),
+        KnobDelta::AdvanceKernelDuplicationBias { to } => check_ordered_bound(
+            CompileKnobId::RomKernelDuplicationBias,
+            to,
+            &current.bounds.rom_window.max_kernel_duplication_bias,
+        ),
+        KnobDelta::PromoteOverlay { to } => check_ordered_bound(
+            CompileKnobId::OverlayPromotion,
+            to,
+            &current.bounds.overlay.max_promotion,
+        ),
+        KnobDelta::SetSliceCoarsening { to } => check_ordered_bound(
+            CompileKnobId::ScheduleSliceCoarsening,
+            to,
+            &current.bounds.schedule.max_slice_coarsening,
+        ),
+        KnobDelta::DisableOptionalProbes { .. }
+        | KnobDelta::ForceRecompute { .. }
+        | KnobDelta::ForceKernelResidency { .. }
+        | KnobDelta::NarrowTileClasses { .. } => Ok(()),
+        KnobDelta::UpdatePressureThreshold { update } => check_pressure_update_limit(update),
+    }
+}
+
+fn check_pressure_update_limit(update: &ResourcePressureUpdate) -> Result<(), DeltaRejection> {
+    match update {
+        ResourcePressureUpdate::WramHot { limit } => check_pressure_limit("wram_hot", limit),
+        ResourcePressureUpdate::HramHot { limit } => check_pressure_limit("hram_hot", limit),
+        ResourcePressureUpdate::Bank0Rom { limit } => check_pressure_limit("bank0_rom", limit),
+        ResourcePressureUpdate::SwitchableRomWindow { limit } => {
+            check_pressure_limit("switchable_rom_window", limit)
+        }
+        ResourcePressureUpdate::SramWindow { limit } => check_pressure_limit("sram_window", limit),
+        ResourcePressureUpdate::SliceCycles { limit } => {
+            check_pressure_limit("slice_cycles", limit)
+        }
+        ResourcePressureUpdate::InterruptLatency { limit } => {
+            check_pressure_limit("interrupt_latency", limit)
+        }
+        ResourcePressureUpdate::TraceBytesPerFrame { limit } => {
+            check_pressure_limit("trace_bytes_per_frame", limit)
+        }
+        ResourcePressureUpdate::PersistBytesPerFrame { limit } => {
+            check_pressure_limit("persist_bytes_per_frame", limit)
+        }
+        ResourcePressureUpdate::OverlayInstallsPerFrame { limit } => {
+            check_pressure_limit("overlay_installs_per_frame", limit)
+        }
+        ResourcePressureUpdate::BankSwitchesPerToken { limit } => {
+            check_pressure_limit("bank_switches_per_token", limit)
+        }
+        ResourcePressureUpdate::SramPageSwitchesPerToken { limit } => {
+            check_pressure_limit("sram_page_switches_per_token", limit)
+        }
+    }
+}
+
+fn check_pressure_limit<T>(
+    field: &'static str,
+    limit: &PressureLimit<T>,
+) -> Result<(), DeltaRejection>
+where
+    T: PartialOrd + fmt::Debug,
+{
+    if limit.soft <= limit.hard {
+        Ok(())
+    } else {
+        Err(DeltaRejection::BeyondBounds {
+            knob: CompileKnobId::ScheduleResourcePressure,
+            attempted: format!("{field}.soft={:?}", limit.soft),
+            max: format!("{field}.hard={:?}; invariant soft <= hard", limit.hard),
+        })
+    }
+}
+
+fn check_ordered_bound<T>(knob: CompileKnobId, attempted: &T, max: &T) -> Result<(), DeltaRejection>
+where
+    T: MonotoneKnob + std::fmt::Debug,
+{
+    if attempted.rank() <= max.rank() {
+        Ok(())
+    } else {
+        Err(DeltaRejection::BeyondBounds {
+            knob,
+            attempted: format!("{attempted:?}"),
+            max: format!("{max:?}"),
+        })
+    }
+}
+
+fn check_delta_monotone(delta: &KnobDelta, current: &CompileKnobs) -> Result<(), DeltaRejection> {
+    match delta {
+        KnobDelta::AdvancePlacementProfile { to } => check_strict_advance(
+            CompileKnobId::PlacementProfile,
+            &current.global.placement.profile,
+            to,
+        ),
+        KnobDelta::SetTraceDemotion { to } => check_strict_advance(
+            CompileKnobId::ObservationTraceDemotion,
+            &current.global.observation.probe_level,
+            to,
+        ),
+        KnobDelta::RaiseReductionCeiling { to, .. } => check_strict_advance(
+            CompileKnobId::RangeReductionCeiling,
+            &current.global.range.reduction_ceiling,
+            to,
+        ),
+        KnobDelta::PromoteRecomputeLevel { to } => check_strict_advance(
+            CompileKnobId::StorageRecomputePromotion,
+            &current.global.storage.materialization,
+            to,
+        ),
+        KnobDelta::AdvanceSramPageAggression { to } => check_strict_advance(
+            CompileKnobId::SramPageAggression,
+            &current.global.sram.page_aggression,
+            to,
+        ),
+        KnobDelta::AdvanceKernelResidencyBias { to } => check_strict_advance(
+            CompileKnobId::RomKernelResidencyBias,
+            &current.global.rom_window.kernel_residency_bias,
+            to,
+        ),
+        KnobDelta::AdvanceKernelDuplicationBias { to } => check_strict_advance(
+            CompileKnobId::RomKernelDuplicationBias,
+            &current.global.rom_window.kernel_duplication_bias,
+            to,
+        ),
+        KnobDelta::PromoteOverlay { to } => check_strict_advance(
+            CompileKnobId::OverlayPromotion,
+            &current.global.overlay.promotion,
+            to,
+        ),
+        KnobDelta::SetSliceCoarsening { to } => check_strict_advance(
+            CompileKnobId::ScheduleSliceCoarsening,
+            &current.global.schedule.slice_coarsening,
+            to,
+        ),
+        KnobDelta::DisableOptionalProbes { probes } => {
+            if probes.is_empty() {
+                Err(DeltaRejection::NotMonotone {
+                    knob: CompileKnobId::ObservationProbeSelection,
+                    current: "disabled_optional_probes".to_owned(),
+                    attempted: "empty".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        KnobDelta::ForceRecompute { values } => {
+            if values.is_empty() {
+                Err(DeltaRejection::NotMonotone {
+                    knob: CompileKnobId::StorageMaterializationOverrides,
+                    current: "forced_recompute".to_owned(),
+                    attempted: "empty".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        KnobDelta::ForceKernelResidency { .. } | KnobDelta::UpdatePressureThreshold { .. } => {
+            Ok(())
+        }
+        KnobDelta::NarrowTileClasses { remaining, .. } => {
+            if remaining.is_empty() {
+                Err(DeltaRejection::NotMonotone {
+                    knob: CompileKnobId::ScheduleTileSearch,
+                    current: "tile_class_overrides".to_owned(),
+                    attempted: "empty".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn check_strict_advance<T>(
+    knob: CompileKnobId,
+    current: &T,
+    attempted: &T,
+) -> Result<(), DeltaRejection>
+where
+    T: MonotoneKnob + std::fmt::Debug,
+{
+    if T::is_strict_advance(current, attempted) {
+        Ok(())
+    } else {
+        Err(DeltaRejection::NotMonotone {
+            knob,
+            current: format!("{current:?}"),
+            attempted: format!("{attempted:?}"),
+        })
     }
 }
 
@@ -1175,6 +2644,7 @@ mod tests {
                     ..CompileKnobPartialValues::default()
                 },
                 bounds: CompileKnobPartialBounds::default(),
+                ..CompileKnobOverrides::default()
             },
             provenance: vec![CompileKnobProvenanceEntry {
                 path: CompileKnobPath {
@@ -1217,6 +2687,7 @@ mod tests {
                     ..CompileKnobPartialValues::default()
                 },
                 bounds: CompileKnobPartialBounds::default(),
+                ..CompileKnobOverrides::default()
             }),
             requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
         }
@@ -2497,6 +3968,765 @@ mod tests {
             serde_json::from_str(&encoded).expect("constraints deserializes");
 
         assert_eq!(decoded, constraints);
+    }
+
+    mod knobs {
+        use super::*;
+
+        #[test]
+        fn serde_round_trip() {
+            let knobs = compile_knobs_fixture();
+            let encoded = serde_json::to_string(&knobs).expect("knobs serialize");
+            let decoded: CompileKnobs = serde_json::from_str(&encoded).expect("knobs deserialize");
+
+            assert_eq!(decoded, knobs);
+        }
+
+        #[test]
+        fn monotone_orders() {
+            assert_eq!(PlacementProfile::StrictOnePerBank.rank(), 0);
+            assert_eq!(PlacementProfile::Budgeted.rank(), 1);
+            assert_eq!(PlacementProfile::PackedExperts.rank(), 2);
+            assert!(
+                PlacementProfile::Budgeted
+                    .is_monotone_successor_of(&PlacementProfile::StrictOnePerBank)
+            );
+            assert!(
+                StorageMaterialization::SpillColdValues
+                    .is_monotone_successor_of(&StorageMaterialization::RecomputePureValues)
+            );
+            assert!(
+                RomKernelDuplicationBias::DuplicateAllFit
+                    .is_monotone_successor_of(&RomKernelDuplicationBias::DuplicateHot)
+            );
+            assert!(
+                ScheduleSliceCoarsening::Coarse
+                    .is_monotone_successor_of(&ScheduleSliceCoarsening::Balanced)
+            );
+        }
+
+        #[test]
+        fn knob_id_exhaustive() {
+            let ids = f_b16_refinement_knob_ids();
+            assert_eq!(ids.len(), 16);
+            assert!(ids.contains(&CompileKnobId::PlacementProfile));
+            assert!(ids.contains(&CompileKnobId::ObservationTraceDemotion));
+            assert!(ids.contains(&CompileKnobId::StorageMaterializationOverrides));
+            assert!(ids.contains(&CompileKnobId::RomKernelResidencyOverrides));
+            assert!(ids.contains(&CompileKnobId::StageIterationCeilings));
+        }
+    }
+
+    mod selectors {
+        use super::*;
+
+        #[test]
+        fn id_exhaustive() {
+            let classes = [
+                SliceClass::Micro,
+                SliceClass::Frame,
+                SliceClass::TokenBoundary,
+                SliceClass::TraceHeavy,
+            ];
+            let encoded = serde_json::to_string(&TileSelector::SliceClass {
+                class: SliceClass::TraceHeavy,
+            })
+            .expect("selector serializes");
+            let decoded: TileSelector =
+                serde_json::from_str(&encoded).expect("selector deserializes");
+
+            assert_eq!(classes.len(), 4);
+            assert_eq!(
+                decoded,
+                TileSelector::SliceClass {
+                    class: SliceClass::TraceHeavy
+                }
+            );
+        }
+    }
+
+    mod overrides {
+        use super::*;
+
+        #[test]
+        fn serde_round_trip() {
+            let overrides = CompileKnobOverrides {
+                disabled_optional_probes: BTreeSet::from([TraceProbeId(7)]),
+                forced_kernel_residency: BTreeMap::from([(
+                    KernelSelector::KernelSpec {
+                        id: KernelSpecId(3),
+                    },
+                    KernelResidency::WramOverlay,
+                )]),
+                forced_recompute: BTreeSet::from([ValueSelector::Value { id: ValueId(9) }]),
+                reduction_ceiling_overrides: BTreeMap::from([(
+                    ReductionSelector::Layer { id: LayerId(1) },
+                    ReductionPlanCeiling::Adaptive,
+                )]),
+                tile_class_overrides: BTreeMap::from([(
+                    TileSelector::SliceClass {
+                        class: SliceClass::Frame,
+                    },
+                    BTreeSet::from([TileCandidateClass::Balanced]),
+                )]),
+                ..CompileKnobOverrides::default()
+            };
+
+            let encoded = serde_json::to_string(&overrides).expect("overrides serialize");
+            let decoded: CompileKnobOverrides =
+                serde_json::from_str(&encoded).expect("overrides deserialize");
+
+            assert_eq!(decoded, overrides);
+        }
+
+        #[test]
+        fn monotone_insert() {
+            let mut previous = CompileKnobOverrides::default();
+            let mut next = CompileKnobOverrides::default();
+            let selector = KernelSelector::KernelSpec {
+                id: KernelSpecId(1),
+            };
+            next.forced_kernel_residency
+                .insert(selector, KernelResidency::WramOverlay);
+
+            assert!(overrides_are_monotone(&previous, &next));
+
+            previous.forced_kernel_residency.insert(
+                KernelSelector::Section { id: SectionId(2) },
+                KernelResidency::CoResident,
+            );
+            next.forced_kernel_residency.insert(
+                KernelSelector::Section { id: SectionId(2) },
+                KernelResidency::WramOverlay,
+            );
+            assert!(overrides_are_monotone(&previous, &next));
+        }
+
+        #[test]
+        fn monotone_no_delete() {
+            let selector = ValueSelector::Value { id: ValueId(1) };
+            let previous = CompileKnobOverrides {
+                forced_recompute: BTreeSet::from([selector]),
+                ..CompileKnobOverrides::default()
+            };
+            let next = CompileKnobOverrides::default();
+
+            assert!(!overrides_are_monotone(&previous, &next));
+        }
+
+        fn overrides_are_monotone(
+            previous: &CompileKnobOverrides,
+            next: &CompileKnobOverrides,
+        ) -> bool {
+            previous
+                .disabled_optional_probes
+                .is_subset(&next.disabled_optional_probes)
+                && previous.forced_recompute.is_subset(&next.forced_recompute)
+                && previous
+                    .forced_kernel_residency
+                    .iter()
+                    .all(|(selector, old)| {
+                        next.forced_kernel_residency
+                            .get(selector)
+                            .is_some_and(|new| new.rank() >= old.rank())
+                    })
+                && previous
+                    .reduction_ceiling_overrides
+                    .iter()
+                    .all(|(selector, old)| {
+                        next.reduction_ceiling_overrides
+                            .get(selector)
+                            .is_some_and(|new| new.rank() >= old.rank())
+                    })
+                && previous.tile_class_overrides.iter().all(|(selector, old)| {
+                    next.tile_class_overrides
+                        .get(selector)
+                        .is_some_and(|new| new.is_subset(old))
+                })
+        }
+    }
+
+    mod delta {
+        use super::*;
+
+        #[test]
+        fn serde_round_trip() {
+            let delta = ConstraintDelta {
+                changes: vec![KnobDelta::UpdatePressureThreshold {
+                    update: ResourcePressureUpdate::SliceCycles {
+                        limit: PressureLimit {
+                            soft: 1200,
+                            hard: 1400,
+                        },
+                    },
+                }],
+            };
+
+            let encoded = serde_json::to_string(&delta).expect("delta serializes");
+            let decoded: ConstraintDelta =
+                serde_json::from_str(&encoded).expect("delta deserializes");
+
+            assert_eq!(decoded, delta);
+        }
+
+        #[test]
+        fn admissibility_locked() {
+            let mut knobs = compile_knobs_fixture();
+            knobs.locks.locked.insert(CompileKnobId::PlacementProfile);
+            let rejection = check_delta_admissible(
+                &KnobDelta::AdvancePlacementProfile {
+                    to: PlacementProfile::PackedExperts,
+                },
+                &knobs,
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("locked knob rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::KnobLocked {
+                    knob: CompileKnobId::PlacementProfile
+                }
+            ));
+        }
+
+        #[test]
+        fn admissibility_policy_toggle() {
+            let rejection = check_delta_admissible(
+                &KnobDelta::PromoteOverlay {
+                    to: OverlayPromotion::EligibleKernels,
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Bringup),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("disabled overlay promotion rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::PolicyToggleDisabled { toggle, .. }
+                    if toggle == "allow_overlay_promotion"
+            ));
+        }
+
+        #[test]
+        fn admissibility_bounds() {
+            let mut knobs = compile_knobs_fixture();
+            knobs.bounds.placement.max_profile = PlacementProfile::Budgeted;
+            let rejection = check_delta_admissible(
+                &KnobDelta::AdvancePlacementProfile {
+                    to: PlacementProfile::PackedExperts,
+                },
+                &knobs,
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("beyond max rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::BeyondBounds {
+                    knob: CompileKnobId::PlacementProfile,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn admissibility_monotone() {
+            let rejection = check_delta_admissible(
+                &KnobDelta::AdvancePlacementProfile {
+                    to: PlacementProfile::StrictOnePerBank,
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("backward step rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::NotMonotone {
+                    knob: CompileKnobId::PlacementProfile,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn invariant_blocks_demotion() {
+            let rejection = check_delta_admissible(
+                &KnobDelta::SetTraceDemotion {
+                    to: ProbeCollectionLevel::Verbose,
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Invariant,
+            )
+            .expect_err("invariant observability rejects demotion");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::InvariantObservabilityViolation {
+                    knob: CompileKnobId::ObservationTraceDemotion
+                }
+            ));
+        }
+
+        #[test]
+        fn effectful_recompute_rejected() {
+            let value = ValueSelector::Value { id: ValueId(5) };
+            let facts = RecomputePurityFacts {
+                effectful_values: BTreeSet::from([value.clone()]),
+                ..RecomputePurityFacts::default()
+            };
+            let rejection = check_delta_admissible_with_recompute_purity(
+                &KnobDelta::ForceRecompute {
+                    values: BTreeSet::from([value.clone()]),
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+                &facts,
+            )
+            .expect_err("effectful recompute rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::EffectfulRecompute { value: rejected }
+                    if rejected == value
+            ));
+        }
+
+        #[test]
+        fn pure_recompute_allowed() {
+            let value = ValueSelector::Value { id: ValueId(6) };
+            let facts = RecomputePurityFacts {
+                pure_values: BTreeSet::from([value.clone()]),
+                ..RecomputePurityFacts::default()
+            };
+
+            check_delta_admissible_with_recompute_purity(
+                &KnobDelta::ForceRecompute {
+                    values: BTreeSet::from([value]),
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+                &facts,
+            )
+            .expect("pure force recompute is admissible");
+        }
+
+        #[test]
+        fn force_recompute_without_purity_facts_rejects_unknown() {
+            let value = ValueSelector::Value { id: ValueId(7) };
+            let rejection = check_delta_admissible(
+                &KnobDelta::ForceRecompute {
+                    values: BTreeSet::from([value.clone()]),
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("unknown recompute purity rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::EffectfulRecompute { value: rejected }
+                    if rejected == value
+            ));
+        }
+
+        #[test]
+        fn resource_pressure_update_variants_exhaustive() {
+            let byte = PressureLimit {
+                soft: 10_u64,
+                hard: 20_u64,
+            };
+            let cycles = PressureLimit {
+                soft: 30_u64,
+                hard: 40_u64,
+            };
+            let per_frame = PressureLimit {
+                soft: 3_u16,
+                hard: 4_u16,
+            };
+            let tiny = PressureLimit {
+                soft: 1_u8,
+                hard: 2_u8,
+            };
+            let updates = [
+                ResourcePressureUpdate::WramHot { limit: byte },
+                ResourcePressureUpdate::HramHot { limit: byte },
+                ResourcePressureUpdate::Bank0Rom { limit: byte },
+                ResourcePressureUpdate::SwitchableRomWindow { limit: byte },
+                ResourcePressureUpdate::SramWindow { limit: byte },
+                ResourcePressureUpdate::SliceCycles { limit: cycles },
+                ResourcePressureUpdate::InterruptLatency { limit: cycles },
+                ResourcePressureUpdate::TraceBytesPerFrame { limit: per_frame },
+                ResourcePressureUpdate::PersistBytesPerFrame { limit: per_frame },
+                ResourcePressureUpdate::OverlayInstallsPerFrame { limit: tiny },
+                ResourcePressureUpdate::BankSwitchesPerToken { limit: per_frame },
+                ResourcePressureUpdate::SramPageSwitchesPerToken { limit: per_frame },
+            ];
+
+            assert_eq!(updates.len(), 12);
+        }
+    }
+
+    mod profile_defaults {
+        use super::*;
+
+        #[test]
+        fn bringup() {
+            assert_eq!(
+                RepairPolicy::for_profile(RepairPolicyProfile::Bringup),
+                RepairPolicy {
+                    max_refinement_iters: 1,
+                    allow_placement_profile_fallback: false,
+                    allow_trace_demotion: false,
+                    allow_overlay_promotion: false,
+                    allow_recompute_promotion: false,
+                }
+            );
+            let locks = f_b16_profile_lock_set(RepairPolicyProfile::Bringup);
+            assert!(!locks.is_locked(CompileKnobId::ScheduleTileSearch));
+            assert!(!locks.is_locked(CompileKnobId::ScheduleSliceCoarsening));
+            assert!(locks.is_locked(CompileKnobId::PlacementProfile));
+        }
+
+        #[test]
+        fn bringup_first_fit_strict_override() {
+            assert_eq!(
+                RepairPolicy::for_profile(RepairPolicyProfile::BringupFirstFit),
+                RepairPolicy::bringup_strict_first_fit()
+            );
+            assert_eq!(
+                RepairPolicy::for_profile(RepairPolicyProfile::BringupFirstFit)
+                    .max_refinement_iters,
+                0
+            );
+            assert_eq!(
+                f_b16_profile_lock_set(RepairPolicyProfile::BringupFirstFit),
+                f_b16_profile_lock_set(RepairPolicyProfile::Bringup)
+            );
+        }
+
+        #[test]
+        fn default() {
+            assert_eq!(
+                RepairPolicy::for_profile(RepairPolicyProfile::Default).max_refinement_iters,
+                4
+            );
+            let locks = f_b16_profile_lock_set(RepairPolicyProfile::Default);
+            assert!(locks.is_locked(CompileKnobId::ScheduleResourcePressure));
+            assert!(locks.is_locked(CompileKnobId::StageIterationCeilings));
+            assert!(!locks.is_locked(CompileKnobId::PlacementProfile));
+        }
+
+        #[test]
+        fn default_unlocks_every_refinement_knob_except_pressure_and_stage_iters() {
+            let locks = f_b16_profile_lock_set(RepairPolicyProfile::Default);
+            let expected_locked = BTreeSet::from([
+                CompileKnobId::ScheduleResourcePressure,
+                CompileKnobId::StageIterationCeilings,
+            ]);
+
+            assert_eq!(locks.locked, expected_locked);
+            for knob in f_b16_refinement_knob_ids() {
+                let should_be_locked = expected_locked.contains(&knob);
+                assert_eq!(
+                    locks.is_locked(knob),
+                    should_be_locked,
+                    "{knob:?} lock state should match Default profile contract"
+                );
+            }
+        }
+
+        #[test]
+        fn trace_invariant_locks_everything() {
+            let locks = f_b16_profile_lock_set(RepairPolicyProfile::TraceInvariant);
+            assert!(
+                f_b16_refinement_knob_ids()
+                    .into_iter()
+                    .all(|knob| locks.is_locked(knob))
+            );
+        }
+
+        #[test]
+        fn recovery() {
+            let policy = RepairPolicy::for_profile(RepairPolicyProfile::Recovery);
+            assert_eq!(policy.max_refinement_iters, 6);
+            assert!(policy.allow_placement_profile_fallback);
+            assert!(policy.allow_trace_demotion);
+            assert!(policy.allow_overlay_promotion);
+            assert!(policy.allow_recompute_promotion);
+        }
+
+        #[test]
+        fn placement_provenance_is_populated() {
+            let profile =
+                load_compile_profile_spec(BRINGUP_COMPILE_PROFILE_TOML).expect("profile loads");
+            let knobs =
+                resolve_initial_knobs_from_profile_spec(&profile).expect("initial knobs resolve");
+            let entry = knobs
+                .provenance
+                .iter()
+                .find(|entry| entry.path.knob == CompileKnobId::Placement)
+                .expect("fixture has knob provenance");
+
+            assert!(!entry.chain.is_empty());
+            assert_eq!(
+                entry.path.field.as_ref().map(FieldPath::as_str),
+                Some("profile_default.placement")
+            );
+            assert!(
+                entry
+                    .chain
+                    .iter()
+                    .all(|provenance| !provenance.evidence.is_empty())
+            );
+        }
+
+        #[test]
+        fn resolves_initial_knobs_from_canonical_profiles() {
+            let profiles = canonical_compile_profile_specs().expect("canonical profiles load");
+
+            for profile in &profiles {
+                let knobs = resolve_initial_knobs_from_profile_spec(profile)
+                    .expect("initial knobs resolve from complete profile spec");
+                let repair = resolve_repair_policy_from_profile_spec(profile)
+                    .expect("repair policy resolves from profile id");
+
+                assert_eq!(repair, profile.repair_policy);
+                assert_eq!(
+                    knobs.global.placement,
+                    profile.knob_defaults.placement.expect("placement default")
+                );
+                assert_eq!(
+                    knobs.bounds.placement,
+                    profile.knob_bounds.placement.expect("placement bound")
+                );
+                assert_eq!(knobs.provenance.len(), 8);
+                assert!(knobs.provenance.iter().all(|entry| {
+                    entry
+                        .chain
+                        .iter()
+                        .all(|provenance| matches!(provenance.source, PolicySource::ProfileDefault))
+                }));
+            }
+        }
+
+        #[test]
+        fn resolve_initial_knobs_rejects_missing_profile_default() {
+            let mut profile =
+                load_compile_profile_spec(BRINGUP_COMPILE_PROFILE_TOML).expect("profile loads");
+            profile.knob_defaults.placement = None;
+
+            let err = resolve_initial_knobs_from_profile_spec(&profile)
+                .expect_err("missing default rejects");
+
+            assert!(matches!(
+                err,
+                InitialKnobsResolveError::MissingDefault {
+                    field: "placement",
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn pressure_thresholds_have_provenance() {
+            let profile =
+                load_compile_profile_spec(DEFAULT_COMPILE_PROFILE_TOML).expect("profile loads");
+            let objective = objective_fixture();
+            let trace_budget = TraceBudget {
+                max_events_per_slice: 11,
+                max_bytes_per_frame: 300,
+                drop_policy: TraceDropPolicy::DropOldest,
+            };
+            let chrome_budget = RuntimeChromeBudget {
+                target: TargetProfileId::from("dmg-mbc5"),
+                profile: CompileProfileId::from("Default"),
+                runtime_nucleus_hash: Hash256::from_bytes([0x44; 32]),
+                rom_slots: vec![
+                    crate::budget::RomBudgetSlot {
+                        id: gbf_foundation::BudgetSlotId::new(1),
+                        class: crate::budget::BudgetSlotClass::Bank0Free,
+                        usable_bytes: 4096,
+                        reserved_slack: 96,
+                        placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+                    },
+                    crate::budget::RomBudgetSlot {
+                        id: gbf_foundation::BudgetSlotId::new(2),
+                        class: crate::budget::BudgetSlotClass::ExpertBank,
+                        usable_bytes: 16_384,
+                        reserved_slack: 384,
+                        placement_caps: BTreeSet::from([PlacementProfile::PackedExperts]),
+                    },
+                ],
+                memory_caps: crate::budget::RuntimeMemoryCapSection {
+                    wram_usable_bytes: 8192,
+                    sram_usable_bytes: 32 * 1024,
+                    hram_usable_bytes: 127,
+                    source_target_profile_hash: Hash256::from_bytes([0x45; 32]),
+                },
+                wram_reserved: 512,
+                sram_reserved: 1024,
+            };
+
+            let resolved = resolve_resource_pressure_thresholds(
+                &profile,
+                Some(&chrome_budget),
+                &objective,
+                &trace_budget,
+            )
+            .expect("thresholds resolve");
+
+            assert_eq!(resolved.thresholds.wram_hot.hard, 7680);
+            assert_eq!(resolved.thresholds.bank0_rom.hard, 4000);
+            assert_eq!(resolved.thresholds.switchable_rom_window.hard, 16_000);
+            assert_eq!(resolved.thresholds.sram_window.hard, 31 * 1024);
+            assert_eq!(resolved.thresholds.slice_cycles.hard, 8000);
+            assert_eq!(resolved.thresholds.interrupt_latency.hard, 1000);
+            assert_eq!(resolved.thresholds.trace_bytes_per_frame.hard, 300);
+            assert_eq!(resolved.thresholds.bank_switches_per_token.hard, 5);
+            assert_eq!(resolved.thresholds.sram_page_switches_per_token.hard, 1);
+            assert_eq!(resolved.provenance.len(), 12);
+
+            let wram = resolved
+                .provenance
+                .iter()
+                .find(|entry| {
+                    entry
+                        .path
+                        .field
+                        .as_ref()
+                        .is_some_and(|field| field.as_str() == "thresholds.wram_hot")
+                })
+                .expect("wram provenance exists");
+            assert!(
+                wram.chain
+                    .iter()
+                    .any(|provenance| matches!(provenance.source, PolicySource::TargetDefault))
+            );
+
+            let switches =
+                resolved
+                    .provenance
+                    .iter()
+                    .find(|entry| {
+                        entry.path.field.as_ref().is_some_and(|field| {
+                            field.as_str() == "thresholds.bank_switches_per_token"
+                        })
+                    })
+                    .expect("switch provenance exists");
+            assert!(switches.chain.iter().any(|provenance| {
+                matches!(provenance.source, PolicySource::CompileRequestOverride)
+            }));
+        }
+
+        #[test]
+        fn pressure_update_rejects_soft_limit_above_hard_limit() {
+            let rejection = check_delta_admissible(
+                &KnobDelta::UpdatePressureThreshold {
+                    update: ResourcePressureUpdate::WramHot {
+                        limit: PressureLimit {
+                            soft: 4097,
+                            hard: 4096,
+                        },
+                    },
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("soft above hard rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::BeyondBounds {
+                    knob: CompileKnobId::ScheduleResourcePressure,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn pressure_update_rejects_until_mutable_thresholds_are_wired() {
+            let rejection = check_delta_admissible(
+                &KnobDelta::UpdatePressureThreshold {
+                    update: ResourcePressureUpdate::WramHot {
+                        limit: PressureLimit {
+                            soft: 1024,
+                            hard: 2048,
+                        },
+                    },
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("valid pressure update is unsupported in narrow-v1");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::UnsupportedMutation {
+                    knob: CompileKnobId::ScheduleResourcePressure,
+                    reason
+                } if reason.contains("bd-2n14")
+            ));
+        }
+
+        #[test]
+        fn pressure_thresholds_fall_back_to_profile_defaults_without_runtime_budget() {
+            let profile =
+                load_compile_profile_spec(BRINGUP_COMPILE_PROFILE_TOML).expect("profile loads");
+            let objective = CompileObjective {
+                service: None,
+                max_cycles_per_token: None,
+                max_bank_switches_per_token: None,
+                max_sram_page_switches_per_token: None,
+                ..objective_fixture()
+            };
+            let resolved = resolve_resource_pressure_thresholds(
+                &profile,
+                None,
+                &objective,
+                &profile.trace_budget,
+            )
+            .expect("thresholds resolve without runtime chrome budget");
+
+            assert_limit(resolved.thresholds.wram_hot, 4096);
+            assert_limit(resolved.thresholds.hram_hot, 96);
+            assert_limit(resolved.thresholds.bank0_rom, 4096);
+            assert_limit(resolved.thresholds.switchable_rom_window, 16 * 1024);
+            assert_limit(resolved.thresholds.sram_window, 8 * 1024);
+            assert_limit(resolved.thresholds.slice_cycles, 8192);
+            assert_limit(resolved.thresholds.interrupt_latency, 2048);
+            assert_limit(
+                resolved.thresholds.trace_bytes_per_frame,
+                profile.trace_budget.max_bytes_per_frame,
+            );
+            assert_limit(resolved.thresholds.persist_bytes_per_frame, 512);
+            assert_limit(resolved.thresholds.overlay_installs_per_frame, 1);
+            assert_limit(resolved.thresholds.bank_switches_per_token, 8);
+            assert_limit(resolved.thresholds.sram_page_switches_per_token, 4);
+            assert!(resolved.provenance.iter().all(|entry| {
+                entry.path.knob == CompileKnobId::ScheduleResourcePressure
+                    && !entry.chain.is_empty()
+            }));
+        }
+
+        fn assert_limit<T>(limit: PressureLimit<T>, expected_hard: T)
+        where
+            T: Copy + PartialOrd + std::fmt::Debug + PartialEq,
+        {
+            assert_eq!(limit.hard, expected_hard);
+            assert!(limit.soft <= limit.hard);
+        }
     }
 
     #[derive(Clone, Default)]

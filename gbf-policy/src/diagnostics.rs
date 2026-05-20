@@ -84,6 +84,13 @@ pub enum ValidationOrigin {
     ObservationPlanConstruction,
     RangePlanConstruction,
     StoragePlanConstruction,
+    SramPagePlanConstruction,
+    RomWindowPlanConstruction,
+    OverlayPlanConstruction,
+    ArenaPlanConstruction,
+    SchedIrConstruction,
+    ResourceStateValidation,
+    ScheduleCostAnalysis,
     Manifest,
     Lowering,
     Calibration,
@@ -450,6 +457,388 @@ pub enum ValidationCode {
         code: StoragePlanDiagnosticCode,
         provenance: StoragePlanDiagnosticProvenance,
     },
+    SramPagePlan {
+        code: SramPagePlanDiagnosticCode,
+        provenance: SramPagePlanDiagnosticProvenance,
+    },
+    RomWindowPlan {
+        code: RomWindowPlanDiagnosticCode,
+        provenance: RomWindowPlanDiagnosticProvenance,
+    },
+    OverlayPlan {
+        code: OverlayPlanDiagnosticCode,
+        provenance: OverlayPlanDiagnosticProvenance,
+    },
+    ArenaPlan {
+        code: ArenaPlanDiagnosticCode,
+        provenance: ArenaPlanDiagnosticProvenance,
+    },
+    ResourceState {
+        code: ResourceStateDiagnosticCode,
+        provenance: ResourceStateDiagnosticProvenance,
+    },
+    ScheduleCost {
+        code: ScheduleCostDiagnosticCode,
+        provenance: ScheduleCostDiagnosticProvenance,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+#[allow(clippy::enum_variant_names)]
+pub enum ScheduleCostDiagnosticCode {
+    CostScheduleCostInputHashMismatch,
+    CostCalibrationBundleHashMismatch,
+    CostCalibrationBundleStale,
+    CostCalibrationMissingForRequirement,
+    CostKernelSpecNotInRegistry,
+    CostPerModeMissing,
+    CostPerModeUnexpected,
+    CostEvidenceClassRefsInconsistent,
+    CostFallbackReasonMissing,
+    CostFallbackReasonPresentForCalibrated,
+    CostUncertaintyEnvelopeMalformed,
+    CostUncertaintyEnvelopeNegative,
+    CostObjectiveSatisfactionMatrixIncomplete,
+    CostObjectiveSatisfactionMatrixInconsistent,
+    CostHeuristicPolicyUnknown,
+    CostTransferPolicyUnknown,
+    CostFloatingPointFieldDetected,
+    CostScheduleCostSchemaUnknown,
+    CostOptionFieldMissing,
+    CostOptionFieldPresentUnexpectedly,
+    CostRefsUnionInconsistent,
+    CostScheduleCostReportRoundTripFailed,
+    CostFinalNonNegativityViolation,
+}
+
+impl ScheduleCostDiagnosticCode {
+    pub const ALL: [Self; 23] = [
+        Self::CostScheduleCostInputHashMismatch,
+        Self::CostCalibrationBundleHashMismatch,
+        Self::CostCalibrationBundleStale,
+        Self::CostCalibrationMissingForRequirement,
+        Self::CostKernelSpecNotInRegistry,
+        Self::CostPerModeMissing,
+        Self::CostPerModeUnexpected,
+        Self::CostEvidenceClassRefsInconsistent,
+        Self::CostFallbackReasonMissing,
+        Self::CostFallbackReasonPresentForCalibrated,
+        Self::CostUncertaintyEnvelopeMalformed,
+        Self::CostUncertaintyEnvelopeNegative,
+        Self::CostObjectiveSatisfactionMatrixIncomplete,
+        Self::CostObjectiveSatisfactionMatrixInconsistent,
+        Self::CostHeuristicPolicyUnknown,
+        Self::CostTransferPolicyUnknown,
+        Self::CostFloatingPointFieldDetected,
+        Self::CostScheduleCostSchemaUnknown,
+        Self::CostOptionFieldMissing,
+        Self::CostOptionFieldPresentUnexpectedly,
+        Self::CostRefsUnionInconsistent,
+        Self::CostScheduleCostReportRoundTripFailed,
+        Self::CostFinalNonNegativityViolation,
+    ];
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        match self {
+            Self::CostScheduleCostInputHashMismatch => 1,
+            Self::CostCalibrationBundleHashMismatch => 2,
+            Self::CostCalibrationBundleStale => 3,
+            Self::CostCalibrationMissingForRequirement => 4,
+            Self::CostKernelSpecNotInRegistry => 5,
+            Self::CostPerModeMissing => 6,
+            Self::CostPerModeUnexpected => 7,
+            Self::CostEvidenceClassRefsInconsistent => 8,
+            Self::CostFallbackReasonMissing => 9,
+            Self::CostFallbackReasonPresentForCalibrated => 10,
+            Self::CostUncertaintyEnvelopeMalformed => 11,
+            Self::CostUncertaintyEnvelopeNegative => 12,
+            Self::CostObjectiveSatisfactionMatrixIncomplete => 13,
+            Self::CostObjectiveSatisfactionMatrixInconsistent => 14,
+            Self::CostHeuristicPolicyUnknown => 15,
+            Self::CostTransferPolicyUnknown => 16,
+            Self::CostFloatingPointFieldDetected => 17,
+            Self::CostScheduleCostSchemaUnknown => 18,
+            Self::CostOptionFieldMissing => 19,
+            Self::CostOptionFieldPresentUnexpectedly => 20,
+            Self::CostRefsUnionInconsistent => 21,
+            Self::CostScheduleCostReportRoundTripFailed => 22,
+            Self::CostFinalNonNegativityViolation => 23,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self.number() {
+            1 => "COST-001",
+            2 => "COST-002",
+            3 => "COST-003",
+            4 => "COST-004",
+            5 => "COST-005",
+            6 => "COST-006",
+            7 => "COST-007",
+            8 => "COST-008",
+            9 => "COST-009",
+            10 => "COST-010",
+            11 => "COST-011",
+            12 => "COST-012",
+            13 => "COST-013",
+            14 => "COST-014",
+            15 => "COST-015",
+            16 => "COST-016",
+            17 => "COST-017",
+            18 => "COST-018",
+            19 => "COST-019",
+            20 => "COST-020",
+            21 => "COST-021",
+            22 => "COST-022",
+            23 => "COST-023",
+            _ => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CostScheduleCostInputHashMismatch => "CostScheduleCostInputHashMismatch",
+            Self::CostCalibrationBundleHashMismatch => "CostCalibrationBundleHashMismatch",
+            Self::CostCalibrationBundleStale => "CostCalibrationBundleStale",
+            Self::CostCalibrationMissingForRequirement => "CostCalibrationMissingForRequirement",
+            Self::CostKernelSpecNotInRegistry => "CostKernelSpecNotInRegistry",
+            Self::CostPerModeMissing => "CostPerModeMissing",
+            Self::CostPerModeUnexpected => "CostPerModeUnexpected",
+            Self::CostEvidenceClassRefsInconsistent => "CostEvidenceClassRefsInconsistent",
+            Self::CostFallbackReasonMissing => "CostFallbackReasonMissing",
+            Self::CostFallbackReasonPresentForCalibrated => {
+                "CostFallbackReasonPresentForCalibrated"
+            }
+            Self::CostUncertaintyEnvelopeMalformed => "CostUncertaintyEnvelopeMalformed",
+            Self::CostUncertaintyEnvelopeNegative => "CostUncertaintyEnvelopeNegative",
+            Self::CostObjectiveSatisfactionMatrixIncomplete => {
+                "CostObjectiveSatisfactionMatrixIncomplete"
+            }
+            Self::CostObjectiveSatisfactionMatrixInconsistent => {
+                "CostObjectiveSatisfactionMatrixInconsistent"
+            }
+            Self::CostHeuristicPolicyUnknown => "CostHeuristicPolicyUnknown",
+            Self::CostTransferPolicyUnknown => "CostTransferPolicyUnknown",
+            Self::CostFloatingPointFieldDetected => "CostFloatingPointFieldDetected",
+            Self::CostScheduleCostSchemaUnknown => "CostScheduleCostSchemaUnknown",
+            Self::CostOptionFieldMissing => "CostOptionFieldMissing",
+            Self::CostOptionFieldPresentUnexpectedly => "CostOptionFieldPresentUnexpectedly",
+            Self::CostRefsUnionInconsistent => "CostRefsUnionInconsistent",
+            Self::CostScheduleCostReportRoundTripFailed => "CostScheduleCostReportRoundTripFailed",
+            Self::CostFinalNonNegativityViolation => "CostFinalNonNegativityViolation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ScheduleCostDiagnosticProvenance {
+    HashMismatch {
+        product: String,
+        recorded: Hash256,
+        computed: Hash256,
+    },
+    Mode {
+        mode: RuntimeMode,
+    },
+    Objective {
+        mode: RuntimeMode,
+        axis: String,
+        quantile: String,
+        target_q16_16: i64,
+        observed_q16_16: i64,
+    },
+    Calibration {
+        layer: CalibrationLayer,
+        declared_confidence: CalibrationConfidenceClass,
+        required_confidence: String,
+    },
+    Estimate {
+        field: String,
+        invariant: String,
+    },
+    JsonPath {
+        json_path: String,
+        field_or_tag: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+#[allow(clippy::enum_variant_names)]
+pub enum ResourceStateDiagnosticCode {
+    SchedInputHashMismatch,
+    SchedPackEmpty,
+    SchedEpochCoverageGap,
+    SchedEntryResidencyEpochMismatch,
+    SchedOverlayInstallEpochMismatch,
+    SchedArenaSlotUnknown,
+    LeaseRequiredLeaseNotAcquired,
+    LeaseUnbalanced,
+    LeaseDoubleAcquire,
+    LeaseReleaseWithoutAcquire,
+    LeaseYieldCrossesNonResumable,
+    LeaseKindMismatchAgainstUpstream,
+    ResIsrEnabledHoldsRomWindowLease,
+    ResIsrEnabledHoldsSramPageLease,
+    ResIsrEnabledInExpertBank,
+    ResBankSwitchUnbracketed,
+    ModeRequestedModeNotEmitted,
+    ModeCheckpointSchemaMismatch,
+    DriftObservedNotAllNoneAtCompileTime,
+    DriftConsecutiveViolationsNonZeroAtCompileTime,
+    ResourceStateReportRoundTripFailed,
+}
+
+impl ResourceStateDiagnosticCode {
+    pub const ALL: [Self; 21] = [
+        Self::SchedInputHashMismatch,
+        Self::SchedPackEmpty,
+        Self::SchedEpochCoverageGap,
+        Self::SchedEntryResidencyEpochMismatch,
+        Self::SchedOverlayInstallEpochMismatch,
+        Self::SchedArenaSlotUnknown,
+        Self::LeaseRequiredLeaseNotAcquired,
+        Self::LeaseUnbalanced,
+        Self::LeaseDoubleAcquire,
+        Self::LeaseReleaseWithoutAcquire,
+        Self::LeaseYieldCrossesNonResumable,
+        Self::LeaseKindMismatchAgainstUpstream,
+        Self::ResIsrEnabledHoldsRomWindowLease,
+        Self::ResIsrEnabledHoldsSramPageLease,
+        Self::ResIsrEnabledInExpertBank,
+        Self::ResBankSwitchUnbracketed,
+        Self::ModeRequestedModeNotEmitted,
+        Self::ModeCheckpointSchemaMismatch,
+        Self::DriftObservedNotAllNoneAtCompileTime,
+        Self::DriftConsecutiveViolationsNonZeroAtCompileTime,
+        Self::ResourceStateReportRoundTripFailed,
+    ];
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        match self {
+            Self::SchedInputHashMismatch => 1,
+            Self::SchedPackEmpty => 2,
+            Self::SchedEpochCoverageGap => 3,
+            Self::SchedEntryResidencyEpochMismatch => 4,
+            Self::SchedOverlayInstallEpochMismatch => 5,
+            Self::SchedArenaSlotUnknown => 6,
+            Self::LeaseRequiredLeaseNotAcquired => 7,
+            Self::LeaseUnbalanced => 8,
+            Self::LeaseDoubleAcquire => 9,
+            Self::LeaseReleaseWithoutAcquire => 10,
+            Self::LeaseYieldCrossesNonResumable => 11,
+            Self::LeaseKindMismatchAgainstUpstream => 12,
+            Self::ResIsrEnabledHoldsRomWindowLease => 13,
+            Self::ResIsrEnabledHoldsSramPageLease => 14,
+            Self::ResIsrEnabledInExpertBank => 15,
+            Self::ResBankSwitchUnbracketed => 16,
+            Self::ModeRequestedModeNotEmitted => 17,
+            Self::ModeCheckpointSchemaMismatch => 18,
+            Self::DriftObservedNotAllNoneAtCompileTime => 19,
+            Self::DriftConsecutiveViolationsNonZeroAtCompileTime => 20,
+            Self::ResourceStateReportRoundTripFailed => 21,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self.number() {
+            1 => "RSV-001",
+            2 => "RSV-002",
+            3 => "RSV-003",
+            4 => "RSV-004",
+            5 => "RSV-005",
+            6 => "RSV-006",
+            7 => "RSV-007",
+            8 => "RSV-008",
+            9 => "RSV-009",
+            10 => "RSV-010",
+            11 => "RSV-011",
+            12 => "RSV-012",
+            13 => "RSV-013",
+            14 => "RSV-014",
+            15 => "RSV-015",
+            16 => "RSV-016",
+            17 => "RSV-017",
+            18 => "RSV-018",
+            19 => "RSV-019",
+            20 => "RSV-020",
+            21 => "RSV-021",
+            _ => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SchedInputHashMismatch => "SchedInputHashMismatch",
+            Self::SchedPackEmpty => "SchedPackEmpty",
+            Self::SchedEpochCoverageGap => "SchedEpochCoverageGap",
+            Self::SchedEntryResidencyEpochMismatch => "SchedEntryResidencyEpochMismatch",
+            Self::SchedOverlayInstallEpochMismatch => "SchedOverlayInstallEpochMismatch",
+            Self::SchedArenaSlotUnknown => "SchedArenaSlotUnknown",
+            Self::LeaseRequiredLeaseNotAcquired => "LeaseRequiredLeaseNotAcquired",
+            Self::LeaseUnbalanced => "LeaseUnbalanced",
+            Self::LeaseDoubleAcquire => "LeaseDoubleAcquire",
+            Self::LeaseReleaseWithoutAcquire => "LeaseReleaseWithoutAcquire",
+            Self::LeaseYieldCrossesNonResumable => "LeaseYieldCrossesNonResumable",
+            Self::LeaseKindMismatchAgainstUpstream => "LeaseKindMismatchAgainstUpstream",
+            Self::ResIsrEnabledHoldsRomWindowLease => "ResIsrEnabledHoldsRomWindowLease",
+            Self::ResIsrEnabledHoldsSramPageLease => "ResIsrEnabledHoldsSramPageLease",
+            Self::ResIsrEnabledInExpertBank => "ResIsrEnabledInExpertBank",
+            Self::ResBankSwitchUnbracketed => "ResBankSwitchUnbracketed",
+            Self::ModeRequestedModeNotEmitted => "ModeRequestedModeNotEmitted",
+            Self::ModeCheckpointSchemaMismatch => "ModeCheckpointSchemaMismatch",
+            Self::DriftObservedNotAllNoneAtCompileTime => "DriftObservedNotAllNoneAtCompileTime",
+            Self::DriftConsecutiveViolationsNonZeroAtCompileTime => {
+                "DriftConsecutiveViolationsNonZeroAtCompileTime"
+            }
+            Self::ResourceStateReportRoundTripFailed => "ResourceStateReportRoundTripFailed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ResourceStateDiagnosticProvenance {
+    HashMismatch {
+        product: String,
+        recorded: Hash256,
+        computed: Hash256,
+    },
+    Mode {
+        mode: RuntimeMode,
+    },
+    Slice {
+        invariant: String,
+        slice_id: u32,
+    },
+    Lease {
+        invariant: String,
+        lease_id: u32,
+    },
+    Epoch {
+        invariant: String,
+        epoch_id: u32,
+    },
+    ArenaSlot {
+        invariant: String,
+        slot_id: u32,
+    },
+    Drift {
+        invariant: String,
+        metric: String,
+    },
+    JsonPath {
+        json_path: String,
+        field_or_tag: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -812,6 +1201,749 @@ pub enum StoragePlanDiagnosticProvenance {
     FingerprintCollision {
         first_payload_hash: Hash256,
         second_payload_hash: Hash256,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+#[allow(clippy::enum_variant_names)]
+pub enum SramPagePlanDiagnosticCode {
+    SramInputHashMismatch,
+    SramCommitGroupCrossStream,
+    SramPageOverflow,
+    SramPageGeometryMismatch,
+    SramBudgetExceeded,
+    SramResidencyUnresolved,
+    SramYieldResumeResidencyViolation,
+    SramCrossStreamPageSharing,
+    SramCanonicalSortDrift,
+    SramReportRoundTripFailed,
+    SramSectionRoleLeaked,
+    SramSchedulingFieldLeaked,
+    SramRepairProvenanceForbidden,
+    SramTargetProfileLayoutUnsupported,
+    SramPolicyProjectionMismatch,
+}
+
+impl SramPagePlanDiagnosticCode {
+    pub const ALL: [Self; 15] = [
+        Self::SramInputHashMismatch,
+        Self::SramCommitGroupCrossStream,
+        Self::SramPageOverflow,
+        Self::SramPageGeometryMismatch,
+        Self::SramBudgetExceeded,
+        Self::SramResidencyUnresolved,
+        Self::SramYieldResumeResidencyViolation,
+        Self::SramCrossStreamPageSharing,
+        Self::SramCanonicalSortDrift,
+        Self::SramReportRoundTripFailed,
+        Self::SramSectionRoleLeaked,
+        Self::SramSchedulingFieldLeaked,
+        Self::SramRepairProvenanceForbidden,
+        Self::SramTargetProfileLayoutUnsupported,
+        Self::SramPolicyProjectionMismatch,
+    ];
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        match self {
+            Self::SramInputHashMismatch => 1,
+            Self::SramCommitGroupCrossStream => 2,
+            Self::SramPageOverflow => 3,
+            Self::SramPageGeometryMismatch => 4,
+            Self::SramBudgetExceeded => 5,
+            Self::SramResidencyUnresolved => 6,
+            Self::SramYieldResumeResidencyViolation => 7,
+            Self::SramCrossStreamPageSharing => 8,
+            Self::SramCanonicalSortDrift => 9,
+            Self::SramReportRoundTripFailed => 10,
+            Self::SramSectionRoleLeaked => 11,
+            Self::SramSchedulingFieldLeaked => 12,
+            Self::SramRepairProvenanceForbidden => 13,
+            Self::SramTargetProfileLayoutUnsupported => 14,
+            Self::SramPolicyProjectionMismatch => 15,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self.number() {
+            1 => "SRAM-001",
+            2 => "SRAM-002",
+            3 => "SRAM-003",
+            4 => "SRAM-004",
+            5 => "SRAM-005",
+            6 => "SRAM-006",
+            7 => "SRAM-007",
+            8 => "SRAM-008",
+            9 => "SRAM-009",
+            10 => "SRAM-010",
+            11 => "SRAM-011",
+            12 => "SRAM-012",
+            13 => "SRAM-013",
+            14 => "SRAM-014",
+            15 => "SRAM-015",
+            _ => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SramInputHashMismatch => "SramInputHashMismatch",
+            Self::SramCommitGroupCrossStream => "SramCommitGroupCrossStream",
+            Self::SramPageOverflow => "SramPageOverflow",
+            Self::SramPageGeometryMismatch => "SramPageGeometryMismatch",
+            Self::SramBudgetExceeded => "SramBudgetExceeded",
+            Self::SramResidencyUnresolved => "SramResidencyUnresolved",
+            Self::SramYieldResumeResidencyViolation => "SramYieldResumeResidencyViolation",
+            Self::SramCrossStreamPageSharing => "SramCrossStreamPageSharing",
+            Self::SramCanonicalSortDrift => "SramCanonicalSortDrift",
+            Self::SramReportRoundTripFailed => "SramReportRoundTripFailed",
+            Self::SramSectionRoleLeaked => "SramSectionRoleLeaked",
+            Self::SramSchedulingFieldLeaked => "SramSchedulingFieldLeaked",
+            Self::SramRepairProvenanceForbidden => "SramRepairProvenanceForbidden",
+            Self::SramTargetProfileLayoutUnsupported => "SramTargetProfileLayoutUnsupported",
+            Self::SramPolicyProjectionMismatch => "SramPolicyProjectionMismatch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SramPagePlanDiagnosticProvenance {
+    HashMismatch {
+        product: String,
+        recorded: Hash256,
+        computed: Hash256,
+    },
+    Binding {
+        invariant: String,
+        binding_id: u32,
+    },
+    CommitGroup {
+        invariant: String,
+        commit_group_id: u32,
+        sequence_streams: Vec<u32>,
+    },
+    Page {
+        invariant: String,
+        page: u8,
+        observed_bytes: u32,
+        cap_bytes: u32,
+    },
+    Budget {
+        total_bytes: u32,
+        cap_bytes: u32,
+    },
+    Residency {
+        invariant: String,
+        binding_id: u32,
+        residency: String,
+    },
+    Geometry {
+        observed_header_bytes: u16,
+        observed_payload_bytes: u32,
+        observed_commit_word_bytes: u8,
+        observed_alignment: u16,
+        expected_header_bytes: u16,
+        expected_payload_bytes: u32,
+        expected_commit_word_bytes: u8,
+        expected_alignment: u16,
+    },
+    JsonPath {
+        json_path: String,
+        field_or_tag: String,
+    },
+    PolicyProjection {
+        field: String,
+        detail: String,
+    },
+    TargetProfileLayout {
+        target_profile_hash: Hash256,
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum RomWindowPlanDiagnosticCode {
+    RomInputHashMismatch,
+    RomBankCapacityExceeded,
+    RomBankSwitchBudgetExceeded,
+    RomProfileViolation,
+    RomCanonicalSortDrift,
+    RomSectionRoleLeaked,
+    RomSchedulingFieldLeaked,
+    RomRepairProvenanceForbidden,
+    RomTargetProfileLayoutUnsupported,
+    RomPolicyProjectionMismatch,
+    RomMultipleSwitchableBanksDemandedInPhase,
+    RomBank0OverBudget,
+    RomOverlayDemandExceedsWramReservation,
+}
+
+impl RomWindowPlanDiagnosticCode {
+    pub const ALL: [Self; 13] = [
+        Self::RomInputHashMismatch,
+        Self::RomBankCapacityExceeded,
+        Self::RomBankSwitchBudgetExceeded,
+        Self::RomProfileViolation,
+        Self::RomCanonicalSortDrift,
+        Self::RomSectionRoleLeaked,
+        Self::RomSchedulingFieldLeaked,
+        Self::RomRepairProvenanceForbidden,
+        Self::RomTargetProfileLayoutUnsupported,
+        Self::RomPolicyProjectionMismatch,
+        Self::RomMultipleSwitchableBanksDemandedInPhase,
+        Self::RomBank0OverBudget,
+        Self::RomOverlayDemandExceedsWramReservation,
+    ];
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        match self {
+            Self::RomInputHashMismatch => 1,
+            Self::RomBankCapacityExceeded => 2,
+            Self::RomBankSwitchBudgetExceeded => 3,
+            Self::RomProfileViolation => 4,
+            Self::RomCanonicalSortDrift => 5,
+            Self::RomSectionRoleLeaked => 6,
+            Self::RomSchedulingFieldLeaked => 7,
+            Self::RomRepairProvenanceForbidden => 8,
+            Self::RomTargetProfileLayoutUnsupported => 9,
+            Self::RomPolicyProjectionMismatch => 10,
+            Self::RomMultipleSwitchableBanksDemandedInPhase => 11,
+            Self::RomBank0OverBudget => 12,
+            Self::RomOverlayDemandExceedsWramReservation => 13,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self.number() {
+            1 => "ROM-001",
+            2 => "ROM-002",
+            3 => "ROM-003",
+            4 => "ROM-004",
+            5 => "ROM-005",
+            6 => "ROM-006",
+            7 => "ROM-007",
+            8 => "ROM-008",
+            9 => "ROM-009",
+            10 => "ROM-010",
+            11 => "ROM-011",
+            12 => "ROM-012",
+            13 => "ROM-013",
+            _ => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::RomInputHashMismatch => "RomInputHashMismatch",
+            Self::RomBankCapacityExceeded => "RomBankCapacityExceeded",
+            Self::RomBankSwitchBudgetExceeded => "RomBankSwitchBudgetExceeded",
+            Self::RomProfileViolation => "RomProfileViolation",
+            Self::RomCanonicalSortDrift => "RomCanonicalSortDrift",
+            Self::RomSectionRoleLeaked => "RomSectionRoleLeaked",
+            Self::RomSchedulingFieldLeaked => "RomSchedulingFieldLeaked",
+            Self::RomRepairProvenanceForbidden => "RomRepairProvenanceForbidden",
+            Self::RomTargetProfileLayoutUnsupported => "RomTargetProfileLayoutUnsupported",
+            Self::RomPolicyProjectionMismatch => "RomPolicyProjectionMismatch",
+            Self::RomMultipleSwitchableBanksDemandedInPhase => {
+                "RomMultipleSwitchableBanksDemandedInPhase"
+            }
+            Self::RomBank0OverBudget => "RomBank0OverBudget",
+            Self::RomOverlayDemandExceedsWramReservation => {
+                "RomOverlayDemandExceedsWramReservation"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum RomWindowPlanDiagnosticProvenance {
+    HashMismatch {
+        product: String,
+        recorded: Hash256,
+        computed: Hash256,
+    },
+    Binding {
+        invariant: String,
+        binding_id: u32,
+    },
+    Kernel {
+        invariant: String,
+        kernel: String,
+    },
+    Lut {
+        invariant: String,
+        lut: String,
+    },
+    Bank {
+        bank: u16,
+        observed_bytes: u32,
+        cap_bytes: u32,
+    },
+    Budget {
+        decision_value: u16,
+        upper_bound: u16,
+        cap: u16,
+    },
+    Phase {
+        epoch: u32,
+        demanded_banks: Vec<u16>,
+    },
+    Bank0Demand {
+        total_kernel_bytes: u32,
+        total_lut_bytes: u32,
+        bank0_cap_bytes: u32,
+    },
+    OverlayDemand {
+        declared_bytes: u32,
+        wram_reserved_bytes: u32,
+    },
+    JsonPath {
+        json_path: String,
+        field_or_tag: String,
+    },
+    PolicyProjection {
+        field: String,
+        detail: String,
+    },
+    TargetProfileLayout {
+        target_profile_hash: Hash256,
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+#[allow(clippy::enum_variant_names)]
+pub enum OverlayPlanDiagnosticCode {
+    OverlayInputHashMismatch,
+    OverlayWramOverlayCapExceeded,
+    OverlayRegionPayloadExceedsRegionCap,
+    OverlayRegionEmptyButPopulated,
+    OverlayRegionIdDuplicate,
+    OverlayShareClassEvictionUndefined,
+    OverlayInstallSourceNotVisible,
+    OverlayInstallEventDefaultMissing,
+    OverlayCandidateNotInstalled,
+    OverlayInstallReferencesUnknownRegion,
+    OverlayInstallReferencesUnknownMember,
+    OverlayLeaseShapeIncomplete,
+    OverlayMemberPayloadExceedsRegion,
+    OverlayCanonicalSortDrift,
+    OverlayReportRoundTripFailed,
+    OverlaySectionRoleLeaked,
+    OverlaySchedulingFieldLeaked,
+    OverlayRepairProvenanceForbidden,
+    OverlayResolvedPolicyProjectionMismatch,
+    OverlayTargetProfileLayoutUnsupported,
+    OverlayNoCandidatesButReservationDeclared,
+}
+
+impl OverlayPlanDiagnosticCode {
+    pub const ALL: [Self; 21] = [
+        Self::OverlayInputHashMismatch,
+        Self::OverlayWramOverlayCapExceeded,
+        Self::OverlayRegionPayloadExceedsRegionCap,
+        Self::OverlayRegionEmptyButPopulated,
+        Self::OverlayRegionIdDuplicate,
+        Self::OverlayShareClassEvictionUndefined,
+        Self::OverlayInstallSourceNotVisible,
+        Self::OverlayInstallEventDefaultMissing,
+        Self::OverlayCandidateNotInstalled,
+        Self::OverlayInstallReferencesUnknownRegion,
+        Self::OverlayInstallReferencesUnknownMember,
+        Self::OverlayLeaseShapeIncomplete,
+        Self::OverlayMemberPayloadExceedsRegion,
+        Self::OverlayCanonicalSortDrift,
+        Self::OverlayReportRoundTripFailed,
+        Self::OverlaySectionRoleLeaked,
+        Self::OverlaySchedulingFieldLeaked,
+        Self::OverlayRepairProvenanceForbidden,
+        Self::OverlayResolvedPolicyProjectionMismatch,
+        Self::OverlayTargetProfileLayoutUnsupported,
+        Self::OverlayNoCandidatesButReservationDeclared,
+    ];
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        match self {
+            Self::OverlayInputHashMismatch => 1,
+            Self::OverlayWramOverlayCapExceeded => 2,
+            Self::OverlayRegionPayloadExceedsRegionCap => 3,
+            Self::OverlayRegionEmptyButPopulated => 4,
+            Self::OverlayRegionIdDuplicate => 5,
+            Self::OverlayShareClassEvictionUndefined => 6,
+            Self::OverlayInstallSourceNotVisible => 7,
+            Self::OverlayInstallEventDefaultMissing => 8,
+            Self::OverlayCandidateNotInstalled => 9,
+            Self::OverlayInstallReferencesUnknownRegion => 10,
+            Self::OverlayInstallReferencesUnknownMember => 11,
+            Self::OverlayLeaseShapeIncomplete => 12,
+            Self::OverlayMemberPayloadExceedsRegion => 13,
+            Self::OverlayCanonicalSortDrift => 14,
+            Self::OverlayReportRoundTripFailed => 15,
+            Self::OverlaySectionRoleLeaked => 16,
+            Self::OverlaySchedulingFieldLeaked => 17,
+            Self::OverlayRepairProvenanceForbidden => 18,
+            Self::OverlayResolvedPolicyProjectionMismatch => 19,
+            Self::OverlayTargetProfileLayoutUnsupported => 20,
+            Self::OverlayNoCandidatesButReservationDeclared => 21,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self.number() {
+            1 => "OP-001",
+            2 => "OP-002",
+            3 => "OP-003",
+            4 => "OP-004",
+            5 => "OP-005",
+            6 => "OP-006",
+            7 => "OP-007",
+            8 => "OP-008",
+            9 => "OP-009",
+            10 => "OP-010",
+            11 => "OP-011",
+            12 => "OP-012",
+            13 => "OP-013",
+            14 => "OP-014",
+            15 => "OP-015",
+            16 => "OP-016",
+            17 => "OP-017",
+            18 => "OP-018",
+            19 => "OP-019",
+            20 => "OP-020",
+            21 => "OP-021",
+            _ => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::OverlayInputHashMismatch => "OverlayInputHashMismatch",
+            Self::OverlayWramOverlayCapExceeded => "OverlayWramOverlayCapExceeded",
+            Self::OverlayRegionPayloadExceedsRegionCap => "OverlayRegionPayloadExceedsRegionCap",
+            Self::OverlayRegionEmptyButPopulated => "OverlayRegionEmptyButPopulated",
+            Self::OverlayRegionIdDuplicate => "OverlayRegionIdDuplicate",
+            Self::OverlayShareClassEvictionUndefined => "OverlayShareClassEvictionUndefined",
+            Self::OverlayInstallSourceNotVisible => "OverlayInstallSourceNotVisible",
+            Self::OverlayInstallEventDefaultMissing => "OverlayInstallEventDefaultMissing",
+            Self::OverlayCandidateNotInstalled => "OverlayCandidateNotInstalled",
+            Self::OverlayInstallReferencesUnknownRegion => "OverlayInstallReferencesUnknownRegion",
+            Self::OverlayInstallReferencesUnknownMember => "OverlayInstallReferencesUnknownMember",
+            Self::OverlayLeaseShapeIncomplete => "OverlayLeaseShapeIncomplete",
+            Self::OverlayMemberPayloadExceedsRegion => "OverlayMemberPayloadExceedsRegion",
+            Self::OverlayCanonicalSortDrift => "OverlayCanonicalSortDrift",
+            Self::OverlayReportRoundTripFailed => "OverlayReportRoundTripFailed",
+            Self::OverlaySectionRoleLeaked => "OverlaySectionRoleLeaked",
+            Self::OverlaySchedulingFieldLeaked => "OverlaySchedulingFieldLeaked",
+            Self::OverlayRepairProvenanceForbidden => "OverlayRepairProvenanceForbidden",
+            Self::OverlayResolvedPolicyProjectionMismatch => {
+                "OverlayResolvedPolicyProjectionMismatch"
+            }
+            Self::OverlayTargetProfileLayoutUnsupported => "OverlayTargetProfileLayoutUnsupported",
+            Self::OverlayNoCandidatesButReservationDeclared => {
+                "OverlayNoCandidatesButReservationDeclared"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum OverlayPlanDiagnosticProvenance {
+    HashMismatch {
+        product: String,
+        recorded: Hash256,
+        computed: Hash256,
+    },
+    Region {
+        invariant: String,
+        region_id: u32,
+    },
+    Reservation {
+        total_bytes: u32,
+        cap_bytes: u32,
+    },
+    Member {
+        invariant: String,
+        member: String,
+        payload_bytes: u32,
+        region_bytes: u16,
+    },
+    Install {
+        invariant: String,
+        install_id: u32,
+    },
+    JsonPath {
+        json_path: String,
+        field_or_tag: String,
+    },
+    PolicyProjection {
+        field: String,
+        detail: String,
+    },
+    TargetProfileLayout {
+        target_profile_hash: Hash256,
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+#[allow(clippy::enum_variant_names)]
+pub enum ArenaPlanDiagnosticCode {
+    ArenaInputHashMismatch,
+    ArenaAllocationFailed,
+    ArenaCapacityExceeded,
+    ArenaUnmappedStorageClass,
+    ArenaLifetimeClassMismatch,
+    ArenaAliasClassDisagreement,
+    ArenaAliasClassMustOverlapDisagreement,
+    ArenaSlotIdDuplicate,
+    ArenaPersistentPageGeometryMismatch,
+    ArenaPersistentPageStreamMismatch,
+    ArenaCrossStreamPageSharing,
+    ArenaSramSpanForbidden,
+    ArenaHarnessLeakDetected,
+    ArenaContinuationRecordSizeMismatch,
+    ArenaHramOutOfRange,
+    ArenaBank0WramOverflow,
+    ArenaHramUsableCapExceeded,
+    ArenaOverlayReservationOverflow,
+    ArenaOverlayReservationUnderflow,
+    ArenaOverlayReservationOverlap,
+    ArenaOverlayReservationCountMismatch,
+    ArenaOverlayReservationCapDrift,
+    ArenaCanonicalSortDrift,
+    ArenaReportRoundTripFailed,
+    ArenaSectionRoleLeaked,
+    ArenaSchedulingFieldLeaked,
+    ArenaRepairProvenanceForbidden,
+    ArenaTargetProfileLayoutUnsupported,
+    ArenaPureExpressionAllocated,
+    ArenaTraceRingMisplaced,
+    ArenaPolicyProjectionMismatch,
+    ArenaCertAddressInvariantFailed,
+}
+
+impl ArenaPlanDiagnosticCode {
+    pub const ALL: [Self; 32] = [
+        Self::ArenaInputHashMismatch,
+        Self::ArenaAllocationFailed,
+        Self::ArenaCapacityExceeded,
+        Self::ArenaUnmappedStorageClass,
+        Self::ArenaLifetimeClassMismatch,
+        Self::ArenaAliasClassDisagreement,
+        Self::ArenaAliasClassMustOverlapDisagreement,
+        Self::ArenaSlotIdDuplicate,
+        Self::ArenaPersistentPageGeometryMismatch,
+        Self::ArenaPersistentPageStreamMismatch,
+        Self::ArenaCrossStreamPageSharing,
+        Self::ArenaSramSpanForbidden,
+        Self::ArenaHarnessLeakDetected,
+        Self::ArenaContinuationRecordSizeMismatch,
+        Self::ArenaHramOutOfRange,
+        Self::ArenaBank0WramOverflow,
+        Self::ArenaHramUsableCapExceeded,
+        Self::ArenaOverlayReservationOverflow,
+        Self::ArenaOverlayReservationUnderflow,
+        Self::ArenaOverlayReservationOverlap,
+        Self::ArenaOverlayReservationCountMismatch,
+        Self::ArenaOverlayReservationCapDrift,
+        Self::ArenaCanonicalSortDrift,
+        Self::ArenaReportRoundTripFailed,
+        Self::ArenaSectionRoleLeaked,
+        Self::ArenaSchedulingFieldLeaked,
+        Self::ArenaRepairProvenanceForbidden,
+        Self::ArenaTargetProfileLayoutUnsupported,
+        Self::ArenaPureExpressionAllocated,
+        Self::ArenaTraceRingMisplaced,
+        Self::ArenaPolicyProjectionMismatch,
+        Self::ArenaCertAddressInvariantFailed,
+    ];
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        match self {
+            Self::ArenaInputHashMismatch => 1,
+            Self::ArenaAllocationFailed => 2,
+            Self::ArenaCapacityExceeded => 3,
+            Self::ArenaUnmappedStorageClass => 4,
+            Self::ArenaLifetimeClassMismatch => 5,
+            Self::ArenaAliasClassDisagreement => 6,
+            Self::ArenaAliasClassMustOverlapDisagreement => 7,
+            Self::ArenaSlotIdDuplicate => 8,
+            Self::ArenaPersistentPageGeometryMismatch => 9,
+            Self::ArenaPersistentPageStreamMismatch => 10,
+            Self::ArenaCrossStreamPageSharing => 11,
+            Self::ArenaSramSpanForbidden => 12,
+            Self::ArenaHarnessLeakDetected => 13,
+            Self::ArenaContinuationRecordSizeMismatch => 14,
+            Self::ArenaHramOutOfRange => 15,
+            Self::ArenaBank0WramOverflow => 16,
+            Self::ArenaHramUsableCapExceeded => 17,
+            Self::ArenaOverlayReservationOverflow => 18,
+            Self::ArenaOverlayReservationUnderflow => 19,
+            Self::ArenaOverlayReservationOverlap => 20,
+            Self::ArenaOverlayReservationCountMismatch => 21,
+            Self::ArenaOverlayReservationCapDrift => 22,
+            Self::ArenaCanonicalSortDrift => 23,
+            Self::ArenaReportRoundTripFailed => 24,
+            Self::ArenaSectionRoleLeaked => 25,
+            Self::ArenaSchedulingFieldLeaked => 26,
+            Self::ArenaRepairProvenanceForbidden => 27,
+            Self::ArenaTargetProfileLayoutUnsupported => 28,
+            Self::ArenaPureExpressionAllocated => 29,
+            Self::ArenaTraceRingMisplaced => 30,
+            Self::ArenaPolicyProjectionMismatch => 31,
+            Self::ArenaCertAddressInvariantFailed => 32,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self.number() {
+            1 => "ARENA-001",
+            2 => "ARENA-002",
+            3 => "ARENA-003",
+            4 => "ARENA-004",
+            5 => "ARENA-005",
+            6 => "ARENA-006",
+            7 => "ARENA-007",
+            8 => "ARENA-008",
+            9 => "ARENA-009",
+            10 => "ARENA-010",
+            11 => "ARENA-011",
+            12 => "ARENA-012",
+            13 => "ARENA-013",
+            14 => "ARENA-014",
+            15 => "ARENA-015",
+            16 => "ARENA-016",
+            17 => "ARENA-017",
+            18 => "ARENA-018",
+            19 => "ARENA-019",
+            20 => "ARENA-020",
+            21 => "ARENA-021",
+            22 => "ARENA-022",
+            23 => "ARENA-023",
+            24 => "ARENA-024",
+            25 => "ARENA-025",
+            26 => "ARENA-026",
+            27 => "ARENA-027",
+            28 => "ARENA-028",
+            29 => "ARENA-029",
+            30 => "ARENA-030",
+            31 => "ARENA-031",
+            32 => "ARENA-032",
+            _ => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ArenaInputHashMismatch => "ArenaInputHashMismatch",
+            Self::ArenaAllocationFailed => "ArenaAllocationFailed",
+            Self::ArenaCapacityExceeded => "ArenaCapacityExceeded",
+            Self::ArenaUnmappedStorageClass => "ArenaUnmappedStorageClass",
+            Self::ArenaLifetimeClassMismatch => "ArenaLifetimeClassMismatch",
+            Self::ArenaAliasClassDisagreement => "ArenaAliasClassDisagreement",
+            Self::ArenaAliasClassMustOverlapDisagreement => {
+                "ArenaAliasClassMustOverlapDisagreement"
+            }
+            Self::ArenaSlotIdDuplicate => "ArenaSlotIdDuplicate",
+            Self::ArenaPersistentPageGeometryMismatch => "ArenaPersistentPageGeometryMismatch",
+            Self::ArenaPersistentPageStreamMismatch => "ArenaPersistentPageStreamMismatch",
+            Self::ArenaCrossStreamPageSharing => "ArenaCrossStreamPageSharing",
+            Self::ArenaSramSpanForbidden => "ArenaSramSpanForbidden",
+            Self::ArenaHarnessLeakDetected => "ArenaHarnessLeakDetected",
+            Self::ArenaContinuationRecordSizeMismatch => "ArenaContinuationRecordSizeMismatch",
+            Self::ArenaHramOutOfRange => "ArenaHramOutOfRange",
+            Self::ArenaBank0WramOverflow => "ArenaBank0WramOverflow",
+            Self::ArenaHramUsableCapExceeded => "ArenaHramUsableCapExceeded",
+            Self::ArenaOverlayReservationOverflow => "ArenaOverlayReservationOverflow",
+            Self::ArenaOverlayReservationUnderflow => "ArenaOverlayReservationUnderflow",
+            Self::ArenaOverlayReservationOverlap => "ArenaOverlayReservationOverlap",
+            Self::ArenaOverlayReservationCountMismatch => "ArenaOverlayReservationCountMismatch",
+            Self::ArenaOverlayReservationCapDrift => "ArenaOverlayReservationCapDrift",
+            Self::ArenaCanonicalSortDrift => "ArenaCanonicalSortDrift",
+            Self::ArenaReportRoundTripFailed => "ArenaReportRoundTripFailed",
+            Self::ArenaSectionRoleLeaked => "ArenaSectionRoleLeaked",
+            Self::ArenaSchedulingFieldLeaked => "ArenaSchedulingFieldLeaked",
+            Self::ArenaRepairProvenanceForbidden => "ArenaRepairProvenanceForbidden",
+            Self::ArenaTargetProfileLayoutUnsupported => "ArenaTargetProfileLayoutUnsupported",
+            Self::ArenaPureExpressionAllocated => "ArenaPureExpressionAllocated",
+            Self::ArenaTraceRingMisplaced => "ArenaTraceRingMisplaced",
+            Self::ArenaPolicyProjectionMismatch => "ArenaPolicyProjectionMismatch",
+            Self::ArenaCertAddressInvariantFailed => "ArenaCertAddressInvariantFailed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ArenaPlanDiagnosticProvenance {
+    HashMismatch {
+        product: String,
+        recorded: Hash256,
+        computed: Hash256,
+    },
+    Binding {
+        invariant: String,
+        binding_id: u32,
+    },
+    AliasClass {
+        invariant: String,
+        alias_class_id: u32,
+    },
+    Arena {
+        invariant: String,
+        arena_id: u32,
+        named: String,
+    },
+    Slot {
+        invariant: String,
+        slot_id: u32,
+        observed_bytes: u32,
+        cap_bytes: u32,
+    },
+    Reservation {
+        invariant: String,
+        total_bytes: u32,
+        expected_bytes: u32,
+    },
+    Geometry {
+        observed_header_bytes: u16,
+        observed_payload_bytes: u32,
+        observed_commit_word_bytes: u8,
+        observed_alignment: u16,
+        expected_header_bytes: u16,
+        expected_payload_bytes: u32,
+        expected_commit_word_bytes: u8,
+        expected_alignment: u16,
+    },
+    JsonPath {
+        json_path: String,
+        field_or_tag: String,
+    },
+    PolicyProjection {
+        field: String,
+        detail: String,
+    },
+    TargetProfileLayout {
+        target_profile_hash: Hash256,
+        detail: String,
     },
 }
 

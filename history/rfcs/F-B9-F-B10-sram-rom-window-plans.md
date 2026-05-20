@@ -1907,6 +1907,19 @@ distilled the relevant information).
 
 ### 8.2 Output product
 
+> **F-B9 v1 implementation amendment (bd-3ns, 2026-05-20).**
+> The landed Stage 7 v1 public product is intentionally narrowed to the
+> bead's closure surface: typed input identity and hashes, sorted
+> `SramPageBinding` rows, resolved `PersistentPage` rows, a stream index,
+> `SramBudgetTally`, `PersistentPageGeometry`, canonical self-hash,
+> deterministic report emission/parsing, diagnostics, and K7 cache-key
+> inputs. The fuller RFC product below (`SramWorkingSet`,
+> `CommitBoundary`, `PageRotation`, `SpillPolicy`,
+> `SramSwitchProjections`, and SRAM cert emission) remains the design target
+> for later explicitly owned beads. Downstream stages must not infer those
+> omitted fields from Stage 7 v1 reports until a future bead lands and
+> amends the schema.
+
 ```rust
 pub struct SramPagePlan {
     pub identity: SramPagePlanIdentity,
@@ -2439,6 +2452,23 @@ slack for overlays, ROM bank count, and `max_bank_switches_per_token`.
 references (consumed by hash; F-B10 doesn't perform the writes).
 
 ### 9.2 Output product
+
+> **F-B10 v1 implementation amendment (bd-15n, 2026-05-20).**
+> The landed Stage 8 v1 public product is intentionally narrowed to explicit
+> `KernelResidencyInput`, `LutResidencyInput`, `RomConstBindingInput`, and
+> `RomWindowEpochInput` rows plus the F-B9 `SramPagePlan` product hash. It
+> does not yet enumerate kernels/LUTs from `ObservationPlan`, reductions from
+> `RangePlan`, or audit parents for artifact validation, policy resolution,
+> static budget, QuantGraph, or InferIR. K8 includes the direct Stage 8 input
+> hashes, `RuntimeMode`, policy projection hash, pass version, and feature-set
+> hash; transitive audit-parent expansion remains owned by the future registry
+> extraction/adoption bead. Window certificate emission, full epoch coverage
+> proof against `GbInferIR`, install-source visibility proof, and registry
+> missing/source-impossible diagnostics are deferred until explicitly owned
+> later beads add those producers. Downstream stages must consume only the
+> v1 fields emitted here (`RomWindowPlan` residency maps, bindings, banks,
+> residency epochs, closures, overlay demand, Bank0 demand, projections,
+> provenance, and self hash) until a later amendment expands the schema.
 
 ```rust
 pub struct RomWindowPlan {
@@ -4575,4 +4605,3 @@ Every later optimization stops second-guessing whether a kernel
 should live in Bank 0 or an overlay.
 
 That is what this chunk buys.
-

@@ -1,6 +1,6 @@
 //! Stage 0.5 policy resolution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gbf_foundation::{FieldPath, Hash256};
 use gbf_policy::{
@@ -9,10 +9,11 @@ use gbf_policy::{
     CompileKnobProvenanceEntry, CompileKnobValues, CompileKnobs, ConstraintOperation,
     ConstraintProvenance, ConstraintValue, DiagnosticSeverity, EffectiveConstraints, EvidenceRef,
     KnobLockSet, MonotoneKnob, ObservationKnob, PlacementKnob, PolicyProvenance, PolicySource,
-    ProbeCollectionLevel, ReductionPlanCeiling, ResolvedCompilePolicy, RomKernelDuplicationBias,
-    RomKernelResidencyBias, RomWindowKnob, ScheduleKnob, ScheduleResourcePressure,
-    ScheduleSliceCoarsening, ScheduleTileSearch, StorageMaterialization, ValidationCode,
-    ValidationDetail, ValidationDiagnostic, ValidationOrigin, canonical_default_bounds_fixture,
+    ProbeCollectionLevel, RecomputePurityFacts, ReductionPlanCeiling, ResolvedCompilePolicy,
+    RomKernelDuplicationBias, RomKernelResidencyBias, RomWindowKnob, ScheduleKnob,
+    ScheduleResourcePressure, ScheduleSliceCoarsening, ScheduleTileSearch, StorageMaterialization,
+    ValidationCode, ValidationDetail, ValidationDiagnostic, ValidationOrigin, ValueSelector,
+    canonical_default_bounds_fixture,
 };
 use gbf_report::report_schemas::policy_resolution_v1::{
     ArtifactIdentitySection, CompileKnobsSection, CompileRequestSection, ConstraintEnforcement,
@@ -29,6 +30,65 @@ use sha2::{Digest, Sha256};
 use crate::validate::{ValidatedInputHashes, ValidationProduct};
 
 pub type CompileKnobPreferences = CompileKnobPartialValues;
+
+pub fn recompute_purity_facts_from_infer_ir(
+    infer_ir: &crate::s3::infer_ir::GbInferIR,
+    selectors: impl IntoIterator<Item = ValueSelector>,
+) -> RecomputePurityFacts {
+    let nodes = infer_ir
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node))
+        .collect::<BTreeMap<_, _>>();
+    let effects = infer_ir
+        .effects
+        .iter()
+        .map(|effect| (effect.effect_id, effect))
+        .collect::<BTreeMap<_, _>>();
+    let selectors = selectors.into_iter().collect::<BTreeSet<_>>();
+    let mut facts = RecomputePurityFacts::default();
+
+    for selector in selectors {
+        if selector_is_recompute_pure(&selector, infer_ir, &nodes, &effects) {
+            facts.pure_values.insert(selector);
+        } else {
+            facts.effectful_values.insert(selector);
+        }
+    }
+
+    facts
+}
+
+fn selector_is_recompute_pure(
+    selector: &ValueSelector,
+    infer_ir: &crate::s3::infer_ir::GbInferIR,
+    nodes: &BTreeMap<crate::s3::infer_ir::NodeId, &crate::s3::infer_ir::GbNode>,
+    effects: &BTreeMap<crate::s3::infer_ir::EffectId, &crate::s3::infer_ir::EffectDecl>,
+) -> bool {
+    use crate::s3::infer_ir::{EffectClass, ValueId as InferValueId, ValueProducerRef};
+
+    let ValueSelector::Value { id } = selector else {
+        return false;
+    };
+    let value_id = InferValueId::new(id.0);
+    let Some(ValueProducerRef::Node { node }) = infer_ir.provenance.values.get(&value_id) else {
+        return false;
+    };
+    let Some(node) = nodes.get(node) else {
+        return false;
+    };
+
+    node.effects_out.iter().all(|effect_id| {
+        effects.get(effect_id).is_some_and(|effect| {
+            !matches!(
+                effect.class,
+                EffectClass::Rng { .. }
+                    | EffectClass::SequenceState { .. }
+                    | EffectClass::FaultBoundary
+            )
+        })
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintFrame {
@@ -482,7 +542,7 @@ fn apply_values(
                         next,
                         ConstraintProvenance {
                             source: frame.source.clone(),
-                            operation,
+                            operation: operation.clone(),
                             evidence: frame.evidence.clone(),
                         },
                     );
@@ -495,7 +555,7 @@ fn apply_values(
                     !matches!(frame.source, PolicySource::Calibration),
                     ConstraintProvenance {
                         source: frame.source.clone(),
-                        operation,
+                        operation: operation.clone(),
                         evidence: frame.evidence.clone(),
                     },
                 );
@@ -903,20 +963,56 @@ fn set_partial_value_from_constraint(
     knob: CompileKnobId,
     value: &ConstraintValue,
 ) -> Result<(), ()> {
-    match (knob, value) {
-        (CompileKnobId::Placement, ConstraintValue::PlacementProfile { value }) => {
-            values.placement = Some(PlacementKnob { profile: *value });
-        }
-        (CompileKnobId::Observation, ConstraintValue::ObservabilityMode { value }) => {
-            let mut observation = values
-                .observation
-                .unwrap_or_else(|| conservative_target_values().observation);
-            observation.observability = *value;
-            values.observation = Some(observation);
-        }
-        _ => return Err(()),
+    match knob.top_level() {
+        CompileKnobId::Placement => match value {
+            ConstraintValue::PlacementProfile { value } => {
+                values.placement = Some(PlacementKnob { profile: *value });
+                Ok(())
+            }
+            ConstraintValue::ObservabilityMode { .. }
+            | ConstraintValue::U16 { .. }
+            | ConstraintValue::U32 { .. }
+            | ConstraintValue::Bool { .. }
+            | ConstraintValue::Text { .. } => Err(()),
+        },
+        CompileKnobId::Observation => match value {
+            ConstraintValue::ObservabilityMode { value } => {
+                let mut observation = values
+                    .observation
+                    .unwrap_or_else(|| conservative_target_values().observation);
+                observation.observability = *value;
+                values.observation = Some(observation);
+                Ok(())
+            }
+            ConstraintValue::PlacementProfile { .. }
+            | ConstraintValue::U16 { .. }
+            | ConstraintValue::U32 { .. }
+            | ConstraintValue::Bool { .. }
+            | ConstraintValue::Text { .. } => Err(()),
+        },
+        CompileKnobId::Range
+        | CompileKnobId::Storage
+        | CompileKnobId::Sram
+        | CompileKnobId::RomWindow
+        | CompileKnobId::Overlay
+        | CompileKnobId::Schedule => Err(()),
+        knob @ (CompileKnobId::PlacementProfile
+        | CompileKnobId::ObservationTraceDemotion
+        | CompileKnobId::ObservationProbeSelection
+        | CompileKnobId::RangeReductionCeiling
+        | CompileKnobId::StorageRecomputePromotion
+        | CompileKnobId::StorageMaterializationOverrides
+        | CompileKnobId::SramPageAggression
+        | CompileKnobId::SramSpillPolicy
+        | CompileKnobId::RomKernelResidencyBias
+        | CompileKnobId::RomKernelDuplicationBias
+        | CompileKnobId::RomKernelResidencyOverrides
+        | CompileKnobId::OverlayPromotion
+        | CompileKnobId::ScheduleTileSearch
+        | CompileKnobId::ScheduleSliceCoarsening
+        | CompileKnobId::ScheduleResourcePressure
+        | CompileKnobId::StageIterationCeilings) => fine_grained_knob_after_top_level(knob),
     }
-    Ok(())
 }
 
 fn value_within_knob_bounds(
@@ -924,7 +1020,7 @@ fn value_within_knob_bounds(
     values: &CompileKnobValues,
     bounds: &CompileKnobBounds,
 ) -> bool {
-    match knob {
+    match knob.top_level() {
         CompileKnobId::Placement => values.placement.profile <= bounds.placement.max_profile,
         CompileKnobId::Observation => {
             values.observation.probe_level <= bounds.observation.max_probe_level
@@ -947,6 +1043,22 @@ fn value_within_knob_bounds(
                 && values.schedule.slice_coarsening <= bounds.schedule.max_slice_coarsening
                 && values.schedule.resource_pressure <= bounds.schedule.max_resource_pressure
         }
+        knob @ (CompileKnobId::PlacementProfile
+        | CompileKnobId::ObservationTraceDemotion
+        | CompileKnobId::ObservationProbeSelection
+        | CompileKnobId::RangeReductionCeiling
+        | CompileKnobId::StorageRecomputePromotion
+        | CompileKnobId::StorageMaterializationOverrides
+        | CompileKnobId::SramPageAggression
+        | CompileKnobId::SramSpillPolicy
+        | CompileKnobId::RomKernelResidencyBias
+        | CompileKnobId::RomKernelDuplicationBias
+        | CompileKnobId::RomKernelResidencyOverrides
+        | CompileKnobId::OverlayPromotion
+        | CompileKnobId::ScheduleTileSearch
+        | CompileKnobId::ScheduleSliceCoarsening
+        | CompileKnobId::ScheduleResourcePressure
+        | CompileKnobId::StageIterationCeilings) => fine_grained_knob_after_top_level(knob),
     }
 }
 
@@ -954,18 +1066,43 @@ fn value_descriptor(
     knob: CompileKnobId,
     values: &CompileKnobValues,
 ) -> gbf_policy::KnobValueDescriptor {
-    let value = match knob {
+    let value = match knob.top_level() {
         CompileKnobId::Placement => ConstraintValue::PlacementProfile {
             value: values.placement.profile,
         },
         CompileKnobId::Observation => ConstraintValue::ObservabilityMode {
             value: values.observation.observability,
         },
-        _ => ConstraintValue::Text {
+        CompileKnobId::Range
+        | CompileKnobId::Storage
+        | CompileKnobId::Sram
+        | CompileKnobId::RomWindow
+        | CompileKnobId::Overlay
+        | CompileKnobId::Schedule => ConstraintValue::Text {
             value: format!("{:?}", values),
         },
+        knob @ (CompileKnobId::PlacementProfile
+        | CompileKnobId::ObservationTraceDemotion
+        | CompileKnobId::ObservationProbeSelection
+        | CompileKnobId::RangeReductionCeiling
+        | CompileKnobId::StorageRecomputePromotion
+        | CompileKnobId::StorageMaterializationOverrides
+        | CompileKnobId::SramPageAggression
+        | CompileKnobId::SramSpillPolicy
+        | CompileKnobId::RomKernelResidencyBias
+        | CompileKnobId::RomKernelDuplicationBias
+        | CompileKnobId::RomKernelResidencyOverrides
+        | CompileKnobId::OverlayPromotion
+        | CompileKnobId::ScheduleTileSearch
+        | CompileKnobId::ScheduleSliceCoarsening
+        | CompileKnobId::ScheduleResourcePressure
+        | CompileKnobId::StageIterationCeilings) => fine_grained_knob_after_top_level(knob),
     };
     gbf_policy::KnobValueDescriptor { value }
+}
+
+fn fine_grained_knob_after_top_level<T>(knob: CompileKnobId) -> T {
+    unreachable!("top_level() returned fine-grained compile knob {knob:?}")
 }
 
 fn out_of_bounds_diagnostic(
@@ -1766,7 +1903,7 @@ macro_rules! impl_set_bound {
     ($ty:ty, $variant:ident, $field:ident) => {
         impl SetBound<$ty> for CompileKnobBounds {
             fn set_bound(&mut self, knob: CompileKnobId, value: $ty) {
-                if knob == CompileKnobId::$variant {
+                if knob.top_level() == CompileKnobId::$variant {
                     self.$field = value;
                 }
             }
@@ -2037,6 +2174,7 @@ pub(crate) mod tests {
                 }),
                 ..CompileKnobPartialBounds::default()
             },
+            ..CompileKnobOverrides::default()
         });
 
         let failure = resolve_policy(&fixture.validation()).expect_err("out of bounds rejects");

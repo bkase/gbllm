@@ -1617,6 +1617,7 @@ mod tests {
                 overrides: CompileKnobOverrides {
                     values: CompileKnobPartialValues::default(),
                     bounds: CompileKnobPartialBounds::default(),
+                    ..CompileKnobOverrides::default()
                 },
                 provenance: vec![CompileKnobProvenanceEntry {
                     path: gbf_policy::CompileKnobPath {
