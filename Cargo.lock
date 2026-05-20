@@ -2361,6 +2361,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gbf-codegen-tests"
+version = "0.1.0"
+dependencies = [
+ "gbf-codegen",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "gbf-data"
 version = "0.1.0"
 dependencies = [

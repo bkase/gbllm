@@ -19,6 +19,7 @@ members = [
     "gbf-asm",
     "gbf-runtime",
     "gbf-codegen",
+    "gbf-codegen-tests",
     "gbf-emu",
     "gbf-data",
     "gbf-store",

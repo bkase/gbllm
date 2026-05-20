@@ -23,6 +23,9 @@ pub mod s5;
 pub mod schedule;
 pub mod stage_cache;
 pub mod storage;
+pub mod storage_plan;
+#[cfg(any(test, feature = "test-infra"))]
+pub mod storage_plan_test_infra;
 pub mod validate;
 pub mod window;
 

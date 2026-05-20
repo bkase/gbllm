@@ -67,6 +67,34 @@ jobs:
         run: cargo test -p gbf-cli --test s1_cli
       - name: F-B1 dev-loop smoke
         run: scripts/review/f-b1/smoke.sh
+      - name: F-B8 storage-plan debug artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          artifact_root="target/f-b8-debug-artifacts"
+          rm -rf "$artifact_root"
+          mkdir -p "$artifact_root/tiny_routed_ffn" "$artifact_root/sc11_forbidden_key_leak"
+          cargo run -p gbf-codegen --bin gbf-storage-plan-debug -- \
+            --inputs builtin:tiny_routed_ffn \
+            --out "$artifact_root/tiny_routed_ffn" \
+            --trace-format json
+          set +e
+          cargo run -p gbf-codegen --bin gbf-storage-plan-debug -- \
+            --inputs builtin:sc11_forbidden_key_leak \
+            --out "$artifact_root/sc11_forbidden_key_leak" \
+            --trace-format json
+          status=$?
+          set -e
+          if [ "$status" -ne 1 ]; then
+            echo "expected sc11_forbidden_key_leak to exit 1, got $status" >&2
+            exit 1
+          fi
+      - name: Upload F-B8 storage-plan debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f-b8-debug-artifacts
+          path: target/f-b8-debug-artifacts
 
   f-b1-review-packet:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')

@@ -1,0 +1,11 @@
+[package]
+name = "gbf-codegen-tests"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+gbf-codegen = { path = "../gbf-codegen", features = ["test-infra"] }
+serde_json.workspace = true
+tracing.workspace = true

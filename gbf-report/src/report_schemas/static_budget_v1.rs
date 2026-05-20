@@ -621,6 +621,7 @@ fn validation_origin_rank(origin: ValidationOrigin) -> u8 {
         ValidationOrigin::CompileRequest => 10,
         ValidationOrigin::PolicyResolution => 11,
         ValidationOrigin::Budget => 12,
+        ValidationOrigin::StoragePlanConstruction => 13,
     }
 }
 

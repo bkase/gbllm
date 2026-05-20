@@ -38,6 +38,7 @@ const OBSERVATION_PLAN_SCHEMA: &str = "observation_plan.v1";
 const OPERATIONAL_PROBE_SCHEMA: &str = "operational_probe_schema.v1";
 const RANGE_CERT_SCHEMA: &str = "range.cert.v1";
 const RANGE_PLAN_SCHEMA: &str = "range_plan.v1";
+const STORAGE_PLAN_SCHEMA: &str = "storage_plan.v1";
 
 /// Report schema identifier carried by every F-B2/F-B4 report envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1592,6 +1593,13 @@ fn is_allowed_null_path(schema: &str, path: &str) -> bool {
         }
         RANGE_PLAN_SCHEMA => path == "result",
         RANGE_CERT_SCHEMA => path == "identity.range_plan_self_hash",
+        STORAGE_PLAN_SCHEMA => {
+            matches!(path, "body.result" | "body.summary")
+                || path.ends_with(".first_use_node")
+                || path.ends_with(".last_use_node")
+                || path.ends_with(".op_output_role")
+                || path.ends_with(".op_output_format")
+        }
         _ => false,
     }
 }
