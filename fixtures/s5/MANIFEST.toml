@@ -1,0 +1,169 @@
+schema = "s5_fixture_manifest.v1"
+corpus = "fixtures/s5"
+owner_bead = "bd-u4fh"
+fixture_scope = "SUBSTRATE_ONLY"
+spec_sha = "UNSET_PLACEHOLDER_F_S5_RFC_SHA"
+spec_sha_status = "placeholder_unset"
+producer_replay_owner = "bd-q3zo"
+
+[[files]]
+path = "boundary/h13/delta_1024_pass.toml"
+sha256 = "a2d4e182c40c5c8d9896a17cebb850fcf394d288af37017b267466b82afb4387"
+intent = "H13 strict-pass boundary fixture"
+owner_bead = "bd-2isr"
+
+[[files]]
+path = "boundary/h13/delta_1025_warn.toml"
+sha256 = "962a0a9f8edf3e536792f9a66d045e8376af0de9638e56b3b66803d4887a28ea"
+intent = "H13 warning-band lower boundary fixture"
+owner_bead = "bd-2isr"
+
+[[files]]
+path = "boundary/h13/delta_2048_warn.toml"
+sha256 = "3ce98fa97ea9fbf7f74b5651287b50fe3ab87ee9adc9314d5ffdecfb2cd3bdd2"
+intent = "H13 warning-band upper boundary fixture"
+owner_bead = "bd-2isr"
+
+[[files]]
+path = "boundary/h13/delta_2049_refute.toml"
+sha256 = "b5c95e032b810871467ff7f5b008dd45b4cdb44ba5c1910c383e69a88a3a6f3a"
+intent = "H13 refutation boundary fixture"
+owner_bead = "bd-2isr"
+
+[[files]]
+path = "chrome_budget/real_canonical.toml"
+sha256 = "054516068caf96d0467c63b98066800e1f797ed32fe52af17641df27df7d12fd"
+intent = "RuntimeChromeBudget real runtime nucleus hash fixture"
+owner_bead = "bd-2rjw"
+
+[[files]]
+path = "chrome_budget/synthetic_canonical.toml"
+sha256 = "08b337081e6a375d130622c420cfb947b266f400019f65b29c43c6634bd829c6"
+intent = "RuntimeChromeBudget synthetic-reference runtime nucleus hash fixture"
+owner_bead = "bd-2rjw"
+
+[[files]]
+path = "encoded_rom/seed_0_canonical/build.json"
+sha256 = "a810fd1aa57e7062a5d7ff89707a477e0a04c12a3f74d18be4cf90fabe7bf463"
+intent = "EncodedRom seed-0 build identity fixture"
+owner_bead = "bd-1d6b"
+
+[[files]]
+path = "encoded_rom/seed_0_canonical/certs/arena.cert.json"
+sha256 = "b6fc2ba6f5cda1c8ca30edde214c25043b4fdc419bcd18f603aad311180f91b6"
+intent = "EncodedRom arena cert fixture"
+owner_bead = "bd-1d6b"
+
+[[files]]
+path = "encoded_rom/seed_0_canonical/certs/range.cert.json"
+sha256 = "45c71999875d54f76b19c2ca2f94f41e735b0ecce8b1fa7d43ab6dbfa1993a28"
+intent = "EncodedRom range cert fixture"
+owner_bead = "bd-1d6b"
+
+[[files]]
+path = "encoded_rom/seed_0_canonical/certs/reachability.cert.json"
+sha256 = "3d7db69edf1e56359809c4f3516ad0464f1725a44c7a29ed94b80cf557b0b1c7"
+intent = "EncodedRom reachability cert fixture"
+owner_bead = "bd-1d6b"
+
+[[files]]
+path = "encoded_rom/seed_0_canonical/certs/resource_state.cert.json"
+sha256 = "18c89103ba6c9ea748d3d2da938dc078f7a477cd304e22b37a8d7dad04912f3b"
+intent = "EncodedRom resource-state cert fixture"
+owner_bead = "bd-1d6b"
+
+[[files]]
+path = "encoded_rom/seed_0_canonical/certs/window.cert.json"
+sha256 = "73b77251e02cf27ec7b9b8763a577bf0ce5f2fb37d4d6b2fb2826b07884749cc"
+intent = "EncodedRom window cert fixture"
+owner_bead = "bd-1d6b"
+
+[[files]]
+path = "encoded_rom/seed_0_canonical/rom.gb.sha256"
+sha256 = "31c37fd86ea91891830e1d74a5c5645c1b868af2d669dd10f45b454fb78e135a"
+intent = "EncodedRom ROM payload digest fixture"
+owner_bead = "bd-1d6b"
+
+[[files]]
+path = "first_commit/h15/single_charset_v1_token.bin"
+sha256 = "684888c0ebb17f374298b65ee2807526c066094c701bcc7ebbe1c1095f494fc1"
+intent = "H15 single-token first video commit fixture"
+owner_bead = "bd-3af8"
+
+[[files]]
+path = "first_commit/h15/two_charset_v1_tokens.bin"
+sha256 = "2341a9c4270f9019a09041df3884cae2426b73c9ee750d73ec0fbcb6c2250f45"
+intent = "H15 two-token first video commit fixture"
+owner_bead = "bd-3af8"
+
+[[files]]
+path = "first_commit/h15/zero_token_payload.bin"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+intent = "H15 zero-token first video commit fixture"
+owner_bead = "bd-3af8"
+
+[[files]]
+path = "frontier/recommendation_a.json"
+sha256 = "45f1ca54026f7c1a73ea0995a2bbcbb55410617afd682d0b3ec3f4925d95c9d2"
+intent = "FrontierRecommendation A fixture"
+owner_bead = "bd-9flf"
+
+[[files]]
+path = "frontier/recommendation_b_l_fix1.json"
+sha256 = "180cdd3f06d4f2fc43059974cb607db4b4e5da091ed2290d6bbb4b8270a7874d"
+intent = "FrontierRecommendation B fixture with L_FIX1 leader"
+owner_bead = "bd-9flf"
+
+[[files]]
+path = "frontier/recommendation_b_l_mt4.json"
+sha256 = "662a9e77e92c49dff188b2f932ab43fc92dcc413807c811d1043494a6d02ce1c"
+intent = "FrontierRecommendation B fixture with L_MT4 leader"
+owner_bead = "bd-9flf"
+
+[[files]]
+path = "frontier/recommendation_tie.json"
+sha256 = "bb1e4ea68d32ddc7b29352ceb937b8d3e0e106d65995d32d8e7a11d9d7e22017"
+intent = "FrontierRecommendation Tie fixture"
+owner_bead = "bd-9flf"
+
+[[files]]
+path = "log_streams/seed_0_canonical_run.ndjson"
+sha256 = "c3122fc9df3aa720fb3585543233181f50612aeb27399cf495222d77cb991b17"
+intent = "SUBSTRATE_ONLY placeholder seed-0 replay log stream fixture; not a live producer trace"
+owner_bead = "bd-2t1y"
+
+[[files]]
+path = "sequences/h5/identical_repetition.toml"
+sha256 = "412d10b208661886fb3b5537182b543ace7fa4bf0aa3b3fc87ffa756923faac3"
+intent = "H5 equal long-range repetition fixture"
+owner_bead = "bd-38fj"
+
+[[files]]
+path = "sequences/h5/l_fix1_better_repetition.toml"
+sha256 = "5eeedfbeaae30933f8dc12e47ca50d6722c09a84899b7160c0f7799af298fdab"
+intent = "H5 L_FIX1 lower repetition fixture"
+owner_bead = "bd-38fj"
+
+[[files]]
+path = "sequences/h5/l_mt4_better_repetition.toml"
+sha256 = "dc8001b450144e16197faf4df49eb3b50e289f035c1dcc327a623e9a63a546e0"
+intent = "H5 L_MT4 lower repetition fixture"
+owner_bead = "bd-38fj"
+
+[[files]]
+path = "shadow/broken_negative_control.sample.json"
+sha256 = "3d53d6ca26428f7d393f8eac9d9c7980257d65a3cf741de0f5311a4a111674bb"
+intent = "SHR-1 broken negative-control JSON sample"
+owner_bead = "bd-2bv4"
+
+[[files]]
+path = "shadow/broken_negative_control.toml"
+sha256 = "d7e4294cb65530472f3da08771b6e941d78535bf91d0d7479b2767d9a9e6c6f8"
+intent = "SHR-1 broken negative-control source declaration; sample JSON is canonical rehearsal validator fixture"
+owner_bead = "bd-2bv4"
+
+[[files]]
+path = "shadow/healthy_canonical.toml"
+sha256 = "2f68d5353f5409db9999d2f985adf58a7a6bd01bbd03f03bb46709fb76dff905"
+intent = "SHR-1 healthy canonical sample summary"
+owner_bead = "bd-2bv4"

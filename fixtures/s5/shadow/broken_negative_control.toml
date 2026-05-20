@@ -1,0 +1,7 @@
+# owner_bead = "bd-2bv4"
+schema = "s5_shadow_fixture_ref.v1"
+intent = "Source declaration for the SHR-1 broken negative control; the JSON sample is the canonical rehearsal/validator fixture"
+json_sample = "broken_negative_control.sample.json"
+expected_ok = false
+expected_failure_stage = "RomWindowPlan"
+expected_diagnostic_contains = "negative control"

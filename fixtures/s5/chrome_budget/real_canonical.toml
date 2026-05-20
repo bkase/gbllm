@@ -1,0 +1,10 @@
+# owner_bead = "bd-2rjw"
+schema = "s5_runtime_chrome_budget_fixture.v1"
+intent = "Canonical real runtime nucleus hash budget fixture"
+target = "dmg-mbc5-8mib-128kib"
+profile = "Bringup"
+runtime_nucleus_hash = "sha256:5151515151515151515151515151515151515151515151515151515151515151"
+wram_usable_bytes = 8192
+sram_usable_bytes = 32768
+hram_usable_bytes = 127
+

@@ -1,0 +1,29 @@
+{
+  "compiler_feedback_sha": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "emission_id": {
+    "step": 4000
+  },
+  "failure_stage": "RomWindowPlan",
+  "fits_envelope": false,
+  "reachability_cert_valid": false,
+  "resource_state_cert_valid": false,
+  "sample_self_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "schema": "s5_shadow_compile_sample.v1",
+  "seed": 0,
+  "shadow_byte_cost": 4294967295,
+  "shadow_compile_ok": false,
+  "shadow_compile_skipped": "broken-negative-control: out-of-WRAM placement fixture fails before RomWindowPlan",
+  "shadow_energy_proxy_units": 0,
+  "shadow_kernel_count": 0,
+  "shadow_latency_proxy_cycles": 0,
+  "stages_executed": [
+    "QuantGraph",
+    "StaticBudgetReport",
+    "GbInferIR",
+    "ObservationPlan",
+    "RangePlan",
+    "StoragePlan",
+    "SramPagePlan"
+  ],
+  "variant": "boundedkv"
+}

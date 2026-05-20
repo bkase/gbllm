@@ -1,18 +1,126 @@
 //! Runtime chrome budget schema.
 
 use std::collections::BTreeSet;
+use std::fmt;
+use std::str::FromStr;
 
 use gbf_foundation::{BudgetSlotId, CompileProfileId, Hash256, TargetProfileId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::compile::PlacementProfile;
+
+pub const SYNTHETIC_REFERENCE_PREFIX: &str = "SYNTHETIC_REFERENCE:";
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RuntimeNucleusHash {
+    Real(Hash256),
+    SyntheticReference(Hash256),
+}
+
+impl RuntimeNucleusHash {
+    #[must_use]
+    pub const fn real(hash: Hash256) -> Self {
+        Self::Real(hash)
+    }
+
+    #[must_use]
+    pub const fn synthetic_reference(hash: Hash256) -> Self {
+        Self::SyntheticReference(hash)
+    }
+
+    #[must_use]
+    pub const fn hash(self) -> Hash256 {
+        match self {
+            Self::Real(hash) | Self::SyntheticReference(hash) => hash,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_synthetic_reference(self) -> bool {
+        matches!(self, Self::SyntheticReference(_))
+    }
+}
+
+impl From<Hash256> for RuntimeNucleusHash {
+    fn from(hash: Hash256) -> Self {
+        Self::real(hash)
+    }
+}
+
+impl fmt::Display for RuntimeNucleusHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Real(hash) => fmt::Display::fmt(hash, f),
+            Self::SyntheticReference(hash) => {
+                f.write_str(SYNTHETIC_REFERENCE_PREFIX)?;
+                fmt::Display::fmt(hash, f)
+            }
+        }
+    }
+}
+
+impl fmt::Debug for RuntimeNucleusHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl FromStr for RuntimeNucleusHash {
+    type Err = RuntimeNucleusHashParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(hash) = value.strip_prefix(SYNTHETIC_REFERENCE_PREFIX) {
+            return Hash256::from_str(hash)
+                .map(Self::synthetic_reference)
+                .map_err(RuntimeNucleusHashParseError::Hash);
+        }
+
+        Hash256::from_str(value)
+            .map(Self::real)
+            .map_err(RuntimeNucleusHashParseError::Hash)
+    }
+}
+
+impl Serialize for RuntimeNucleusHash {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeNucleusHash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeNucleusHashParseError {
+    Hash(gbf_foundation::Hash256ParseError),
+}
+
+impl fmt::Display for RuntimeNucleusHashParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hash(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeNucleusHashParseError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeChromeBudget {
     pub target: TargetProfileId,
     pub profile: CompileProfileId,
-    pub runtime_nucleus_hash: Hash256,
+    pub runtime_nucleus_hash: RuntimeNucleusHash,
     pub rom_slots: Vec<RomBudgetSlot>,
     pub memory_caps: RuntimeMemoryCapSection,
     pub wram_reserved: u16,
@@ -54,11 +162,15 @@ mod tests {
         serde_json::to_value(Hash256::from_bytes([byte; 32])).expect("hash serializes")
     }
 
+    fn runtime_hash(byte: u8) -> RuntimeNucleusHash {
+        RuntimeNucleusHash::real(Hash256::from_bytes([byte; 32]))
+    }
+
     fn budget_fixture() -> RuntimeChromeBudget {
         RuntimeChromeBudget {
             target: TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Bringup"),
-            runtime_nucleus_hash: Hash256::from_bytes([1; 32]),
+            runtime_nucleus_hash: runtime_hash(1),
             rom_slots: vec![RomBudgetSlot {
                 id: BudgetSlotId::new(7),
                 class: BudgetSlotClass::ExpertBank,
@@ -190,5 +302,74 @@ mod tests {
         value["unexpected"] = serde_json::json!("nope");
 
         assert!(serde_json::from_value::<RuntimeChromeBudget>(value).is_err());
+    }
+
+    #[test]
+    fn runtime_nucleus_hash_round_trips_real_and_synthetic() {
+        let real = RuntimeNucleusHash::real(Hash256::from_bytes([0xab; 32]));
+        let synthetic = RuntimeNucleusHash::synthetic_reference(Hash256::from_bytes([0xcd; 32]));
+
+        assert_eq!(
+            serde_json::to_value(real).expect("real hash serializes"),
+            serde_json::json!(
+                "sha256:abababababababababababababababababababababababababababababababab"
+            )
+        );
+        assert_eq!(
+            serde_json::from_value::<RuntimeNucleusHash>(serde_json::json!(
+                "sha256:abababababababababababababababababababababababababababababababab"
+            ))
+            .expect("real hash deserializes"),
+            real
+        );
+        assert_eq!(
+            serde_json::to_value(synthetic).expect("synthetic hash serializes"),
+            serde_json::json!(
+                "SYNTHETIC_REFERENCE:sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            )
+        );
+        assert_eq!(
+            serde_json::from_value::<RuntimeNucleusHash>(serde_json::json!(
+                "SYNTHETIC_REFERENCE:sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            ))
+            .expect("synthetic hash deserializes"),
+            synthetic
+        );
+        assert!(synthetic.is_synthetic_reference());
+        assert_eq!(
+            format!("{synthetic:?}"),
+            "SYNTHETIC_REFERENCE:sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        );
+    }
+
+    #[test]
+    fn runtime_nucleus_hash_rejects_malformed_strings() {
+        for value in [
+            "SYNTHETIC_REFERENCE:foo",
+            "foo",
+            "SYNTHETIC_REFERENCE:SYNTHETIC_REFERENCE:sha256:abababababababababababababababababababababababababababababababab",
+            "SYNTHETIC_REFERENCE:sha256:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        ] {
+            assert!(
+                serde_json::from_value::<RuntimeNucleusHash>(serde_json::json!(value)).is_err(),
+                "{value} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_chrome_budget_accepts_synthetic_reference_hash() {
+        let mut value = serde_json::to_value(budget_fixture()).expect("budget serializes");
+        value["runtime_nucleus_hash"] = serde_json::json!(
+            "SYNTHETIC_REFERENCE:sha256:0101010101010101010101010101010101010101010101010101010101010101"
+        );
+
+        let decoded: RuntimeChromeBudget =
+            serde_json::from_value(value).expect("synthetic budget deserializes");
+
+        assert_eq!(
+            decoded.runtime_nucleus_hash,
+            RuntimeNucleusHash::synthetic_reference(Hash256::from_bytes([1; 32]))
+        );
     }
 }

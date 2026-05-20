@@ -1,0 +1,67 @@
+{
+  "variant_records": [
+    {
+      "variant": "boundedkv",
+      "aggregate": {
+        "val_bpc_fp": 1.5,
+        "val_bpc_ternary": 1.3,
+        "ternary_gap": 0.2,
+        "v0_success_pass": true,
+        "v0_success_score": 0.8,
+        "param_count": 10000,
+        "projected_deployed_bytes": 20000,
+        "shadow_compile_ok_at_end": true,
+        "shadow_byte_cost_at_end": 18000,
+        "shadow_kernel_count_at_end": 12,
+        "latency_proxy_cycles": 50000,
+        "encoded_rom_byte_cost": 21000,
+        "fits_envelope": true,
+        "reachability_cert_valid": true,
+        "resource_state_cert_valid": true
+      }
+    },
+    {
+      "variant": "linearstate_fixed_0_5",
+      "aggregate": {
+        "val_bpc_fp": 1.45,
+        "val_bpc_ternary": 1.24,
+        "ternary_gap": 0.21,
+        "v0_success_pass": true,
+        "v0_success_score": 0.82,
+        "param_count": 10000,
+        "projected_deployed_bytes": 20000,
+        "shadow_compile_ok_at_end": true,
+        "shadow_byte_cost_at_end": 18200,
+        "shadow_kernel_count_at_end": 12,
+        "latency_proxy_cycles": 51000,
+        "encoded_rom_byte_cost": 22000,
+        "fits_envelope": true,
+        "reachability_cert_valid": true,
+        "resource_state_cert_valid": true
+      }
+    },
+    {
+      "variant": "linearstate_mt4",
+      "aggregate": {
+        "val_bpc_fp": 1.4,
+        "val_bpc_ternary": 1.2,
+        "ternary_gap": 0.2,
+        "v0_success_pass": true,
+        "v0_success_score": 0.84,
+        "param_count": 10000,
+        "projected_deployed_bytes": 20000,
+        "shadow_compile_ok_at_end": true,
+        "shadow_byte_cost_at_end": 18300,
+        "shadow_kernel_count_at_end": 12,
+        "latency_proxy_cycles": 52000,
+        "encoded_rom_byte_cost": 20000,
+        "fits_envelope": true,
+        "reachability_cert_valid": true,
+        "resource_state_cert_valid": true
+      }
+    }
+  ],
+  "frontier_recommendation": "B",
+  "frontier_leader_variant": "linearstate_mt4"
+}
+
