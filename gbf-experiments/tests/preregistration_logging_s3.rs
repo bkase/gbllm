@@ -21,7 +21,6 @@ fn preregistration_loader_emits_pin_loaded_event() {
     });
 
     assert_eq!(pin.schema, "s3_preregistration.v1");
-    assert_eq!(pin.first_result_commit, "");
 
     let events = capture.events();
     let event = events

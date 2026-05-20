@@ -1,0 +1,4 @@
+*** END OF THE PROJECT GUTENBERG EBOOK FOOTER BEFORE HEADER ***
+Intro after an early footer.
+*** START OF THE PROJECT GUTENBERG EBOOK FOOTER BEFORE HEADER ***
+The only footer is before the header.

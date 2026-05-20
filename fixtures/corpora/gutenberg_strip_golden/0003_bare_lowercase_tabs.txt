@@ -1,0 +1,6 @@
+Catalog front matter.
+	***	start of project gutenberg ebook bare lowercase tabs ***
+Bare marker body survives.
+Tabs before markers are horizontal whitespace.
+
+	***	end of project gutenberg ebook bare lowercase tabs ***

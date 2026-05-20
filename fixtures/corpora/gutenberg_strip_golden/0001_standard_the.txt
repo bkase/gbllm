@@ -1,0 +1,7 @@
+Preface that must disappear.
+*** START OF THE PROJECT GUTENBERG EBOOK STANDARD THE ***
+Alpha line.
+Beta line.
+
+*** END OF THE PROJECT GUTENBERG EBOOK STANDARD THE ***
+Trailer that must disappear.

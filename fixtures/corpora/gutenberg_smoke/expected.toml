@@ -1,0 +1,88 @@
+# fixtures/corpora/gutenberg_smoke/expected.toml
+# Drift oracle for the tiny in-repo Gutenberg smoke fixture.
+# Full build-corpus manifest/train/val production remains with bd-29lv.
+# Charset drop governance remains with bd-bzx3; contamination with bd-2p3n;
+# KN-5 baseline with bd-2nca; end-to-end smoke logging with bd-u6tn.
+
+schema = "gutenberg_smoke_expected.v1"
+fixture_manifest_path = "fixtures/corpora/gutenberg_smoke.toml"
+fixture_manifest_sha256 = "sha256:6127276fd038bd74293e80c0bb175f0a66805bc35f583cbcef3142e92f761867"
+gutenberg_manifest_self_hash = "pending:bd-29lv"
+train_sha256 = "pending:bd-29lv"
+val_sha256 = "pending:bd-29lv"
+source_blob_count = 8
+retained_book_count = 8
+total_fixture_bytes = 1041202
+drop_count_total = 0
+drop_count_no_supported_plaintext_format = 0
+drop_count_no_plaintext_archive_member = 0
+drop_count_source_decode_failed = 0
+drop_count_ambiguous_plaintext_archive = 0
+drop_count_invalid_utf8 = 0
+drop_count_empty_after_strip = 0
+drop_count_marker_missing = 0
+drop_count_unmappable_density = 0
+drop_count_dedup_collision = 0
+
+[owners]
+build_corpus_manifest_train_val = "bd-29lv"
+d3_strip_marker_drops = "bd-3vae"
+charset_unmappable_empty_drops = "bd-bzx3"
+contamination_report = "bd-2p3n"
+kn5_baseline = "bd-2nca"
+smoke_pipeline_logging = "bd-u6tn"
+
+[kn5_baseline]
+owner_bead = "bd-2nca"
+manifest_binding_owner = "bd-29lv"
+token_stream = "build-corpus train/val bytes with BOS/EOS book-boundary ids removed for TextCharSeq"
+expected_bpc_kn5 = 2.58418875422063
+tolerance = 1.0e-12
+
+[[source_blobs]]
+book_id = 4089
+local_blob_path = "fixtures/corpora/gutenberg_smoke/4089.318e6b2f8aa79d2e.bin"
+source_blob_sha256 = "sha256:318e6b2f8aa79d2e414e2cbc1ef920644e0ad267cb05c92220197db873a8cd85"
+source_blob_size_bytes = 520262
+
+[[source_blobs]]
+book_id = 4493
+local_blob_path = "fixtures/corpora/gutenberg_smoke/4493.fa1b6ae6db2f56f1.bin"
+source_blob_sha256 = "sha256:fa1b6ae6db2f56f154d652a45d516e3c4c7b9890a9c74f41f1e4060191da304a"
+source_blob_size_bytes = 135017
+
+[[source_blobs]]
+book_id = 17125
+local_blob_path = "fixtures/corpora/gutenberg_smoke/17125.1c40bd2467d6ba33.bin"
+source_blob_sha256 = "sha256:1c40bd2467d6ba33cf09b365b476914db1dd363efa54508ed294303db61fc127"
+source_blob_size_bytes = 300741
+
+[[source_blobs]]
+book_id = 17422
+local_blob_path = "fixtures/corpora/gutenberg_smoke/17422.f3388d754321bb01.bin"
+source_blob_sha256 = "sha256:f3388d754321bb01efb26acc870bcb1792e74ff13fef8efcd45c062e73a9e221"
+source_blob_size_bytes = 20027
+
+[[source_blobs]]
+book_id = 17424
+local_blob_path = "fixtures/corpora/gutenberg_smoke/17424.ea3b980ee4c39f86.bin"
+source_blob_sha256 = "sha256:ea3b980ee4c39f86562aec3a0a0dd7ff4ad5a6c905e3b47650e3f52f92d8732b"
+source_blob_size_bytes = 20039
+
+[[source_blobs]]
+book_id = 19394
+local_blob_path = "fixtures/corpora/gutenberg_smoke/19394.9da23d988c123492.bin"
+source_blob_sha256 = "sha256:9da23d988c1234920e3367c29a844e2d7ea29c94b26bf67d327a9e40d11336be"
+source_blob_size_bytes = 20483
+
+[[source_blobs]]
+book_id = 29156
+local_blob_path = "fixtures/corpora/gutenberg_smoke/29156.f0cae9e6aa2bbda5.bin"
+source_blob_sha256 = "sha256:f0cae9e6aa2bbda58a5f18075ce93ae06253735e27efddfe4f0abc0effee95ba"
+source_blob_size_bytes = 20785
+
+[[source_blobs]]
+book_id = 78663
+local_blob_path = "fixtures/corpora/gutenberg_smoke/78663.3b3c58ec80bca217.bin"
+source_blob_sha256 = "sha256:3b3c58ec80bca21769b576be710f858437a51a36f77cccfa10447cf1658dbf57"
+source_blob_size_bytes = 3848
