@@ -13,7 +13,7 @@ fn preregistration_toml_round_trips_and_hash_replays_are_stable() {
     assert_commit_id(&pin.predictions_commit);
     assert_commit_id(&pin.rfc_revision);
     assert!(!pin.pass_version_s3.is_empty());
-    assert_eq!(pin.first_result_commit, "");
+    assert_commit_id(&pin.first_result_commit);
 
     let rfc = read_workspace_file("history/rfcs/F-S3-v0-success-tinystories.md");
     let section = rfc_predictions_section(&rfc);

@@ -1,0 +1,7 @@
+Header matter.
+*** START OF THE PROJECT GUTENBERG EBOOK PRESERVE BODY WHITESPACE ***
+
+  Leading spaces stay.
+Trailing spaces stay.
+
+*** END OF THE PROJECT GUTENBERG EBOOK PRESERVE BODY WHITESPACE ***

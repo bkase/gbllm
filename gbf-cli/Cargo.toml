@@ -29,12 +29,20 @@ s3-full = [
     "s3-phase-d",
     "s3-oracle-real",
 ]
+s4 = ["gbf-experiments/s4"]
+s4-full = ["s4", "gbf-experiments/s4-full"]
+s4-falsify = ["s4", "gbf-experiments/s4-falsify"]
 falsify = ["phase-a", "gbf-experiments/falsify"]
 
 [dev-dependencies]
 assert_cmd.workspace = true
+bzip2.workspace = true
+flate2.workspace = true
 gbf-artifact = { path = "../gbf-artifact" }
 predicates.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tar.workspace = true
 tempfile.workspace = true
+toml.workspace = true
+zip.workspace = true

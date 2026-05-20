@@ -1,0 +1,12 @@
+schema = "s4_preregistration.v1"
+rfc_path = "history/rfcs/F-S4-gutenberg-promotion.md"
+predictions_line_start = 1225
+predictions_line_end = 1516
+predictions_commit = "0b36c8017fee50e18a36a91a6eb570d54c1091fa"
+predictions_section_hash = "sha256:3799106e0cb9ddb28afa0cc79a4600823f4b3149f299d8c60e3ba49d8b35dd0c"
+pass_version_S4 = "s4-prereg-bd-12we-2026-05-19"
+rfc_revision = "0b36c8017fee50e18a36a91a6eb570d54c1091fa"
+
+# TOML has no null value. Empty string is the preregistration null sentinel
+# until the first results-bearing S4 PR records the earliest result commit.
+first_result_commit = ""

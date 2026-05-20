@@ -1,0 +1,7 @@
+﻿Lead with UTF-8 BOM and CRLF marker coverage.
+*** START OF THIS PROJECT GUTENBERG EBOOK BOM CRLF ***
+Carriage returns become LF.
+Second body line.
+
+*** END OF THIS PROJECT GUTENBERG EBOOK BOM CRLF ***
+Ignored trailer.

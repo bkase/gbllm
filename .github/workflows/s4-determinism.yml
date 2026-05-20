@@ -1,0 +1,50 @@
+name: S4 Determinism
+
+on:
+  pull_request:
+    paths:
+      - "scripts/s4_determinism_check.sh"
+      - "scripts/s4_full_determinism_check.sh"
+      - "scripts/s4_isolation_check.sh"
+      - "scripts/s4_ci_common.py"
+      - "scripts/tests/s4_ci_scripts_test.sh"
+      - "gbf-experiments/src/s4/**"
+      - "experiments/S4/**"
+      - ".github/workflows/s4-determinism.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: s4-determinism-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  s4-determinism:
+    name: S4 determinism gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run S4 determinism smoke and pre-result scaffolding
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/s4-determinism
+          scripts/s4_determinism_check.sh --report-path artifacts/s4-determinism/s4-determinism.json
+          scripts/s4_full_determinism_check.sh --dry-run --report-path artifacts/s4-determinism/s4-full-determinism.json
+          scripts/s4_isolation_check.sh --dry-run --report-path artifacts/s4-determinism/s4-isolation.json
+
+      - name: Upload S4 determinism artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s4-determinism-artifacts
+          path: |
+            artifacts/s4-determinism/*.json
+          if-no-files-found: warn
+          retention-days: 14

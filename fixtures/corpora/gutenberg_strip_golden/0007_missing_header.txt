@@ -1,0 +1,3 @@
+There is no Project Gutenberg start marker in this source.
+Body-looking text cannot be retained without the RFC header.
+*** END OF THE PROJECT GUTENBERG EBOOK MISSING HEADER ***
