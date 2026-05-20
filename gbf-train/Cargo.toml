@@ -10,6 +10,8 @@ default = []
 burn-adapter = ["dep:burn", "burn/autodiff", "burn/ndarray"]
 qat = []
 qat-ablation = []
+s5-default = []
+s5-no-log = []
 
 [dependencies]
 burn = { workspace = true, optional = true }

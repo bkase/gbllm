@@ -114,7 +114,9 @@ Owns:
   S5 reproducibility laws (extends S1 with per-variant + per-export
     determinism, frontier byte-equality, emulator deterministic
     execution)
-  S5 falsification suite (12-14 deliberately-broken substitutes)
+  S5 falsification suite (fifteen deliberately-broken substitutes;
+    current in-repo wrapper is substrate-only until bd-q3zo wires live
+    gbf-experiments::s5 producer execution)
 
 Does not own:
   charset_v1 (S3)
@@ -766,7 +768,10 @@ D11 Shadow compile cadence and pipeline (real, not stub) (Fit axis)
    {shadow_compile_ok, fits_envelope, reachability_cert_valid,
    resource_state_cert_valid} is false; from the remaining, pick the
    point with minimum val_bpc_ternary, breaking ties by minimum
-   encoded_rom_byte_cost.
+   encoded_rom_byte_cost only when both tied candidates have a present
+   value. If exactly one tied candidate has Null encoded_rom_byte_cost,
+   the encoded-ROM tie-break is skipped for that pair and selection
+   falls through to the lexicographic tie-breaker.
 
    v0_success_subset_S5 is a strict 3-prompt subset of S3's v0_success
    workload, pinned in fixtures/workloads/v0_success_s5.toml:
@@ -832,7 +837,9 @@ D14 logging-overhead gate — pinned threshold (Fit axis)
      gate_predicate    :
        (median(instrumented) - median(baseline)) / median(baseline) < 0.01
    Threshold: 0.01 (1.0%). [ESTIMATE]; see A16 in §19.
-   Implementation: scripts/s5_logging_overhead_check.sh.
+   Implementation: scripts/s5_logging_overhead_check.sh as the D14
+   gate/report substrate. The full §13.18 self-hashed report emission
+   remains owned by bd-zy3j.
 
 D15 fail-closed on NaN / divergence (per-variant)
    Any seed of any variant producing non-finite loss or non-finite
@@ -1577,12 +1584,15 @@ version to change the record layout.
 LongRangeRepetitionPenalty (§3 of original S5):
   For a generated token sequence g of length N >= 64:
     let R := { (i, j) : 0 <= i < j < N, g[i] = g[j], j - i >= 64 }
-    LongRangeRepetitionPenalty(g) := sum_{(i,j) in R} 1 / (j - i)
-  This value is non-negative; larger means more long-range repetition.
+    pair_weighted_sum(g) := sum_{(i,j) in R} 1 / (j - i)
+    LongRangeRepetitionPenalty(g) := pair_weighted_sum(g) / N
+  This per-generated-token value is non-negative; larger means more
+  long-range repetition.
   H5 compares
   L_MT4 vs L_FIX1 on this quantity over the v0_success generation
-  prompt set; threshold 0.10 nats / generated token (Predicted) and
-  0.05 (Falsification).
+  prompt set; threshold 0.10 pair-weighted sum / generated token
+  (Predicted) and 0.05 pair-weighted sum / generated token
+  (Falsification).
 ```
 
 ## 6.2 Attention-oracle reference contract
@@ -1594,11 +1604,12 @@ AttentionOracleReference :=
 
 Properties (all required):
   AO-1  No Burn dependency.
-  AO-2  No checkpoint dependency: the oracle takes the ternary
-        projections (as f64 matrices) and the activation-fake-quant
-        clip bound as inputs, NOT a Burn module handle.
-  AO-3  No RNG: the oracle is a pure function of (fixture, projections,
-        clip bound).
+  AO-2  No Burn module handle, live trainer state, host runtime state,
+        or checkpoint object dependency: the oracle takes canonical
+        projection tensors extracted from the checkpoint/artifact under
+        test and the activation-fake-quant clip bound as inputs.
+  AO-3  No RNG: the oracle is a pure function of (fixture, serialized
+        projections, clip bound).
   AO-4  Bit-identical output across runs on the same platform.
   AO-5  oracle_self_hash binds the canonical f64 weights, the f32
         activation clip, and the fixture inputs; replay reproduces it.
@@ -2068,8 +2079,10 @@ Selection:
   Filter out points where any of {shadow_compile_ok_at_end,
   fits_envelope, reachability_cert_valid, resource_state_cert_valid}
   is false; from the remaining, pick min val_bpc_ternary; break ties
-  by min encoded_rom_byte_cost; further ties by lex (variant, seed,
-  cadence_step).
+  by min encoded_rom_byte_cost only when both candidates have a
+  present value; if one candidate has Null and the other has Some,
+  encoded_rom_byte_cost is not treated as better or worse and the
+  comparison falls through to lex (variant, seed, cadence_step).
 
 Empty-input invariant: emitter returns frontier=[], selected=None.
 Single-point: frontier=[P], selected = (Some(P) if all gates true else None).
@@ -2095,18 +2108,23 @@ that always picks the first point) fails the fixture.
 ```text
 operation s5_frontier_recommendation
   input:   { per_variant_aggregates: VariantAggregates }
-  output:  FrontierRecommendation in {A, B, Tie}
+  output:  {
+    frontier_recommendation: FrontierRecommendation in {A, B, Tie},
+    frontier_leader_variant: Null | VariantId
+  }
 
 Rule (mirrors D5):
   if BoundedKv beats both L_FIX1 and L_MT4 on aggregate val_bpc_ternary
      by >= 0.05 AND BoundedKv passes v0_success AND
      shadow_compile_ok_at_end is true:
     A
-  elif L_MT4 beats BoundedKv on aggregate val_bpc_ternary by >= 0.05
-       AND L_MT4 passes v0_success:
-    B
+  elif any LinearState variant in {L_FIX1, L_MT4} beats BoundedKv on
+       aggregate val_bpc_ternary by >= 0.05 AND passes v0_success:
+    B, with frontier_leader_variant set to the best LinearState
+    variant by val_bpc_ternary, tie-broken by encoded_rom_byte_cost
+    when both candidate costs are present, then by VariantId
   else:
-    Tie
+    Tie, with frontier_leader_variant = Null
 
 Invariants:
   FR-1  Recommendation is a license, not a winner. Decision dispatch
@@ -2114,6 +2132,8 @@ Invariants:
         Pass-with-B-frontier / Pass-with-tie.
   FR-2  Recommendation does NOT override D8's primary integration
         choice for Act II (BoundedKv always).
+  FR-3  frontier_leader_variant is populated only for B, and may be
+        either L_FIX1 or L_MT4. A and Tie record Null.
 ```
 
 ---
@@ -2673,6 +2693,9 @@ FrontierReport (JSON) :=
     selected:              Null | CheckpointFrontierPoint
     selection_authority:   "automated" | "manual-override"
     frontier_recommendation: "A" | "B" | "Tie"
+    frontier_leader_variant: Null | VariantId
+                          ; set to L_FIX1 or L_MT4 only when
+                          ; frontier_recommendation = "B"
     dominance_log_sha:     Hash256
     frontier_self_hash:    Hash256
   }
@@ -3047,7 +3070,9 @@ Closure protocol:
    - scripts/check-nucleus-drift.sh
    - scripts/s5_logging_overhead_check.sh
    - scripts/s5_predictions_ancestry.sh (RP-Predictions-Ancestry)
-   - scripts/s5_falsification_suite.sh  (runs all 12-14 F-cases per §16)
+   - scripts/s5_falsification_suite.sh  (substrate-only F13/F14/F15 policy
+       checks + dry-run feature matrix; live F1..F15 producer loop owner:
+       bd-q3zo)
    - scripts/s5_reproducibility_smoke.sh (Rep-S5-1, Rep-S5-2, Rep-S5-5,
        Rep-S5-7, Rep-S5-8, Rep-S5-12 on the tiny in-repo fixture)
 
@@ -3090,8 +3115,8 @@ Closure protocol:
 # 16. Proof obligations (combined falsification suite)
 
 Each numbered O-obligation is a CI-enforced test or script. The
-F1..F13 falsification cases (down from S5's 7 + S6's 9 = 16 by
-folding same-substrate duplicates per merge rule 8) are the
+F1..F15 falsification cases (down from S5's 7 + S6's 9 = 16 by
+folding one same-substrate duplicate per merge rule 8) are the
 deliberately-broken substitutes that must each produce the expected
 Refuted verdict.
 
@@ -3247,10 +3272,12 @@ F15 feedback-broken
     safe_bound update constant. Expected: H16 Refuted.
 ```
 
-Each F-case is implemented as an in-repo feature gate
-(`--features s5-falsify-{N}`) in gbf-experiments::s5. The
-falsification suite script enables one F-case at a time, runs the
-corresponding hypothesis's test, and asserts the verdict is Refuted.
+Current in-repo support for bd-233u is the bounded policy substrate
+for F13/F14/F15 plus Cargo feature-mutex/dry-run feature-matrix
+coverage for `s5-falsify-{N}`. It does not claim live
+gbf-experiments::s5 producer-side substitutions or real F1..F15
+feature-loop execution. That live producer loop, fixtures, and
+one-feature-at-a-time execution are owned by bd-q3zo.
 
 ---
 
@@ -3407,7 +3434,7 @@ gbf-experiments/tests/
   s5_fit_per_export_revalidation.rs
   s5_fit_feedback_apply_fixture.rs
   s5_fit_logging_overhead_gate.rs
-  s5_falsification_F1.rs ... s5_falsification_F13.rs
+  s5_falsification_F1.rs ... s5_falsification_F15.rs
 
 gbf-experiments/tests/fixtures/
   integration_s5/             ; tiny in-repo fixture for CI smoke
@@ -3740,8 +3767,10 @@ F-S5 Pick and Fit is correct when:
 
 12. All seventeen hypotheses have explicit verdicts in the
     falsification analysis section, with concrete observations cited.
-    The thirteen F1..F13 deliberately-broken substitutes each produce
-    the expected Refuted verdict. S5 retires sequence-state-
+    The fifteen F1..F15 deliberately-broken substitutes each produce
+    the expected Refuted verdict once the live producer loop owned by
+    bd-q3zo is wired; bd-233u provides only the policy substrate and
+    feature-mutex scaffolding for this claim. S5 retires sequence-state-
     architecture comparison risk AND the integration risk between
     training (S1..S4 + Pick) and the compiler+runtime stack
     (F-A*/F-B*). It does NOT claim MoE benefit (S7),
@@ -3751,6 +3780,3 @@ F-S5 Pick and Fit is correct when:
     switching, or cartridge hardware behavior. Those are later
     slices' or post-closure proof obligations.
 ```
-
-
-

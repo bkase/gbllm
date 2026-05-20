@@ -2,6 +2,8 @@
 
 #[cfg(all(feature = "qat", feature = "qat-ablation"))]
 compile_error!("qat and qat-ablation are mutually exclusive");
+#[cfg(all(feature = "s5-default", feature = "s5-no-log"))]
+compile_error!("S5 feature mutex violated: s5-default and s5-no-log are mutually exclusive");
 
 pub mod adapter;
 #[cfg(feature = "burn-adapter")]

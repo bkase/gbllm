@@ -1,0 +1,9 @@
+# owner_bead = "bd-2bv4"
+schema = "s5_shadow_fixture_ref.v1"
+intent = "SHR-1 healthy sample summary: all stages executed and ok=true"
+variant = "boundedkv"
+seed = 0
+emission_id = "phase_e_final"
+ok = true
+stages_executed = ["LowerIR", "OverlayPlan", "BankPack", "EmitAsm", "Assemble"]
+

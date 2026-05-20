@@ -36,8 +36,13 @@ fn validate_experiment_build_selection() {
     let s4 = env::var_os("CARGO_FEATURE_S4").is_some();
     let s4_full = env::var_os("CARGO_FEATURE_S4_FULL").is_some();
     let s4_falsify = env::var_os("CARGO_FEATURE_S4_FALSIFY").is_some();
+    let s5_default = env::var_os("CARGO_FEATURE_S5_DEFAULT").is_some();
+    let s5_no_log = env::var_os("CARGO_FEATURE_S5_NO_LOG").is_some();
     let s3_oracle_real = env::var_os("CARGO_FEATURE_S3_ORACLE_REAL").is_some();
     let s3_oracle_fallback = env::var_os("CARGO_FEATURE_S3_ORACLE_FALLBACK").is_some();
+    let s5_falsifier_count = (1..=15)
+        .filter(|index| env::var_os(format!("CARGO_FEATURE_S5_FALSIFY_{index}")).is_some())
+        .count();
 
     if s2_full && s2_ablation {
         panic!("S2 feature mutex violated");
@@ -48,6 +53,12 @@ fn validate_experiment_build_selection() {
     if s4_full && s4_falsify {
         panic!("S4 feature mutex violated: s4-full and s4-falsify are mutually exclusive");
     }
+    if s5_default && s5_no_log {
+        panic!("S5 feature mutex violated: s5-default and s5-no-log are mutually exclusive");
+    }
+    if s5_falsifier_count > 1 {
+        panic!("S5 falsifier feature mutex violated: enable at most one s5-falsify-N feature");
+    }
 
     match (phase_a, ablation) {
         (true, false) | (false, true) => {}
@@ -55,9 +66,9 @@ fn validate_experiment_build_selection() {
             panic!("gbf-experiments features phase-a and ablation are mutually exclusive");
         }
         (false, false) => {
-            if !s2_full && !s2_ablation && !s3 && !s4 {
+            if !s2_full && !s2_ablation && !s3 && !s4 && !s5_default && !s5_no_log {
                 panic!(
-                    "gbf-experiments requires at least one S1, S2, S3, or S4 experiment feature"
+                    "gbf-experiments requires at least one S1, S2, S3, S4, or S5 experiment feature"
                 );
             }
         }

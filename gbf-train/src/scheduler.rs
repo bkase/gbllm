@@ -410,6 +410,47 @@ impl PhasePosition {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D13FeedbackApplyBoundary {
+    PhaseAFinalize,
+    PhaseB,
+    PhaseC,
+    PhaseD,
+}
+
+impl D13FeedbackApplyBoundary {
+    #[must_use]
+    pub const fn step(self) -> u64 {
+        match self {
+            Self::PhaseAFinalize => 6000,
+            Self::PhaseB => 6001,
+            Self::PhaseC => 12000,
+            Self::PhaseD => 20000,
+        }
+    }
+
+    #[must_use]
+    pub const fn owner_phase(self) -> TrainPhaseKind {
+        match self {
+            Self::PhaseAFinalize => TrainPhaseKind::DenseTeacherWarmup,
+            Self::PhaseB => TrainPhaseKind::RouterWarmup,
+            Self::PhaseC => TrainPhaseKind::ExpertTernaryQat,
+            Self::PhaseD => TrainPhaseKind::FullNumericQat,
+        }
+    }
+}
+
+#[must_use]
+pub const fn d13_feedback_apply_boundary(step: u64) -> Option<D13FeedbackApplyBoundary> {
+    match step {
+        6000 => Some(D13FeedbackApplyBoundary::PhaseAFinalize),
+        6001 => Some(D13FeedbackApplyBoundary::PhaseB),
+        12000 => Some(D13FeedbackApplyBoundary::PhaseC),
+        20000 => Some(D13FeedbackApplyBoundary::PhaseD),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhaseSchedulerError {
     StepOutOfRange {
@@ -550,6 +591,124 @@ mod tests {
                 final_step: 50,
             }
         );
+    }
+
+    #[test]
+    fn scheduler_s5_lookup_pins_phase_b_c_boundary_at_6002() {
+        let scheduler = s5_scheduler();
+
+        assert_eq!(
+            scheduler.current_phase(6000).unwrap().kind(),
+            TrainPhaseKind::DenseTeacherWarmup
+        );
+        assert_eq!(
+            scheduler.current_phase(6001).unwrap().kind(),
+            TrainPhaseKind::RouterWarmup
+        );
+        assert_eq!(
+            scheduler.current_phase(6002).unwrap().kind(),
+            TrainPhaseKind::ExpertTernaryQat
+        );
+        assert_eq!(
+            scheduler.current_phase(6003).unwrap().kind(),
+            TrainPhaseKind::ExpertTernaryQat
+        );
+    }
+
+    #[test]
+    fn scheduler_s5_live_transition_enters_phase_c_at_6002() {
+        let mut scheduler = s5_scheduler();
+        let mut model = RecordingModel::default();
+        let collector = TestEventCollector::new();
+        let emitter = TrainingLogEmitter::with_test_collector(collector.clone());
+        let mut checkpoint_steps = Vec::new();
+
+        for step in [6000, 6001, 6002, 6003] {
+            scheduler
+                .apply_step_with_checkpoint(step, &mut model, &emitter, |transition| {
+                    checkpoint_steps.push(transition.step());
+                    true
+                })
+                .unwrap();
+        }
+
+        assert_eq!(checkpoint_steps, vec![6001, 6002]);
+        assert_eq!(
+            model
+                .calls
+                .iter()
+                .map(|controls| controls.phase_kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TrainPhaseKind::DenseTeacherWarmup,
+                TrainPhaseKind::RouterWarmup,
+                TrainPhaseKind::ExpertTernaryQat,
+                TrainPhaseKind::ExpertTernaryQat,
+            ]
+        );
+
+        let events = collector.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].field("step"), Some(&TestFieldValue::U64(6001)));
+        assert_eq!(
+            events[0].field("to_phase"),
+            Some(&TestFieldValue::String("router_warmup".to_owned()))
+        );
+        assert_eq!(events[1].field("step"), Some(&TestFieldValue::U64(6002)));
+        assert_eq!(
+            events[1].field("from_phase"),
+            Some(&TestFieldValue::String("router_warmup".to_owned()))
+        );
+        assert_eq!(
+            events[1].field("to_phase"),
+            Some(&TestFieldValue::String("expert_ternary_qat".to_owned()))
+        );
+    }
+
+    #[test]
+    fn scheduler_s5_phase_membership_stream_is_replay_deterministic() {
+        fn stream() -> Vec<(u64, TrainPhaseKind)> {
+            let scheduler = s5_scheduler();
+            [6000, 6001, 6002, 6003]
+                .into_iter()
+                .map(|step| (step, scheduler.current_phase(step).unwrap().kind()))
+                .collect()
+        }
+
+        let first = stream();
+        let second = stream();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            vec![
+                (6000, TrainPhaseKind::DenseTeacherWarmup),
+                (6001, TrainPhaseKind::RouterWarmup),
+                (6002, TrainPhaseKind::ExpertTernaryQat),
+                (6003, TrainPhaseKind::ExpertTernaryQat),
+            ]
+        );
+    }
+
+    #[test]
+    fn d13_feedback_apply_boundary_assigns_6000_to_phase_a_and_6001_to_phase_b() {
+        assert_eq!(
+            d13_feedback_apply_boundary(6000),
+            Some(D13FeedbackApplyBoundary::PhaseAFinalize)
+        );
+        assert_eq!(
+            d13_feedback_apply_boundary(6000).unwrap().owner_phase(),
+            TrainPhaseKind::DenseTeacherWarmup
+        );
+        assert_eq!(
+            d13_feedback_apply_boundary(6001),
+            Some(D13FeedbackApplyBoundary::PhaseB)
+        );
+        assert_eq!(
+            d13_feedback_apply_boundary(6001).unwrap().owner_phase(),
+            TrainPhaseKind::RouterWarmup
+        );
+        assert_eq!(d13_feedback_apply_boundary(6002), None);
     }
 
     #[test]
@@ -883,6 +1042,10 @@ mod tests {
 
     fn scheduler() -> TrainingPhaseScheduler {
         TrainingPhaseScheduler::new(TrainingPhaseSchedule::default_five_phase(10).unwrap())
+    }
+
+    fn s5_scheduler() -> TrainingPhaseScheduler {
+        TrainingPhaseScheduler::new(TrainingPhaseSchedule::s5_pick_and_fit().unwrap())
     }
 
     #[derive(Debug, Default)]

@@ -1,0 +1,9 @@
+# owner_bead = "bd-2isr"
+schema = "s5_h13_boundary_fixture.v1"
+intent = "strict pass boundary: |shadow-final| <= 1024"
+seed = 0
+shadow_byte_cost = 8192
+final_encoded_rom_byte_cost = 9216
+expected_delta_abs = 1024
+expected_status = "strict_pass"
+

@@ -18,11 +18,11 @@ use gbf_policy::{
     OverlayPromotion, PlacementKnob, PlacementProfile, PolicySource, ProbeCollectionLevel,
     RangeCapsSpec, RangeKnob, ReductionPlanCeiling, ReductionSiteId, RepairPolicy,
     RepairPolicyProfile, RiskPolicy, RomKernelDuplicationBias, RomKernelResidencyBias,
-    RomWindowKnob, RuntimeMode, ScheduleKnob, ScheduleResourcePressure, ScheduleSliceCoarsening,
-    ScheduleTileSearch, ServiceLevelObjective, SramKnob, SramPageAggression, StorageKnob,
-    StorageMaterialization, SwitchProjectionSource, TraceBudget, TraceDropPolicy, ValidationCode,
-    ValidationDetail, ValidationDiagnostic, ValidationOrigin, budget_failure_diagnostic,
-    canonical_default_bounds_fixture,
+    RomWindowKnob, RuntimeMode, RuntimeNucleusHash, ScheduleKnob, ScheduleResourcePressure,
+    ScheduleSliceCoarsening, ScheduleTileSearch, ServiceLevelObjective, SramKnob,
+    SramPageAggression, StorageKnob, StorageMaterialization, SwitchProjectionSource, TraceBudget,
+    TraceDropPolicy, ValidationCode, ValidationDetail, ValidationDiagnostic, ValidationOrigin,
+    budget_failure_diagnostic, canonical_default_bounds_fixture,
 };
 use gbf_report::report_schemas::artifact_validation_v1::{
     ArtifactCompatibilityDecision, ArtifactCompatibilityFailure, ArtifactCompatibilitySection,
@@ -376,7 +376,7 @@ fn static_runtime_budget_section() -> RuntimeChromeBudgetSection {
     RuntimeChromeBudgetSection {
         target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
         profile: CompileProfileId::from("Bringup"),
-        runtime_nucleus_hash: hash(0x40),
+        runtime_nucleus_hash: RuntimeNucleusHash::real(hash(0x40)),
         rom_slots: vec![
             RomBudgetSlotEntry {
                 id: BudgetSlotId::new(1),

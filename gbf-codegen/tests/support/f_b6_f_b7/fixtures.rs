@@ -33,7 +33,7 @@ use gbf_policy::{
     BudgetSlotClass, DEFAULT_COMPILE_PROFILE_ID, MetricRegistrySnapshot, ObservabilityMode,
     ObservationProfileCaps, PlacementProfile, ProbeImportanceClass, ProbeRegistrySnapshot,
     RangeCapsSpec, ReductionPlanCeiling, ReductionSiteId, RomBudgetSlot, RuntimeChromeBudget,
-    RuntimeMemoryCapSection, RuntimeMode, TraceBudget as PolicyTraceBudget,
+    RuntimeMemoryCapSection, RuntimeMode, RuntimeNucleusHash, TraceBudget as PolicyTraceBudget,
     TraceDropPolicy as PolicyTraceDropPolicy, TraceEventLayoutRegistrySnapshot, TraceProbeId,
     metric_registry_hash, metric_registry_v1, probe_registry_hash, probe_registry_v1,
     trace_event_layout_registry_hash, trace_event_layout_registry_v1,
@@ -392,7 +392,7 @@ impl StaticBudgetReductionSiteFactsFixture {
         let runtime_budget = RuntimeChromeBudget {
             target: TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from(DEFAULT_COMPILE_PROFILE_ID),
-            runtime_nucleus_hash: hash(0x50),
+            runtime_nucleus_hash: RuntimeNucleusHash::real(hash(0x50)),
             rom_slots: vec![RomBudgetSlot {
                 id: BudgetSlotId::new(0),
                 class: BudgetSlotClass::CommonBank,

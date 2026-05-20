@@ -1,7 +1,7 @@
 {
   "target": "dmg-mbc5-8mib-128kib",
   "profile": "Bringup",
-  "runtime_nucleus_hash": "sha256:2a1fc3405e389733a0006c5b1e6a314a7d81fbc671466a3bc02cdbb876cd1ec5",
+  "runtime_nucleus_hash": "SYNTHETIC_REFERENCE:sha256:2a1fc3405e389733a0006c5b1e6a314a7d81fbc671466a3bc02cdbb876cd1ec5",
   "rom_slots": [
     {
       "id": 0,

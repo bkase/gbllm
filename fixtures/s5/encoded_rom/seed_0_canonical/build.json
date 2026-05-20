@@ -1,0 +1,21 @@
+{
+  "schema": "s5_encoded_rom_build_fixture.v1",
+  "owner_bead": "bd-1d6b",
+  "spec_sha": "UNSET_PLACEHOLDER_F_S5_RFC_SHA",
+  "spec_sha_status": "placeholder_unset",
+  "variant": "boundedkv",
+  "seed": 0,
+  "build_identity": {
+    "runtime_nucleus_hash": "sha256:5151515151515151515151515151515151515151515151515151515151515151",
+    "artifact_core_hash": "sha256:8181818181818181818181818181818181818181818181818181818181818181"
+  },
+  "rom_sha256": "sha256:abababababababababababababababababababababababababababababababab",
+  "certs": [
+    "certs/range.cert.json",
+    "certs/arena.cert.json",
+    "certs/window.cert.json",
+    "certs/reachability.cert.json",
+    "certs/resource_state.cert.json"
+  ]
+}
+

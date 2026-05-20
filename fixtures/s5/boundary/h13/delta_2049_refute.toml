@@ -1,0 +1,9 @@
+# owner_bead = "bd-2isr"
+schema = "s5_h13_boundary_fixture.v1"
+intent = "refutation boundary: |shadow-final| > 2048"
+seed = 0
+shadow_byte_cost = 8192
+final_encoded_rom_byte_cost = 10241
+expected_delta_abs = 2049
+expected_status = "refuted"
+

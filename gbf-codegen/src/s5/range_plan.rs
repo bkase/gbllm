@@ -3954,7 +3954,7 @@ mod tests {
         let runtime_budget = RuntimeChromeBudget {
             target: TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Default"),
-            runtime_nucleus_hash: hash(0x60),
+            runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(0x60)),
             rom_slots: vec![RomBudgetSlot {
                 id: BudgetSlotId::new(0),
                 class: BudgetSlotClass::CommonBank,

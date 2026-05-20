@@ -11,8 +11,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::budget::RuntimeChromeBudget;
-use crate::canonical::domain_hash;
+use crate::budget::{RuntimeChromeBudget, RuntimeNucleusHash};
+use crate::canonical::{canonical_json_bytes, domain_hash};
 use crate::objective::{CompileObjective, RiskPolicy};
 use crate::repair::{RepairPolicy, RepairProposalId};
 
@@ -84,6 +84,653 @@ pub struct CompileInvocationInputs {
     pub compile_request: CompileRequest,
     pub target_profile: TargetProfile,
     pub runtime_chrome_budget: Option<RuntimeChromeBudget>,
+}
+
+pub const S5_ATTENTION_ORACLE_SCHEMA: &str = "s5_attention_oracle_spec.v1";
+
+pub const S5_ATTENTION_ORACLE_INTEGRATION_OWNER: &str =
+    "bd-1gmy AttentionOracleReport binding hashes and gbf-experiments::s5 oracle runner";
+
+pub const S5_ATTENTION_ORACLE_PROHIBITED_DEPENDENCIES: [&str; 4] = [
+    "Burn module handle",
+    "live trainer state",
+    "host runtime state",
+    "random number stream",
+];
+
+pub const S5_ATTENTION_ORACLE_REQUIRED_INPUTS: [&str; 4] = [
+    "checkpoint artifact reference",
+    "canonical serialized projection tensors",
+    "quant spec binding",
+    "activation fake-quant clip bound",
+];
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5AttentionOracleInputs {
+    pub schema: String,
+    pub checkpoint_artifact: ArtifactRef,
+    pub projection_tensors: CanonicalProjectionTensorSet,
+    pub quant_spec: S5AttentionOracleQuantSpecBinding,
+    pub activation_fake_quant_clip: f32,
+    pub fixture_token_ids: Vec<u32>,
+}
+
+impl S5AttentionOracleInputs {
+    #[must_use]
+    pub fn new(
+        checkpoint_artifact: ArtifactRef,
+        projection_tensors: CanonicalProjectionTensorSet,
+        quant_spec: S5AttentionOracleQuantSpecBinding,
+        activation_fake_quant_clip: f32,
+        fixture_token_ids: Vec<u32>,
+    ) -> Self {
+        Self {
+            schema: S5_ATTENTION_ORACLE_SCHEMA.to_owned(),
+            checkpoint_artifact,
+            projection_tensors,
+            quant_spec,
+            activation_fake_quant_clip,
+            fixture_token_ids,
+        }
+    }
+
+    #[must_use]
+    pub fn prohibited_dependencies() -> &'static [&'static str] {
+        &S5_ATTENTION_ORACLE_PROHIBITED_DEPENDENCIES
+    }
+
+    #[must_use]
+    pub fn required_inputs() -> &'static [&'static str] {
+        &S5_ATTENTION_ORACLE_REQUIRED_INPUTS
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5AttentionOracleQuantSpecBinding {
+    pub source: ProjectionTensorSource,
+    pub canonical_bytes_sha256: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalProjectionTensorSet {
+    pub source: ProjectionTensorSource,
+    pub tensors: Vec<CanonicalProjectionTensor>,
+}
+
+impl CanonicalProjectionTensorSet {
+    #[must_use]
+    pub fn from_checkpoint_artifact(
+        source: ProjectionTensorSource,
+        tensors: Vec<CanonicalProjectionTensor>,
+    ) -> Self {
+        Self { source, tensors }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ProjectionTensorSource {
+    QuantSpecWeightQuant,
+    PhaseAFpProjectionTensors,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalProjectionTensor {
+    pub name: ProjectionTensorName,
+    pub rows: u32,
+    pub cols: u32,
+    pub encoding: ProjectionTensorEncoding,
+    pub canonical_bytes_sha256: Hash256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionTensorName {
+    Query,
+    Key,
+    Value,
+    Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ProjectionTensorEncoding {
+    F64LeMatrix,
+    Fp32LeMatrix,
+    QuantizedWeightBytes,
+}
+
+pub const S5_ATTENTION_ORACLE_REPORT_SCHEMA: &str = "s5_attention_oracle.v1";
+
+/// The current S5 attention-oracle report schema is a policy contract surface.
+///
+/// No `gbf-artifact` public re-export is claimed by bd-1gmy/bd-179t; the live
+/// producer and artifact plumbing remain owned by the named integration owner.
+pub const S5_ATTENTION_ORACLE_REPORT_SCHEMA_SCOPE: &str =
+    "gbf-policy policy-only report contract; gbf-artifact exposure is not claimed here";
+
+pub const S5_ATTENTION_ORACLE_REPORT_PRODUCER_OWNER: &str = "future gbf-experiments::s5 oracle runner / OracleReportEmitted / seed-0 e2e / on-disk mutation protocol owner";
+
+const S5_ATTENTION_ORACLE_AGGREGATE_EPSILON: f32 = 1.0e-6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5AttentionOracleBindingHashes {
+    pub phase_a_checkpoint_sha: Hash256,
+    pub projection_tensors_sha: Hash256,
+    pub quant_spec_sha: Hash256,
+    pub activation_clip_sha: Hash256,
+}
+
+impl S5AttentionOracleBindingHashes {
+    pub fn from_inputs(inputs: &S5AttentionOracleInputs) -> Result<Self, serde_json::Error> {
+        if !inputs.activation_fake_quant_clip.is_finite() {
+            return Err(serde_json::Error::custom(
+                "activation_fake_quant_clip must be finite",
+            ));
+        }
+
+        Ok(Self {
+            phase_a_checkpoint_sha: s5_attention_oracle_domain_hash(
+                "phase_a_checkpoint",
+                &inputs.checkpoint_artifact,
+            )?,
+            projection_tensors_sha: s5_attention_oracle_domain_hash(
+                "projection_tensors",
+                &inputs.projection_tensors,
+            )?,
+            quant_spec_sha: s5_attention_oracle_domain_hash("quant_spec", &inputs.quant_spec)?,
+            activation_clip_sha: s5_attention_oracle_domain_hash(
+                "activation_clip",
+                &ActivationClipHashInput {
+                    activation_fake_quant_clip: inputs.activation_fake_quant_clip,
+                },
+            )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationClipHashInput {
+    activation_fake_quant_clip: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5AttentionOracleReport {
+    pub schema: String,
+    pub seed: u64,
+    pub phase_a_checkpoint_sha: Hash256,
+    pub projection_tensors_sha: Hash256,
+    pub quant_spec_sha: Hash256,
+    pub activation_clip_sha: Hash256,
+    pub fixture_suite_sha: Hash256,
+    pub spec_sha: Hash256,
+    pub per_fixture_results: Vec<S5AttentionOracleResult>,
+    pub aggregate_max_abs_diff: f32,
+    pub aggregate_p99_max_abs_diff: f32,
+    pub aggregate_agreement: bool,
+    pub oracle_self_hash: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5AttentionOracleReportPayload {
+    pub fixture_suite_sha: Hash256,
+    pub spec_sha: Hash256,
+    pub per_fixture_results: Vec<S5AttentionOracleResult>,
+    pub aggregate_max_abs_diff: f32,
+    pub aggregate_p99_max_abs_diff: f32,
+    pub aggregate_agreement: bool,
+}
+
+impl S5AttentionOracleReport {
+    #[must_use]
+    pub fn new(
+        seed: u64,
+        bindings: S5AttentionOracleBindingHashes,
+        payload: S5AttentionOracleReportPayload,
+    ) -> Self {
+        Self {
+            schema: S5_ATTENTION_ORACLE_REPORT_SCHEMA.to_owned(),
+            seed,
+            phase_a_checkpoint_sha: bindings.phase_a_checkpoint_sha,
+            projection_tensors_sha: bindings.projection_tensors_sha,
+            quant_spec_sha: bindings.quant_spec_sha,
+            activation_clip_sha: bindings.activation_clip_sha,
+            fixture_suite_sha: payload.fixture_suite_sha,
+            spec_sha: payload.spec_sha,
+            per_fixture_results: payload.per_fixture_results,
+            aggregate_max_abs_diff: payload.aggregate_max_abs_diff,
+            aggregate_p99_max_abs_diff: payload.aggregate_p99_max_abs_diff,
+            aggregate_agreement: payload.aggregate_agreement,
+            oracle_self_hash: Hash256::ZERO,
+        }
+    }
+
+    pub fn computed_oracle_self_hash(&self) -> Result<Hash256, serde_json::Error> {
+        let mut hashable = self.clone();
+        hashable.oracle_self_hash = Hash256::ZERO;
+        s5_attention_oracle_domain_hash("report", &hashable)
+    }
+
+    pub fn with_computed_oracle_self_hash(mut self) -> Result<Self, serde_json::Error> {
+        self.oracle_self_hash = self.computed_oracle_self_hash()?;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn binding_hashes(&self) -> S5AttentionOracleBindingHashes {
+        S5AttentionOracleBindingHashes {
+            phase_a_checkpoint_sha: self.phase_a_checkpoint_sha,
+            projection_tensors_sha: self.projection_tensors_sha,
+            quant_spec_sha: self.quant_spec_sha,
+            activation_clip_sha: self.activation_clip_sha,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5AttentionOracleResult {
+    pub fixture_id: String,
+    pub position: u32,
+    pub oracle_logits_sha256: Hash256,
+    pub boundedkv_logits_sha256: Hash256,
+    pub max_abs_diff: f32,
+    pub agreement: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S5AttentionOracleBindingMismatch {
+    pub field: &'static str,
+    pub expected: Hash256,
+    pub observed: Hash256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S5AttentionOracleAggregateMismatch {
+    pub field: &'static str,
+    pub reason: &'static str,
+}
+
+pub fn verify_s5_attention_oracle_report_bindings(
+    report: &S5AttentionOracleReport,
+    expected: &S5AttentionOracleBindingHashes,
+) -> Result<(), S5AttentionOracleBindingMismatch> {
+    for (field, expected, observed) in [
+        (
+            "phase_a_checkpoint_sha",
+            expected.phase_a_checkpoint_sha,
+            report.phase_a_checkpoint_sha,
+        ),
+        (
+            "projection_tensors_sha",
+            expected.projection_tensors_sha,
+            report.projection_tensors_sha,
+        ),
+        (
+            "quant_spec_sha",
+            expected.quant_spec_sha,
+            report.quant_spec_sha,
+        ),
+        (
+            "activation_clip_sha",
+            expected.activation_clip_sha,
+            report.activation_clip_sha,
+        ),
+    ] {
+        if expected != observed {
+            return Err(S5AttentionOracleBindingMismatch {
+                field,
+                expected,
+                observed,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_s5_attention_oracle_report_aggregates(
+    report: &S5AttentionOracleReport,
+) -> Result<(), S5AttentionOracleAggregateMismatch> {
+    validate_s5_attention_oracle_metric("aggregate_max_abs_diff", report.aggregate_max_abs_diff)?;
+    validate_s5_attention_oracle_metric(
+        "aggregate_p99_max_abs_diff",
+        report.aggregate_p99_max_abs_diff,
+    )?;
+
+    let aggregate_agreement = report
+        .per_fixture_results
+        .iter()
+        .all(|result| result.agreement);
+    if report.aggregate_agreement != aggregate_agreement {
+        return Err(S5AttentionOracleAggregateMismatch {
+            field: "aggregate_agreement",
+            reason: "does not match per_fixture_results agreement",
+        });
+    }
+
+    let mut observed_max_abs_diff = 0.0_f32;
+    for result in &report.per_fixture_results {
+        validate_s5_attention_oracle_metric(
+            "per_fixture_results.max_abs_diff",
+            result.max_abs_diff,
+        )?;
+        observed_max_abs_diff = observed_max_abs_diff.max(result.max_abs_diff);
+    }
+
+    if report.aggregate_max_abs_diff + S5_ATTENTION_ORACLE_AGGREGATE_EPSILON < observed_max_abs_diff
+    {
+        return Err(S5AttentionOracleAggregateMismatch {
+            field: "aggregate_max_abs_diff",
+            reason: "less than per_fixture_results max_abs_diff",
+        });
+    }
+
+    if report.aggregate_p99_max_abs_diff
+        > report.aggregate_max_abs_diff + S5_ATTENTION_ORACLE_AGGREGATE_EPSILON
+    {
+        return Err(S5AttentionOracleAggregateMismatch {
+            field: "aggregate_p99_max_abs_diff",
+            reason: "greater than aggregate_max_abs_diff",
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_s5_attention_oracle_metric(
+    field: &'static str,
+    value: f32,
+) -> Result<(), S5AttentionOracleAggregateMismatch> {
+    if !value.is_finite() {
+        return Err(S5AttentionOracleAggregateMismatch {
+            field,
+            reason: "must be finite",
+        });
+    }
+    if value < 0.0 {
+        return Err(S5AttentionOracleAggregateMismatch {
+            field,
+            reason: "must be non-negative",
+        });
+    }
+    Ok(())
+}
+
+fn s5_attention_oracle_domain_hash<T: Serialize>(
+    type_name: &str,
+    value: &T,
+) -> Result<Hash256, serde_json::Error> {
+    domain_hash(
+        "gbf-policy",
+        type_name,
+        S5_ATTENTION_ORACLE_REPORT_SCHEMA,
+        value,
+    )
+}
+
+pub fn s5_attention_oracle_canonical_json_bytes<T: Serialize>(
+    value: &T,
+) -> Result<Vec<u8>, serde_json::Error> {
+    canonical_json_bytes(value)
+}
+
+pub const S5_ENCODED_ROM_BUILD_IDENTITY_INTEGRATION_OWNER: &str =
+    "EncodedRomBundle producer and H15 ArtifactOracle::predict_first_token integration";
+
+pub const S5_ENCODED_ROM_REQUIRED_SEEDS: [u64; 5] = [0, 1, 2, 3, 4];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5EncodedRomBuildIdentityBlock {
+    pub runtime_nucleus_hash: RuntimeNucleusHash,
+    pub artifact_core_hash: Hash256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S5EncodedRomIdentityField {
+    RuntimeNucleusHash,
+    ArtifactCoreHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S5EncodedRomRuntimeBindingMismatch {
+    pub field: S5EncodedRomIdentityField,
+    pub expected: RuntimeNucleusHash,
+    pub observed: RuntimeNucleusHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S5EncodedRomArtifactBindingMismatch {
+    pub field: S5EncodedRomIdentityField,
+    pub expected: Hash256,
+    pub observed: Hash256,
+}
+
+pub fn verify_s5_encoded_rom_er3_runtime_nucleus_hash(
+    build_identity: &S5EncodedRomBuildIdentityBlock,
+    chrome_budget: &RuntimeChromeBudget,
+) -> Result<(), S5EncodedRomRuntimeBindingMismatch> {
+    let expected = chrome_budget.runtime_nucleus_hash;
+    let observed = build_identity.runtime_nucleus_hash;
+    if expected == observed {
+        return Ok(());
+    }
+
+    Err(S5EncodedRomRuntimeBindingMismatch {
+        field: S5EncodedRomIdentityField::RuntimeNucleusHash,
+        expected,
+        observed,
+    })
+}
+
+pub fn verify_s5_encoded_rom_er7_artifact_core_hash(
+    build_identity: &S5EncodedRomBuildIdentityBlock,
+    artifact_oracle_core_hash: Hash256,
+) -> Result<(), S5EncodedRomArtifactBindingMismatch> {
+    let expected = artifact_oracle_core_hash;
+    let observed = build_identity.artifact_core_hash;
+    if expected == observed {
+        return Ok(());
+    }
+
+    Err(S5EncodedRomArtifactBindingMismatch {
+        field: S5EncodedRomIdentityField::ArtifactCoreHash,
+        expected,
+        observed,
+    })
+}
+
+pub fn verify_s5_encoded_rom_er7_attention_oracle_report(
+    build_identity: &S5EncodedRomBuildIdentityBlock,
+    report: &S5AttentionOracleReport,
+) -> Result<(), S5EncodedRomArtifactBindingMismatch> {
+    verify_s5_encoded_rom_er7_artifact_core_hash(build_identity, report.phase_a_checkpoint_sha)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum S5EncodedRomCertKind {
+    Range,
+    Arena,
+    Window,
+    Reachability,
+    ResourceState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5EncodedRomCertValidity {
+    pub seed: u64,
+    pub range_cert_valid: bool,
+    pub arena_cert_valid: bool,
+    pub window_cert_valid: bool,
+    pub reachability_cert_valid: bool,
+    pub resource_state_cert_valid: bool,
+}
+
+impl S5EncodedRomCertValidity {
+    #[must_use]
+    pub const fn all_valid_for_seed(seed: u64) -> Self {
+        Self {
+            seed,
+            range_cert_valid: true,
+            arena_cert_valid: true,
+            window_cert_valid: true,
+            reachability_cert_valid: true,
+            resource_state_cert_valid: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn first_invalid_cert(self) -> Option<S5EncodedRomCertKind> {
+        if !self.range_cert_valid {
+            Some(S5EncodedRomCertKind::Range)
+        } else if !self.arena_cert_valid {
+            Some(S5EncodedRomCertKind::Arena)
+        } else if !self.window_cert_valid {
+            Some(S5EncodedRomCertKind::Window)
+        } else if !self.reachability_cert_valid {
+            Some(S5EncodedRomCertKind::Reachability)
+        } else if !self.resource_state_cert_valid {
+            Some(S5EncodedRomCertKind::ResourceState)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S5EncodedRomO11Error {
+    MissingSeed {
+        seed: u64,
+    },
+    InvalidCert {
+        seed: u64,
+        cert_kind: S5EncodedRomCertKind,
+    },
+}
+
+pub fn verify_s5_o11_all_seed_certs(
+    certs: &[S5EncodedRomCertValidity],
+) -> Result<(), S5EncodedRomO11Error> {
+    for seed in S5_ENCODED_ROM_REQUIRED_SEEDS {
+        let Some(cert) = certs.iter().find(|cert| cert.seed == seed) else {
+            return Err(S5EncodedRomO11Error::MissingSeed { seed });
+        };
+
+        if let Some(cert_kind) = cert.first_invalid_cert() {
+            return Err(S5EncodedRomO11Error::InvalidCert { seed, cert_kind });
+        }
+    }
+
+    Ok(())
+}
+
+pub const PF3_BRINGUP_WRAM_FIT_REPORT_FIELDS: [&str; 5] = [
+    "overlay_bytes",
+    "continuation_bytes",
+    "stack_bytes",
+    "hot_arena_bytes_min",
+    "reserve_bytes",
+];
+
+pub const PF3_BRINGUP_WRAM_FIT_REPORT_INTEGRATION_OWNER: &str =
+    "S5 DeployabilityReport emitter / gbf-train s5_preflight integration";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5Pf3PreflightReport {
+    pub profile: CompileProfileId,
+    pub fits_envelope: bool,
+    pub hard_failures: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wram_fit_report: Option<BringUpWramFitReport>,
+}
+
+impl S5Pf3PreflightReport {
+    #[must_use]
+    pub fn has_bringup_wram_fit_report_fields(&self) -> bool {
+        self.wram_fit_report.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BringUpWramFitReport {
+    pub overlay_bytes: u32,
+    pub continuation_bytes: u32,
+    pub stack_bytes: u32,
+    pub hot_arena_bytes_min: u32,
+    pub reserve_bytes: u32,
+}
+
+/// Minimal PF-3 policy surface for the Default-vs-Bringup profile assertion.
+///
+/// This is not the full S5 `DeployabilityReport` emitter. It only models the
+/// profile-dependent WRAM field presence required by PF-3 while the full
+/// training preflight integration remains owned by
+/// `PF3_BRINGUP_WRAM_FIT_REPORT_INTEGRATION_OWNER`.
+#[must_use]
+pub fn s5_pf3_preflight_profile_surface(
+    in_budget: &RuntimeChromeBudget,
+    profile: &CompileProfileSpec,
+) -> S5Pf3PreflightReport {
+    let hard_failures = pf3_budget_failures(in_budget);
+    let wram_fit_report = if profile.id.as_str() == BRINGUP_COMPILE_PROFILE_ID {
+        Some(BringUpWramFitReport::bringup_defaults())
+    } else {
+        None
+    };
+
+    S5Pf3PreflightReport {
+        profile: profile.id.clone(),
+        fits_envelope: hard_failures.is_empty(),
+        hard_failures,
+        wram_fit_report,
+    }
+}
+
+impl BringUpWramFitReport {
+    #[must_use]
+    pub const fn bringup_defaults() -> Self {
+        Self {
+            overlay_bytes: 4096,
+            continuation_bytes: 256,
+            stack_bytes: 256,
+            hot_arena_bytes_min: 2048,
+            reserve_bytes: 1536,
+        }
+    }
+}
+
+fn pf3_budget_failures(in_budget: &RuntimeChromeBudget) -> Vec<String> {
+    let mut failures = Vec::new();
+    if u32::from(in_budget.wram_reserved) >= in_budget.memory_caps.wram_usable_bytes {
+        failures.push(format!(
+            "wram_reserved {} must be below wram_usable_bytes {}",
+            in_budget.wram_reserved, in_budget.memory_caps.wram_usable_bytes
+        ));
+    }
+    if in_budget.rom_slots.is_empty() {
+        failures.push("runtime chrome budget must include at least one ROM slot".to_owned());
+    }
+    for slot in &in_budget.rom_slots {
+        if u32::from(slot.reserved_slack) >= slot.usable_bytes {
+            failures.push(format!(
+                "slot_id={} slot_class={:?} reserved_slack {} must be below usable_bytes {}",
+                slot.id, slot.class, slot.reserved_slack, slot.usable_bytes
+            ));
+        }
+    }
+    failures
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1774,9 +2421,7 @@ mod tests {
             "profile_tile_min > 0",
         );
         assert_invalid(
-            source
-                .replace("profile_tile_max = 256", "profile_tile_max = 15")
-                .replace("profile_tile_min = 16", "profile_tile_min = 16"),
+            source.replace("profile_tile_max = 256", "profile_tile_max = 15"),
             "profile_tile_min <= profile_tile_max",
         );
         assert_invalid(

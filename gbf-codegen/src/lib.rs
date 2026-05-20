@@ -49,7 +49,7 @@ mod tests {
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_ID, BudgetSlotClass, CalibrationConfidenceClass,
         CalibrationConfidenceRequirement, DEFAULT_COMPILE_PROFILE_ID, PlacementProfile,
-        RomBudgetSlot, RuntimeChromeBudget, RuntimeMemoryCapSection,
+        RomBudgetSlot, RuntimeChromeBudget, RuntimeMemoryCapSection, RuntimeNucleusHash,
         canonical_compile_profile_specs,
     };
     use gbf_report::{ReportOutcome, canonicalize as canonicalize_report};
@@ -387,7 +387,7 @@ mod tests {
         RuntimeChromeBudget {
             target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
             profile: CompileProfileId::from("Bringup"),
-            runtime_nucleus_hash: hash(0x40),
+            runtime_nucleus_hash: RuntimeNucleusHash::real(hash(0x40)),
             rom_slots: vec![RomBudgetSlot {
                 id: BudgetSlotId::new(1),
                 class: BudgetSlotClass::ExpertBank,

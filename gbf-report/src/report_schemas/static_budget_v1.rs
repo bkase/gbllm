@@ -10,9 +10,10 @@ use gbf_foundation::{
 pub use gbf_policy::StaticFitInterpretation;
 use gbf_policy::{
     BudgetFailure, BudgetSlotClass, DiagnosticSeverity, EvidenceRef, PlacementProfile,
-    ReductionSiteId, RomBudgetSlot, RuntimeChromeBudget, SwitchProjectionSource, ValidationCode,
-    ValidationDetail, ValidationDiagnostic, ValidationOrigin, budget_failure_diagnostic,
-    budget_failure_diagnostic_with_provenance, budget_failure_matches_diagnostic,
+    ReductionSiteId, RomBudgetSlot, RuntimeChromeBudget, RuntimeNucleusHash,
+    SwitchProjectionSource, ValidationCode, ValidationDetail, ValidationDiagnostic,
+    ValidationOrigin, budget_failure_diagnostic, budget_failure_diagnostic_with_provenance,
+    budget_failure_matches_diagnostic,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -104,7 +105,7 @@ pub struct BudgetPolicySection {
 pub struct RuntimeChromeBudgetSection {
     pub target: TargetProfileId,
     pub profile: CompileProfileId,
-    pub runtime_nucleus_hash: Hash256,
+    pub runtime_nucleus_hash: RuntimeNucleusHash,
     pub rom_slots: Vec<RomBudgetSlotEntry>,
     pub memory_caps: RuntimeMemoryCapSection,
     pub wram_reserved: u16,
@@ -1182,7 +1183,7 @@ mod tests {
         RuntimeChromeBudgetSection {
             target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
             profile: CompileProfileId::from("Bringup"),
-            runtime_nucleus_hash: hash(5),
+            runtime_nucleus_hash: RuntimeNucleusHash::real(hash(5)),
             rom_slots: vec![
                 RomBudgetSlotEntry {
                     id: BudgetSlotId::new(1),
