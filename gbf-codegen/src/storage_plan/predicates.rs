@@ -73,6 +73,13 @@ pub struct ReductionSiteRef {
     pub site: ReductionSiteId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceStateSlotRef {
+    pub layer: u16,
+    pub slot: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PredicateValueFacts {
@@ -80,6 +87,8 @@ pub struct PredicateValueFacts {
     pub format: Option<ValueFormat>,
     pub logical_size: Option<u32>,
     pub lifetime_estimate: Option<LifetimeClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_state_slot: Option<SequenceStateSlotRef>,
     pub pure: bool,
     pub hidden_state_output: bool,
 }
@@ -92,6 +101,7 @@ impl PredicateValueFacts {
             format: Some(format),
             logical_size: None,
             lifetime_estimate: Some(LifetimeClass::Slice),
+            sequence_state_slot: None,
             pure: true,
             hidden_state_output: false,
         }
@@ -104,9 +114,16 @@ impl PredicateValueFacts {
             format: None,
             logical_size: None,
             lifetime_estimate: None,
+            sequence_state_slot: None,
             pure: false,
             hidden_state_output: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_sequence_state_slot(mut self, layer: u16, slot: u32) -> Self {
+        self.sequence_state_slot = Some(SequenceStateSlotRef { layer, slot });
+        self
     }
 }
 
@@ -478,6 +495,11 @@ pub fn is_const_tensor_ref_value(env: &PredicateEnv, value: ValueId) -> bool {
 #[must_use]
 pub fn is_sequence_state_slot(env: &PredicateEnv, value: ValueId) -> bool {
     value_role_of(env, value) == Some(ValueRole::SequenceStateSlot)
+}
+
+#[must_use]
+pub fn sequence_state_slot_ref(env: &PredicateEnv, value: ValueId) -> Option<SequenceStateSlotRef> {
+    env.facts(value).and_then(|facts| facts.sequence_state_slot)
 }
 
 #[must_use]

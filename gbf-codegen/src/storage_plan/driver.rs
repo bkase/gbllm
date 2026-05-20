@@ -20,7 +20,7 @@ use crate::storage_plan::lifetime::{
 use crate::storage_plan::persist::{PersistBindingInput, resolve_persist_bindings};
 use crate::storage_plan::predicates::{
     PredicateEnv, RecomputeAllowedFailurePredicate, ValueRole, recompute_allowed,
-    recompute_allowed_failure_predicates, value_format_of,
+    recompute_allowed_failure_predicates, sequence_state_slot_ref, value_format_of,
 };
 use crate::storage_plan::types::{
     AbstractLiveRange, AdmittingPredicateId, AliasClass, AliasClassFingerprint, AliasClassId,
@@ -433,6 +433,7 @@ fn build_storage_provenance(
             Materialization::Recompute | Materialization::Materialize { .. } => None,
         })
         .collect();
+    let sequence_state_page_sources = sequence_state_page_sources(input);
 
     StorageProvenance {
         bindings: result
@@ -472,7 +473,7 @@ fn build_storage_provenance(
                 (
                     *id,
                     PersistPageProvenance {
-                        source: persist_page_source(*id, page.kind),
+                        source: persist_page_source(*id, page.kind, &sequence_state_page_sources),
                     },
                 )
             })
@@ -496,12 +497,43 @@ fn build_storage_provenance(
     }
 }
 
-fn persist_page_source(id: PersistPageId, kind: PersistKind) -> PersistPageSource {
+fn sequence_state_page_sources(
+    input: &StoragePlanCoreInput,
+) -> BTreeMap<PersistPageId, PersistPageSource> {
+    input
+        .values
+        .iter()
+        .filter_map(|value| {
+            let Materialization::Persist { page, .. } = value.materialization else {
+                return None;
+            };
+            if value.persist_kind != Some(PersistKind::SequenceState) {
+                return None;
+            }
+            let slot = sequence_state_slot_ref(&input.predicate_env, value.value)?;
+            Some((
+                page,
+                PersistPageSource::SequenceStateSlot {
+                    layer: slot.layer,
+                    slot: slot.slot,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn persist_page_source(
+    id: PersistPageId,
+    kind: PersistKind,
+    sequence_state_page_sources: &BTreeMap<PersistPageId, PersistPageSource>,
+) -> PersistPageSource {
     match kind {
-        PersistKind::SequenceState => PersistPageSource::SequenceStateSlot {
-            layer: 0,
-            slot: id.0,
-        },
+        PersistKind::SequenceState => sequence_state_page_sources.get(&id).cloned().unwrap_or(
+            PersistPageSource::SequenceStateSlot {
+                layer: 0,
+                slot: id.0,
+            },
+        ),
         PersistKind::Continuation => PersistPageSource::Continuation,
         PersistKind::Transcript => PersistPageSource::Transcript { family: id.0 },
         PersistKind::Harness => PersistPageSource::Harness { family: id.0 },
@@ -764,6 +796,38 @@ mod tests {
                 .members()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn sequence_state_persist_page_provenance_uses_layer_slot_facts() {
+        let value = ValueId::new(9);
+        let page = PersistPageId(91);
+        let mut input = fixture_input(BTreeSet::new(), false);
+        input.values = vec![StoragePlanCoreValue {
+            value,
+            materialization: Materialization::Persist {
+                page,
+                commit_group: CommitGroupId(7),
+            },
+            live_range: live_range(2, 3),
+            role: ValueRole::SequenceStateSlot,
+            persist_kind: Some(PersistKind::SequenceState),
+            commit_group_reason: Some(CommitGroupReason::PerSequenceStateSlot),
+        }];
+        input.alias_edges = vec![];
+        input.predicate_env = PredicateEnv::new().with_value(
+            value,
+            PredicateValueFacts::new(ValueRole::SequenceStateSlot, ValueFormat::Flag)
+                .with_sequence_state_slot(4, 99),
+        );
+
+        let output = build_storage_plan_core(&input);
+        let result = output.result.expect("sequence-state page resolves");
+
+        assert_eq!(
+            result.provenance.persist_pages[&page].source,
+            PersistPageSource::SequenceStateSlot { layer: 4, slot: 99 }
         );
     }
 

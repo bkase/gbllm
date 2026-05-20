@@ -165,6 +165,18 @@ pub const fn durability_for(kind: PersistKind, reason: CommitGroupReason) -> Dur
 }
 
 fn validate_kind_reason(binding: &PersistBindingInput) -> Result<(), PersistResolverDiagnostic> {
+    if binding.reason == CommitGroupReason::OrderedRecoverable {
+        return Err(PersistResolverDiagnostic {
+            code: StoragePlanDiagnosticCode::StorageReservedShapeEmitted,
+            value: Some(binding.value),
+            page: Some(binding.page),
+            commit_group: Some(binding.commit_group),
+            kind: Some(binding.kind),
+            reason: Some(binding.reason),
+            kind_set: BTreeSet::from([binding.kind]),
+        });
+    }
+
     let ok = match binding.kind {
         PersistKind::SequenceState => matches!(
             binding.reason,
@@ -364,6 +376,48 @@ mod tests {
         assert_eq!(
             error.code,
             StoragePlanDiagnosticCode::StorageReservedShapeEmitted
+        );
+    }
+
+    #[test]
+    fn ordered_recoverable_reason_is_reserved_shape_store_030() {
+        let error = resolve_persist_bindings(&[binding(
+            1,
+            1,
+            1,
+            PersistKind::Trace,
+            CommitGroupReason::OrderedRecoverable,
+        )])
+        .expect_err("ordered recoverable is a reserved v1 shape");
+
+        assert_eq!(
+            error.code,
+            StoragePlanDiagnosticCode::StorageReservedShapeEmitted
+        );
+        assert_eq!(error.reason, Some(CommitGroupReason::OrderedRecoverable));
+    }
+
+    #[test]
+    fn ungrouped_sequence_state_page_is_critical_and_semantic_state_pinned() {
+        let resolution = resolve_persist_bindings(&[binding(
+            1,
+            1,
+            1,
+            PersistKind::SequenceState,
+            CommitGroupReason::PerSequenceStateSlot,
+        )])
+        .expect("single sequence-state page resolves");
+        let page = &resolution.persist_pages[&PersistPageId(1)];
+
+        assert_eq!(page.durability, DurabilityClass::Critical);
+        assert_eq!(
+            page.schema_pin,
+            PersistSchemaPin {
+                state_schema: 1,
+                requires_semantic_state_hash: true,
+                requires_resume_abi_hash: false,
+                requires_build_identity_hash: false,
+            }
         );
     }
 
