@@ -9,6 +9,8 @@ use crate::s1::quant_graph::TensorId;
 use crate::s3::infer_ir::{NodeId, ValueId};
 use crate::storage_plan::types::LifetimeClass;
 
+pub const HRAM_ADMITTED_SET_COMPUTED_EVENT: &str = "f_b8.dr_12.admitted_set_computed";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ValueRole {
@@ -396,6 +398,7 @@ pub fn precompute_hram_admitted_set(
         (role_priority, logical_size, value)
     });
 
+    let candidates_count = candidates.len() as u64;
     let mut admitted_values = BTreeSet::new();
     let mut admission_order = Vec::new();
     let mut cumulative = 0_u32;
@@ -409,6 +412,15 @@ pub fn precompute_hram_admitted_set(
         admitted_values.insert(value);
         admission_order.push(value);
     }
+
+    tracing::info!(
+        target: "gbf_codegen::storage_plan",
+        event = HRAM_ADMITTED_SET_COMPUTED_EVENT,
+        candidates_count,
+        admitted_count = admission_order.len() as u64,
+        total_logical_bytes = cumulative as u64,
+        "storage DR-12 HRAM admitted set computed"
+    );
 
     PrecomputedHramAdmittedSet {
         admitted_values,

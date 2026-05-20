@@ -24,6 +24,7 @@ use crate::storage_plan::types::{
 
 pub const DECISION_RULE_FIRED_EVENT: &str = "f_b8.rule.fired";
 pub const DECISION_RULE_REJECTED_EVENT: &str = "f_b8.rule.rejected";
+pub const DR_11_SKIPPED_RENORM_SCRATCH_EVENT: &str = "f_b8.dr_11.skipped_renorm_scratch";
 pub const DECISION_RULE_SET_MANIFEST_SCHEMA: &str = "storage_plan.decision_rule_set.v1";
 pub const DECISION_RULE_SET_RFC_REVISION: &str = "F-B8-v2";
 pub type DecisionRuleDiagnosticCode = StoragePlanDiagnosticCode;
@@ -293,7 +294,7 @@ fn decision_rule_manifest_entry(rule: &DecisionRule) -> DecisionRuleManifestEntr
 fn emit_rule_event(rule: &DecisionRule, value: ValueId, outcome: &DecisionRuleOutcome) {
     match outcome {
         DecisionRuleOutcome::Bind(_) => {
-            tracing::info!(
+            tracing::debug!(
                 target: "gbf_codegen::storage_plan",
                 event = DECISION_RULE_FIRED_EVENT,
                 rule_id = rule.id.0 as u64,
@@ -427,8 +428,19 @@ fn predicate_renorm_loop_scratch(env: &PredicateEnv, value: ValueId) -> bool {
 }
 
 fn predicate_recompute_for_pure_slice_value(env: &PredicateEnv, value: ValueId) -> bool {
+    if is_renorm_loop_scratch(env, value) {
+        tracing::trace!(
+            target: "gbf_codegen::storage_plan",
+            event = DR_11_SKIPPED_RENORM_SCRATCH_EVENT,
+            rule_id = 13_u64,
+            rule_name = "DR-11 RecomputeForPureSliceValue",
+            value_id = value.get() as u64,
+            "storage DR-11 skipped renorm loop scratch"
+        );
+        return false;
+    }
+
     is_pure_value(env, value)
-        && !is_renorm_loop_scratch(env, value)
         && recompute_allowed(env, value)
         && recompute_promotion_admits_pure_slice_values(env)
         && recompute_cost_within_cycle_ceiling(env, value)
@@ -590,8 +602,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use crate::storage_plan::predicates::{
-        PrecomputedHramAdmittedSet, PredicateValueFacts, RecomputeAllowedFailurePredicate,
-        ValueFormat, ValueRole, precompute_hram_admitted_set, recompute_allowed_failure_predicates,
+        HRAM_ADMITTED_SET_COMPUTED_EVENT, PrecomputedHramAdmittedSet, PredicateValueFacts,
+        RecomputeAllowedFailurePredicate, ValueFormat, ValueRole, precompute_hram_admitted_set,
+        recompute_allowed_failure_predicates,
     };
     use gbf_policy::{ReductionSiteId, StorageMaterialization};
     use tracing::field::{Field, Visit};
@@ -702,6 +715,7 @@ mod tests {
 
         let events = capture.events();
         assert_event(&events, DECISION_RULE_FIRED_EVENT, "rule_name", "bind");
+        assert_event_level(&events, DECISION_RULE_FIRED_EVENT, "DEBUG");
         assert_event(
             &events,
             DECISION_RULE_REJECTED_EVENT,
@@ -1173,6 +1187,40 @@ mod tests {
     }
 
     #[test]
+    fn dr_11_skipped_renorm_scratch_emits_trace_event_when_evaluated() {
+        let scratch = ValueId::new(42);
+        let site = reduction_site(8, "renorm");
+        let env = PredicateEnv::new()
+            .with_value(scratch, facts(ValueRole::Scratch))
+            .with_value_reduction_site(scratch, site.clone())
+            .with_renorm_loop_site(site)
+            .with_recompute_promotion(StorageMaterialization::RecomputePureValues)
+            .with_recompute_cycle_ceiling(1)
+            .with_recompute_cost_estimate(scratch, 1);
+        let capture = CapturedTracingLayer::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(
+                evaluate_decision_rules(&[DECISION_RULES[12]], &env, scratch),
+                DecisionRuleEvaluation::NoAdmittingRule {
+                    value: scratch,
+                    code: DecisionRuleDiagnosticCode::StorageNoAdmittingDecisionRule
+                }
+            );
+        });
+
+        let events = capture.events();
+        assert_event(
+            &events,
+            DR_11_SKIPPED_RENORM_SCRATCH_EVENT,
+            "value_id",
+            "42",
+        );
+        assert_event_level(&events, DR_11_SKIPPED_RENORM_SCRATCH_EVENT, "TRACE");
+    }
+
+    #[test]
     fn hram_admission_prepass_is_deterministic_and_uses_documented_sort_key() {
         let decision_large = ValueId::new(50);
         let decision_small = ValueId::new(51);
@@ -1221,6 +1269,50 @@ mod tests {
                 code: DecisionRuleDiagnosticCode::StorageNoAdmittingDecisionRule
             }
         );
+    }
+
+    #[test]
+    fn dr_12_hram_greedy_budget_canary_emits_admitted_set_event() {
+        let small = ValueId::new(60);
+        let medium = ValueId::new(61);
+        let large = ValueId::new(62);
+        let env = PredicateEnv::new()
+            .with_value(small, hot_scalar_facts(ValueRole::RouterScore, 16))
+            .with_value(medium, hot_scalar_facts(ValueRole::RouterScore, 32))
+            .with_value(large, hot_scalar_facts(ValueRole::RouterScore, 48));
+        let capture = CapturedTracingLayer::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let admitted = tracing::subscriber::with_default(subscriber, || {
+            precompute_hram_admitted_set(&env, 64)
+        });
+
+        assert_eq!(admitted.admission_order, vec![small, medium]);
+        assert_eq!(admitted.admitted_values, BTreeSet::from([small, medium]));
+        assert!(!admitted.admitted_values.contains(&large));
+        assert_eq!(admitted.cumulative_logical_size, 48);
+        assert_eq!(admitted.allocatable_budget, 64);
+
+        let events = capture.events();
+        assert_event(
+            &events,
+            HRAM_ADMITTED_SET_COMPUTED_EVENT,
+            "candidates_count",
+            "3",
+        );
+        assert_event(
+            &events,
+            HRAM_ADMITTED_SET_COMPUTED_EVENT,
+            "admitted_count",
+            "2",
+        );
+        assert_event(
+            &events,
+            HRAM_ADMITTED_SET_COMPUTED_EVENT,
+            "total_logical_bytes",
+            "48",
+        );
+        assert_event_level(&events, HRAM_ADMITTED_SET_COMPUTED_EVENT, "INFO");
     }
 
     #[test]
@@ -1450,6 +1542,15 @@ mod tests {
         );
     }
 
+    fn assert_event_level(events: &[CapturedEvent], name: &str, expected_level: &str) {
+        assert!(
+            events
+                .iter()
+                .any(|event| event.name == name && event.level == expected_level),
+            "missing event {name} at level {expected_level}; events={events:?}"
+        );
+    }
+
     #[derive(Clone, Default)]
     struct CapturedTracingLayer {
         events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
@@ -1464,6 +1565,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct CapturedEvent {
         name: String,
+        level: String,
         fields: BTreeMap<String, String>,
     }
 
@@ -1484,6 +1586,7 @@ mod tests {
                 .expect("events lock")
                 .push(CapturedEvent {
                     name,
+                    level: event.metadata().level().to_string(),
                     fields: visitor.fields,
                 });
         }
