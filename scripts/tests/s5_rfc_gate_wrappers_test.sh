@@ -50,9 +50,8 @@ grep -F "SUBSTRATE_ONLY" "$TMPDIR/reproducibility.out" >/dev/null
   --report-path "$TMPDIR/falsification-suite.json" \
   >"$TMPDIR/falsification.out"
 grep -F "S5 falsification suite PASS" "$TMPDIR/falsification.out" >/dev/null
-grep -F "SUBSTRATE_ONLY" "$TMPDIR/falsification.out" >/dev/null
-grep -F "live gbf-experiments::s5 F1..F15 s5-falsify-N producer execution is not invoked here yet" "$TMPDIR/falsification.out" >/dev/null
-grep -F "owner: bd-q3zo" "$TMPDIR/falsification.out" >/dev/null
+grep -F "live gbf-experiments::s5 F1..F15 feature loop" "$TMPDIR/falsification.out" >/dev/null
+grep -F "LIMITATION: full S5 producer replay APIs are not implemented" "$TMPDIR/falsification.out" >/dev/null
 test -f "$TMPDIR/falsification-suite.json"
 
 echo "[S5 RFC GATE WRAPPERS TEST] script checks passed"

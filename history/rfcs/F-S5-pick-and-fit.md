@@ -3274,10 +3274,10 @@ F15 feedback-broken
 
 Current in-repo support for bd-233u is the bounded policy substrate
 for F13/F14/F15 plus Cargo feature-mutex/dry-run feature-matrix
-coverage for `s5-falsify-{N}`. It does not claim live
-gbf-experiments::s5 producer-side substitutions or real F1..F15
-feature-loop execution. That live producer loop, fixtures, and
-one-feature-at-a-time execution are owned by bd-q3zo.
+coverage for `s5-falsify-{N}`. bd-q3zo adds the bounded
+gbf-experiments::s5 feature loop for F1..F15, one feature at a
+time, using explicit producer-contract fixtures where upstream full
+S5 producer replay APIs do not exist yet.
 
 ---
 
@@ -3539,7 +3539,7 @@ S5-build-C — "Falsification harness"
     qat
     s5-default
     burn-adapter
-    s5-falsify-{N}              ; mutually exclusive; N in {1..13}
+    s5-falsify-{N}              ; mutually exclusive; N in {1..15}
   Compile-time mutex enforced via compile_error!.
   Purpose: drive the §16 F-cases.
 
@@ -3561,7 +3561,7 @@ s5-no-log                = []
 s5-oracle-cross-build    = []
 s5-falsify-1             = []
 s5-falsify-2             = []
-... (s5-falsify-3..13)
+... (s5-falsify-3..15)
 
 # mutually-exclusive guards:
 # - qat XOR qat-ablation (inherited from S1)
@@ -3768,10 +3768,14 @@ F-S5 Pick and Fit is correct when:
 12. All seventeen hypotheses have explicit verdicts in the
     falsification analysis section, with concrete observations cited.
     The fifteen F1..F15 deliberately-broken substitutes each produce
-    the expected Refuted verdict once the live producer loop owned by
-    bd-q3zo is wired; bd-233u provides only the policy substrate and
-    feature-mutex scaffolding for this claim. S5 retires sequence-state-
-    architecture comparison risk AND the integration risk between
+    the expected Refuted verdict under the bounded gbf-experiments::s5
+    feature loop owned by bd-q3zo. Cases without upstream full producer
+    replay APIs use explicit producer-contract fixtures and report that
+    limitation; replacing those fixture-backed cases with real producer
+    replay inputs is tracked by bd-rh33. bd-233u provides only the
+    policy substrate and feature-mutex scaffolding for this claim. S5
+    retires sequence-state-architecture comparison risk AND the
+    integration risk between
     training (S1..S4 + Pick) and the compiler+runtime stack
     (F-A*/F-B*). It does NOT claim MoE benefit (S7),
     UpperBankCandidate production-scale quality on Gutenberg (S8),

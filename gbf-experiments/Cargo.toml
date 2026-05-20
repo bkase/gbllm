@@ -89,3 +89,7 @@ trybuild.workspace = true
 [[bench]]
 name = "fisher_yates_22mib"
 harness = false
+
+[[bin]]
+name = "s5_falsification_loop"
+path = "src/bin/s5_falsification_loop.rs"
