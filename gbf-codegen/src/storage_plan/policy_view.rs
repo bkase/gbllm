@@ -47,6 +47,10 @@ impl StoragePolicyView {
         let wram_reserved_bytes = budget
             .map(|budget| u32::from(budget.wram_reserved))
             .unwrap_or_default();
+        // v1 RuntimeChromeBudget has no HRAM-reserved field. Keep Stage 6's
+        // normalized view explicit so a future policy owner has one bridge to
+        // replace when ISR scratch / active-page shadow accounting lands.
+        let hram_reserved_bytes = 0;
 
         Self {
             compile_knobs: StoragePolicyCompileKnobs {
@@ -68,7 +72,9 @@ impl StoragePolicyView {
                 wram_hot: RuntimeClassChromeBudget {
                     reserved_bytes: wram_reserved_bytes,
                 },
-                hram_hot: RuntimeClassChromeBudget { reserved_bytes: 0 },
+                hram_hot: RuntimeClassChromeBudget {
+                    reserved_bytes: hram_reserved_bytes,
+                },
             },
             storage_pressure_budget: StoragePressureBudget {
                 wram_hot: StorageClassPressureBudget {
@@ -78,7 +84,7 @@ impl StoragePolicyView {
                     soft_bytes: hram_soft_bytes,
                 },
             },
-            trace_capture_policy: TraceCapturePolicy::default(),
+            trace_capture_policy: TraceCapturePolicy::from_resolved_policy_v1(policy),
             transcript_capture_policy: TranscriptCapturePolicy {
                 enabled: matches!(policy.observability, ObservabilityMode::Flexible),
             },
@@ -158,6 +164,15 @@ pub struct StorageClassPressureBudget {
 #[serde(deny_unknown_fields)]
 pub struct TraceCapturePolicy {
     pub enabled_probes: BTreeSet<ValueId>,
+}
+
+impl TraceCapturePolicy {
+    fn from_resolved_policy_v1(_policy: &ResolvedCompilePolicy) -> Self {
+        // ResolvedCompilePolicy v1 exposes observability mode and budgets, but
+        // not value-local trace-probe ids. The deterministic Stage 6 contract is
+        // therefore "no value admitted from policy" until that data is wired.
+        Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -256,8 +271,8 @@ pub fn allocatable_hram_budget(policy: &StoragePolicyView) -> Result<u32, Storag
 pub fn soft_pressure_threshold_bytes(
     policy: &StoragePolicyView,
 ) -> Result<u32, StoragePolicyDiagnostic> {
-    let allocatable = u64::from(wram_hot_per_value_eligibility_ceiling(policy)?);
-    let threshold = (allocatable * u64::from(SOFT_PRESSURE_FRACTION.numerator))
+    let soft_bytes = u64::from(policy.storage_pressure_budget.wram_hot.soft_bytes);
+    let threshold = (soft_bytes * u64::from(SOFT_PRESSURE_FRACTION.numerator))
         / u64::from(SOFT_PRESSURE_FRACTION.denominator);
 
     Ok(threshold as u32)
@@ -450,7 +465,7 @@ mod tests {
         );
         assert_eq!(
             soft_pressure_threshold_bytes(&view).expect("soft threshold computes"),
-            6528
+            6963
         );
         assert_eq!(recompute_cycle_ceiling(&view), 24_000);
         assert!(!transcript_capture_enabled(&view));
@@ -459,10 +474,10 @@ mod tests {
     }
 
     #[test]
-    fn soft_pressure_fraction_is_integer_pair() {
+    fn soft_pressure_fraction_uses_raw_soft_bytes_not_reserved_adjusted_ceiling() {
         let mut view = view_fixture();
         view.storage_pressure_budget.wram_hot.soft_bytes = 1000;
-        view.runtime_chrome_budget.wram_hot.reserved_bytes = 0;
+        view.runtime_chrome_budget.wram_hot.reserved_bytes = 200;
 
         assert_eq!(SOFT_PRESSURE_FRACTION.numerator, 85);
         assert_eq!(SOFT_PRESSURE_FRACTION.denominator, 100);
@@ -470,6 +485,48 @@ mod tests {
             soft_pressure_threshold_bytes(&view).expect("soft threshold computes"),
             850
         );
+        assert_eq!(
+            wram_hot_per_value_eligibility_ceiling(&view).expect("eligibility ceiling computes"),
+            800
+        );
+    }
+
+    #[test]
+    fn trace_probe_admission_from_resolved_policy_is_v1_deferred_false() {
+        let view = view_fixture();
+
+        assert!(view.trace_capture_policy.enabled_probes.is_empty());
+        assert!(!trace_capture_admits(&view, ValueId::new(7)));
+    }
+
+    #[test]
+    fn hram_reserved_bytes_are_zero_until_runtime_budget_exposes_them() {
+        let view = view_fixture();
+
+        assert_eq!(view.runtime_chrome_budget.hram_hot.reserved_bytes, 0);
+        assert_eq!(
+            allocatable_hram_budget(&view).expect("hram budget is valid"),
+            view.storage_pressure_budget.hram_hot.soft_bytes
+        );
+    }
+
+    #[test]
+    fn hram_hot_ceiling_reports_store_034_underflow() {
+        let mut view = view_fixture();
+        view.storage_pressure_budget.hram_hot.soft_bytes = 5;
+        view.runtime_chrome_budget.hram_hot.reserved_bytes = 6;
+
+        let error =
+            allocatable_hram_budget(&view).expect_err("reserved HRAM above soft budget underflows");
+
+        assert_eq!(
+            error.code,
+            StoragePolicyDiagnosticCode::StoragePolicyBudgetUnderflow
+        );
+        assert_eq!(error.code.as_str(), "STORE-034");
+        assert_eq!(error.class, StorageClass::HramHot);
+        assert_eq!(error.soft_bytes, 5);
+        assert_eq!(error.reserved_bytes, 6);
     }
 
     #[test]

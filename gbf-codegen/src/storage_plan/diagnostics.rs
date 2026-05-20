@@ -2,7 +2,9 @@
 
 use std::{error::Error, fmt};
 
-use gbf_foundation::{CanonicalJson, CanonicalJsonError, EvidenceRef, FieldPath, Hash256};
+#[cfg(test)]
+use gbf_foundation::Hash256;
+use gbf_foundation::{CanonicalJson, CanonicalJsonError, EvidenceRef, FieldPath};
 use gbf_policy::{
     StoragePlanDiagnosticCode, StoragePlanDiagnosticProvenance, ValidationCode, ValidationDetail,
     ValidationDiagnostic, ValidationOrigin,
@@ -247,11 +249,198 @@ pub fn storage_plan_code_accepts_provenance(
 #[must_use]
 pub fn storage_plan_detail(code: StoragePlanDiagnosticCode) -> ValidationDetail {
     ValidationDetail::Field {
+        // ValidationDetail has no free-text variant; this stable field names the
+        // per-code renderer template that carries the human-readable detail.
         field: FieldPath::from(format!(
-            "storage_plan.diagnostics.{}.{}",
+            "storage_plan.diagnostics.{}.{}.detail_template.{}",
             code.as_str(),
-            code.name()
+            code.name(),
+            storage_plan_detail_template_id(code)
         )),
+    }
+}
+
+#[must_use]
+pub const fn storage_plan_detail_template_id(code: StoragePlanDiagnosticCode) -> &'static str {
+    match code {
+        StoragePlanDiagnosticCode::StorageNoAdmittingDecisionRule => "no_admitting_decision_rule",
+        StoragePlanDiagnosticCode::StorageBindingCoverageGap => "binding_coverage_gap",
+        StoragePlanDiagnosticCode::StorageBindingDoubleBind => "binding_double_bind",
+        StoragePlanDiagnosticCode::StorageRomConstWriteViolation => "rom_const_write_violation",
+        StoragePlanDiagnosticCode::StorageHramAdmissionInvariantViolation => {
+            "hram_admission_invariant_violation"
+        }
+        StoragePlanDiagnosticCode::StorageRecomputeForbiddenForObservedValue => {
+            "recompute_forbidden_for_observed_value"
+        }
+        StoragePlanDiagnosticCode::StoragePersistSequenceStateUnsupportedV1 => {
+            "persist_sequence_state_unsupported_v1"
+        }
+        StoragePlanDiagnosticCode::StoragePersistBindingKindMismatch => {
+            "persist_binding_kind_mismatch"
+        }
+        StoragePlanDiagnosticCode::StoragePersistPageNotReferenced => "persist_page_not_referenced",
+        StoragePlanDiagnosticCode::StorageCommitGroupEmpty => "commit_group_empty",
+        StoragePlanDiagnosticCode::StorageCommitGroupKindMix => "commit_group_kind_mix",
+        StoragePlanDiagnosticCode::StorageCommitGroupDurabilityMix => "commit_group_durability_mix",
+        StoragePlanDiagnosticCode::StorageAliasIntentMaterializationMismatch => {
+            "alias_intent_materialization_mismatch"
+        }
+        StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent => {
+            "alias_class_overlap_without_intent"
+        }
+        StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation => {
+            "alias_class_membership_functional_violation"
+        }
+        StoragePlanDiagnosticCode::StorageRecomputeAliasNotIsolated => {
+            "recompute_alias_not_isolated"
+        }
+        StoragePlanDiagnosticCode::StorageLifetimeAdmissibilityViolation => {
+            "lifetime_admissibility_violation"
+        }
+        StoragePlanDiagnosticCode::StorageForbiddenSpatialEnumLeak => "forbidden_spatial_enum_leak",
+        StoragePlanDiagnosticCode::StorageDeterminismRequiresStableRules => {
+            "determinism_requires_stable_rules"
+        }
+        StoragePlanDiagnosticCode::StorageRangePlanHashMismatch => "range_plan_hash_mismatch",
+        StoragePlanDiagnosticCode::StorageInferIrHashMismatch => "infer_ir_hash_mismatch",
+        StoragePlanDiagnosticCode::StorageObservationPlanHashMismatch => {
+            "observation_plan_hash_mismatch"
+        }
+        StoragePlanDiagnosticCode::StorageQuantGraphHashMismatch => "quant_graph_hash_mismatch",
+        StoragePlanDiagnosticCode::StoragePolicyHashMismatch => "policy_hash_mismatch",
+        StoragePlanDiagnosticCode::StorageIterationInputInvalid => "iteration_input_invalid",
+        StoragePlanDiagnosticCode::StorageOverlayLensViolation => "overlay_lens_violation",
+        StoragePlanDiagnosticCode::StorageRepairProposalIllegal => "repair_proposal_illegal",
+        StoragePlanDiagnosticCode::StorageInferIrEffectClassUnknown => {
+            "infer_ir_effect_class_unknown"
+        }
+        StoragePlanDiagnosticCode::StorageQuantGraphRoutingMismatch => {
+            "quant_graph_routing_mismatch"
+        }
+        StoragePlanDiagnosticCode::StorageReservedShapeEmitted => "reserved_shape_emitted",
+        StoragePlanDiagnosticCode::StorageAliasMixedIntentComponent => {
+            "alias_mixed_intent_component"
+        }
+        StoragePlanDiagnosticCode::StorageAliasIntentCardinalityViolation => {
+            "alias_intent_cardinality_violation"
+        }
+        StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed => {
+            "forced_recompute_not_allowed"
+        }
+        StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow => "policy_budget_underflow",
+        StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision => {
+            "alias_class_fingerprint_collision"
+        }
+    }
+}
+
+#[must_use]
+pub const fn storage_plan_detail_template(code: StoragePlanDiagnosticCode) -> &'static str {
+    match code {
+        StoragePlanDiagnosticCode::StorageNoAdmittingDecisionRule => {
+            "Value classification has no admitting decision rule."
+        }
+        StoragePlanDiagnosticCode::StorageBindingCoverageGap => {
+            "Produced value is missing a storage binding."
+        }
+        StoragePlanDiagnosticCode::StorageBindingDoubleBind => {
+            "Value has more than one storage binding."
+        }
+        StoragePlanDiagnosticCode::StorageRomConstWriteViolation => {
+            "RomConst binding is assigned to a non-const producer."
+        }
+        StoragePlanDiagnosticCode::StorageHramAdmissionInvariantViolation => {
+            "HRAM admission exceeds the deterministic budget."
+        }
+        StoragePlanDiagnosticCode::StorageRecomputeForbiddenForObservedValue => {
+            "Observed checkpoint value was marked for recompute."
+        }
+        StoragePlanDiagnosticCode::StoragePersistSequenceStateUnsupportedV1 => {
+            "Persistent sequence state is unsupported in v1."
+        }
+        StoragePlanDiagnosticCode::StoragePersistBindingKindMismatch => {
+            "Persist binding kind disagrees with its page or commit group."
+        }
+        StoragePlanDiagnosticCode::StoragePersistPageNotReferenced => {
+            "Persist page is not referenced by any binding."
+        }
+        StoragePlanDiagnosticCode::StorageCommitGroupEmpty => "Commit group is empty.",
+        StoragePlanDiagnosticCode::StorageCommitGroupKindMix => {
+            "Commit group mixes incompatible persist kinds."
+        }
+        StoragePlanDiagnosticCode::StorageCommitGroupDurabilityMix => {
+            "Commit group mixes incompatible durability classes."
+        }
+        StoragePlanDiagnosticCode::StorageAliasIntentMaterializationMismatch => {
+            "Alias intent is incompatible with member materializations."
+        }
+        StoragePlanDiagnosticCode::StorageAliasClassOverlapWithoutIntent => {
+            "Alias class overlaps without an overlap-capable intent."
+        }
+        StoragePlanDiagnosticCode::StorageAliasClassMembershipFunctionalViolation => {
+            "Binding maps to more than one alias class."
+        }
+        StoragePlanDiagnosticCode::StorageRecomputeAliasNotIsolated => {
+            "Recompute binding shares an alias class."
+        }
+        StoragePlanDiagnosticCode::StorageLifetimeAdmissibilityViolation => {
+            "Computed lifetime falls outside the admissible interval."
+        }
+        StoragePlanDiagnosticCode::StorageForbiddenSpatialEnumLeak => {
+            "Storage output exposes a forbidden spatial schema field."
+        }
+        StoragePlanDiagnosticCode::StorageDeterminismRequiresStableRules => {
+            "Determinism requires stable rule inputs."
+        }
+        StoragePlanDiagnosticCode::StorageRangePlanHashMismatch => {
+            "RangePlan input hash does not match the recorded Stage 6 input."
+        }
+        StoragePlanDiagnosticCode::StorageInferIrHashMismatch => {
+            "InferIR input hash does not match the recorded Stage 6 input."
+        }
+        StoragePlanDiagnosticCode::StorageObservationPlanHashMismatch => {
+            "ObservationPlan input hash does not match the recorded Stage 6 input."
+        }
+        StoragePlanDiagnosticCode::StorageQuantGraphHashMismatch => {
+            "QuantGraph input hash does not match the recorded Stage 6 input."
+        }
+        StoragePlanDiagnosticCode::StoragePolicyHashMismatch => {
+            "Policy input hash does not match the recorded Stage 6 input."
+        }
+        StoragePlanDiagnosticCode::StorageIterationInputInvalid => {
+            "Stage 6 iteration input exceeds the refinement ceiling."
+        }
+        StoragePlanDiagnosticCode::StorageOverlayLensViolation => {
+            "Overlay eligibility lens rejected the emitted materialization."
+        }
+        StoragePlanDiagnosticCode::StorageRepairProposalIllegal => {
+            "Repair proposal violates locks or bounds."
+        }
+        StoragePlanDiagnosticCode::StorageInferIrEffectClassUnknown => {
+            "InferIR effect class is unknown to StoragePlan."
+        }
+        StoragePlanDiagnosticCode::StorageQuantGraphRoutingMismatch => {
+            "QuantGraph routed-FFN topology disagrees with InferIR routing."
+        }
+        StoragePlanDiagnosticCode::StorageReservedShapeEmitted => {
+            "StoragePlan emitted a schema-reserved v1 shape."
+        }
+        StoragePlanDiagnosticCode::StorageAliasMixedIntentComponent => {
+            "Alias component contains multiple intents."
+        }
+        StoragePlanDiagnosticCode::StorageAliasIntentCardinalityViolation => {
+            "Alias intent member count violates its cardinality."
+        }
+        StoragePlanDiagnosticCode::StorageForcedRecomputeNotAllowed => {
+            "Forced recompute override is not allowed for this value."
+        }
+        StoragePlanDiagnosticCode::StoragePolicyBudgetUnderflow => {
+            "Storage budget reservation exceeds the policy soft budget."
+        }
+        StoragePlanDiagnosticCode::StorageAliasClassFingerprintCollision => {
+            "Alias class fingerprint collision detected."
+        }
     }
 }
 
@@ -357,7 +546,8 @@ pub fn storage_plan_fix_hint(code: StoragePlanDiagnosticCode) -> &'static str {
 }
 
 #[must_use]
-pub fn synthetic_storage_plan_provenance(
+#[cfg(test)]
+fn synthetic_storage_plan_provenance(
     code: StoragePlanDiagnosticCode,
 ) -> StoragePlanDiagnosticProvenance {
     match code {
@@ -567,6 +757,7 @@ pub fn synthetic_storage_plan_provenance(
     }
 }
 
+#[cfg(test)]
 fn hash_mismatch(product: &str, byte: u8) -> StoragePlanDiagnosticProvenance {
     StoragePlanDiagnosticProvenance::HashMismatch {
         product: product.to_owned(),
@@ -575,6 +766,7 @@ fn hash_mismatch(product: &str, byte: u8) -> StoragePlanDiagnosticProvenance {
     }
 }
 
+#[cfg(test)]
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
 }
@@ -624,6 +816,8 @@ mod tests {
             let provenance = synthetic_storage_plan_provenance(code);
             assert!(storage_plan_code_accepts_provenance(code, &provenance));
             assert_ne!(storage_plan_provenance_schema(code), "");
+            assert_ne!(storage_plan_detail_template_id(code), "");
+            assert_ne!(storage_plan_detail_template(code), "");
             assert_ne!(storage_plan_fix_hint(code), "");
         }
 
@@ -717,9 +911,25 @@ mod tests {
             detail,
             ValidationDetail::Field {
                 field: FieldPath::from(
-                    "storage_plan.diagnostics.STORE-017.StorageLifetimeAdmissibilityViolation"
+                    "storage_plan.diagnostics.STORE-017.StorageLifetimeAdmissibilityViolation.detail_template.lifetime_admissibility_violation"
                 )
             }
         );
+    }
+
+    #[test]
+    fn validation_detail_templates_are_distinct_per_code() {
+        let coverage = StoragePlanDiagnosticCode::StorageBindingCoverageGap;
+        let lifetime = StoragePlanDiagnosticCode::StorageLifetimeAdmissibilityViolation;
+
+        assert_ne!(
+            storage_plan_detail_template_id(coverage),
+            storage_plan_detail_template_id(lifetime)
+        );
+        assert_ne!(
+            storage_plan_detail_template(coverage),
+            storage_plan_detail_template(lifetime)
+        );
+        assert_ne!(storage_plan_detail(coverage), storage_plan_detail(lifetime));
     }
 }

@@ -335,7 +335,7 @@ fn semantic_predicate_id(id: DecisionRuleId) -> &'static str {
         11 => "RomConstEmbeddingOrLogitProj",
         12 => "RenormLoopScratch",
         13 => "RecomputeForPureSliceValue",
-        14 => "HotScalarHramAdmitted",
+        14 => "HotScalarHram",
         15 => "DefaultMaterializeKnownIntermediate",
         _ => "UnknownRule",
     }
@@ -1317,6 +1317,8 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(manifest.rules.len(), DECISION_RULES.len());
         assert_eq!(manifest.rules[11].name, "DR-10 RenormLoopScratch");
+        assert_eq!(manifest.rules[13].name, "DR-12 HotScalarHram");
+        assert_eq!(manifest.rules[13].predicate_semantics, "HotScalarHram");
         assert!(
             String::from_utf8(first)
                 .expect("canonical JSON is utf8")
