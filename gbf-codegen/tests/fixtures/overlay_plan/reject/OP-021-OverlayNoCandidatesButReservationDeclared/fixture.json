@@ -1,0 +1,6 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-021-OverlayNoCandidatesButReservationDeclared",
+  "scenario": "no_candidates_but_reservation_declared",
+  "expected_code": { "kind": "OverlayNoCandidatesButReservationDeclared" }
+}

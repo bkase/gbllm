@@ -1,0 +1,9 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-014-OverlayCanonicalSortDrift",
+  "scenario": "canonical_sort_drift",
+  "expected_code": { "kind": "OverlayCanonicalSortDrift" },
+  "expected_extra_codes": [
+    { "kind": "OverlayMemberPayloadExceedsRegion" }
+  ]
+}

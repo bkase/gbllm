@@ -143,6 +143,8 @@ pub enum EdgeKind {
     Call,
     JumpRelative,
     JumpAbsolute,
+    /// Thunk-to-callee transfer for a legalized far call. The caller-to-thunk
+    /// leg is emitted from the rewritten call instruction as `Call`.
     FarCallViaThunk,
     RstVector,
 }
@@ -548,11 +550,14 @@ fn propagate_classes(
     edges: &[ReachabilityEdge],
 ) -> Result<BTreeMap<u32, BTreeSet<ReachabilityClass>>, ReachabilityValidationError> {
     let mut classes: BTreeMap<u32, BTreeSet<ReachabilityClass>> = BTreeMap::new();
-    let mut queue = VecDeque::new();
+    let mut queue_seeds = BTreeSet::new();
     for row in &placed.preplacement_reachability_classes {
         let section_classes = classes.entry(row.section_id).or_default();
         for class in &row.classes {
             section_classes.insert(*class);
+        }
+        if !row.classes.is_empty() {
+            queue_seeds.insert(row.section_id);
         }
     }
     for root in roots {
@@ -563,11 +568,13 @@ fn propagate_classes(
         };
         let section_id = address.section.get();
         for class in &root.classes {
-            if classes.entry(section_id).or_default().insert(*class) {
-                queue.push_back(section_id);
-            }
+            classes.entry(section_id).or_default().insert(*class);
+        }
+        if !root.classes.is_empty() {
+            queue_seeds.insert(section_id);
         }
     }
+    let mut queue: VecDeque<_> = queue_seeds.into_iter().collect();
 
     let mut outgoing: BTreeMap<u32, Vec<&ReachabilityEdge>> = BTreeMap::new();
     for edge in edges {
@@ -1156,6 +1163,65 @@ mod tests {
                 .classes
                 .contains(&ReachabilityClass::BankLeaseProtected)
         );
+    }
+
+    #[test]
+    fn preplacement_root_overlap_still_walks_outgoing_call_edge() {
+        let entry = named("runtime.test.entry");
+        let callee = named("runtime.test.callee");
+        let mut entry_builder =
+            Builder::new_with_id(SectionId::new(1), SectionRole::Bank0Nucleus, entry.clone());
+        entry_builder.label(entry.clone());
+        entry_builder.branch(SymbolicBranch::call(callee.clone(), None));
+        let callee_section = section(
+            2,
+            SectionRole::Bank0Nucleus,
+            "runtime.test.callee",
+            Instr::Ret { cond: None },
+        );
+        let bundle = build_asmir_bundle(AsmIRCodegenInput {
+            codegen_sections: vec![entry_builder.finish(), callee_section],
+            nucleus_sections: vec![],
+            provenance: vec![],
+        })
+        .expect("bundle");
+        let seed = PrePlacementReachability {
+            section_classes: vec![PrePlacementSectionClass {
+                section_id: 1,
+                symbol: "runtime.test.entry".to_owned(),
+                classes: vec![ReachabilityClass::HarnessEntryReachable],
+            }],
+            findings: Vec::new(),
+        };
+        let placed =
+            place_asmir_bundle_with_reachability(&bundle, PlacementProfile::Budgeted, &seed)
+                .expect("place");
+        let (report, _) = validate_reachability(
+            &placed,
+            ReachabilityValidationInput {
+                roots: vec![ReachabilityRoot {
+                    symbol: entry,
+                    root_kind: ReachabilityRootKind::HarnessEntry,
+                    classes: vec![ReachabilityClass::HarnessEntryReachable],
+                }],
+                ..ReachabilityValidationInput::default()
+            },
+        )
+        .expect("report");
+
+        assert!(report.edges.iter().any(|edge| {
+            edge.from_section_id == 1 && edge.to_section_id == 2 && edge.edge_kind == EdgeKind::Call
+        }));
+        assert!(
+            report
+                .section_classes
+                .iter()
+                .find(|row| row.section_id == 2)
+                .is_some_and(|row| row
+                    .classes
+                    .contains(&ReachabilityClass::HarnessEntryReachable))
+        );
+        assert!(!report.dead_code.iter().any(|row| row.section_id == 2));
     }
 
     #[test]

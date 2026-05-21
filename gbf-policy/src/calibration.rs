@@ -3,11 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use gbf_foundation::{Hash256, PackerVersion};
+use gbf_foundation::{CompileProfileId, Hash256, PackerVersion};
 use gbf_hw::calibration::{
     CalibrationConfidenceClass, CalibrationSetRef as LayeredCalibrationSetRef,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::compile::RuntimeMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CalibrationLayer {
@@ -171,11 +173,28 @@ pub struct CalibrationSetRef {
     pub layers: BTreeSet<CalibrationLayer>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibrationSessionProfile {
+    pub target_profile_hash: Hash256,
+    pub compile_profile: CompileProfileId,
+    pub runtime_modes: BTreeSet<RuntimeMode>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidityEnvelope {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub session_profiles: BTreeSet<CalibrationSessionProfile>,
     #[serde(default)]
     pub future_fields: ValidityEnvelopeFuturePlaceholder,
+}
+
+impl ValidityEnvelope {
+    #[must_use]
+    pub fn contains_session_profile(&self, active: &CalibrationSessionProfile) -> bool {
+        self.session_profiles.contains(active)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

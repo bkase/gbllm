@@ -4,20 +4,26 @@ use std::path::Path;
 use gbf_codegen::s1::quant_graph::DeterminismClass;
 use gbf_codegen::s3::infer_ir::{NodeId, ValueId};
 use gbf_codegen::sram_page_plan::{
-    PageId, PageResidency, PersistentPageGeometry, SRAM_PAGE_PLAN_SCHEMA_VERSION, SequenceStreamId,
-    SramPagePlanBindingInput, SramPagePlanCacheKeyInputs, SramPagePlanInputHashes,
-    SramPagePlanInputIdentity, SramPagePlanInputs, SramPagePlanOutcome, build_sram_page_plan,
-    emit_sram_page_plan_json_bytes, parse_sram_page_plan_report_bytes,
+    ColdSpillResidency, PageId, PageResidency, PersistManifestResidency, PersistentPageGeometry,
+    SRAM_PAGE_PLAN_SCHEMA_VERSION, SequenceStreamId, SramEpochId, SramPagePlanBindingInput,
+    SramPagePlanCacheKeyInputs, SramPagePlanEpochInput, SramPagePlanInputHashes,
+    SramPagePlanInputIdentity, SramPagePlanInputs, SramPagePlanOutcome, SramResidencyRole,
+    SramSwitchCaps, build_sram_page_plan, emit_sram_cert_json_bytes, emit_sram_cert_report,
+    emit_sram_page_plan_json_bytes, emit_sram_page_plan_report, is_yield_safe_at,
+    parse_sram_cert_report_bytes, parse_sram_page_plan_report_bytes,
     validate_sram_page_plan_json_surface,
 };
 use gbf_codegen::storage_plan::types::{
     AbstractLiveRange, AliasClassId, BindingJustification, CommitGroupId, DecisionRuleId,
     LifetimeClass, Materialization, PersistPageId, StorageBinding,
 };
-use gbf_foundation::{BudgetSlotId, CompileProfileId, Hash256, TargetProfileId};
+use gbf_codegen::window::NodeAnchorRange;
+use gbf_foundation::{
+    BudgetSlotId, CompileProfileId, Hash256, TargetProfileId, canonical_json_bytes_omitting_fields,
+};
 use gbf_policy::{
     BudgetSlotClass, PlacementProfile, RomBudgetSlot, RuntimeChromeBudget, RuntimeMemoryCapSection,
-    SramPagePlanDiagnosticCode, ValidationCode,
+    SramKnob, SramPageAggression, SramPagePlanDiagnosticCode, SramSpillPolicy, ValidationCode,
 };
 use gbf_report::{canonicalize, round_trip_self_hash};
 use serde_json::json;
@@ -34,6 +40,20 @@ fn sram_page_plan_pass_fixtures_cover_single_multi_and_yield_resume() {
     assert_eq!(single_plan.budgets.page_count, 1);
     assert_eq!(single_plan.budgets.stream_count, 1);
     assert_eq!(single_plan.bindings[0].page, single_plan.bindings[1].page);
+    assert_eq!(single_plan.active_sets.len(), 1);
+    assert_eq!(single_plan.active_sets[0].bytes_in_use, 768);
+    assert_eq!(
+        single_plan.active_sets[0].commit_boundaries_in_range.len(),
+        1
+    );
+    assert_eq!(single_plan.commit_boundaries.len(), 1);
+    assert_eq!(single_plan.page_rotations.len(), 1);
+    assert_eq!(
+        single_plan
+            .projections
+            .projected_sram_page_switches_per_token,
+        1
+    );
 
     assert_fixture("pass", "multi_stream");
     let multi = build_sram_page_plan(&fixture_inputs(vec![
@@ -44,6 +64,15 @@ fn sram_page_plan_pass_fixtures_cover_single_multi_and_yield_resume() {
     let multi_plan = multi.result.as_ref().expect("multi-stream plan");
     assert_eq!(multi_plan.budgets.stream_count, 2);
     assert_ne!(multi_plan.bindings[0].page, multi_plan.bindings[1].page);
+    assert_eq!(multi_plan.active_sets.len(), 2);
+    assert_eq!(multi_plan.commit_boundaries.len(), 2);
+    assert_eq!(multi_plan.page_rotations.len(), 2);
+    assert_eq!(
+        multi_plan
+            .projections
+            .projected_sram_page_switches_per_token,
+        2
+    );
 
     assert_fixture("pass", "yield_resume");
     let yield_resume = build_sram_page_plan(&fixture_inputs(vec![binding(
@@ -55,6 +84,127 @@ fn sram_page_plan_pass_fixtures_cover_single_multi_and_yield_resume() {
         true,
     )]));
     assert_eq!(yield_resume.outcome, SramPagePlanOutcome::Succeeded);
+
+    assert_fixture("pass", "spill_eager_manifest_residency");
+    let mut spill_eager = fixture_inputs(vec![binding(
+        1,
+        7,
+        1,
+        128,
+        PageResidency::AnyPageInBudget,
+        false,
+    )]);
+    spill_eager.policy.spill_policy = SramSpillPolicy::SpillEager;
+    spill_eager.runtime_chrome_budget.sram_reserved = 2 * page_size_bytes(spill_eager.geometry);
+    let spill_eager = build_sram_page_plan(&spill_eager);
+    assert_eq!(spill_eager.outcome, SramPagePlanOutcome::Succeeded);
+    let spill_plan = spill_eager.result.as_ref().expect("spill-eager plan");
+    assert_eq!(
+        spill_plan.spill_policy.persist_manifest_residency,
+        PersistManifestResidency::DedicatedManifestPage
+    );
+    assert_eq!(
+        spill_plan.spill_policy.cold_spill_residency,
+        ColdSpillResidency::BoundedColdSpill { max_pages: 2 }
+    );
+    let boundary = &spill_plan.commit_boundaries[0];
+    assert!(!boundary.member_pages.contains(&boundary.manifest_page));
+    assert_eq!(
+        spill_plan
+            .bindings
+            .iter()
+            .filter(|binding| binding.residency_role == SramResidencyRole::SramPagedSpill)
+            .count(),
+        2
+    );
+
+    assert_fixture("pass", "sram_cert_claims");
+    let report = emit_sram_page_plan_report(&spill_eager).expect("spill report");
+    let cert = emit_sram_cert_report(&spill_eager, report.report_self_hash)
+        .expect("cert emits")
+        .expect("success emits cert");
+    assert_eq!(
+        cert.claim.sram_plan_self_hash,
+        spill_plan.sram_page_plan_self_hash
+    );
+    assert!(cert.claim.single_page_invariant_holds);
+    assert!(cert.claim.all_persists_resolved);
+    assert!(cert.claim.page_switches_per_token_within_cap);
+    assert_eq!(cert.claim.page_switches_per_token, 2);
+    assert_eq!(cert.claim.page_switches_cap, 4);
+    assert_eq!(cert.evidence.page_rotation_count, 2);
+}
+
+#[test]
+fn sram_page_plan_fixtures_cover_roles_serialization_and_yield_predicate() {
+    assert_fixture("pass", "residency_roles");
+    let mut continuation = binding(5, 5, 1, 32, PageResidency::AnyPageInBudget, false);
+    set_persist_page_and_rule(&mut continuation, 0x2000_0005, 5);
+    let mut transcript = binding(6, 6, 1, 32, PageResidency::AnyPageInBudget, false);
+    set_persist_page_and_rule(&mut transcript, 0x3000_0006, 6);
+    let mut harness = binding(7, 7, 1, 32, PageResidency::AnyPageInBudget, false);
+    set_persist_page_and_rule(&mut harness, 0x4000_0007, 7);
+    let mut trace = binding(8, 8, 1, 32, PageResidency::AnyPageInBudget, false);
+    set_persist_page_and_rule(&mut trace, 0x5000_0008, 7);
+    let output = build_sram_page_plan(&fixture_inputs(vec![
+        continuation,
+        transcript,
+        harness,
+        trace,
+    ]));
+    assert_eq!(output.outcome, SramPagePlanOutcome::Succeeded);
+    let report = emit_sram_page_plan_report(&output).expect("report emits");
+    let cert = emit_sram_cert_report(&output, report.report_self_hash)
+        .expect("cert emits")
+        .expect("success emits cert");
+    assert_eq!(cert.evidence.persistent_kind_distribution.continuation, 1);
+    assert_eq!(cert.evidence.persistent_kind_distribution.transcript, 1);
+    assert_eq!(cert.evidence.persistent_kind_distribution.harness, 1);
+    assert_eq!(cert.evidence.persistent_kind_distribution.trace, 1);
+
+    assert_fixture("pass", "canonical_serialization_order");
+    let mut order_inputs = fixture_inputs(vec![
+        binding(
+            2,
+            70,
+            1,
+            32,
+            PageResidency::FixedPage { page: PageId(1) },
+            false,
+        ),
+        binding(
+            1,
+            70,
+            1,
+            32,
+            PageResidency::FixedPage { page: PageId(2) },
+            false,
+        ),
+    ]);
+    order_inputs.epochs = vec![
+        SramPagePlanEpochInput {
+            epoch: SramEpochId(0),
+            op_range: NodeAnchorRange {
+                first_node: NodeId::new(1),
+                last_node: NodeId::new(2),
+            },
+        },
+        SramPagePlanEpochInput {
+            epoch: SramEpochId(1),
+            op_range: NodeAnchorRange {
+                first_node: NodeId::new(2),
+                last_node: NodeId::new(3),
+            },
+        },
+    ];
+    let output = build_sram_page_plan(&order_inputs);
+    assert_eq!(output.outcome, SramPagePlanOutcome::Succeeded);
+    let boundary = &output.result.as_ref().expect("plan").commit_boundaries[0];
+    assert_eq!(
+        boundary.serialization_order,
+        vec![ValueId::new(1), ValueId::new(2)]
+    );
+    assert!(is_yield_safe_at(boundary, boundary.after_epoch));
 }
 
 #[test]
@@ -155,6 +305,99 @@ fn sram_page_plan_reject_fixtures_cover_allocator_and_diagnostics() {
         &build_sram_page_plan(&fixture_inputs(distinct_inputs)),
         SramPagePlanDiagnosticCode::SramTargetProfileLayoutUnsupported,
     );
+
+    assert_fixture("reject", "multi_page_epoch");
+    let mut multi_page_epoch = fixture_inputs(vec![
+        binding(
+            1,
+            10,
+            1,
+            128,
+            PageResidency::FixedPage { page: PageId(1) },
+            false,
+        ),
+        binding(
+            2,
+            11,
+            1,
+            128,
+            PageResidency::FixedPage { page: PageId(2) },
+            false,
+        ),
+    ]);
+    multi_page_epoch.epochs = vec![SramPagePlanEpochInput {
+        epoch: SramEpochId(0),
+        op_range: NodeAnchorRange {
+            first_node: NodeId::new(1),
+            last_node: NodeId::new(3),
+        },
+    }];
+    assert_has_code(
+        &build_sram_page_plan(&multi_page_epoch),
+        SramPagePlanDiagnosticCode::SramPolicyProjectionMismatch,
+    );
+
+    assert_fixture("reject", "empty_working_set_epoch");
+    let mut empty_epoch = fixture_inputs(vec![binding(
+        1,
+        12,
+        1,
+        128,
+        PageResidency::AnyPageInBudget,
+        false,
+    )]);
+    empty_epoch.epochs = vec![SramPagePlanEpochInput {
+        epoch: SramEpochId(0),
+        op_range: NodeAnchorRange {
+            first_node: NodeId::new(10),
+            last_node: NodeId::new(11),
+        },
+    }];
+    assert_has_code(
+        &build_sram_page_plan(&empty_epoch),
+        SramPagePlanDiagnosticCode::SramPolicyProjectionMismatch,
+    );
+
+    assert_fixture("reject", "spill_policy_manifest_conflict");
+    let mut spill_conflict = fixture_inputs(vec![binding(
+        1,
+        12,
+        1,
+        128,
+        PageResidency::AnyPageInBudget,
+        false,
+    )]);
+    spill_conflict.policy.spill_policy = SramSpillPolicy::SpillEager;
+    spill_conflict.runtime_chrome_budget.sram_reserved = page_size_bytes(spill_conflict.geometry);
+    assert_has_code(
+        &build_sram_page_plan(&spill_conflict),
+        SramPagePlanDiagnosticCode::SramPolicyProjectionMismatch,
+    );
+
+    assert_fixture("reject", "page_switch_cap_exceeded");
+    let mut cap_failure = fixture_inputs(vec![
+        binding(
+            1,
+            20,
+            1,
+            128,
+            PageResidency::FixedPage { page: PageId(1) },
+            false,
+        ),
+        binding(
+            2,
+            21,
+            1,
+            128,
+            PageResidency::FixedPage { page: PageId(2) },
+            false,
+        ),
+    ]);
+    cap_failure.switch_caps.max_sram_page_switches_per_token = 1;
+    assert_has_code(
+        &build_sram_page_plan(&cap_failure),
+        SramPagePlanDiagnosticCode::SramPolicyProjectionMismatch,
+    );
 }
 
 #[test]
@@ -207,6 +450,74 @@ fn sram_page_plan_report_fixture_round_trips_and_is_byte_deterministic() {
             .as_ref()
             .expect("source product")
             .sram_page_plan_self_hash
+    );
+}
+
+#[test]
+fn sram_cert_fixture_emits_only_for_success_and_is_byte_deterministic() {
+    let output = build_sram_page_plan(&fixture_inputs(vec![
+        binding(
+            1,
+            30,
+            1,
+            64,
+            PageResidency::FixedPage { page: PageId(1) },
+            false,
+        ),
+        binding(
+            2,
+            31,
+            1,
+            64,
+            PageResidency::FixedPage { page: PageId(2) },
+            false,
+        ),
+    ]));
+    assert_eq!(output.outcome, SramPagePlanOutcome::Succeeded);
+    let report = emit_sram_page_plan_report(&output).expect("report emits");
+    let first = emit_sram_cert_json_bytes(&output, report.report_self_hash)
+        .expect("first cert")
+        .expect("success cert");
+    let second = emit_sram_cert_json_bytes(&output, report.report_self_hash)
+        .expect("second cert")
+        .expect("success cert again");
+    assert_eq!(first, second);
+
+    let parsed = parse_sram_cert_report_bytes(&first).expect("cert parses");
+    assert_eq!(
+        canonical_json_bytes_omitting_fields(&parsed, &[]).expect("canonical cert"),
+        first
+    );
+    assert_eq!(parsed.claim.page_switches_per_token, 2);
+    assert_eq!(parsed.claim.page_switches_cap, 4);
+    assert!(parsed.claim.page_switches_per_token_within_cap);
+
+    let mut cap_failure = fixture_inputs(vec![
+        binding(
+            1,
+            40,
+            1,
+            64,
+            PageResidency::FixedPage { page: PageId(1) },
+            false,
+        ),
+        binding(
+            2,
+            41,
+            1,
+            64,
+            PageResidency::FixedPage { page: PageId(2) },
+            false,
+        ),
+    ]);
+    cap_failure.switch_caps.max_sram_page_switches_per_token = 1;
+    let failed = build_sram_page_plan(&cap_failure);
+    assert_eq!(failed.outcome, SramPagePlanOutcome::Failed);
+    let failed_report = emit_sram_page_plan_report(&failed).expect("failed report emits");
+    assert!(
+        emit_sram_cert_json_bytes(&failed, failed_report.report_self_hash)
+            .expect("failed cert query")
+            .is_none()
     );
 }
 
@@ -329,8 +640,16 @@ fn fixture_inputs(bindings: Vec<SramPagePlanBindingInput>) -> SramPagePlanInputs
             wram_reserved: 0,
             sram_reserved: 512,
         },
+        policy: SramKnob {
+            page_aggression: SramPageAggression::Preserve,
+            spill_policy: SramSpillPolicy::NoSpill,
+        },
+        switch_caps: SramSwitchCaps {
+            max_sram_page_switches_per_token: 4,
+        },
         geometry: PersistentPageGeometry::dmg_mbc5_8k(),
         expected_geometry: PersistentPageGeometry::dmg_mbc5_8k(),
+        epochs: Vec::new(),
         bindings,
     }
 }
@@ -368,6 +687,24 @@ fn binding(
     }
 }
 
+fn set_persist_page_and_rule(binding: &mut SramPagePlanBindingInput, page: u32, rule: u32) {
+    let Materialization::Persist {
+        page: persist_page, ..
+    } = &mut binding.binding.materialization
+    else {
+        panic!("expected persist binding");
+    };
+    *persist_page = PersistPageId(page);
+    binding.binding.justification = BindingJustification::DecisionRule(DecisionRuleId(rule));
+}
+
 fn hash(byte: u8) -> Hash256 {
     Hash256::from_bytes([byte; 32])
+}
+
+fn page_size_bytes(geometry: PersistentPageGeometry) -> u32 {
+    geometry
+        .payload_bytes
+        .saturating_add(u32::from(geometry.header_bytes))
+        .saturating_add(u32::from(geometry.commit_word_bytes))
 }

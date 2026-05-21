@@ -1,6 +1,6 @@
 id = "Bringup"
 schema_version = "2.0.0"
-defaults_hash = "sha256:bf29866653c974c2ce8da8ccb82700d43fd27f2423badf41233a155635eac351"
+defaults_hash = "sha256:e7759d3abfd6acba4a501b7169788b1b1800d6f9b1a6a309551e62d80750c2b3"
 observability = { kind = "Invariant" }
 
 [trace_budget]

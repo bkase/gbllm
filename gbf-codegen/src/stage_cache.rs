@@ -57,7 +57,7 @@ use crate::validate::{
     ValidationStageFailure,
 };
 use crate::window::RomWindowPlanCacheKey;
-use gbf_report::build::{BuildReportPackageEntry, BuildReportPackageError};
+use gbf_report::build::{BuildReportPackage, BuildReportPackageEntry, BuildReportPackageError};
 
 pub const PASS_VERSION_VALIDATE: SemVer = SemVer::new(1, 0, 0);
 pub const PASS_VERSION_RESOLVE: SemVer = SemVer::new(2, 0, 0);
@@ -290,6 +290,17 @@ pub enum StoreBackedStageRunOutput<P> {
         status_entry: StageCacheStatusEntry,
         replayed: bool,
     },
+}
+
+impl<P> StoreBackedStageRunOutput<P> {
+    #[must_use]
+    pub const fn status_entry(&self) -> &StageCacheStatusEntry {
+        match self {
+            Self::Success { status_entry, .. } | Self::FailureMemo { status_entry, .. } => {
+                status_entry
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2852,6 +2863,526 @@ pub fn cache_status_report_package_entry(
     )?)
 }
 
+pub struct CompiledBuildPipelineInputs<'a> {
+    pub storage_plan: &'a crate::storage_plan::StoragePlanCoreInput,
+    pub sram_page_plan: &'a crate::sram_page_plan::SramPagePlanInputs,
+    pub rom_window_plan: &'a crate::window::RomWindowPlanInputs,
+    pub overlay_plan: &'a crate::overlay_plan::OverlayPlanInputs,
+    pub arena_plan: &'a crate::arena::ArenaPlanInputs,
+    pub schedule_pack: &'a crate::schedule::SchedulePackInputs,
+    pub schedule_cost: &'a crate::schedule_cost::ScheduleCostInputs,
+    pub backend: &'a crate::rom::Stage12BackendInputs<'a>,
+    pub not_applicable_input_identity_hash: Hash256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompiledBuildPipelineExpectedHashes {
+    pub stage6_storage_plan: StoreBackedStageExpectedHashes,
+    pub stage7_sram_page_plan: StoreBackedStageExpectedHashes,
+    pub stage8_rom_window_plan: StoreBackedStageExpectedHashes,
+    pub stage85_overlay_plan: StoreBackedStageExpectedHashes,
+    pub stage9_arena_plan: StoreBackedStageExpectedHashes,
+    pub stage10_schedule_pack: StoreBackedStageExpectedHashes,
+    pub stage105_resource_state: StoreBackedStageExpectedHashes,
+    pub stage11_schedule_cost: StoreBackedStageExpectedHashes,
+    pub stage12_backend: StoreBackedStageExpectedHashes,
+}
+
+/// Reports emitted by the Stage 6-12 compiled-build cache driver.
+///
+/// F-B17 currently packages the canonical `cache_status.json` entry only. Full
+/// backend report-envelope aggregation remains owned by the backend/report
+/// beads that define those public envelopes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildReports {
+    pub cache_status: CacheStatusReportBody,
+    pub package: BuildReportPackage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledBuild {
+    pub storage_plan: crate::storage_plan::StoragePlanReportResult,
+    pub sram_page_plan: crate::sram_page_plan::SramPagePlan,
+    pub rom_window_plan: crate::window::RomWindowPlan,
+    pub overlay_plan: crate::overlay_plan::OverlayPlanResult,
+    pub arena_plan: crate::arena::ArenaPlanResult,
+    pub schedule_pack: crate::schedule::SchedulePackResult,
+    pub resource_state: crate::schedule::ResourceStateCertificate,
+    pub schedule_cost: gbf_policy::ScheduleCostReport,
+    pub backend: crate::rom::Stage12BackendProduct,
+    pub reports: BuildReports,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledBuildFailure {
+    pub stage_id: StageId,
+    pub diagnostics: Vec<ValidationDiagnostic>,
+    pub report_self_hash: Hash256,
+    pub reports: BuildReports,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompiledBuildPipelineResult {
+    Passed(Box<CompiledBuild>),
+    Failed(CompiledBuildFailure),
+}
+
+#[derive(Debug)]
+pub enum CompiledBuildPipelineError {
+    Stage(CodegenStageCacheError),
+    CacheStatus(CacheStatusCollectionError),
+    InputMismatch {
+        consumer_stage_id: StageId,
+        field: &'static str,
+        expected: Hash256,
+        observed: Hash256,
+    },
+}
+
+impl fmt::Display for CompiledBuildPipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stage(error) => write!(f, "{error}"),
+            Self::CacheStatus(error) => write!(f, "{error}"),
+            Self::InputMismatch {
+                consumer_stage_id,
+                field,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "compiled-build pipeline input mismatch for stage {consumer_stage_id} field {field}: expected {expected}, observed {observed}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CompiledBuildPipelineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Stage(error) => Some(error),
+            Self::CacheStatus(error) => Some(error),
+            Self::InputMismatch { .. } => None,
+        }
+    }
+}
+
+impl From<CodegenStageCacheError> for CompiledBuildPipelineError {
+    fn from(value: CodegenStageCacheError) -> Self {
+        Self::Stage(value)
+    }
+}
+
+impl From<CacheStatusCollectionError> for CompiledBuildPipelineError {
+    fn from(value: CacheStatusCollectionError) -> Self {
+        Self::CacheStatus(value)
+    }
+}
+
+pub fn run_compiled_build_stage_cache_pipeline(
+    cache: &StoreStageCache<'_>,
+    inputs: CompiledBuildPipelineInputs<'_>,
+    expected_hashes: CompiledBuildPipelineExpectedHashes,
+) -> Result<CompiledBuildPipelineResult, CompiledBuildPipelineError> {
+    let mut collector = CacheStatusCollector::new();
+
+    let stage6 = crate::storage_plan::run_storage_plan_with_cache(
+        cache,
+        inputs.storage_plan,
+        expected_hashes.stage6_storage_plan,
+    )?;
+    collector.record(stage6.status_entry().clone())?;
+    let (storage_plan, storage_plan_self_hash) = match stage6 {
+        StoreBackedStageRunOutput::Success {
+            product,
+            product_self_hash,
+            ..
+        } => (product, product_self_hash),
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "6",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "7",
+        "input_identity.storage_plan_self_hash",
+        storage_plan_self_hash,
+        inputs.sram_page_plan.input_identity.storage_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "8",
+        "input_identity.storage_plan_self_hash",
+        storage_plan_self_hash,
+        inputs.rom_window_plan.input_identity.storage_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "8.5",
+        "input_identity.storage_plan_self_hash",
+        storage_plan_self_hash,
+        inputs.overlay_plan.input_identity.storage_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "9",
+        "input_identity.storage_plan_self_hash",
+        storage_plan_self_hash,
+        inputs.arena_plan.input_identity.storage_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "10",
+        "input_identity.storage_plan_self_hash",
+        storage_plan_self_hash,
+        inputs.schedule_pack.input_identity.storage_plan_self_hash,
+    )?;
+
+    let stage7 = crate::sram_page_plan::run_sram_page_plan_with_cache(
+        cache,
+        inputs.sram_page_plan,
+        expected_hashes.stage7_sram_page_plan,
+    )?;
+    collector.record(stage7.status_entry().clone())?;
+    let sram_page_plan = match stage7 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "7",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "8",
+        "input_identity.sram_page_plan_self_hash",
+        sram_page_plan.sram_page_plan_self_hash,
+        inputs
+            .rom_window_plan
+            .input_identity
+            .sram_page_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "8.5",
+        "input_identity.sram_page_plan_self_hash",
+        sram_page_plan.sram_page_plan_self_hash,
+        inputs.overlay_plan.input_identity.sram_page_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "9",
+        "input_identity.sram_page_plan_self_hash",
+        sram_page_plan.sram_page_plan_self_hash,
+        inputs.arena_plan.input_identity.sram_page_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "10",
+        "input_identity.sram_page_plan_self_hash",
+        sram_page_plan.sram_page_plan_self_hash,
+        inputs.schedule_pack.input_identity.sram_page_plan_self_hash,
+    )?;
+
+    let stage8 = crate::window::run_rom_window_plan_with_cache(
+        cache,
+        inputs.rom_window_plan,
+        expected_hashes.stage8_rom_window_plan,
+    )?;
+    collector.record(stage8.status_entry().clone())?;
+    let rom_window_plan = match stage8 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "8",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "8.5",
+        "input_identity.rom_window_plan_self_hash",
+        rom_window_plan.rom_window_plan_self_hash,
+        inputs.overlay_plan.input_identity.rom_window_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "9",
+        "input_identity.rom_window_plan_self_hash",
+        rom_window_plan.rom_window_plan_self_hash,
+        inputs.arena_plan.input_identity.rom_window_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "10",
+        "input_identity.rom_window_plan_self_hash",
+        rom_window_plan.rom_window_plan_self_hash,
+        inputs
+            .schedule_pack
+            .input_identity
+            .rom_window_plan_self_hash,
+    )?;
+
+    let stage85 = crate::overlay_plan::run_overlay_plan_with_cache(
+        cache,
+        inputs.overlay_plan,
+        expected_hashes.stage85_overlay_plan,
+    )?;
+    collector.record(stage85.status_entry().clone())?;
+    let overlay_plan = match stage85 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "8.5",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "9",
+        "input_identity.overlay_plan_self_hash",
+        overlay_plan.overlay_plan_self_hash,
+        inputs.arena_plan.input_identity.overlay_plan_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "10",
+        "input_identity.overlay_plan_self_hash",
+        overlay_plan.overlay_plan_self_hash,
+        inputs.schedule_pack.input_identity.overlay_plan_self_hash,
+    )?;
+
+    let stage9 = crate::arena::run_arena_plan_with_cache(
+        cache,
+        inputs.arena_plan,
+        expected_hashes.stage9_arena_plan,
+    )?;
+    collector.record(stage9.status_entry().clone())?;
+    let arena_plan = match stage9 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "9",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "10",
+        "input_identity.arena_plan_self_hash",
+        arena_plan.arena_plan_self_hash,
+        inputs.schedule_pack.input_identity.arena_plan_self_hash,
+    )?;
+
+    let stage10 = crate::schedule::run_schedule_pack_with_cache(
+        cache,
+        inputs.schedule_pack,
+        expected_hashes.stage10_schedule_pack,
+    )?;
+    collector.record(stage10.status_entry().clone())?;
+    let schedule_pack = match stage10 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "10",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "11",
+        "schedule_pack.schedule_pack_self_hash",
+        schedule_pack.schedule_pack_self_hash,
+        inputs.schedule_cost.schedule_pack.schedule_pack_self_hash,
+    )?;
+    ensure_pipeline_hash(
+        "12",
+        "schedule_pack_self_hash",
+        schedule_pack.schedule_pack_self_hash,
+        inputs.backend.schedule_pack_self_hash,
+    )?;
+
+    let stage105 = crate::schedule::run_resource_state_validation_with_cache(
+        cache,
+        &schedule_pack.product,
+        expected_hashes.stage105_resource_state,
+    )?;
+    collector.record(stage105.status_entry().clone())?;
+    let resource_state = match stage105 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "10.5",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "12",
+        "resource_state_cert_self_hash",
+        resource_state.resource_state_cert_self_hash,
+        inputs.backend.resource_state_cert_self_hash,
+    )?;
+
+    let stage11 = crate::schedule_cost::run_schedule_cost_with_cache(
+        cache,
+        inputs.schedule_cost,
+        expected_hashes.stage11_schedule_cost,
+    )?;
+    collector.record(stage11.status_entry().clone())?;
+    let schedule_cost = match stage11 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "11",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+    ensure_pipeline_hash(
+        "12",
+        "schedule_cost_report_self_hash",
+        schedule_cost.identity.schedule_cost_report_self_hash,
+        inputs.backend.schedule_cost_report_self_hash,
+    )?;
+
+    let stage12 = crate::rom::run_stage12_backend_with_cache(
+        cache,
+        inputs.backend,
+        expected_hashes.stage12_backend,
+    )?;
+    collector.record(stage12.status_entry().clone())?;
+    let backend = match stage12 {
+        StoreBackedStageRunOutput::Success { product, .. } => product,
+        StoreBackedStageRunOutput::FailureMemo {
+            diagnostics,
+            report_self_hash,
+            ..
+        } => {
+            return compiled_build_pipeline_failed(
+                "12",
+                diagnostics,
+                report_self_hash,
+                collector,
+                inputs.not_applicable_input_identity_hash,
+            );
+        }
+    };
+
+    let reports =
+        build_reports_from_cache_status(collector, inputs.not_applicable_input_identity_hash)?;
+    Ok(CompiledBuildPipelineResult::Passed(Box::new(
+        CompiledBuild {
+            storage_plan,
+            sram_page_plan,
+            rom_window_plan,
+            overlay_plan,
+            arena_plan,
+            schedule_pack,
+            resource_state,
+            schedule_cost,
+            backend,
+            reports,
+        },
+    )))
+}
+
+fn compiled_build_pipeline_failed(
+    stage_id: &'static str,
+    diagnostics: Vec<ValidationDiagnostic>,
+    report_self_hash: Hash256,
+    collector: CacheStatusCollector,
+    not_applicable_input_identity_hash: Hash256,
+) -> Result<CompiledBuildPipelineResult, CompiledBuildPipelineError> {
+    let reports = build_reports_from_cache_status(collector, not_applicable_input_identity_hash)?;
+    Ok(CompiledBuildPipelineResult::Failed(CompiledBuildFailure {
+        stage_id: StageId::from_static(stage_id),
+        diagnostics,
+        report_self_hash,
+        reports,
+    }))
+}
+
+fn ensure_pipeline_hash(
+    consumer_stage_id: &'static str,
+    field: &'static str,
+    expected: Hash256,
+    observed: Hash256,
+) -> Result<(), CompiledBuildPipelineError> {
+    if expected == observed {
+        Ok(())
+    } else {
+        Err(CompiledBuildPipelineError::InputMismatch {
+            consumer_stage_id: StageId::from_static(consumer_stage_id),
+            field,
+            expected,
+            observed,
+        })
+    }
+}
+
+fn build_reports_from_cache_status(
+    collector: CacheStatusCollector,
+    not_applicable_input_identity_hash: Hash256,
+) -> Result<BuildReports, CacheStatusCollectionError> {
+    let cache_status =
+        collector.finish_filling_not_applicable(not_applicable_input_identity_hash)?;
+    let package_entry = cache_status_report_package_entry(cache_status.clone())?;
+    let package = BuildReportPackage::from_entries([package_entry])?;
+    Ok(BuildReports {
+        cache_status,
+        package,
+    })
+}
+
 fn validate_cache_status_report_body(
     body: &CacheStatusReportBody,
 ) -> Result<(), CacheStatusReportError> {
@@ -4451,6 +4982,161 @@ mod tests {
     }
 
     #[test]
+    fn compiled_build_pipeline_input_mismatch_reports_consumer_field() {
+        let expected = hash(0x21);
+        let observed = hash(0x22);
+        let error = ensure_pipeline_hash(
+            "8",
+            "input_identity.storage_plan_self_hash",
+            expected,
+            observed,
+        )
+        .expect_err("mismatched pipeline hash is rejected");
+
+        assert!(matches!(
+            error,
+            CompiledBuildPipelineError::InputMismatch {
+                consumer_stage_id,
+                field: "input_identity.storage_plan_self_hash",
+                expected: got_expected,
+                observed: got_observed,
+            } if consumer_stage_id == StageId::from("8")
+                && got_expected == expected
+                && got_observed == observed
+        ));
+    }
+
+    #[test]
+    fn compiled_build_pipeline_failure_result_packages_cache_status() {
+        let mut collector = CacheStatusCollector::new();
+        collector
+            .record(StageCacheStatusEntry::failed(
+                "6",
+                CacheStatusKey::from_hash(hash(0x31)),
+                CacheStatus::Miss,
+                hash(0x32),
+                hash(0x33),
+            ))
+            .expect("record failed stage");
+
+        let result = compiled_build_pipeline_failed(
+            "6",
+            vec![hard_diagnostic()],
+            hash(0x33),
+            collector,
+            hash(0x34),
+        )
+        .expect("pipeline failure result is reported");
+
+        let CompiledBuildPipelineResult::Failed(failure) = result else {
+            panic!("expected failure result");
+        };
+        assert_eq!(failure.stage_id, StageId::from("6"));
+        assert_eq!(failure.diagnostics.len(), 1);
+        assert_eq!(failure.report_self_hash, hash(0x33));
+        assert_eq!(
+            failure.reports.cache_status.per_stage[&StageId::from("6")].result_kind,
+            CacheStatusResultKind::FailureMemo
+        );
+        assert_eq!(
+            failure.reports.cache_status.per_stage[&StageId::from("7")].status,
+            CacheStatus::NotApplicable
+        );
+
+        let entry = failure
+            .reports
+            .package
+            .entries()
+            .iter()
+            .find(|entry| entry.relative_path == CACHE_STATUS_REPORT_FILE_NAME)
+            .expect("cache-status package entry");
+        let parsed: CacheStatusReportEnvelope =
+            serde_json::from_slice(&entry.canonical_bytes).expect("cache-status package parses");
+        assert_eq!(parsed.body, failure.reports.cache_status);
+    }
+
+    #[test]
+    fn f_b17_compiled_build_pipeline_smoke_runs_driver_and_packages_cache_status() {
+        let (_dir, store) = store();
+        let cache = StageCache::new(&store);
+        let fixture = compiled_build_pipeline_smoke_fixture();
+
+        let result = run_compiled_build_stage_cache_pipeline(
+            &cache,
+            CompiledBuildPipelineInputs {
+                storage_plan: &fixture.storage_plan,
+                sram_page_plan: &fixture.sram_page_plan,
+                rom_window_plan: &fixture.rom_window_plan,
+                overlay_plan: &fixture.overlay_plan,
+                arena_plan: &fixture.arena_plan,
+                schedule_pack: &fixture.schedule_pack,
+                schedule_cost: &fixture.schedule_cost,
+                backend: &fixture.backend,
+                not_applicable_input_identity_hash: hash(0xf0),
+            },
+            CompiledBuildPipelineExpectedHashes::default(),
+        )
+        .expect("compiled-build pipeline runs");
+
+        let CompiledBuildPipelineResult::Passed(build) = result else {
+            panic!("compiled-build pipeline should pass with consistent stage 6-12 fixture inputs");
+        };
+
+        for stage_id in ["6", "7", "8", "8.5", "9", "10", "10.5", "11", "12"] {
+            let entry = &build.reports.cache_status.per_stage[&StageId::from(stage_id)];
+            assert_eq!(
+                entry.status,
+                CacheStatus::Miss,
+                "fresh-cache stage {stage_id} should run the production miss path"
+            );
+            assert_eq!(
+                entry.result_kind,
+                CacheStatusResultKind::Product,
+                "stage {stage_id} should produce a product"
+            );
+            assert!(entry.product_self_hash.is_some());
+            assert!(entry.report_self_hash.is_some());
+        }
+        for stage_id in ["0", "0.5", "1", "2", "3", "4", "5"] {
+            assert_eq!(
+                build.reports.cache_status.per_stage[&StageId::from(stage_id)].status,
+                CacheStatus::NotApplicable
+            );
+        }
+
+        assert_eq!(build.storage_plan, fixture.expected_storage_plan);
+        assert_eq!(build.sram_page_plan, fixture.expected_sram_page_plan);
+        assert_eq!(build.rom_window_plan, fixture.expected_rom_window_plan);
+        assert_eq!(build.overlay_plan, fixture.expected_overlay_plan);
+        assert_eq!(build.arena_plan, fixture.expected_arena_plan);
+        assert_eq!(
+            build.schedule_pack.schedule_pack_self_hash,
+            fixture
+                .expected_schedule_pack
+                .product
+                .schedule_pack_self_hash
+        );
+        assert_eq!(
+            build.resource_state.resource_state_cert_self_hash,
+            fixture
+                .expected_resource_state
+                .resource_state_cert_self_hash
+        );
+        assert_eq!(build.schedule_cost, fixture.expected_schedule_cost);
+
+        let entry = build
+            .reports
+            .package
+            .get(CACHE_STATUS_REPORT_FILE_NAME)
+            .expect("canonical cache_status.json package entry");
+        let parsed: CacheStatusReportEnvelope =
+            serde_json::from_slice(&entry.canonical_bytes).expect("cache-status package parses");
+        assert_eq!(entry.relative_path, CACHE_STATUS_REPORT_FILE_NAME);
+        assert_eq!(parsed.body, build.reports.cache_status);
+        assert_eq!(entry.report_self_hash, parsed.report_self_hash);
+    }
+
+    #[test]
     fn f_b17_all_stage_key_adapters_have_typed_input_bundle_conformance() {
         let cases = stage_key_conformance_cases();
         assert_eq!(cases.len(), CACHE_STATUS_STAGE_IDS.len());
@@ -4475,6 +5161,673 @@ mod tests {
         assert_eq!(
             observed_stage_ids,
             CACHE_STATUS_STAGE_IDS.into_iter().collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn f_b17_all_stage_typed_input_bundle_fields_are_load_bearing() {
+        assert_stage_key_material_fields_are_load_bearing(
+            "0",
+            stage0_material(),
+            |material| stage0_validation_store_key(material, Stage0CellKind::Success),
+            vec![
+                field_mutation("artifact_source_hash", |m: &mut Stage0CacheKeyMaterial| {
+                    m.artifact_source_hash = hash(0x12)
+                }),
+                field_mutation(
+                    "artifact_effective_core_hash",
+                    |m: &mut Stage0CacheKeyMaterial| m.artifact_effective_core_hash = None,
+                ),
+                field_mutation(
+                    "artifact_manifest_hash",
+                    |m: &mut Stage0CacheKeyMaterial| m.artifact_manifest_hash = None,
+                ),
+                field_mutation("artifact_aux_hash", |m: &mut Stage0CacheKeyMaterial| {
+                    m.artifact_aux_hash = None
+                }),
+                field_mutation(
+                    "lowering_manifest_hash",
+                    |m: &mut Stage0CacheKeyMaterial| m.lowering_manifest_hash = None,
+                ),
+                field_mutation("hint_bundle_hash", |m: &mut Stage0CacheKeyMaterial| {
+                    m.hint_bundle_hash = hash(0x02)
+                }),
+                field_mutation("compile_request_hash", |m: &mut Stage0CacheKeyMaterial| {
+                    m.compile_request_hash = hash(0x03)
+                }),
+                field_mutation("target_profile_hash", |m: &mut Stage0CacheKeyMaterial| {
+                    m.target_profile_hash = hash(0x04)
+                }),
+                field_mutation("compile_profile_hash", |m: &mut Stage0CacheKeyMaterial| {
+                    m.compile_profile_hash = hash(0x05)
+                }),
+                field_mutation("calibration_hash", |m: &mut Stage0CacheKeyMaterial| {
+                    m.calibration_hash = None
+                }),
+                field_mutation(
+                    "compatibility_adapter_registry_hash",
+                    |m: &mut Stage0CacheKeyMaterial| {
+                        m.compatibility_adapter_registry_hash = hash(0x06)
+                    },
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage0CacheKeyMaterial| m.crate_feature_set_hash = hash(0x07),
+                ),
+                field_mutation(
+                    "artifact_validation_schema_hash",
+                    |m: &mut Stage0CacheKeyMaterial| m.artifact_validation_schema_hash = hash(0x08),
+                ),
+            ],
+        );
+
+        assert_stage_key_material_fields_are_load_bearing(
+            "0.5",
+            stage05_material(),
+            |material| stage05_resolve_policy_store_key(material, Stage05CellKind::Success),
+            vec![
+                field_mutation(
+                    "artifact_validation_self_hash",
+                    |m: &mut Stage05CacheKeyMaterial| m.artifact_validation_self_hash = hash(0x11),
+                ),
+                field_mutation("input_hashes", |m: &mut Stage05CacheKeyMaterial| {
+                    m.input_hashes.compile_request_hash = hash(0x12)
+                }),
+                field_mutation("target_defaults_hash", |m: &mut Stage05CacheKeyMaterial| {
+                    m.target_defaults_hash = hash(0x13)
+                }),
+                field_mutation("compile_profile_hash", |m: &mut Stage05CacheKeyMaterial| {
+                    m.compile_profile_hash = hash(0x14)
+                }),
+                field_mutation(
+                    "profile_defaults_hash",
+                    |m: &mut Stage05CacheKeyMaterial| m.profile_defaults_hash = hash(0x15),
+                ),
+                field_mutation(
+                    "compile_objective_hash",
+                    |m: &mut Stage05CacheKeyMaterial| m.compile_objective_hash = hash(0x16),
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage05CacheKeyMaterial| m.crate_feature_set_hash = hash(0x17),
+                ),
+                field_mutation(
+                    "policy_resolution_schema_hash",
+                    |m: &mut Stage05CacheKeyMaterial| m.policy_resolution_schema_hash = hash(0x18),
+                ),
+            ],
+        );
+
+        assert_stage_key_material_fields_are_load_bearing(
+            "1",
+            stage1_material(),
+            |material| stage1_quant_graph_store_key(material, Stage1CellKind::Success),
+            vec![
+                field_mutation(
+                    "artifact_validation_self_hash",
+                    |m: &mut Stage1CacheKeyMaterial| m.artifact_validation_self_hash = hash(0x21),
+                ),
+                field_mutation(
+                    "policy_resolution_self_hash",
+                    |m: &mut Stage1CacheKeyMaterial| m.policy_resolution_self_hash = hash(0x22),
+                ),
+                field_mutation(
+                    "artifact_effective_core_hash",
+                    |m: &mut Stage1CacheKeyMaterial| m.artifact_effective_core_hash = hash(0x23),
+                ),
+                field_mutation(
+                    "lowering_manifest_hash",
+                    |m: &mut Stage1CacheKeyMaterial| m.lowering_manifest_hash = hash(0x24),
+                ),
+                field_mutation(
+                    "resolved_blob_index_hash",
+                    |m: &mut Stage1CacheKeyMaterial| m.resolved_blob_index_hash = hash(0x25),
+                ),
+                field_mutation(
+                    "pass_version_quant_graph",
+                    |m: &mut Stage1CacheKeyMaterial| m.pass_version_quant_graph = "changed".into(),
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage1CacheKeyMaterial| m.crate_feature_set_hash = hash(0x26),
+                ),
+                field_mutation(
+                    "quant_graph_schema_hash",
+                    |m: &mut Stage1CacheKeyMaterial| m.quant_graph_schema_hash = hash(0x27),
+                ),
+            ],
+        );
+
+        assert_stage_key_material_fields_are_load_bearing(
+            "2",
+            stage2_material(Some(hash(0x40))),
+            |material| stage2_static_budget_store_key(material, Stage2CellKind::Success),
+            vec![
+                field_mutation(
+                    "policy_resolution_self_hash",
+                    |m: &mut Stage2CacheKeyMaterial| m.policy_resolution_self_hash = hash(0x31),
+                ),
+                field_mutation("quant_graph_hash", |m: &mut Stage2CacheKeyMaterial| {
+                    m.quant_graph_hash = hash(0x32)
+                }),
+                field_mutation(
+                    "runtime_chrome_budget_hash",
+                    |m: &mut Stage2CacheKeyMaterial| m.runtime_chrome_budget_hash = None,
+                ),
+                field_mutation("target_profile_hash", |m: &mut Stage2CacheKeyMaterial| {
+                    m.target_profile_hash = hash(0x33)
+                }),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage2CacheKeyMaterial| m.crate_feature_set_hash = hash(0x34),
+                ),
+                field_mutation(
+                    "static_budget_schema_hash",
+                    |m: &mut Stage2CacheKeyMaterial| m.static_budget_schema_hash = hash(0x35),
+                ),
+            ],
+        );
+
+        assert_stage_key_material_fields_are_load_bearing(
+            "3",
+            stage3_material(),
+            |material| stage3_infer_ir_store_key(material, Stage3CellKind::Success),
+            vec![
+                field_mutation("quant_graph_self_hash", |m: &mut Stage3CacheKeyMaterial| {
+                    m.quant_graph_self_hash = hash(0x41)
+                }),
+                field_mutation(
+                    "infer_ir_policy_projection_hash",
+                    |m: &mut Stage3CacheKeyMaterial| m.infer_ir_policy_projection_hash = hash(0x42),
+                ),
+                field_mutation(
+                    "static_budget_self_hash",
+                    |m: &mut Stage3CacheKeyMaterial| m.static_budget_self_hash = hash(0x43),
+                ),
+                field_mutation("pass_version_infer_ir", |m: &mut Stage3CacheKeyMaterial| {
+                    m.pass_version_infer_ir = "changed".into()
+                }),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage3CacheKeyMaterial| m.crate_feature_set_hash = hash(0x44),
+                ),
+                field_mutation("infer_ir_schema_hash", |m: &mut Stage3CacheKeyMaterial| {
+                    m.infer_ir_schema_hash = hash(0x45)
+                }),
+            ],
+        );
+
+        assert_stage_key_material_fields_are_load_bearing(
+            "4",
+            stage4_material(),
+            |material| stage4_observation_plan_store_key(material, Stage4CellKind::Success),
+            vec![
+                field_mutation("infer_ir_self_hash", |m: &mut Stage4CacheKeyMaterial| {
+                    m.infer_ir_self_hash = hash(0x51)
+                }),
+                field_mutation("quant_graph_self_hash", |m: &mut Stage4CacheKeyMaterial| {
+                    m.quant_graph_self_hash = hash(0x52)
+                }),
+                field_mutation(
+                    "semantic_checkpoint_schema_hash",
+                    |m: &mut Stage4CacheKeyMaterial| m.semantic_checkpoint_schema_hash = hash(0x53),
+                ),
+                field_mutation(
+                    "observation_policy_projection_hash",
+                    |m: &mut Stage4CacheKeyMaterial| {
+                        m.observation_policy_projection_hash = hash(0x54)
+                    },
+                ),
+                field_mutation(
+                    "pass_version_observation_plan",
+                    |m: &mut Stage4CacheKeyMaterial| {
+                        m.pass_version_observation_plan = "changed".into()
+                    },
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage4CacheKeyMaterial| m.crate_feature_set_hash = hash(0x55),
+                ),
+                field_mutation(
+                    "observation_plan_schema_hash",
+                    |m: &mut Stage4CacheKeyMaterial| m.observation_plan_schema_hash = hash(0x56),
+                ),
+                field_mutation(
+                    "build_active_semantic_checkpoint_schema_schema_hash",
+                    |m: &mut Stage4CacheKeyMaterial| {
+                        m.build_active_semantic_checkpoint_schema_schema_hash = hash(0x57)
+                    },
+                ),
+                field_mutation(
+                    "operational_probe_schema_schema_hash",
+                    |m: &mut Stage4CacheKeyMaterial| {
+                        m.operational_probe_schema_schema_hash = hash(0x58)
+                    },
+                ),
+                field_mutation("probe_registry_hash", |m: &mut Stage4CacheKeyMaterial| {
+                    m.probe_registry_hash = hash(0x59)
+                }),
+                field_mutation("metric_registry_hash", |m: &mut Stage4CacheKeyMaterial| {
+                    m.metric_registry_hash = hash(0x5a)
+                }),
+                field_mutation(
+                    "trace_event_layout_registry_hash",
+                    |m: &mut Stage4CacheKeyMaterial| {
+                        m.trace_event_layout_registry_hash = hash(0x5b)
+                    },
+                ),
+            ],
+        );
+
+        assert_stage_key_material_fields_are_load_bearing(
+            "5",
+            stage5_material(),
+            |material| stage5_range_plan_store_key(material, Stage5CellKind::Success),
+            vec![
+                field_mutation("infer_ir_self_hash", |m: &mut Stage5CacheKeyMaterial| {
+                    m.infer_ir_self_hash = hash(0x61)
+                }),
+                field_mutation("quant_graph_self_hash", |m: &mut Stage5CacheKeyMaterial| {
+                    m.quant_graph_self_hash = hash(0x62)
+                }),
+                field_mutation(
+                    "static_budget_self_hash",
+                    |m: &mut Stage5CacheKeyMaterial| m.static_budget_self_hash = hash(0x63),
+                ),
+                field_mutation(
+                    "range_policy_projection_hash",
+                    |m: &mut Stage5CacheKeyMaterial| m.range_policy_projection_hash = hash(0x64),
+                ),
+                field_mutation(
+                    "pass_version_range_plan",
+                    |m: &mut Stage5CacheKeyMaterial| m.pass_version_range_plan = "changed".into(),
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage5CacheKeyMaterial| m.crate_feature_set_hash = hash(0x65),
+                ),
+                field_mutation(
+                    "range_plan_schema_hash",
+                    |m: &mut Stage5CacheKeyMaterial| m.range_plan_schema_hash = hash(0x66),
+                ),
+                field_mutation(
+                    "range_cert_schema_hash",
+                    |m: &mut Stage5CacheKeyMaterial| m.range_cert_schema_hash = hash(0x67),
+                ),
+            ],
+        );
+
+        assert_hash_key_input_fields_are_load_bearing(
+            "6",
+            stage6_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 6 cache key").0,
+            vec![
+                field_mutation(
+                    "quant_graph_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.quant_graph_hash = hash(0x71)
+                    },
+                ),
+                field_mutation(
+                    "infer_ir_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.infer_ir_hash = hash(0x72)
+                    },
+                ),
+                field_mutation(
+                    "observation_plan_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.observation_plan_hash = hash(0x73)
+                    },
+                ),
+                field_mutation(
+                    "range_plan_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.range_plan_hash = hash(0x74)
+                    },
+                ),
+                field_mutation(
+                    "policy_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.policy_hash = hash(0x75)
+                    },
+                ),
+                field_mutation(
+                    "determinism",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.determinism = DeterminismClass::Deterministic
+                    },
+                ),
+                field_mutation(
+                    "schema",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.schema = gbf_report::ReportSchemaId::from("storage_plan.changed")
+                    },
+                ),
+                field_mutation(
+                    "schema_version",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.schema_version = SemVer::new(9, 9, 9)
+                    },
+                ),
+                field_mutation(
+                    "decision_rule_set_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.decision_rule_set_hash = hash(0x76)
+                    },
+                ),
+                field_mutation(
+                    "persist_compat_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.persist_compat_hash = hash(0x77)
+                    },
+                ),
+                field_mutation(
+                    "alias_rule_set_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.alias_rule_set_hash = hash(0x78)
+                    },
+                ),
+                field_mutation(
+                    "pass_version",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.pass_version = "changed".into()
+                    },
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut crate::storage_plan::StoragePlanCacheKeyInputs| {
+                        m.crate_feature_set_hash = hash(0x79)
+                    },
+                ),
+            ],
+        );
+
+        assert_hash_key_input_fields_are_load_bearing(
+            "7",
+            stage7_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 7 cache key").0,
+            hash_field_mutations::<crate::sram_page_plan::SramPagePlanCacheKeyInputs>(&[
+                "storage_plan_self_hash",
+                "observation_plan_self_hash",
+                "range_plan_self_hash",
+                "runtime_chrome_budget_hash",
+                "target_profile_hash",
+                "sram_page_plan_policy_projection_hash",
+                "crate_feature_set_hash",
+            ])
+            .into_iter()
+            .chain([field_mutation(
+                "pass_version",
+                |m: &mut crate::sram_page_plan::SramPagePlanCacheKeyInputs| {
+                    m.pass_version = "changed".into()
+                },
+            )])
+            .collect(),
+        );
+
+        assert_hash_key_input_fields_are_load_bearing(
+            "8",
+            stage8_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 8 cache key").0,
+            hash_field_mutations::<crate::window::RomWindowPlanCacheKeyInputs>(&[
+                "artifact_validation_self_hash",
+                "policy_resolution_self_hash",
+                "static_budget_self_hash",
+                "quant_graph_self_hash",
+                "infer_ir_self_hash",
+                "storage_plan_self_hash",
+                "observation_plan_self_hash",
+                "range_plan_self_hash",
+                "sram_page_plan_self_hash",
+                "runtime_chrome_budget_hash",
+                "target_profile_hash",
+                "rom_window_plan_policy_projection_hash",
+                "crate_feature_set_hash",
+            ])
+            .into_iter()
+            .chain([
+                field_mutation(
+                    "runtime_mode",
+                    |m: &mut crate::window::RomWindowPlanCacheKeyInputs| {
+                        m.runtime_mode = RuntimeMode::Trace
+                    },
+                ),
+                field_mutation(
+                    "pass_version",
+                    |m: &mut crate::window::RomWindowPlanCacheKeyInputs| {
+                        m.pass_version = "changed".into()
+                    },
+                ),
+            ])
+            .collect(),
+        );
+
+        assert_hash_key_input_fields_are_load_bearing(
+            "8.5",
+            stage85_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 8.5 cache key").0,
+            hash_field_mutations::<crate::overlay_plan::OverlayPlanCacheKeyInputs>(&[
+                "storage_plan_self_hash",
+                "sram_page_plan_self_hash",
+                "rom_window_plan_self_hash",
+                "runtime_chrome_budget_hash",
+                "target_profile_hash",
+                "overlay_plan_policy_projection_hash",
+                "crate_feature_set_hash",
+            ])
+            .into_iter()
+            .chain([field_mutation(
+                "pass_version",
+                |m: &mut crate::overlay_plan::OverlayPlanCacheKeyInputs| {
+                    m.pass_version = "changed".into()
+                },
+            )])
+            .collect(),
+        );
+
+        assert_hash_key_input_fields_are_load_bearing(
+            "9",
+            stage9_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 9 cache key").0,
+            hash_field_mutations::<crate::arena::ArenaPlanCacheKeyInputs>(&[
+                "storage_plan_self_hash",
+                "sram_page_plan_self_hash",
+                "rom_window_plan_self_hash",
+                "overlay_plan_self_hash",
+                "runtime_chrome_budget_hash",
+                "target_profile_hash",
+                "arena_plan_policy_projection_hash",
+                "crate_feature_set_hash",
+            ])
+            .into_iter()
+            .chain([field_mutation(
+                "pass_version",
+                |m: &mut crate::arena::ArenaPlanCacheKeyInputs| m.pass_version = "changed".into(),
+            )])
+            .collect(),
+        );
+
+        assert_hash_key_input_fields_are_load_bearing(
+            "10",
+            stage10_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 10 cache key").0,
+            vec![
+                field_mutation(
+                    "input_hashes",
+                    |m: &mut crate::schedule::SchedulePackCacheKeyInputs| {
+                        m.input_hashes.infer_ir_self_hash = hash(0xa1)
+                    },
+                ),
+                field_mutation(
+                    "requested_runtime_modes",
+                    |m: &mut crate::schedule::SchedulePackCacheKeyInputs| {
+                        m.requested_runtime_modes.insert(RuntimeMode::Trace);
+                    },
+                ),
+                field_mutation(
+                    "pass_version",
+                    |m: &mut crate::schedule::SchedulePackCacheKeyInputs| {
+                        m.pass_version = "changed".into()
+                    },
+                ),
+            ],
+        );
+
+        assert_hash_key_input_fields_are_load_bearing(
+            "10.5",
+            stage105_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 10.5 cache key").0,
+            vec![
+                field_mutation(
+                    "schedule_pack_self_hash",
+                    |m: &mut crate::schedule::ResourceStateCacheKeyInputs| {
+                        m.schedule_pack_self_hash = hash(0xb1)
+                    },
+                ),
+                field_mutation(
+                    "feature_set_hash",
+                    |m: &mut crate::schedule::ResourceStateCacheKeyInputs| {
+                        m.feature_set_hash = hash(0xb2)
+                    },
+                ),
+                field_mutation(
+                    "pass_version",
+                    |m: &mut crate::schedule::ResourceStateCacheKeyInputs| {
+                        m.pass_version = "changed"
+                    },
+                ),
+            ],
+        );
+
+        assert_hash_key_input_fields_are_load_bearing_except(
+            "11",
+            stage11_key_inputs(),
+            |inputs| inputs.cache_key().expect("stage 11 cache key").0,
+            vec![
+                field_mutation(
+                    "schedule_pack_self_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.schedule_pack_self_hash = hash(0xc1)
+                    },
+                ),
+                field_mutation(
+                    "calibration_bundle_set_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.calibration_bundle_set_hash = hash(0xc3)
+                    },
+                ),
+                field_mutation(
+                    "runtime_chrome_budget_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.runtime_chrome_budget_hash = hash(0xc4)
+                    },
+                ),
+                field_mutation(
+                    "target_profile_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.target_profile_hash = hash(0xc5)
+                    },
+                ),
+                field_mutation(
+                    "kernel_spec_registry_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.kernel_spec_registry_hash = hash(0xc6)
+                    },
+                ),
+                field_mutation(
+                    "active_session_profile_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.active_session_profile_hash = hash(0xca)
+                    },
+                ),
+                field_mutation(
+                    "schedule_cost_policy_projection_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.schedule_cost_policy_projection_hash = hash(0xc7)
+                    },
+                ),
+                field_mutation(
+                    "pass_version",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.pass_version = "changed"
+                    },
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.crate_feature_set_hash = hash(0xc8)
+                    },
+                ),
+                field_mutation(
+                    "schedule_cost_schema_hash",
+                    |m: &mut crate::schedule_cost::ScheduleCostCacheKeyInputs| {
+                        m.schedule_cost_schema_hash = hash(0xc9)
+                    },
+                ),
+            ],
+            &["policy_resolution_self_hash"],
+        );
+
+        let stage11_base = stage11_key_inputs();
+        let stage11_base_key = stage11_base.cache_key().expect("stage 11 cache key").0;
+        let mut stage11_audit_changed = stage11_base;
+        stage11_audit_changed.policy_resolution_self_hash = hash(0xc2);
+        assert_eq!(
+            stage11_base_key,
+            stage11_audit_changed
+                .cache_key()
+                .expect("stage 11 cache key")
+                .0,
+            "stage 11 K14 must exclude policy_resolution_self_hash audit-parent drift"
+        );
+
+        assert_stage_key_material_fields_are_load_bearing(
+            "12",
+            stage12_material(),
+            |material| stage12_backend_store_key(material, StoreBackedStageCellKind::Success),
+            vec![
+                field_mutation(
+                    "schedule_pack_self_hash",
+                    |m: &mut Stage12BackendCacheKeyMaterial| m.schedule_pack_self_hash = hash(0xd1),
+                ),
+                field_mutation(
+                    "resource_state_cert_self_hash",
+                    |m: &mut Stage12BackendCacheKeyMaterial| {
+                        m.resource_state_cert_self_hash = hash(0xd2)
+                    },
+                ),
+                field_mutation(
+                    "schedule_cost_report_self_hash",
+                    |m: &mut Stage12BackendCacheKeyMaterial| {
+                        m.schedule_cost_report_self_hash = hash(0xd3)
+                    },
+                ),
+                field_mutation(
+                    "runtime_nucleus_hash",
+                    |m: &mut Stage12BackendCacheKeyMaterial| m.runtime_nucleus_hash = hash(0xd4),
+                ),
+                field_mutation(
+                    "cartridge_header_hash",
+                    |m: &mut Stage12BackendCacheKeyMaterial| m.cartridge_header_hash = hash(0xd5),
+                ),
+                field_mutation(
+                    "backend_policy_projection_hash",
+                    |m: &mut Stage12BackendCacheKeyMaterial| {
+                        m.backend_policy_projection_hash = hash(0xd6)
+                    },
+                ),
+                field_mutation(
+                    "pass_version_backend",
+                    |m: &mut Stage12BackendCacheKeyMaterial| {
+                        m.pass_version_backend = "changed".into()
+                    },
+                ),
+                field_mutation(
+                    "crate_feature_set_hash",
+                    |m: &mut Stage12BackendCacheKeyMaterial| m.crate_feature_set_hash = hash(0xd7),
+                ),
+            ],
         );
     }
 
@@ -4560,6 +5913,184 @@ mod tests {
     }
 
     #[test]
+    fn f_b17_cross_stage_drift_invalidates_direct_consumer_chain() {
+        let stage05 = stage05_material();
+        let mut changed_stage05 = stage05.clone();
+        changed_stage05.artifact_validation_self_hash = hash(0xf0);
+        assert_stage_key_drift(
+            "Stage 0 validation drift invalidates Stage 0.5",
+            stage05_resolve_policy_store_key(&stage05, Stage05CellKind::Success),
+            stage05_resolve_policy_store_key(&changed_stage05, Stage05CellKind::Success),
+        );
+
+        let stage1 = stage1_material();
+        let mut changed_stage1_policy = stage1.clone();
+        changed_stage1_policy.policy_resolution_self_hash = hash(0xf1);
+        assert_stage_key_drift(
+            "Stage 0.5 policy drift invalidates Stage 1",
+            stage1_quant_graph_store_key(&stage1, Stage1CellKind::Success),
+            stage1_quant_graph_store_key(&changed_stage1_policy, Stage1CellKind::Success),
+        );
+
+        let stage2 = stage2_material(Some(hash(0x40)));
+        let mut changed_stage2_policy = stage2.clone();
+        changed_stage2_policy.policy_resolution_self_hash = hash(0xf2);
+        assert_stage_key_drift(
+            "Stage 0.5 policy drift invalidates Stage 2",
+            stage2_static_budget_store_key(&stage2, Stage2CellKind::Success),
+            stage2_static_budget_store_key(&changed_stage2_policy, Stage2CellKind::Success),
+        );
+
+        let stage3 = stage3_material();
+        let mut changed_stage3_quant = stage3.clone();
+        changed_stage3_quant.quant_graph_self_hash = hash(0xf3);
+        assert_stage_key_drift(
+            "Stage 1 QuantGraph drift invalidates Stage 3",
+            stage3_infer_ir_store_key(&stage3, Stage3CellKind::Success),
+            stage3_infer_ir_store_key(&changed_stage3_quant, Stage3CellKind::Success),
+        );
+
+        let stage4 = stage4_material();
+        let mut changed_stage4_infer = stage4.clone();
+        changed_stage4_infer.infer_ir_self_hash = hash(0xf4);
+        assert_stage_key_drift(
+            "Stage 3 InferIR drift invalidates Stage 4",
+            stage4_observation_plan_store_key(&stage4, Stage4CellKind::Success),
+            stage4_observation_plan_store_key(&changed_stage4_infer, Stage4CellKind::Success),
+        );
+
+        let stage5 = stage5_material();
+        let mut changed_stage5_budget = stage5.clone();
+        changed_stage5_budget.static_budget_self_hash = hash(0xf5);
+        assert_stage_key_drift(
+            "Stage 2 static-budget drift invalidates Stage 5",
+            stage5_range_plan_store_key(&stage5, Stage5CellKind::Success),
+            stage5_range_plan_store_key(&changed_stage5_budget, Stage5CellKind::Success),
+        );
+
+        let stage6 = stage6_key_inputs();
+        let mut changed_stage6_infer = stage6.clone();
+        changed_stage6_infer.infer_ir_hash = hash(0xf6);
+        assert_hash_key_drift(
+            "Stage 3 InferIR drift invalidates Stage 6",
+            stage6.cache_key().expect("stage 6 key").0,
+            changed_stage6_infer
+                .cache_key()
+                .expect("changed stage 6 key")
+                .0,
+        );
+
+        let stage7 = stage7_key_inputs();
+        let mut changed_stage7_storage = stage7.clone();
+        changed_stage7_storage.storage_plan_self_hash = hash(0xf7);
+        assert_hash_key_drift(
+            "Stage 6 storage-plan drift invalidates Stage 7",
+            stage7.cache_key().expect("stage 7 key").0,
+            changed_stage7_storage
+                .cache_key()
+                .expect("changed stage 7 key")
+                .0,
+        );
+
+        let stage8 = stage8_key_inputs();
+        let mut changed_stage8_sram = stage8.clone();
+        changed_stage8_sram.sram_page_plan_self_hash = hash(0xf8);
+        assert_hash_key_drift(
+            "Stage 7 SRAM-page drift invalidates Stage 8",
+            stage8.cache_key().expect("stage 8 key").0,
+            changed_stage8_sram
+                .cache_key()
+                .expect("changed stage 8 key")
+                .0,
+        );
+
+        let stage85 = stage85_key_inputs();
+        let mut changed_stage85_rom = stage85.clone();
+        changed_stage85_rom.rom_window_plan_self_hash = hash(0xf9);
+        assert_hash_key_drift(
+            "Stage 8 ROM-window drift invalidates Stage 8.5",
+            stage85.cache_key().expect("stage 8.5 key").0,
+            changed_stage85_rom
+                .cache_key()
+                .expect("changed stage 8.5 key")
+                .0,
+        );
+
+        let stage9 = stage9_key_inputs();
+        let mut changed_stage9_overlay = stage9.clone();
+        changed_stage9_overlay.overlay_plan_self_hash = hash(0xfa);
+        assert_hash_key_drift(
+            "Stage 8.5 overlay drift invalidates Stage 9",
+            stage9.cache_key().expect("stage 9 key").0,
+            changed_stage9_overlay
+                .cache_key()
+                .expect("changed stage 9 key")
+                .0,
+        );
+
+        let stage10 = stage10_key_inputs();
+        let mut changed_stage10_arena = stage10.clone();
+        changed_stage10_arena.input_hashes.arena_plan_self_hash = hash(0xfb);
+        assert_hash_key_drift(
+            "Stage 9 arena drift invalidates Stage 10",
+            stage10.cache_key().expect("stage 10 key").0,
+            changed_stage10_arena
+                .cache_key()
+                .expect("changed stage 10 key")
+                .0,
+        );
+
+        let stage105 = stage105_key_inputs();
+        let mut changed_stage105_schedule = stage105;
+        changed_stage105_schedule.schedule_pack_self_hash = hash(0xfc);
+        assert_hash_key_drift(
+            "Stage 10 schedule-pack drift invalidates Stage 10.5",
+            stage105.cache_key().expect("stage 10.5 key").0,
+            changed_stage105_schedule
+                .cache_key()
+                .expect("changed stage 10.5 key")
+                .0,
+        );
+
+        let stage11 = stage11_key_inputs();
+        let mut changed_stage11_schedule = stage11;
+        changed_stage11_schedule.schedule_pack_self_hash = hash(0xfd);
+        assert_hash_key_drift(
+            "Stage 10 schedule-pack drift invalidates Stage 11",
+            stage11.cache_key().expect("stage 11 key").0,
+            changed_stage11_schedule
+                .cache_key()
+                .expect("changed stage 11 key")
+                .0,
+        );
+
+        let stage12 = stage12_material();
+        let mut changed_stage12_schedule = stage12.clone();
+        changed_stage12_schedule.schedule_pack_self_hash = hash(0xfe);
+        assert_stage_key_drift(
+            "Stage 10 schedule-pack drift invalidates Stage 12",
+            stage12_backend_store_key(&stage12, StoreBackedStageCellKind::Success),
+            stage12_backend_store_key(&changed_stage12_schedule, StoreBackedStageCellKind::Success),
+        );
+
+        let mut changed_stage12_resource = stage12.clone();
+        changed_stage12_resource.resource_state_cert_self_hash = hash(0xef);
+        assert_stage_key_drift(
+            "Stage 10.5 resource-state drift invalidates Stage 12",
+            stage12_backend_store_key(&stage12, StoreBackedStageCellKind::Success),
+            stage12_backend_store_key(&changed_stage12_resource, StoreBackedStageCellKind::Success),
+        );
+
+        let mut changed_stage12_cost = stage12.clone();
+        changed_stage12_cost.schedule_cost_report_self_hash = hash(0xee);
+        assert_stage_key_drift(
+            "Stage 11 schedule-cost drift invalidates Stage 12",
+            stage12_backend_store_key(&stage12, StoreBackedStageCellKind::Success),
+            stage12_backend_store_key(&changed_stage12_cost, StoreBackedStageCellKind::Success),
+        );
+    }
+
+    #[test]
     fn f_b17_stage_6_through_12_modules_expose_concrete_cache_runner_symbols() {
         type Runner<I, O> =
             for<'a, 's> fn(
@@ -4576,6 +6107,13 @@ mod tests {
             StoreBackedStageRunOutput<crate::rom::Stage12BackendProduct>,
             CodegenStageCacheError,
         >;
+        type PipelineRunner =
+            for<'a, 's> fn(
+                &'a StageCache<'s>,
+                CompiledBuildPipelineInputs<'a>,
+                CompiledBuildPipelineExpectedHashes,
+            )
+                -> Result<CompiledBuildPipelineResult, CompiledBuildPipelineError>;
 
         let _stage6: Runner<
             crate::storage_plan::StoragePlanCoreInput,
@@ -4606,6 +6144,7 @@ mod tests {
             gbf_policy::ScheduleCostReport,
         > = crate::schedule_cost::run_schedule_cost_with_cache;
         let _stage12: Stage12Runner = crate::rom::run_stage12_backend_with_cache;
+        let _pipeline: PipelineRunner = run_compiled_build_stage_cache_pipeline;
     }
 
     #[test]
@@ -6466,6 +8005,794 @@ mod tests {
         changed_load_bearing: StageKey,
     }
 
+    type FieldMutation<T> = (&'static str, Box<dyn Fn(&mut T)>);
+
+    fn field_mutation<T, F>(field: &'static str, mutate: F) -> FieldMutation<T>
+    where
+        F: Fn(&mut T) + 'static,
+    {
+        (field, Box::new(mutate))
+    }
+
+    fn assert_stage_key_material_fields_are_load_bearing<T, F>(
+        stage_id: &'static str,
+        base: T,
+        key_fn: F,
+        mutations: Vec<FieldMutation<T>>,
+    ) where
+        T: Clone + serde::Serialize,
+        F: Fn(&T) -> StageKey,
+    {
+        assert_mutations_cover_serialized_fields(stage_id, &base, &mutations);
+        let base_key = compose_key(&key_fn(&base));
+        assert_eq!(
+            base_key,
+            compose_key(&key_fn(&base)),
+            "stage {stage_id} key must repeat deterministically"
+        );
+        for (field, mutate) in mutations {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(
+                base_key,
+                compose_key(&key_fn(&changed)),
+                "stage {stage_id} key did not change when field {field} changed"
+            );
+        }
+    }
+
+    fn assert_hash_key_input_fields_are_load_bearing<T, F>(
+        stage_id: &'static str,
+        base: T,
+        key_fn: F,
+        mutations: Vec<FieldMutation<T>>,
+    ) where
+        T: Clone + serde::Serialize,
+        F: Fn(&T) -> Hash256,
+    {
+        assert_mutations_cover_serialized_fields(stage_id, &base, &mutations);
+        let base_key = key_fn(&base);
+        assert_eq!(
+            base_key,
+            key_fn(&base),
+            "stage {stage_id} typed cache key must repeat deterministically"
+        );
+        for (field, mutate) in mutations {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(
+                base_key,
+                key_fn(&changed),
+                "stage {stage_id} typed cache key did not change when field {field} changed"
+            );
+        }
+    }
+
+    fn assert_hash_key_input_fields_are_load_bearing_except<T, F>(
+        stage_id: &'static str,
+        base: T,
+        key_fn: F,
+        mutations: Vec<FieldMutation<T>>,
+        ignored_serialized_fields: &[&'static str],
+    ) where
+        T: Clone + serde::Serialize,
+        F: Fn(&T) -> Hash256,
+    {
+        assert_mutations_cover_serialized_fields_except(
+            stage_id,
+            &base,
+            &mutations,
+            ignored_serialized_fields,
+        );
+        let base_key = key_fn(&base);
+        assert_eq!(
+            base_key,
+            key_fn(&base),
+            "stage {stage_id} typed cache key must repeat deterministically"
+        );
+        for (field, mutate) in mutations {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(
+                base_key,
+                key_fn(&changed),
+                "stage {stage_id} typed cache key did not change when field {field} changed"
+            );
+        }
+    }
+
+    fn assert_stage_key_drift(message: &'static str, base: StageKey, changed: StageKey) {
+        assert_ne!(compose_key(&base), compose_key(&changed), "{message}");
+    }
+
+    fn assert_hash_key_drift(message: &'static str, base: Hash256, changed: Hash256) {
+        assert_ne!(base, changed, "{message}");
+    }
+
+    struct CompiledBuildPipelineSmokeFixture {
+        storage_plan: crate::storage_plan::StoragePlanCoreInput,
+        sram_page_plan: crate::sram_page_plan::SramPagePlanInputs,
+        rom_window_plan: crate::window::RomWindowPlanInputs,
+        overlay_plan: crate::overlay_plan::OverlayPlanInputs,
+        arena_plan: crate::arena::ArenaPlanInputs,
+        schedule_pack: crate::schedule::SchedulePackInputs,
+        schedule_cost: crate::schedule_cost::ScheduleCostInputs,
+        backend: crate::rom::Stage12BackendInputs<'static>,
+        expected_storage_plan: crate::storage_plan::StoragePlanReportResult,
+        expected_sram_page_plan: crate::sram_page_plan::SramPagePlan,
+        expected_rom_window_plan: crate::window::RomWindowPlan,
+        expected_overlay_plan: crate::overlay_plan::OverlayPlanResult,
+        expected_arena_plan: crate::arena::ArenaPlanResult,
+        expected_schedule_pack: crate::schedule::SchedulePackResult,
+        expected_resource_state: crate::schedule::ResourceStateCertificate,
+        expected_schedule_cost: gbf_policy::ScheduleCostReport,
+    }
+
+    fn compiled_build_pipeline_smoke_fixture() -> CompiledBuildPipelineSmokeFixture {
+        let storage_plan = crate::storage_plan_test_infra::synth::minimal_singleton_core_input();
+        let storage_output = crate::storage_plan::build_storage_plan_core(&storage_plan);
+        assert_eq!(
+            storage_output.outcome,
+            crate::storage_plan::StoragePlanCoreOutcome::Succeeded,
+            "{:?}",
+            storage_output.diagnostics
+        );
+        let storage_core_result = storage_output
+            .result
+            .as_ref()
+            .expect("storage plan core result");
+        let expected_storage_plan = crate::storage_plan::StoragePlanReportResult::from_core_result(
+            &storage_output.input_identity,
+            storage_core_result,
+        );
+        let storage_plan_self_hash =
+            crate::storage_plan::storage_plan_report_result_self_hash(&expected_storage_plan)
+                .expect("storage plan result hashes");
+
+        let runtime_chrome_budget = pipeline_runtime_chrome_budget();
+        let runtime_chrome_budget_hash = hash(0xa0);
+        let target_profile_hash = hash(0xa1);
+        let geometry = crate::sram_page_plan::PersistentPageGeometry::dmg_mbc5_8k();
+        let sram_page_plan = pipeline_sram_page_plan_inputs(
+            &storage_plan,
+            storage_plan_self_hash,
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            runtime_chrome_budget.clone(),
+            geometry,
+        );
+        let sram_output = crate::sram_page_plan::build_sram_page_plan(&sram_page_plan);
+        assert_eq!(
+            sram_output.outcome,
+            crate::sram_page_plan::SramPagePlanOutcome::Succeeded,
+            "{:?}",
+            sram_output.diagnostics
+        );
+        let expected_sram_page_plan = sram_output.result.expect("sram page plan result");
+
+        let rom_window_plan = pipeline_rom_window_plan_inputs(
+            &storage_plan,
+            storage_plan_self_hash,
+            expected_sram_page_plan.clone(),
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            runtime_chrome_budget.clone(),
+        );
+        let rom_output = crate::window::build_rom_window_plan(&rom_window_plan);
+        assert_eq!(
+            rom_output.outcome,
+            crate::window::RomWindowPlanOutcome::Succeeded,
+            "{:?}",
+            rom_output.diagnostics
+        );
+        let expected_rom_window_plan = rom_output.result.expect("rom window plan result");
+
+        let overlay_plan = pipeline_overlay_plan_inputs(
+            storage_plan_self_hash,
+            expected_sram_page_plan.sram_page_plan_self_hash,
+            expected_rom_window_plan.clone(),
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            runtime_chrome_budget.clone(),
+        );
+        let overlay_output = crate::overlay_plan::build_overlay_plan(&overlay_plan);
+        assert_eq!(
+            overlay_output.outcome,
+            crate::overlay_plan::OverlayPlanOutcome::Succeeded,
+            "{:?}",
+            overlay_output.diagnostics
+        );
+        let expected_overlay_plan = overlay_output.result.expect("overlay plan result");
+
+        let arena_plan = pipeline_arena_plan_inputs(
+            storage_plan_self_hash,
+            expected_sram_page_plan.clone(),
+            expected_rom_window_plan.rom_window_plan_self_hash,
+            expected_overlay_plan.product.clone(),
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            runtime_chrome_budget.clone(),
+            geometry,
+        );
+        let arena_output = crate::arena::build_arena_plan(&arena_plan);
+        assert_eq!(
+            arena_output.outcome,
+            crate::arena::ArenaPlanOutcome::Succeeded,
+            "{:?}",
+            arena_output.diagnostics
+        );
+        let expected_arena_plan = arena_output.result.expect("arena plan result");
+
+        let schedule_pack = pipeline_schedule_pack_inputs(
+            &storage_plan,
+            storage_plan_self_hash,
+            expected_sram_page_plan.sram_page_plan_self_hash,
+            expected_rom_window_plan.clone(),
+            expected_overlay_plan.product.clone(),
+            expected_arena_plan.product.clone(),
+            runtime_chrome_budget_hash,
+        );
+        let schedule_output = crate::schedule::build_schedule_pack(&schedule_pack);
+        assert_eq!(
+            schedule_output.outcome,
+            crate::schedule::SchedulePackOutcome::Succeeded,
+            "{:?}",
+            schedule_output.diagnostics
+        );
+        let expected_schedule_pack = schedule_output.result.expect("schedule pack result");
+        let mut expected_resource_state = schedule_output.cert.expect("resource state cert");
+        expected_resource_state.resource_state_cert_self_hash =
+            crate::schedule::resource_state_cert_self_hash(&expected_resource_state)
+                .expect("resource-state cert hashes");
+
+        let schedule_cost = pipeline_schedule_cost_inputs(
+            expected_schedule_pack.product.clone(),
+            runtime_chrome_budget,
+            target_profile_hash,
+        );
+        let schedule_cost_output = crate::schedule_cost::analyze_schedule_cost(&schedule_cost);
+        assert_eq!(
+            schedule_cost_output.outcome,
+            crate::schedule_cost::ScheduleCostOutcome::Succeeded,
+            "{:?}",
+            schedule_cost_output.diagnostics
+        );
+        let expected_schedule_cost = schedule_cost_output.report.expect("schedule cost report");
+
+        let placed_rom = Box::leak(Box::new(pipeline_placed_rom()));
+        let cartridge_header = Box::leak(Box::new(gbf_asm::rom::CartridgeHeader {
+            rom_size: gbf_asm::rom::RomSize::Kib64,
+            ..gbf_asm::rom::CartridgeHeader::new("GBFTEST").expect("header")
+        }));
+        let backend = crate::rom::Stage12BackendInputs {
+            placed_rom,
+            cartridge_header,
+            build_hash: hash(0xb0),
+            schedule_pack_self_hash: expected_schedule_pack.schedule_pack_self_hash,
+            resource_state_cert_self_hash: expected_resource_state.resource_state_cert_self_hash,
+            schedule_cost_report_self_hash: expected_schedule_cost
+                .identity
+                .schedule_cost_report_self_hash,
+            runtime_nucleus_hash: hash(0xb1),
+            cartridge_header_hash: hash(0xb2),
+            backend_policy_projection_hash: hash(0xb3),
+            report_self_hash: hash(0xb4),
+        };
+
+        CompiledBuildPipelineSmokeFixture {
+            storage_plan,
+            sram_page_plan,
+            rom_window_plan,
+            overlay_plan,
+            arena_plan,
+            schedule_pack,
+            schedule_cost,
+            backend,
+            expected_storage_plan,
+            expected_sram_page_plan,
+            expected_rom_window_plan,
+            expected_overlay_plan,
+            expected_arena_plan,
+            expected_schedule_pack,
+            expected_resource_state,
+            expected_schedule_cost,
+        }
+    }
+
+    fn pipeline_runtime_chrome_budget() -> gbf_policy::RuntimeChromeBudget {
+        gbf_policy::RuntimeChromeBudget {
+            target: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
+            profile: CompileProfileId::from("Bringup"),
+            runtime_nucleus_hash: hash(0x91),
+            rom_slots: vec![
+                gbf_policy::RomBudgetSlot {
+                    id: gbf_foundation::BudgetSlotId::new(0),
+                    class: BudgetSlotClass::Bank0Free,
+                    usable_bytes: 16 * 1024,
+                    reserved_slack: 0,
+                    placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+                },
+                gbf_policy::RomBudgetSlot {
+                    id: gbf_foundation::BudgetSlotId::new(1),
+                    class: BudgetSlotClass::CommonBank,
+                    usable_bytes: 16 * 1024,
+                    reserved_slack: 0,
+                    placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+                },
+                gbf_policy::RomBudgetSlot {
+                    id: gbf_foundation::BudgetSlotId::new(2),
+                    class: BudgetSlotClass::ExpertBank,
+                    usable_bytes: 16 * 1024,
+                    reserved_slack: 0,
+                    placement_caps: BTreeSet::from([PlacementProfile::Budgeted]),
+                },
+            ],
+            memory_caps: gbf_policy::RuntimeMemoryCapSection {
+                wram_usable_bytes: 8 * 1024,
+                sram_usable_bytes: 32 * 1024,
+                hram_usable_bytes: 127,
+                source_target_profile_hash: hash(0x92),
+            },
+            wram_reserved: 128,
+            sram_reserved: 512,
+        }
+    }
+
+    fn pipeline_sram_page_plan_inputs(
+        storage_plan: &crate::storage_plan::StoragePlanCoreInput,
+        storage_plan_self_hash: Hash256,
+        runtime_chrome_budget_hash: Hash256,
+        target_profile_hash: Hash256,
+        runtime_chrome_budget: gbf_policy::RuntimeChromeBudget,
+        geometry: crate::sram_page_plan::PersistentPageGeometry,
+    ) -> crate::sram_page_plan::SramPagePlanInputs {
+        let identity = crate::sram_page_plan::SramPagePlanInputIdentity {
+            storage_plan_self_hash,
+            observation_plan_self_hash: storage_plan.input_identity.observation_plan_hash,
+            range_plan_self_hash: storage_plan.input_identity.range_plan_hash,
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            sram_page_plan_policy_projection_hash: hash(0xa2),
+            determinism: DeterminismClass::BitExact,
+            schema_version: crate::sram_page_plan::SRAM_PAGE_PLAN_SCHEMA_VERSION,
+        };
+        crate::sram_page_plan::SramPagePlanInputs {
+            expected_input_hashes: identity.hashes(),
+            input_identity: identity,
+            runtime_chrome_budget,
+            policy: gbf_policy::SramKnob {
+                page_aggression: gbf_policy::SramPageAggression::PackCold,
+                spill_policy: gbf_policy::SramSpillPolicy::NoSpill,
+            },
+            switch_caps: crate::sram_page_plan::SramSwitchCaps {
+                max_sram_page_switches_per_token: 4,
+            },
+            geometry,
+            expected_geometry: geometry,
+            epochs: vec![crate::sram_page_plan::SramPagePlanEpochInput {
+                epoch: crate::sram_page_plan::SramEpochId(0),
+                op_range: crate::window::NodeAnchorRange {
+                    first_node: NodeId::new(0),
+                    last_node: NodeId::new(0),
+                },
+            }],
+            bindings: Vec::new(),
+        }
+    }
+
+    fn pipeline_rom_window_plan_inputs(
+        storage_plan: &crate::storage_plan::StoragePlanCoreInput,
+        storage_plan_self_hash: Hash256,
+        sram_page_plan: crate::sram_page_plan::SramPagePlan,
+        runtime_chrome_budget_hash: Hash256,
+        target_profile_hash: Hash256,
+        runtime_chrome_budget: gbf_policy::RuntimeChromeBudget,
+    ) -> crate::window::RomWindowPlanInputs {
+        let infer_ir = pipeline_empty_infer_ir(DeterminismClass::BitExact);
+        let infer_ir_hash =
+            crate::s3::infer_ir::infer_ir_self_hash(&infer_ir).expect("pipeline infer ir hashes");
+        let identity = crate::window::RomWindowPlanInputIdentity {
+            artifact_validation_self_hash: hash(0xa0),
+            policy_resolution_self_hash: hash(0xa1),
+            static_budget_self_hash: hash(0xa2),
+            quant_graph_self_hash: hash(0xa4),
+            infer_ir_self_hash: infer_ir_hash,
+            storage_plan_self_hash,
+            observation_plan_self_hash: storage_plan.input_identity.observation_plan_hash,
+            range_plan_self_hash: storage_plan.input_identity.range_plan_hash,
+            sram_page_plan_self_hash: sram_page_plan.sram_page_plan_self_hash,
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            rom_window_plan_policy_projection_hash: hash(0xa3),
+            runtime_mode: RuntimeMode::Interactive,
+            determinism: DeterminismClass::BitExact,
+            target_profile_id: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
+            schema_version: crate::window::ROM_WINDOW_PLAN_SCHEMA_VERSION,
+        };
+        crate::window::RomWindowPlanInputs {
+            expected_input_hashes: identity.hashes(),
+            input_identity: identity,
+            infer_ir,
+            runtime_chrome_budget,
+            policy: crate::window::RomWindowPlanPolicyProjection {
+                placement_profile: PlacementProfile::Budgeted,
+                rom_window: gbf_policy::RomWindowKnob {
+                    kernel_residency_bias: gbf_policy::RomKernelResidencyBias::PreferCommonBank,
+                    kernel_duplication_bias: gbf_policy::RomKernelDuplicationBias::Share,
+                },
+                max_bank_switches_per_token: Some(8),
+            },
+            sram_page_plan,
+            epochs: vec![crate::window::RomWindowEpochInput {
+                id: crate::window::ResidencyEpochId(0),
+                op_range: crate::window::NodeAnchorRange {
+                    first_node: NodeId::new(0),
+                    last_node: NodeId::new(0),
+                },
+                sram_page_binding: None,
+                yield_kind: crate::window::YieldKindHint::NoYieldsExpected,
+            }],
+            kernels: Vec::new(),
+            luts: Vec::new(),
+            storage_bindings: Vec::new(),
+        }
+    }
+
+    fn pipeline_empty_infer_ir(determinism: DeterminismClass) -> GbInferIR {
+        GbInferIR {
+            identity: InferIrIdentity {
+                quant_graph_self_hash: hash(0xc0),
+                infer_ir_policy_projection_hash: hash(0xc1),
+                static_budget_self_hash: hash(0xc2),
+                requested_runtime_modes_hash: hash(0xc3),
+                determinism,
+                topological_order_hash: hash(0xc4),
+            },
+            token_inputs: Vec::new(),
+            nodes: Vec::new(),
+            values: Vec::new(),
+            effects: Vec::new(),
+            provenance: Default::default(),
+            anchors: BTreeMap::new(),
+        }
+    }
+
+    fn pipeline_overlay_plan_inputs(
+        storage_plan_self_hash: Hash256,
+        sram_page_plan_self_hash: Hash256,
+        rom_window_plan: crate::window::RomWindowPlan,
+        runtime_chrome_budget_hash: Hash256,
+        target_profile_hash: Hash256,
+        runtime_chrome_budget: gbf_policy::RuntimeChromeBudget,
+    ) -> crate::overlay_plan::OverlayPlanInputs {
+        let identity = crate::overlay_plan::OverlayPlanInputIdentity {
+            storage_plan_self_hash,
+            sram_page_plan_self_hash,
+            rom_window_plan_self_hash: rom_window_plan.rom_window_plan_self_hash,
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            overlay_plan_policy_projection_hash: hash(0xa4),
+            determinism: DeterminismClass::BitExact,
+            target_profile_id: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
+            schema_version: crate::overlay_plan::OVERLAY_PLAN_SCHEMA_VERSION,
+        };
+        crate::overlay_plan::OverlayPlanInputs {
+            expected_input_hashes: identity.hashes(),
+            input_identity: identity,
+            audit_parents: crate::overlay_plan::OverlayPlanAuditParents {
+                policy_resolution_self_hash: hash(0xa5),
+                artifact_validation_self_hash: hash(0xa6),
+                compile_request_hash: hash(0xa7),
+            },
+            runtime_chrome_budget,
+            target_profile: crate::overlay_plan::OverlayTargetProfileSummary {
+                allowed_overlay_constraints: BTreeSet::from([
+                    crate::overlay_plan::WramRegionConstraint::DmgWramC000Dfff,
+                ]),
+                default_overlay_constraint:
+                    crate::overlay_plan::WramRegionConstraint::DmgWramC000Dfff,
+                wram_overlay_region_max_bytes: 1024,
+            },
+            policy: crate::overlay_plan::OverlayPlanPolicyProjection {
+                overlay_eviction_default: crate::overlay_plan::OverlayEvictionPolicy::ReloadOnUse,
+                overlay_install_event_default: Some(
+                    crate::overlay_plan::OverlayInstallEvent::ExpertSwitch,
+                ),
+                runtime_modes_requested: BTreeSet::from([RuntimeMode::Interactive]),
+                require_explicit_zero_reservation: false,
+            },
+            rom_window_plan,
+        }
+    }
+
+    fn pipeline_arena_plan_inputs(
+        storage_plan_self_hash: Hash256,
+        sram_page_plan: crate::sram_page_plan::SramPagePlan,
+        rom_window_plan_self_hash: Hash256,
+        overlay_plan: crate::overlay_plan::OverlayPlan,
+        runtime_chrome_budget_hash: Hash256,
+        target_profile_hash: Hash256,
+        runtime_chrome_budget: gbf_policy::RuntimeChromeBudget,
+        geometry: crate::sram_page_plan::PersistentPageGeometry,
+    ) -> crate::arena::ArenaPlanInputs {
+        let identity = crate::arena::ArenaPlanInputIdentity {
+            storage_plan_self_hash,
+            sram_page_plan_self_hash: sram_page_plan.sram_page_plan_self_hash,
+            rom_window_plan_self_hash,
+            overlay_plan_self_hash: overlay_plan.overlay_plan_self_hash,
+            runtime_chrome_budget_hash,
+            target_profile_hash,
+            arena_plan_policy_projection_hash: hash(0xa8),
+            determinism: DeterminismClass::BitExact,
+            target_profile_id: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
+            schema_version: crate::arena::ARENA_PLAN_SCHEMA_VERSION,
+        };
+        crate::arena::ArenaPlanInputs {
+            expected_input_hashes: identity.hashes(),
+            input_identity: identity,
+            runtime_chrome_budget,
+            target_profile: crate::arena::ArenaTargetProfileSummary {
+                wram_usable_bytes: 8 * 1024,
+                sram_window_bytes: 8 * 1024,
+                hram_usable_bytes: 127,
+            },
+            policy: crate::arena::ArenaPlanPolicyProjection {
+                arena_alignment_default: 16,
+                arena_zerofill_policy: crate::arena::ArenaZerofillPolicy::ZeroOnBuild,
+                persistent_page_geometry: geometry,
+            },
+            storage_bindings: Vec::new(),
+            sram_page_plan,
+            overlay_plan,
+        }
+    }
+
+    fn pipeline_schedule_pack_inputs(
+        storage_plan: &crate::storage_plan::StoragePlanCoreInput,
+        storage_plan_self_hash: Hash256,
+        sram_page_plan_self_hash: Hash256,
+        rom_window_plan: crate::window::RomWindowPlan,
+        overlay_plan: crate::overlay_plan::OverlayPlan,
+        arena_plan: crate::arena::ArenaPlan,
+        runtime_chrome_budget_hash: Hash256,
+    ) -> crate::schedule::SchedulePackInputs {
+        let identity = crate::schedule::SchedulePackInputIdentity {
+            infer_ir_self_hash: storage_plan.input_identity.infer_ir_hash,
+            observation_plan_self_hash: storage_plan.input_identity.observation_plan_hash,
+            range_plan_self_hash: storage_plan.input_identity.range_plan_hash,
+            storage_plan_self_hash,
+            sram_page_plan_self_hash,
+            rom_window_plan_self_hash: rom_window_plan.rom_window_plan_self_hash,
+            overlay_plan_self_hash: overlay_plan.overlay_plan_self_hash,
+            arena_plan_self_hash: arena_plan.arena_plan_self_hash,
+            policy_resolution_self_hash: storage_plan.input_identity.policy_hash,
+            runtime_chrome_budget_self_hash: runtime_chrome_budget_hash,
+            feature_set_hash: crate_feature_set_hash(),
+            requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
+            determinism: DeterminismClass::BitExact,
+            target_profile_id: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
+            schema_version: crate::schedule::SCHED_IR_SCHEMA_VERSION,
+        };
+        crate::schedule::SchedulePackInputs {
+            expected_input_hashes: identity.hashes(),
+            input_identity: identity,
+            rom_window_plan,
+            overlay_plan,
+            arena_plan,
+        }
+    }
+
+    fn pipeline_schedule_cost_inputs(
+        schedule_pack: crate::schedule::SchedulePack,
+        runtime_chrome_budget: gbf_policy::RuntimeChromeBudget,
+        target_profile_hash: Hash256,
+    ) -> crate::schedule_cost::ScheduleCostInputs {
+        let policy_fixture = crate::policy::tests::Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let validation = policy_fixture.validation();
+        let mut policy = resolve_policy(&validation).expect("policy resolves").policy;
+        policy.target = runtime_chrome_budget.target.clone();
+        policy.requested_runtime_modes = schedule_pack.identity.requested_runtime_modes.clone();
+        policy.objective.max_cycles_per_token = Some(1_000_000);
+        policy.objective.max_bank_switches_per_token = Some(1_000);
+        policy.objective.max_sram_page_switches_per_token = Some(1_000);
+        policy.objective.risk.calibration_confidence_requirement =
+            gbf_policy::CalibrationConfidenceRequirement::NoMinimumConfidence;
+
+        let kernel_spec_registry =
+            crate::schedule_cost::ScheduleCostKernelRegistry::from_schedule_pack(&schedule_pack);
+        let kernel_spec_registry_hash = kernel_spec_registry
+            .registry_hash()
+            .expect("kernel registry hash");
+        let active_session_profile = gbf_policy::CalibrationSessionProfile {
+            target_profile_hash,
+            compile_profile: policy.profile.clone(),
+            runtime_modes: policy.requested_runtime_modes.clone(),
+        };
+
+        crate::schedule_cost::ScheduleCostInputs {
+            schedule_pack,
+            policy,
+            calibration_bundle_set: gbf_policy::BootstrapCalibrationBundle::new(hash(0xa9)),
+            runtime_chrome_budget,
+            target_profile_hash,
+            kernel_spec_registry,
+            kernel_spec_registry_hash,
+            active_session_profile,
+            crate_feature_set_hash: crate_feature_set_hash(),
+            schedule_cost_schema_hash: schema_hash(
+                crate::schedule_cost::SCHEDULE_COST_SCHEMA_ID,
+                "1.0.0",
+                "schedule_cost::ScheduleCostReportBody::validate_semantics",
+            ),
+        }
+    }
+
+    fn pipeline_placed_rom() -> crate::place::PlacedRom {
+        use gbf_asm::builder::Builder;
+        use gbf_asm::isa::Instr;
+        use gbf_asm::section::{Section, SectionId, SectionRole};
+        use gbf_asm::symbols::SymbolName;
+
+        fn section(id: u32, role: SectionRole, name: &'static str, instr: Instr) -> Section {
+            let name = SymbolName::new(name).expect("symbol");
+            let mut builder = Builder::new_with_id(SectionId::new(id), role, name.clone());
+            builder.label(name);
+            builder.emit(instr);
+            builder.finish()
+        }
+
+        let bundle = crate::lower_asm::build_asmir_bundle(crate::lower_asm::AsmIRCodegenInput {
+            codegen_sections: vec![
+                section(
+                    1,
+                    SectionRole::Bank0Nucleus,
+                    "runtime.test.entry",
+                    Instr::Nop,
+                ),
+                section(
+                    2,
+                    SectionRole::ExpertBank,
+                    "expert.0.0",
+                    Instr::Ret { cond: None },
+                ),
+            ],
+            nucleus_sections: Vec::new(),
+            provenance: Vec::new(),
+        })
+        .expect("asmir bundle");
+        crate::place::place_asmir_bundle(&bundle, PlacementProfile::Budgeted).expect("placed rom")
+    }
+
+    fn assert_mutations_cover_serialized_fields<T: serde::Serialize>(
+        stage_id: &'static str,
+        base: &T,
+        mutations: &[FieldMutation<T>],
+    ) {
+        assert_mutations_cover_serialized_fields_except(stage_id, base, mutations, &[]);
+    }
+
+    fn assert_mutations_cover_serialized_fields_except<T: serde::Serialize>(
+        stage_id: &'static str,
+        base: &T,
+        mutations: &[FieldMutation<T>],
+        ignored_serialized_fields: &[&'static str],
+    ) {
+        let value = serde_json::to_value(base).expect("cache key material serializes");
+        let ignored = ignored_serialized_fields
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect::<BTreeSet<_>>();
+        let observed = value
+            .as_object()
+            .unwrap_or_else(|| panic!("stage {stage_id} key material serializes as object"))
+            .keys()
+            .filter(|field| !ignored.contains(*field))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mutated = mutations
+            .iter()
+            .map(|(field, _)| (*field).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            observed, mutated,
+            "stage {stage_id} per-field conformance must cover every serialized key field"
+        );
+    }
+
+    trait TestHashFieldMutations {
+        fn set_hash_field(&mut self, field: &'static str, value: Hash256);
+    }
+
+    fn hash_field_mutations<T: TestHashFieldMutations + 'static>(
+        fields: &[&'static str],
+    ) -> Vec<FieldMutation<T>> {
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let field = *field;
+                field_mutation(field, move |inputs: &mut T| {
+                    inputs.set_hash_field(field, hash(0xe0_u8.wrapping_add(index as u8)));
+                })
+            })
+            .collect()
+    }
+
+    impl TestHashFieldMutations for crate::sram_page_plan::SramPagePlanCacheKeyInputs {
+        fn set_hash_field(&mut self, field: &'static str, value: Hash256) {
+            match field {
+                "storage_plan_self_hash" => self.storage_plan_self_hash = value,
+                "observation_plan_self_hash" => self.observation_plan_self_hash = value,
+                "range_plan_self_hash" => self.range_plan_self_hash = value,
+                "runtime_chrome_budget_hash" => self.runtime_chrome_budget_hash = value,
+                "target_profile_hash" => self.target_profile_hash = value,
+                "sram_page_plan_policy_projection_hash" => {
+                    self.sram_page_plan_policy_projection_hash = value;
+                }
+                "crate_feature_set_hash" => self.crate_feature_set_hash = value,
+                _ => panic!("unexpected Stage 7 hash field {field}"),
+            }
+        }
+    }
+
+    impl TestHashFieldMutations for crate::window::RomWindowPlanCacheKeyInputs {
+        fn set_hash_field(&mut self, field: &'static str, value: Hash256) {
+            match field {
+                "artifact_validation_self_hash" => self.artifact_validation_self_hash = value,
+                "policy_resolution_self_hash" => self.policy_resolution_self_hash = value,
+                "static_budget_self_hash" => self.static_budget_self_hash = value,
+                "quant_graph_self_hash" => self.quant_graph_self_hash = value,
+                "infer_ir_self_hash" => self.infer_ir_self_hash = value,
+                "storage_plan_self_hash" => self.storage_plan_self_hash = value,
+                "observation_plan_self_hash" => self.observation_plan_self_hash = value,
+                "range_plan_self_hash" => self.range_plan_self_hash = value,
+                "sram_page_plan_self_hash" => self.sram_page_plan_self_hash = value,
+                "runtime_chrome_budget_hash" => self.runtime_chrome_budget_hash = value,
+                "target_profile_hash" => self.target_profile_hash = value,
+                "rom_window_plan_policy_projection_hash" => {
+                    self.rom_window_plan_policy_projection_hash = value;
+                }
+                "crate_feature_set_hash" => self.crate_feature_set_hash = value,
+                _ => panic!("unexpected Stage 8 hash field {field}"),
+            }
+        }
+    }
+
+    impl TestHashFieldMutations for crate::overlay_plan::OverlayPlanCacheKeyInputs {
+        fn set_hash_field(&mut self, field: &'static str, value: Hash256) {
+            match field {
+                "storage_plan_self_hash" => self.storage_plan_self_hash = value,
+                "sram_page_plan_self_hash" => self.sram_page_plan_self_hash = value,
+                "rom_window_plan_self_hash" => self.rom_window_plan_self_hash = value,
+                "runtime_chrome_budget_hash" => self.runtime_chrome_budget_hash = value,
+                "target_profile_hash" => self.target_profile_hash = value,
+                "overlay_plan_policy_projection_hash" => {
+                    self.overlay_plan_policy_projection_hash = value;
+                }
+                "crate_feature_set_hash" => self.crate_feature_set_hash = value,
+                _ => panic!("unexpected Stage 8.5 hash field {field}"),
+            }
+        }
+    }
+
+    impl TestHashFieldMutations for crate::arena::ArenaPlanCacheKeyInputs {
+        fn set_hash_field(&mut self, field: &'static str, value: Hash256) {
+            match field {
+                "storage_plan_self_hash" => self.storage_plan_self_hash = value,
+                "sram_page_plan_self_hash" => self.sram_page_plan_self_hash = value,
+                "rom_window_plan_self_hash" => self.rom_window_plan_self_hash = value,
+                "overlay_plan_self_hash" => self.overlay_plan_self_hash = value,
+                "runtime_chrome_budget_hash" => self.runtime_chrome_budget_hash = value,
+                "target_profile_hash" => self.target_profile_hash = value,
+                "arena_plan_policy_projection_hash" => {
+                    self.arena_plan_policy_projection_hash = value;
+                }
+                "crate_feature_set_hash" => self.crate_feature_set_hash = value,
+                _ => panic!("unexpected Stage 9 hash field {field}"),
+            }
+        }
+    }
+
     fn stage_key_conformance_cases() -> Vec<StageKeyConformanceCase> {
         let stage0 = stage0_material();
         let mut changed_stage0 = stage0.clone();
@@ -6569,6 +8896,128 @@ mod tests {
             },
         ));
         cases
+    }
+
+    fn stage6_key_inputs() -> crate::storage_plan::StoragePlanCacheKeyInputs {
+        crate::storage_plan::StoragePlanCacheKeyInputs {
+            quant_graph_hash: hash(0x10),
+            infer_ir_hash: hash(0x11),
+            observation_plan_hash: hash(0x12),
+            range_plan_hash: hash(0x13),
+            policy_hash: hash(0x14),
+            determinism: DeterminismClass::BitExact,
+            schema: gbf_report::ReportSchemaId::from(crate::storage_plan::STORAGE_PLAN_SCHEMA_ID),
+            schema_version: SemVer::new(1, 0, 0),
+            decision_rule_set_hash: hash(0x15),
+            persist_compat_hash: hash(0x16),
+            alias_rule_set_hash: hash(0x17),
+            pass_version: crate::storage_plan::STORAGE_PLAN_PASS_VERSION.to_owned(),
+            crate_feature_set_hash: hash(0x18),
+        }
+    }
+
+    fn stage7_key_inputs() -> crate::sram_page_plan::SramPagePlanCacheKeyInputs {
+        crate::sram_page_plan::SramPagePlanCacheKeyInputs {
+            storage_plan_self_hash: hash(0x20),
+            observation_plan_self_hash: hash(0x21),
+            range_plan_self_hash: hash(0x22),
+            runtime_chrome_budget_hash: hash(0x23),
+            target_profile_hash: hash(0x24),
+            sram_page_plan_policy_projection_hash: hash(0x25),
+            pass_version: "stage7/v1".to_owned(),
+            crate_feature_set_hash: hash(0x26),
+        }
+    }
+
+    fn stage8_key_inputs() -> crate::window::RomWindowPlanCacheKeyInputs {
+        crate::window::RomWindowPlanCacheKeyInputs {
+            artifact_validation_self_hash: hash(0x2b),
+            policy_resolution_self_hash: hash(0x2c),
+            static_budget_self_hash: hash(0x2d),
+            quant_graph_self_hash: hash(0x2e),
+            infer_ir_self_hash: hash(0x2f),
+            storage_plan_self_hash: hash(0x30),
+            observation_plan_self_hash: hash(0x31),
+            range_plan_self_hash: hash(0x32),
+            sram_page_plan_self_hash: hash(0x33),
+            runtime_chrome_budget_hash: hash(0x34),
+            target_profile_hash: hash(0x35),
+            rom_window_plan_policy_projection_hash: hash(0x36),
+            runtime_mode: RuntimeMode::Interactive,
+            pass_version: "stage8/v1".to_owned(),
+            crate_feature_set_hash: hash(0x37),
+        }
+    }
+
+    fn stage85_key_inputs() -> crate::overlay_plan::OverlayPlanCacheKeyInputs {
+        crate::overlay_plan::OverlayPlanCacheKeyInputs {
+            storage_plan_self_hash: hash(0x40),
+            sram_page_plan_self_hash: hash(0x41),
+            rom_window_plan_self_hash: hash(0x42),
+            runtime_chrome_budget_hash: hash(0x43),
+            target_profile_hash: hash(0x44),
+            overlay_plan_policy_projection_hash: hash(0x45),
+            pass_version: "stage8.5/v1".to_owned(),
+            crate_feature_set_hash: hash(0x46),
+        }
+    }
+
+    fn stage9_key_inputs() -> crate::arena::ArenaPlanCacheKeyInputs {
+        crate::arena::ArenaPlanCacheKeyInputs {
+            storage_plan_self_hash: hash(0x50),
+            sram_page_plan_self_hash: hash(0x51),
+            rom_window_plan_self_hash: hash(0x52),
+            overlay_plan_self_hash: hash(0x53),
+            runtime_chrome_budget_hash: hash(0x54),
+            target_profile_hash: hash(0x55),
+            arena_plan_policy_projection_hash: hash(0x56),
+            pass_version: "stage9/v1".to_owned(),
+            crate_feature_set_hash: hash(0x57),
+        }
+    }
+
+    fn stage10_key_inputs() -> crate::schedule::SchedulePackCacheKeyInputs {
+        crate::schedule::SchedulePackCacheKeyInputs {
+            input_hashes: crate::schedule::SchedulePackInputHashes {
+                infer_ir_self_hash: hash(0x60),
+                observation_plan_self_hash: hash(0x61),
+                range_plan_self_hash: hash(0x62),
+                storage_plan_self_hash: hash(0x63),
+                sram_page_plan_self_hash: hash(0x64),
+                rom_window_plan_self_hash: hash(0x65),
+                overlay_plan_self_hash: hash(0x66),
+                arena_plan_self_hash: hash(0x67),
+                policy_resolution_self_hash: hash(0x68),
+                runtime_chrome_budget_self_hash: hash(0x69),
+                feature_set_hash: hash(0x6a),
+            },
+            requested_runtime_modes: BTreeSet::from([RuntimeMode::Interactive]),
+            pass_version: "stage10/v1".to_owned(),
+        }
+    }
+
+    fn stage105_key_inputs() -> crate::schedule::ResourceStateCacheKeyInputs {
+        crate::schedule::ResourceStateCacheKeyInputs {
+            schedule_pack_self_hash: hash(0x70),
+            feature_set_hash: hash(0x71),
+            pass_version: "stage10.5/v1",
+        }
+    }
+
+    fn stage11_key_inputs() -> crate::schedule_cost::ScheduleCostCacheKeyInputs {
+        crate::schedule_cost::ScheduleCostCacheKeyInputs {
+            schedule_pack_self_hash: hash(0x80),
+            policy_resolution_self_hash: hash(0x81),
+            calibration_bundle_set_hash: hash(0x82),
+            runtime_chrome_budget_hash: hash(0x83),
+            target_profile_hash: hash(0x84),
+            kernel_spec_registry_hash: hash(0x85),
+            active_session_profile_hash: hash(0x86),
+            schedule_cost_policy_projection_hash: hash(0x89),
+            pass_version: "stage11/v1",
+            crate_feature_set_hash: hash(0x87),
+            schedule_cost_schema_hash: hash(0x88),
+        }
     }
 
     fn store() -> (TempDir, BlobStore) {
@@ -6940,6 +9389,7 @@ mod tests {
             observation_plan,
             build_active_checkpoint_schema,
             operational_probe_schema,
+            rom_window_facts: crate::s4::observation_plan::ObservationRomWindowFacts::default(),
         }
     }
 
@@ -6978,6 +9428,7 @@ mod tests {
             range_cert_body_hash: range_cert_body_hash(&range_cert).expect("range cert hashes"),
             range_plan,
             range_cert,
+            rom_window_facts: crate::s5::range_plan::RangeRomWindowFacts::default(),
         }
     }
 

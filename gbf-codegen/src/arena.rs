@@ -34,6 +34,8 @@ use crate::storage_plan::types::{
 };
 use gbf_store::stage_cache::StageCache as StoreStageCache;
 
+const CONTINUATION_ABI_SYMBOL: &str = "gbf_abi::InferenceStateHeader";
+
 pub const ARENA_PLAN_SCHEMA_ID: &str = "arena_plan.v1";
 pub const ARENA_PLAN_SCHEMA_VERSION: SemVer = SemVer::new(1, 0, 0);
 pub const ARENA_PLAN_PASS_VERSION: &str = "stage9/v1";
@@ -185,6 +187,9 @@ pub enum SlotBindingRef {
 #[serde(tag = "kind", deny_unknown_fields)]
 #[allow(clippy::enum_variant_names)]
 pub enum RuntimeFixedKind {
+    WramContinuationHeader,
+    HarnessCommandBlock,
+    HarnessResultBlock,
     HramFrameFlags,
     HramBankShadow,
     HramFaultCode,
@@ -305,6 +310,21 @@ impl ArenaPlanInputHashes {
             ArenaPlanInputProduct::TargetProfile => self.target_profile_hash,
             ArenaPlanInputProduct::PolicyProjection => self.arena_plan_policy_projection_hash,
         }
+    }
+
+    #[must_use]
+    pub fn all_bound(&self) -> bool {
+        [
+            self.storage_plan_self_hash,
+            self.sram_page_plan_self_hash,
+            self.rom_window_plan_self_hash,
+            self.overlay_plan_self_hash,
+            self.runtime_chrome_budget_hash,
+            self.target_profile_hash,
+            self.arena_plan_policy_projection_hash,
+        ]
+        .into_iter()
+        .all(|hash| hash != Hash256::ZERO)
     }
 }
 
@@ -449,11 +469,13 @@ impl ReportBody for ArenaPlanReportBody {
 #[serde(deny_unknown_fields)]
 pub struct ArenaCertBody {
     pub pass_version: String,
+    pub input_hashes: ArenaPlanInputHashes,
     pub arena_plan_self_hash: Hash256,
     pub address_invariants: ArenaAddressInvariants,
     pub reservation_honor: OverlayReservationHonor,
+    pub continuation_record: ArenaContinuationWitness,
     pub persistent_page_geometry: ArenaPersistentGeometryWitness,
-    pub harness_no_leak: bool,
+    pub harness_no_leak: ArenaHarnessNoLeakCertificate,
     pub diagnostics: Vec<ValidationDiagnostic>,
     pub arena_cert_self_hash: Hash256,
 }
@@ -471,19 +493,33 @@ impl ReportBody for ArenaCertBody {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArenaAddressInvariants {
+    #[serde(rename = "materialize_coverage")]
     pub f_addr_1_materialize_coverage: bool,
+    #[serde(rename = "persist_coverage")]
     pub f_addr_2_persist_coverage: bool,
+    #[serde(rename = "alias_class_share_or_disjoint")]
     pub f_addr_3_alias_total_or_disjoint: bool,
+    #[serde(rename = "lifetime_preservation")]
     pub f_addr_4_lifetime_preservation: bool,
+    #[serde(rename = "overlay_byte_equality")]
     pub f_addr_5_overlay_byte_equality: bool,
+    #[serde(rename = "overlay_disjointness")]
     pub f_addr_6_overlay_disjointness: bool,
+    #[serde(rename = "overlay_member_start")]
     pub f_addr_7_overlay_member_start_of_region: bool,
+    #[serde(rename = "sram_no_span")]
     pub f_addr_8_sram_no_span: bool,
+    #[serde(rename = "hram_page_bound")]
     pub f_addr_9_hram_page_bound: bool,
+    #[serde(rename = "continuation_sized")]
     pub f_addr_10_continuation_sized: bool,
+    #[serde(rename = "harness_disjoint")]
     pub f_addr_11_harness_disjoint: bool,
+    #[serde(rename = "persist_header_aligned")]
     pub f_addr_12_persistent_page_header_aligned: bool,
+    #[serde(rename = "slot_id_unique")]
     pub f_addr_13_slot_id_unique: bool,
+    #[serde(rename = "binding_ref_resolves")]
     pub f_addr_14_binding_ref_resolves: bool,
 }
 
@@ -532,6 +568,36 @@ impl ArenaAddressInvariants {
 pub struct ArenaPersistentGeometryWitness {
     pub geometry: PersistentPageGeometry,
     pub pages: Vec<ArenaPersistentPageWitness>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArenaHarnessNoLeakCertificate {
+    pub command_block_arena: ArenaId,
+    pub result_block_arena: ArenaId,
+    pub disjoint_from: Vec<NamedArena>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArenaContinuationWitness {
+    pub abi_symbol: String,
+    pub arena_id: ArenaId,
+    pub byte_range: ByteRange,
+    pub header_slot: ArenaSlotId,
+    pub header_size_bytes: u16,
+    pub tail_size_bytes: u16,
+    pub total_size_bytes: u16,
+    pub tail_slots: Vec<ArenaContinuationTailSlotWitness>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArenaContinuationTailSlotWitness {
+    pub slot: ArenaSlotId,
+    pub value: ValueId,
+    pub byte_offset: u16,
+    pub size_bytes: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,6 +784,12 @@ pub fn build_arena_plan(input: &ArenaPlanInputs) -> ArenaPlanOutput {
         );
     }
 
+    if let Err(output) = add_continuation_header_slot(input, &mut builders, &mut slot_id) {
+        return output;
+    }
+    if let Err(output) = add_runtime_harness_slots(input, &mut builders, &mut slot_id) {
+        return output;
+    }
     add_runtime_hram_slots(&mut builders, &mut slot_id);
     let storage_by_value = input
         .storage_bindings
@@ -809,6 +881,37 @@ pub fn build_arena_plan(input: &ArenaPlanInputs) -> ArenaPlanOutput {
             )],
         );
     }
+    let continuation_record = match continuation_witness(&plan) {
+        Some(witness) => witness,
+        None => {
+            return failed_output(
+                input.input_identity.clone(),
+                vec![diagnostic(
+                    ArenaPlanDiagnosticCode::ArenaContinuationRecordSizeMismatch,
+                    ArenaPlanDiagnosticProvenance::Arena {
+                        invariant: "F-Addr-10".to_owned(),
+                        arena_id: 0,
+                        named: "WramContinuationRecord".to_owned(),
+                    },
+                )],
+            );
+        }
+    };
+    let harness_no_leak = match harness_no_leak_certificate(&plan) {
+        Some(certificate) => certificate,
+        None => {
+            return failed_output(
+                input.input_identity.clone(),
+                vec![diagnostic(
+                    ArenaPlanDiagnosticCode::ArenaCertAddressInvariantFailed,
+                    ArenaPlanDiagnosticProvenance::PolicyProjection {
+                        field: "harness_no_leak".to_owned(),
+                        detail: "harness certificate could not be derived".to_owned(),
+                    },
+                )],
+            );
+        }
+    };
 
     let self_hash = match arena_plan_self_hash(&plan) {
         Ok(hash) => hash,
@@ -835,14 +938,16 @@ pub fn build_arena_plan(input: &ArenaPlanInputs) -> ArenaPlanOutput {
     };
     let mut cert = ArenaCertBody {
         pass_version: ARENA_CERT_PASS_VERSION.to_owned(),
+        input_hashes: input.input_identity.hashes(),
         arena_plan_self_hash: self_hash,
         address_invariants: invariants,
         reservation_honor: plan.overlay_reservation.clone(),
+        continuation_record,
         persistent_page_geometry: ArenaPersistentGeometryWitness {
             geometry: input.policy.persistent_page_geometry,
             pages: persistent_witnesses,
         },
-        harness_no_leak: true,
+        harness_no_leak,
         diagnostics: Vec::new(),
         arena_cert_self_hash: Hash256::ZERO,
     };
@@ -1228,11 +1333,93 @@ fn validate_arena_cert_body(
     if outcome == ReportOutcome::Passed
         && !has_hard
         && body.pass_version == ARENA_CERT_PASS_VERSION
+        && body.input_hashes.all_bound()
+        && body.arena_plan_self_hash != Hash256::ZERO
+        && body.arena_cert_self_hash != Hash256::ZERO
         && body.address_invariants.all_pass()
+        && arena_cert_continuation_matches_abi(&body.continuation_record)
+        && arena_cert_harness_no_leak_is_well_formed(&body.harness_no_leak)
     {
         Ok(())
     } else {
         Err(vec![report_invariant("arena_cert.passed")])
+    }
+}
+
+fn arena_cert_continuation_matches_abi(witness: &ArenaContinuationWitness) -> bool {
+    if witness.abi_symbol != CONTINUATION_ABI_SYMBOL
+        || witness.header_size_bytes as usize != gbf_abi::header_size_bytes()
+        || witness.byte_range.len != witness.total_size_bytes
+    {
+        return false;
+    }
+    if witness.total_size_bytes < witness.header_size_bytes
+        || u32::from(witness.total_size_bytes)
+            != u32::from(witness.header_size_bytes) + u32::from(witness.tail_size_bytes)
+    {
+        return false;
+    }
+    let Ok(total_size) = gbf_abi::total_continuation_bytes(u32::from(witness.tail_size_bytes))
+    else {
+        return false;
+    };
+    if usize::from(witness.total_size_bytes) != total_size {
+        return false;
+    }
+
+    continuation_tail_slots_are_canonical(witness)
+}
+
+fn arena_cert_harness_no_leak_is_well_formed(certificate: &ArenaHarnessNoLeakCertificate) -> bool {
+    certificate.command_block_arena != certificate.result_block_arena
+        && certificate
+            .disjoint_from
+            .windows(2)
+            .all(|window| window[0] < window[1])
+        && certificate.disjoint_from.iter().all(|named| {
+            matches!(
+                named,
+                NamedArena::SramSequenceStatePages { .. }
+                    | NamedArena::SramPersistedTranscript
+                    | NamedArena::SramColdSpill
+                    | NamedArena::SramTracePages
+            )
+        })
+}
+
+fn continuation_tail_slots_are_canonical(witness: &ArenaContinuationWitness) -> bool {
+    let mut seen_slots = BTreeSet::new();
+    let mut seen_values = BTreeSet::new();
+    let mut previous_key: Option<(u16, u32)> = None;
+    let mut max_tail_end = u32::from(witness.header_size_bytes);
+
+    for slot in &witness.tail_slots {
+        if !seen_slots.insert(slot.slot) || !seen_values.insert(slot.value) || slot.size_bytes == 0
+        {
+            return false;
+        }
+        let key = (slot.byte_offset, slot.slot.0);
+        if previous_key.is_some_and(|previous| previous >= key) {
+            return false;
+        }
+        previous_key = Some(key);
+
+        let slot_start = u32::from(slot.byte_offset);
+        let Some(slot_end) = slot_start.checked_add(u32::from(slot.size_bytes)) else {
+            return false;
+        };
+        if slot_start < u32::from(witness.header_size_bytes)
+            || slot_end > u32::from(witness.total_size_bytes)
+        {
+            return false;
+        }
+        max_tail_end = max_tail_end.max(slot_end);
+    }
+
+    if witness.tail_slots.is_empty() {
+        witness.tail_size_bytes == 0
+    } else {
+        max_tail_end == u32::from(witness.total_size_bytes)
     }
 }
 
@@ -1283,6 +1470,118 @@ fn failed_output(
         cert: None,
         diagnostics,
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn add_continuation_header_slot(
+    input: &ArenaPlanInputs,
+    builders: &mut BTreeMap<NamedArena, ArenaBuilder>,
+    next_slot: &mut u32,
+) -> Result<(), ArenaPlanOutput> {
+    let header_size = match u16::try_from(gbf_abi::header_size_bytes()) {
+        Ok(size) => size,
+        Err(_) => {
+            return Err(failed_output(
+                input.input_identity.clone(),
+                vec![diagnostic(
+                    ArenaPlanDiagnosticCode::ArenaContinuationRecordSizeMismatch,
+                    ArenaPlanDiagnosticProvenance::Slot {
+                        invariant: "AP-SC-15".to_owned(),
+                        slot_id: 0,
+                        observed_bytes: gbf_abi::header_size_bytes() as u32,
+                        cap_bytes: u32::from(u16::MAX),
+                    },
+                )],
+            ));
+        }
+    };
+    builder_for(
+        builders,
+        NamedArena::WramContinuationRecord,
+        ArenaBacking::Wram,
+    )
+    .slots
+    .push(ArenaSlot {
+        id: next_slot_id(next_slot),
+        byte_offset: 0,
+        size_bytes: header_size,
+        alias_class_id: None,
+        lifetime_class: LifetimeClass::Session,
+        binding_kind: SlotBindingKind::RuntimeFixed {
+            runtime_kind: RuntimeFixedKind::WramContinuationHeader,
+        },
+        binding_ref: SlotBindingRef::RuntimeFixed {
+            runtime_kind: RuntimeFixedKind::WramContinuationHeader,
+        },
+    });
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn add_runtime_harness_slots(
+    input: &ArenaPlanInputs,
+    builders: &mut BTreeMap<NamedArena, ArenaBuilder>,
+    next_slot: &mut u32,
+) -> Result<(), ArenaPlanOutput> {
+    let command_size = match u16::try_from(gbf_abi::HarnessCommandBlock::SIZE) {
+        Ok(size) => size,
+        Err(_) => {
+            return Err(failed_output(
+                input.input_identity.clone(),
+                vec![diagnostic(
+                    ArenaPlanDiagnosticCode::ArenaAllocationFailed,
+                    ArenaPlanDiagnosticProvenance::Slot {
+                        invariant: "AP-SC-24".to_owned(),
+                        slot_id: 0,
+                        observed_bytes: gbf_abi::HarnessCommandBlock::SIZE as u32,
+                        cap_bytes: u32::from(u16::MAX),
+                    },
+                )],
+            ));
+        }
+    };
+    let result_size = match u16::try_from(gbf_abi::HarnessResultBlock::SIZE) {
+        Ok(size) => size,
+        Err(_) => {
+            return Err(failed_output(
+                input.input_identity.clone(),
+                vec![diagnostic(
+                    ArenaPlanDiagnosticCode::ArenaAllocationFailed,
+                    ArenaPlanDiagnosticProvenance::Slot {
+                        invariant: "AP-SC-24".to_owned(),
+                        slot_id: 0,
+                        observed_bytes: gbf_abi::HarnessResultBlock::SIZE as u32,
+                        cap_bytes: u32::from(u16::MAX),
+                    },
+                )],
+            ));
+        }
+    };
+    for (named, runtime_kind, size_bytes) in [
+        (
+            NamedArena::SramHarnessCommandBlock,
+            RuntimeFixedKind::HarnessCommandBlock,
+            command_size,
+        ),
+        (
+            NamedArena::SramHarnessResultBlock,
+            RuntimeFixedKind::HarnessResultBlock,
+            result_size,
+        ),
+    ] {
+        builder_for(builders, named, ArenaBacking::Sram)
+            .slots
+            .push(ArenaSlot {
+                id: next_slot_id(next_slot),
+                byte_offset: 0,
+                size_bytes,
+                alias_class_id: None,
+                lifetime_class: LifetimeClass::Session,
+                binding_kind: SlotBindingKind::RuntimeFixed { runtime_kind },
+                binding_ref: SlotBindingRef::RuntimeFixed { runtime_kind },
+            });
+    }
+    Ok(())
 }
 
 fn add_runtime_hram_slots(builders: &mut BTreeMap<NamedArena, ArenaBuilder>, next_slot: &mut u32) {
@@ -1552,8 +1851,19 @@ fn finalize_builder(
     cursors: &mut BackingCursors,
     id: ArenaId,
 ) -> Result<ArenaInstance, ArenaPlanOutput> {
+    let mut cursor = if matches!(named, NamedArena::WramContinuationRecord) {
+        place_continuation_header(input, &mut builder.slots)?
+    } else {
+        0
+    };
     builder.slots.sort_by_key(|slot| {
         (
+            !matches!(
+                slot.binding_kind,
+                SlotBindingKind::RuntimeFixed {
+                    runtime_kind: RuntimeFixedKind::WramContinuationHeader
+                }
+            ),
             std::cmp::Reverse(slot.size_bytes),
             slot.alias_class_id.map(|id| id.0).unwrap_or(u32::MAX),
             lifetime_priority(slot.lifetime_class.clone()),
@@ -1561,8 +1871,15 @@ fn finalize_builder(
             binding_ref_order(&slot.binding_ref),
         )
     });
-    let mut cursor = 0u32;
     for slot in &mut builder.slots {
+        if matches!(
+            slot.binding_kind,
+            SlotBindingKind::RuntimeFixed {
+                runtime_kind: RuntimeFixedKind::WramContinuationHeader
+            }
+        ) {
+            continue;
+        }
         cursor = align_up(cursor, u32::from(input.policy.arena_alignment_default));
         slot.byte_offset = match u16::try_from(cursor) {
             Ok(offset) => offset,
@@ -1641,6 +1958,51 @@ fn finalize_builder(
         zerofill: input.policy.arena_zerofill_policy,
         slots: builder.slots,
     })
+}
+
+#[allow(clippy::result_large_err)]
+fn place_continuation_header(
+    input: &ArenaPlanInputs,
+    slots: &mut [ArenaSlot],
+) -> Result<u32, ArenaPlanOutput> {
+    let header_size = u32::try_from(gbf_abi::header_size_bytes()).unwrap_or(u32::MAX);
+    let mut headers = slots.iter_mut().filter(|slot| {
+        matches!(
+            slot.binding_kind,
+            SlotBindingKind::RuntimeFixed {
+                runtime_kind: RuntimeFixedKind::WramContinuationHeader
+            }
+        )
+    });
+    let Some(header) = headers.next() else {
+        return Err(failed_output(
+            input.input_identity.clone(),
+            vec![diagnostic(
+                ArenaPlanDiagnosticCode::ArenaContinuationRecordSizeMismatch,
+                ArenaPlanDiagnosticProvenance::Arena {
+                    invariant: "AP-SC-15".to_owned(),
+                    arena_id: 0,
+                    named: "WramContinuationRecord".to_owned(),
+                },
+            )],
+        ));
+    };
+    if headers.next().is_some() || u32::from(header.size_bytes) != header_size {
+        return Err(failed_output(
+            input.input_identity.clone(),
+            vec![diagnostic(
+                ArenaPlanDiagnosticCode::ArenaContinuationRecordSizeMismatch,
+                ArenaPlanDiagnosticProvenance::Slot {
+                    invariant: "AP-SC-15".to_owned(),
+                    slot_id: header.id.0,
+                    observed_bytes: u32::from(header.size_bytes),
+                    cap_bytes: header_size,
+                },
+            )],
+        ));
+    }
+    header.byte_offset = 0;
+    Ok(header_size)
 }
 
 fn validate_overlay_reservation_input(input: &ArenaPlanInputs) -> Option<ValidationDiagnostic> {
@@ -1940,32 +2302,121 @@ fn lifetime_preserved(input: &ArenaPlanInputs, plan: &ArenaPlan, slots: &[&Arena
 }
 
 fn continuation_sized(input: &ArenaPlanInputs, plan: &ArenaPlan) -> bool {
-    let session_materialization = input.storage_bindings.iter().any(|binding| {
-        matches!(
-            &binding.binding.materialization,
-            Materialization::Materialize {
-                class: StorageClass::WramHot,
-                lifetime: LifetimeClass::Session
-            }
-        )
-    });
     let continuation_arenas = plan
         .wram_arenas
         .iter()
         .filter(|arena| matches!(arena.named, NamedArena::WramContinuationRecord))
         .collect::<Vec<_>>();
-    match (session_materialization, continuation_arenas.as_slice()) {
-        (false, []) => true,
-        (true, [arena]) => {
-            arena.byte_range.len > 0
-                && !arena.slots.is_empty()
-                && arena.slots.iter().all(|slot| {
-                    slot.size_bytes > 0
-                        && matches!(slot.binding_kind, SlotBindingKind::MaterializedValue)
+    match continuation_arenas.as_slice() {
+        [arena] => {
+            if arena.backing != ArenaBacking::Wram || arena.byte_range.len == 0 {
+                return false;
+            }
+            let Some(witness) = continuation_witness(plan) else {
+                return false;
+            };
+            let tail_slot_ids = witness
+                .tail_slots
+                .iter()
+                .map(|slot| slot.slot)
+                .collect::<BTreeSet<_>>();
+            let expected_total =
+                match gbf_abi::total_continuation_bytes(u32::from(witness.tail_size_bytes)) {
+                    Ok(total) => total,
+                    Err(_) => return false,
+                };
+            usize::from(witness.total_size_bytes) == expected_total
+                && arena.byte_range.len == witness.total_size_bytes
+                && witness.header_size_bytes as usize == gbf_abi::header_size_bytes()
+                && continuation_tail_slots_are_canonical(&witness)
+                && input.storage_bindings.iter().all(|binding| {
+                    let Materialization::Materialize {
+                        class: StorageClass::WramHot,
+                        lifetime: LifetimeClass::Session,
+                    } = &binding.binding.materialization
+                    else {
+                        return true;
+                    };
+                    plan.arena_bindings
+                        .materialize_to_slot
+                        .iter()
+                        .any(|slot_binding| {
+                            slot_binding.value == binding.binding.value
+                                && tail_slot_ids.contains(&slot_binding.slot)
+                        })
                 })
         }
         _ => false,
     }
+}
+
+fn continuation_witness(plan: &ArenaPlan) -> Option<ArenaContinuationWitness> {
+    let arena = plan
+        .wram_arenas
+        .iter()
+        .find(|arena| matches!(arena.named, NamedArena::WramContinuationRecord))?;
+    let header_size = u16::try_from(gbf_abi::header_size_bytes()).ok()?;
+    let header_slot = arena.slots.iter().find(|slot| {
+        matches!(
+            slot.binding_kind,
+            SlotBindingKind::RuntimeFixed {
+                runtime_kind: RuntimeFixedKind::WramContinuationHeader
+            }
+        )
+    })?;
+    if header_slot.byte_offset != 0 || header_slot.size_bytes != header_size {
+        return None;
+    }
+
+    let materialize_by_slot = plan
+        .arena_bindings
+        .materialize_to_slot
+        .iter()
+        .map(|binding| (binding.slot, binding.value))
+        .collect::<BTreeMap<_, _>>();
+    let mut tail_slots = Vec::new();
+    for slot in &arena.slots {
+        if !matches!(slot.binding_kind, SlotBindingKind::MaterializedValue)
+            || slot.byte_offset < header_size
+        {
+            continue;
+        }
+        let value = *materialize_by_slot.get(&slot.id)?;
+        tail_slots.push(ArenaContinuationTailSlotWitness {
+            slot: slot.id,
+            value,
+            byte_offset: slot.byte_offset,
+            size_bytes: slot.size_bytes,
+        });
+    }
+    tail_slots.sort_by_key(|slot| (slot.byte_offset, slot.slot));
+    let tail_end = arena
+        .slots
+        .iter()
+        .filter(|slot| !matches!(slot.id, id if id == header_slot.id))
+        .map(|slot| u32::from(slot.byte_offset) + u32::from(slot.size_bytes))
+        .max()
+        .unwrap_or(u32::from(header_size));
+    if tail_end < u32::from(header_size) || tail_end != u32::from(arena.byte_range.len) {
+        return None;
+    }
+    let tail_size = u16::try_from(tail_end - u32::from(header_size)).ok()?;
+    let total_size =
+        u16::try_from(gbf_abi::total_continuation_bytes(u32::from(tail_size)).ok()?).ok()?;
+    if total_size != arena.byte_range.len {
+        return None;
+    }
+
+    Some(ArenaContinuationWitness {
+        abi_symbol: CONTINUATION_ABI_SYMBOL.to_owned(),
+        arena_id: arena.id,
+        byte_range: arena.byte_range,
+        header_slot: header_slot.id,
+        header_size_bytes: header_size,
+        tail_size_bytes: tail_size,
+        total_size_bytes: total_size,
+        tail_slots,
+    })
 }
 
 fn harness_disjoint(plan: &ArenaPlan) -> bool {
@@ -1975,9 +2426,7 @@ fn harness_disjoint(plan: &ArenaPlan) -> bool {
         .filter(|arena| {
             matches!(
                 arena.named,
-                NamedArena::SramHarnessCommandBlock
-                    | NamedArena::SramHarnessResultBlock
-                    | NamedArena::SramPersistedTranscript
+                NamedArena::SramHarnessCommandBlock | NamedArena::SramHarnessResultBlock
             )
         })
         .map(|arena| arena.byte_range)
@@ -1998,6 +2447,58 @@ fn harness_disjoint(plan: &ArenaPlan) -> bool {
     harness_ranges
         .iter()
         .all(|left| data_ranges.iter().all(|right| !left.intersects(*right)))
+}
+
+fn harness_no_leak_certificate(plan: &ArenaPlan) -> Option<ArenaHarnessNoLeakCertificate> {
+    let command_block_arena = unique_sram_arena(plan, |named| {
+        matches!(named, NamedArena::SramHarnessCommandBlock)
+    })?;
+    let result_block_arena = unique_sram_arena(plan, |named| {
+        matches!(named, NamedArena::SramHarnessResultBlock)
+    })?;
+    if command_block_arena.id == result_block_arena.id
+        || command_block_arena
+            .byte_range
+            .intersects(result_block_arena.byte_range)
+    {
+        return None;
+    }
+
+    let mut disjoint_from = BTreeSet::new();
+    for arena in plan.sram_arenas.iter().filter(|arena| {
+        matches!(
+            arena.named,
+            NamedArena::SramSequenceStatePages { .. }
+                | NamedArena::SramPersistedTranscript
+                | NamedArena::SramColdSpill
+                | NamedArena::SramTracePages
+        )
+    }) {
+        if command_block_arena.byte_range.intersects(arena.byte_range)
+            || result_block_arena.byte_range.intersects(arena.byte_range)
+        {
+            return None;
+        }
+        disjoint_from.insert(arena.named.clone());
+    }
+
+    Some(ArenaHarnessNoLeakCertificate {
+        command_block_arena: command_block_arena.id,
+        result_block_arena: result_block_arena.id,
+        disjoint_from: disjoint_from.into_iter().collect(),
+    })
+}
+
+fn unique_sram_arena(
+    plan: &ArenaPlan,
+    matches_named: impl Fn(&NamedArena) -> bool,
+) -> Option<&ArenaInstance> {
+    let mut arenas = plan
+        .sram_arenas
+        .iter()
+        .filter(|arena| matches_named(&arena.named));
+    let arena = arenas.next()?;
+    arenas.next().is_none().then_some(arena)
 }
 
 fn persistent_page_header_aligned(input: &ArenaPlanInputs, plan: &ArenaPlan) -> bool {
@@ -2209,10 +2710,13 @@ mod tests {
         OverlayReservationKind, WramRegionConstraint,
     };
     use crate::s3::infer_ir::NodeId;
-    use crate::sram_page_plan::{PageResidency, SramBudgetTally, SramPagePlanInputIdentity};
+    use crate::sram_page_plan::{
+        PageResidency, SramBudgetTally, SramPagePlanInputIdentity, SramResidencyRole,
+    };
     use crate::storage_plan::types::{
         AbstractLiveRange, BindingJustification, DecisionRuleId, PersistPageId,
     };
+    use crate::window::NodeAnchorRange;
 
     #[test]
     fn pass_materialize_persist_overlay_cert_and_report_round_trip() {
@@ -2261,10 +2765,61 @@ mod tests {
         round_trip_self_hash(&parsed).expect("report self hash");
 
         let cert = emit_arena_cert_json_bytes(&output).expect("cert emits");
+        let cert_json: serde_json::Value = serde_json::from_slice(&cert).expect("cert json parses");
+        let cert_body = &cert_json;
+        assert_eq!(
+            cert_body["address_invariants"]["materialize_coverage"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            cert_body["address_invariants"]["alias_class_share_or_disjoint"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            cert_body["address_invariants"]["persist_header_aligned"],
+            serde_json::json!(true)
+        );
+        assert!(cert_body["address_invariants"]["f_addr_1_materialize_coverage"].is_null());
+        assert!(cert_body["address_invariants"]["f_addr_3_alias_total_or_disjoint"].is_null());
+        assert!(
+            cert_body["address_invariants"]["f_addr_12_persistent_page_header_aligned"].is_null()
+        );
+        assert!(cert_body["harness_no_leak"]["command_block_arena"].is_number());
+        assert!(cert_body["harness_no_leak"]["result_block_arena"].is_number());
+        assert!(cert_body["harness_no_leak"]["disjoint_from"].is_array());
         let parsed_cert = parse_arena_cert_report_bytes(&cert).expect("cert parses");
         assert_eq!(parsed_cert.outcome, ReportOutcome::Passed);
         assert!(parsed_cert.body.address_invariants.all_pass());
         assert_eq!(parsed_cert.body.reservation_honor.total_bytes, 128);
+        assert_ne!(
+            parsed_cert.body.harness_no_leak.command_block_arena,
+            parsed_cert.body.harness_no_leak.result_block_arena
+        );
+        assert!(
+            parsed_cert
+                .body
+                .harness_no_leak
+                .disjoint_from
+                .iter()
+                .any(|named| matches!(named, NamedArena::SramSequenceStatePages { .. }))
+        );
+        assert_eq!(
+            parsed_cert.body.input_hashes,
+            output.input_identity.hashes()
+        );
+        assert_eq!(
+            parsed_cert.body.continuation_record.abi_symbol,
+            CONTINUATION_ABI_SYMBOL
+        );
+        assert_eq!(
+            parsed_cert.body.continuation_record.header_size_bytes as usize,
+            gbf_abi::header_size_bytes()
+        );
+        assert_eq!(
+            parsed_cert.body.continuation_record.total_size_bytes,
+            parsed_cert.body.continuation_record.byte_range.len
+        );
+        assert_eq!(parsed_cert.body.continuation_record.tail_size_bytes, 0);
         assert_ne!(parsed_cert.body.arena_cert_self_hash, Hash256::ZERO);
     }
 
@@ -2430,7 +2985,7 @@ mod tests {
     }
 
     #[test]
-    fn continuation_invariant_accepts_session_materialization_with_nonzero_arena() {
+    fn continuation_invariant_records_abi_header_and_tail_window() {
         let mut input = fixture_inputs();
         input.storage_bindings.push(ArenaPlanBindingInput {
             binding: storage_binding(
@@ -2446,10 +3001,54 @@ mod tests {
         let plan = successful_plan(&input);
         let invariants = validate_address_invariants(&input, &plan);
         assert!(invariants.f_addr_10_continuation_sized);
-        assert!(plan.wram_arenas.iter().any(|arena| matches!(
-            arena.named,
-            NamedArena::WramContinuationRecord
-        ) && arena.byte_range.len >= 32));
+        let witness = continuation_witness(&plan).expect("continuation witness");
+        assert_eq!(
+            witness.header_size_bytes as usize,
+            gbf_abi::header_size_bytes()
+        );
+        assert_eq!(
+            usize::from(witness.total_size_bytes),
+            gbf_abi::total_continuation_bytes(u32::from(witness.tail_size_bytes))
+                .expect("continuation total")
+        );
+        assert_eq!(witness.byte_range.len, witness.total_size_bytes);
+        assert_eq!(witness.tail_size_bytes, 32);
+        assert_eq!(witness.tail_slots.len(), 1);
+        let tail_slot = &witness.tail_slots[0];
+        assert_eq!(tail_slot.value, ValueId::from(11));
+        assert_eq!(tail_slot.byte_offset, witness.header_size_bytes);
+        assert_eq!(tail_slot.size_bytes, 32);
+    }
+
+    #[test]
+    fn arena_cert_semantics_reject_continuation_witness_tampering() {
+        let output = build_arena_plan(&fixture_inputs());
+        let mut cert = output.cert.expect("arena cert");
+        cert.continuation_record.header_size_bytes += 1;
+        assert!(validate_arena_cert_body(&cert, ReportOutcome::Passed).is_err());
+
+        let output = build_arena_plan(&fixture_inputs());
+        let mut cert = output.cert.expect("arena cert");
+        cert.input_hashes.rom_window_plan_self_hash = Hash256::ZERO;
+        assert!(validate_arena_cert_body(&cert, ReportOutcome::Passed).is_err());
+
+        let mut input = fixture_inputs();
+        input.storage_bindings.push(ArenaPlanBindingInput {
+            binding: storage_binding(
+                11,
+                Materialization::Materialize {
+                    class: StorageClass::WramHot,
+                    lifetime: LifetimeClass::Session,
+                },
+                11,
+            ),
+            size_bytes: 32,
+        });
+        let output = build_arena_plan(&input);
+        let mut cert = output.cert.expect("arena cert");
+        cert.continuation_record.tail_slots[0].byte_offset =
+            cert.continuation_record.header_size_bytes - 1;
+        assert!(validate_arena_cert_body(&cert, ReportOutcome::Passed).is_err());
     }
 
     #[test]
@@ -2611,10 +3210,16 @@ mod tests {
                 determinism: DeterminismClass::Deterministic,
                 schema_version: crate::sram_page_plan::SRAM_PAGE_PLAN_SCHEMA_VERSION,
             },
+            active_sets: Vec::new(),
             bindings: vec![SramPageBinding {
                 binding_id: ValueId::from(3),
                 page: PageId(0),
                 commit_group: CommitGroupId(1),
+                op_range: NodeAnchorRange {
+                    first_node: NodeId::new(3),
+                    last_node: NodeId::new(4),
+                },
+                residency_role: SramResidencyRole::PersistentSequenceState,
                 residency: PageResidency::FixedPage { page: PageId(0) },
                 payload_bytes: 256,
                 geometry,
@@ -2622,6 +3227,10 @@ mod tests {
             }],
             pages: Vec::new(),
             stream_index: Vec::new(),
+            commit_boundaries: Vec::new(),
+            page_rotations: Vec::new(),
+            spill_policy: Default::default(),
+            projections: crate::sram_page_plan::SramSwitchProjections::empty(),
             budgets: SramBudgetTally {
                 total_bytes: 256,
                 cap_bytes: 32768,

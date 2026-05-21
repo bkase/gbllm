@@ -213,6 +213,7 @@ pub struct ScheduleCostIdentity {
     pub runtime_chrome_budget_hash: Hash256,
     pub target_profile_hash: Hash256,
     pub kernel_spec_registry_hash: Hash256,
+    pub active_session_profile_hash: Hash256,
     pub schedule_cost_policy_projection_hash: Hash256,
     pub pass_version: SemVer,
     pub crate_feature_set_hash: Hash256,

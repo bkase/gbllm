@@ -1,6 +1,6 @@
 //! Stage 8.5 `OverlayPlan` construction, report, and cache-key surface.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::{error::Error, fmt};
 
 use gbf_foundation::{
@@ -852,13 +852,27 @@ fn validate_overlay_plan_report_body(
     match outcome {
         ReportOutcome::Passed => {
             if body.result.is_none() || has_hard || body.pass_version != OVERLAY_PLAN_PASS_VERSION {
-                diagnostics.push(report_invariant("overlay_plan.passed"));
+                diagnostics.push(diagnostic(
+                    OverlayPlanDiagnosticCode::OverlayReportRoundTripFailed,
+                    OverlayPlanDiagnosticProvenance::PolicyProjection {
+                        field: "overlay_plan.passed".to_owned(),
+                        detail: "passed overlay plan report body does not round-trip its semantic invariants"
+                            .to_owned(),
+                    },
+                ));
             }
         }
         ReportOutcome::Failed => {
             if body.result.is_some() || !has_hard || body.pass_version != OVERLAY_PLAN_PASS_VERSION
             {
-                diagnostics.push(report_invariant("overlay_plan.failed"));
+                diagnostics.push(diagnostic(
+                    OverlayPlanDiagnosticCode::OverlayReportRoundTripFailed,
+                    OverlayPlanDiagnosticProvenance::PolicyProjection {
+                        field: "overlay_plan.failed".to_owned(),
+                        detail: "failed overlay plan report body does not round-trip its semantic invariants"
+                            .to_owned(),
+                    },
+                ));
             }
         }
     }
@@ -889,19 +903,6 @@ fn diagnostic(
             reference: code.as_str().to_owned(),
             hash: Some(Hash256::ZERO),
         }],
-    )
-}
-
-fn report_invariant(field: &str) -> ValidationDiagnostic {
-    ValidationDiagnostic::hard(
-        ValidationOrigin::OverlayPlanConstruction,
-        ValidationCode::ReportSemanticInvariantViolated {
-            field: field.to_owned().into(),
-        },
-        ValidationDetail::Field {
-            field: field.to_owned().into(),
-        },
-        vec![],
     )
 }
 
@@ -968,6 +969,14 @@ fn succeeded_output(
             vec![diagnostic],
         );
     }
+    let invariant_diagnostics = validate_overlay_plan_product_invariants(input, &plan);
+    if !invariant_diagnostics.is_empty() {
+        return failed_output(
+            input.input_identity.clone(),
+            input.audit_parents,
+            invariant_diagnostics,
+        );
+    }
 
     let self_hash = match overlay_plan_self_hash(&plan) {
         Ok(hash) => hash,
@@ -1022,6 +1031,287 @@ fn compute_reservation(
     }
 }
 
+pub fn validate_overlay_plan_product_invariants(
+    input: &OverlayPlanInputs,
+    plan: &OverlayPlan,
+) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut region_ids = BTreeSet::new();
+    let mut region_members = BTreeMap::new();
+    let candidates = overlay_members(&input.rom_window_plan)
+        .into_iter()
+        .map(|member| member.id)
+        .collect::<BTreeSet<_>>();
+
+    for region in &plan.regions {
+        if !region_ids.insert(region.id) {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayRegionIdDuplicate,
+                OverlayPlanDiagnosticProvenance::Region {
+                    invariant: "OP-SC-duplicate-region-id".to_owned(),
+                    region_id: region.id.0,
+                },
+            ));
+        }
+        if region.members.is_empty() {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayRegionEmptyButPopulated,
+                OverlayPlanDiagnosticProvenance::Region {
+                    invariant: "OP-SC-1".to_owned(),
+                    region_id: region.id.0,
+                },
+            ));
+        }
+        if !input
+            .target_profile
+            .allowed_overlay_constraints
+            .contains(&region.constraint)
+        {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayTargetProfileLayoutUnsupported,
+                OverlayPlanDiagnosticProvenance::TargetProfileLayout {
+                    target_profile_hash: input.input_identity.target_profile_hash,
+                    detail: format!(
+                        "region {} uses an overlay constraint outside the target profile",
+                        region.id.0
+                    ),
+                },
+            ));
+        }
+        if region.bytes > input.target_profile.wram_overlay_region_max_bytes {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayRegionPayloadExceedsRegionCap,
+                OverlayPlanDiagnosticProvenance::Reservation {
+                    total_bytes: u32::from(region.bytes),
+                    cap_bytes: u32::from(input.target_profile.wram_overlay_region_max_bytes),
+                },
+            ));
+        }
+        for member in &region.members {
+            if member.payload_bytes > u32::from(region.bytes) {
+                diagnostics.push(diagnostic(
+                    OverlayPlanDiagnosticCode::OverlayMemberPayloadExceedsRegion,
+                    OverlayPlanDiagnosticProvenance::Member {
+                        invariant: "OP-SC-2".to_owned(),
+                        member: member.id.to_string(),
+                        payload_bytes: member.payload_bytes,
+                        region_bytes: region.bytes,
+                    },
+                ));
+            }
+        }
+        region_members.insert(
+            region.id,
+            region
+                .members
+                .iter()
+                .map(|member| member.id.clone())
+                .collect::<BTreeSet<_>>(),
+        );
+    }
+
+    for share_class in &plan.share_classes {
+        let Some(members) = region_members.get(&share_class.region) else {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayInstallReferencesUnknownRegion,
+                OverlayPlanDiagnosticProvenance::Region {
+                    invariant: "OP-SC-4".to_owned(),
+                    region_id: share_class.region.0,
+                },
+            ));
+            continue;
+        };
+        if matches!(share_class.eviction, OverlayEvictionPolicy::Undefined) {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayShareClassEvictionUndefined,
+                OverlayPlanDiagnosticProvenance::Region {
+                    invariant: "OP-SC-5".to_owned(),
+                    region_id: share_class.region.0,
+                },
+            ));
+        }
+        for member in &share_class.members {
+            if !members.contains(member) {
+                diagnostics.push(diagnostic(
+                    OverlayPlanDiagnosticCode::OverlayInstallReferencesUnknownMember,
+                    OverlayPlanDiagnosticProvenance::Member {
+                        invariant: "OP-SC-4".to_owned(),
+                        member: member.to_string(),
+                        payload_bytes: 0,
+                        region_bytes: 0,
+                    },
+                ));
+            }
+        }
+    }
+
+    let mut installed_members = BTreeSet::new();
+    for install in &plan.installs {
+        let Some(members) = region_members.get(&install.region) else {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayInstallReferencesUnknownRegion,
+                OverlayPlanDiagnosticProvenance::Install {
+                    invariant: "OP-SC-6".to_owned(),
+                    install_id: install.id.0,
+                },
+            ));
+            continue;
+        };
+        if !members.contains(&install.member) {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayInstallReferencesUnknownMember,
+                OverlayPlanDiagnosticProvenance::Install {
+                    invariant: "OP-SC-7".to_owned(),
+                    install_id: install.id.0,
+                },
+            ));
+        }
+        match &install.source {
+            OverlaySource::RomWindowOverlayDemand { resident } => {
+                if resident != &install.member || !candidates.contains(resident) {
+                    diagnostics.push(diagnostic(
+                        OverlayPlanDiagnosticCode::OverlayInstallSourceNotVisible,
+                        OverlayPlanDiagnosticProvenance::Install {
+                            invariant: "OP-SC-8".to_owned(),
+                            install_id: install.id.0,
+                        },
+                    ));
+                }
+            }
+        }
+        if install.lease_shape.source_lease.source != install.source
+            || install.lease_shape.source_lease.acquire_at != install.install_event
+            || install.lease_shape.source_lease.release_at != install.install_event
+            || install.lease_shape.wram_region_lease.region != install.region
+            || install.lease_shape.wram_region_lease.acquire_at != install.install_event
+            || install.lease_shape.wram_region_lease.release_at != install.install_event
+        {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayLeaseShapeIncomplete,
+                OverlayPlanDiagnosticProvenance::Install {
+                    invariant: "OP-SC-14".to_owned(),
+                    install_id: install.id.0,
+                },
+            ));
+        }
+        installed_members.insert(install.member.clone());
+    }
+
+    for candidate in candidates.difference(&installed_members) {
+        diagnostics.push(diagnostic(
+            OverlayPlanDiagnosticCode::OverlayCandidateNotInstalled,
+            OverlayPlanDiagnosticProvenance::Member {
+                invariant: "OP-SC-9".to_owned(),
+                member: candidate.to_string(),
+                payload_bytes: 0,
+                region_bytes: 0,
+            },
+        ));
+    }
+
+    let reservation_total = plan
+        .reservation
+        .per_region
+        .iter()
+        .fold(0u32, |total, entry| {
+            total.saturating_add(u32::from(entry.bytes))
+        });
+    if u32::from(plan.reservation.total_bytes) != reservation_total
+        || reservation_total > u32::from(input.runtime_chrome_budget.wram_reserved)
+        || plan.reservation.cap_bytes != input.runtime_chrome_budget.wram_reserved
+    {
+        diagnostics.push(diagnostic(
+            OverlayPlanDiagnosticCode::OverlayWramOverlayCapExceeded,
+            OverlayPlanDiagnosticProvenance::Reservation {
+                total_bytes: reservation_total,
+                cap_bytes: u32::from(input.runtime_chrome_budget.wram_reserved),
+            },
+        ));
+    }
+
+    let mut reservation_entries = BTreeMap::new();
+    for entry in &plan.reservation.per_region {
+        if reservation_entries.insert(entry.region, entry).is_some() {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayRegionIdDuplicate,
+                OverlayPlanDiagnosticProvenance::Region {
+                    invariant: "OP-SC-reservation-duplicate-region-id".to_owned(),
+                    region_id: entry.region.0,
+                },
+            ));
+        }
+        if entry.bytes > plan.reservation.region_max_bytes {
+            diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayRegionPayloadExceedsRegionCap,
+                OverlayPlanDiagnosticProvenance::Reservation {
+                    total_bytes: u32::from(entry.bytes),
+                    cap_bytes: u32::from(plan.reservation.region_max_bytes),
+                },
+            ));
+        }
+    }
+    for region in &plan.regions {
+        match reservation_entries.get(&region.id) {
+            Some(entry) if entry.bytes == region.bytes => {}
+            _ => diagnostics.push(diagnostic(
+                OverlayPlanDiagnosticCode::OverlayMemberPayloadExceedsRegion,
+                OverlayPlanDiagnosticProvenance::Region {
+                    invariant: "OP-SC-13".to_owned(),
+                    region_id: region.id.0,
+                },
+            )),
+        }
+    }
+
+    if !is_canonical_overlay_product(plan) {
+        diagnostics.push(diagnostic(
+            OverlayPlanDiagnosticCode::OverlayCanonicalSortDrift,
+            OverlayPlanDiagnosticProvenance::PolicyProjection {
+                field: "overlay_plan_product_order".to_owned(),
+                detail: "regions, share classes, installs, or reservations are not canonical"
+                    .to_owned(),
+            },
+        ));
+    }
+
+    diagnostics
+}
+
+fn is_canonical_overlay_product(plan: &OverlayPlan) -> bool {
+    plan.regions.windows(2).all(|pair| {
+        let left = &pair[0];
+        let right = &pair[1];
+        (
+            left.constraint,
+            std::cmp::Reverse(left.bytes),
+            left.members.iter().map(|member| member.id.clone()).min(),
+        ) <= (
+            right.constraint,
+            std::cmp::Reverse(right.bytes),
+            right.members.iter().map(|member| member.id.clone()).min(),
+        )
+    }) && plan
+        .share_classes
+        .windows(2)
+        .all(|pair| (pair[0].region, pair[0].id) <= (pair[1].region, pair[1].id))
+        && plan.installs.windows(2).all(|pair| {
+            (
+                pair[0].region,
+                pair[0].member.clone(),
+                pair[0].install_event,
+            ) <= (
+                pair[1].region,
+                pair[1].member.clone(),
+                pair[1].install_event,
+            )
+        })
+        && plan
+            .reservation
+            .per_region
+            .windows(2)
+            .all(|pair| pair[0].region <= pair[1].region)
+}
+
 fn overlay_members(plan: &RomWindowPlan) -> Vec<OverlayResident> {
     let kernels = plan.overlay_demand.kernels.iter().map(|kernel| {
         let id = OverlayResidentId::Kernel {
@@ -1059,12 +1349,15 @@ fn saturating_u16(value: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     use gbf_foundation::{CompileProfileId, TargetProfileId};
     use gbf_policy::{
         PlacementProfile, RomBudgetSlot, RuntimeMemoryCapSection, SwitchProjectionSource,
     };
     use gbf_report::ReportOutcome;
+    use serde::Deserialize;
 
     use super::*;
     use crate::window::{
@@ -1309,6 +1602,238 @@ mod tests {
         );
     }
 
+    #[test]
+    fn file_backed_pass_fixtures_emit_report_without_overlay_cert_by_default() {
+        for dir in fixture_dirs(&overlay_plan_fixture_root().join("pass")) {
+            let fixture: OverlayPassFixture = read_fixture_json(&dir.join("fixture.json"));
+            assert_eq!(fixture.fixture_schema, "overlay_plan.pass_fixture.v1");
+            assert_eq!(fixture.expected_outcome, "passed");
+            assert!(
+                !fixture.expected_overlay_cert_emitted,
+                "{} should document default-off overlay.cert.v1 emission",
+                fixture.fixture_id
+            );
+
+            let output = build_overlay_plan(&pass_fixture_inputs(fixture.scenario));
+            assert_eq!(output.outcome, OverlayPlanOutcome::Succeeded);
+            assert_eq!(
+                output.result.as_ref().expect("overlay result").summary,
+                fixture.expected_summary,
+                "{} summary drifted",
+                fixture.fixture_id
+            );
+            let first = emit_overlay_plan_json_bytes(&output).expect("first report");
+            let second = emit_overlay_plan_json_bytes(&output).expect("second report");
+            assert_eq!(first, second, "{} report is canonical", fixture.fixture_id);
+            let parsed = parse_overlay_plan_report_bytes(&first).expect("report parses");
+            assert_eq!(parsed.outcome, ReportOutcome::Passed);
+            assert!(
+                !dir.join("overlay.cert.json").exists(),
+                "{} should not materialize optional overlay.cert.v1 while default-off",
+                fixture.fixture_id
+            );
+        }
+    }
+
+    #[test]
+    fn file_backed_reject_fixtures_cover_every_overlay_diagnostic_code() {
+        let mut codes = BTreeSet::new();
+        for dir in fixture_dirs(&overlay_plan_fixture_root().join("reject")) {
+            let fixture: OverlayRejectFixture = read_fixture_json(&dir.join("fixture.json"));
+            assert_eq!(fixture.fixture_schema, "overlay_plan.reject_fixture.v1");
+            let diagnostics = reject_fixture_diagnostics(fixture.scenario);
+            let diagnostic_codes = diagnostic_codes(&diagnostics);
+            assert!(
+                diagnostic_codes.contains(&fixture.expected_code),
+                "{} missing {:?} in {:?}",
+                fixture.fixture_id,
+                fixture.expected_code,
+                diagnostics
+            );
+            let mut expected_codes = fixture.expected_extra_codes;
+            expected_codes.insert(fixture.expected_code);
+            assert_eq!(
+                diagnostic_codes, expected_codes,
+                "{} diagnostic set drifted",
+                fixture.fixture_id
+            );
+            codes.insert(fixture.expected_code);
+        }
+
+        let expected = OverlayPlanDiagnosticCode::ALL
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(codes, expected);
+    }
+
+    #[test]
+    fn full_reject_code_taxonomy_has_synthetic_fixtures() {
+        let mut codes = BTreeSet::new();
+
+        let mut hash_mismatch = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+        hash_mismatch
+            .expected_input_hashes
+            .rom_window_plan_self_hash = hash(88);
+        collect_output_codes(&mut codes, &build_overlay_plan(&hash_mismatch));
+
+        let mut wram_cap = fixture_inputs(vec![resident_kernel("matvec", 1025)]);
+        wram_cap.target_profile.wram_overlay_region_max_bytes = 2048;
+        wram_cap.runtime_chrome_budget.wram_reserved = 1024;
+        collect_output_codes(&mut codes, &build_overlay_plan(&wram_cap));
+
+        let mut region_overflow = fixture_inputs(vec![resident_kernel("matvec", 513)]);
+        region_overflow.target_profile.wram_overlay_region_max_bytes = 512;
+        collect_output_codes(&mut codes, &build_overlay_plan(&region_overflow));
+
+        let mut undefined_eviction = fixture_inputs(vec![
+            resident_kernel("matvec", 128),
+            resident_lut("gelu", 128),
+        ]);
+        undefined_eviction.policy.overlay_eviction_default = OverlayEvictionPolicy::Undefined;
+        collect_output_codes(&mut codes, &build_overlay_plan(&undefined_eviction));
+
+        let mut missing_event = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+        missing_event.policy.overlay_install_event_default = None;
+        collect_output_codes(&mut codes, &build_overlay_plan(&missing_event));
+
+        let mut empty_runtime_modes = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+        empty_runtime_modes.policy.runtime_modes_requested.clear();
+        collect_output_codes(&mut codes, &build_overlay_plan(&empty_runtime_modes));
+
+        let mut unsupported_target = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+        unsupported_target
+            .target_profile
+            .allowed_overlay_constraints
+            .clear();
+        collect_output_codes(&mut codes, &build_overlay_plan(&unsupported_target));
+
+        let mut explicit_zero = fixture_inputs(Vec::new());
+        explicit_zero.policy.require_explicit_zero_reservation = true;
+        collect_output_codes(&mut codes, &build_overlay_plan(&explicit_zero));
+
+        collect_diagnostic_code(
+            &mut codes,
+            &validate_overlay_plan_json_surface(&serde_json::json!({"leak": "SectionRole"}))
+                .expect("section leak"),
+        );
+        collect_diagnostic_code(
+            &mut codes,
+            &validate_overlay_plan_json_surface(&serde_json::json!({"leak": "ArenaPlan"}))
+                .expect("schedule leak"),
+        );
+        collect_diagnostic_code(
+            &mut codes,
+            &validate_overlay_plan_json_surface(&serde_json::json!({"leak": "RepairProposal"}))
+                .expect("repair leak"),
+        );
+
+        let inputs = fixture_inputs(vec![
+            resident_kernel("matvec", 128),
+            resident_lut("gelu", 64),
+        ]);
+        let valid = build_overlay_plan(&inputs)
+            .result
+            .expect("valid overlay result")
+            .product;
+
+        let mut empty_region = valid.clone();
+        empty_region.regions[0].members.clear();
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &empty_region),
+        );
+
+        let mut duplicate_region = valid.clone();
+        duplicate_region
+            .regions
+            .push(duplicate_region.regions[0].clone());
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &duplicate_region),
+        );
+
+        let ghost = OverlayResidentId::Kernel {
+            kernel: KernelSpecId::from("ghost"),
+        };
+
+        let mut invisible_source = valid.clone();
+        invisible_source.installs[0].source = OverlaySource::RomWindowOverlayDemand {
+            resident: ghost.clone(),
+        };
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &invisible_source),
+        );
+
+        let mut missing_install = valid.clone();
+        missing_install.installs.pop();
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &missing_install),
+        );
+
+        let mut unknown_region = valid.clone();
+        unknown_region.installs[0].region = OverlayId(99);
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &unknown_region),
+        );
+
+        let mut unknown_member = valid.clone();
+        unknown_member.installs[0].member = ghost.clone();
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &unknown_member),
+        );
+
+        let mut incomplete_lease = valid.clone();
+        incomplete_lease.installs[0]
+            .lease_shape
+            .wram_region_lease
+            .region = OverlayId(99);
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &incomplete_lease),
+        );
+
+        let mut member_overflow = valid.clone();
+        member_overflow.regions[0].bytes = 1;
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &member_overflow),
+        );
+
+        let mut sort_drift = valid.clone();
+        let mut second_region = sort_drift.regions[0].clone();
+        second_region.id = OverlayId(1);
+        second_region.bytes = 512;
+        second_region.reservation_floor_bytes = 512;
+        second_region.reservation_ceil_bytes = 512;
+        sort_drift.regions.push(second_region);
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_product_invariants(&inputs, &sort_drift),
+        );
+
+        let invalid_report_body = OverlayPlanReportBody {
+            pass_version: OVERLAY_PLAN_PASS_VERSION.to_owned(),
+            input_identity: inputs.input_identity,
+            audit_parents: inputs.audit_parents,
+            diagnostics: Vec::new(),
+            result: None,
+        };
+        collect_diagnostic_codes(
+            &mut codes,
+            &validate_overlay_plan_report_body(&invalid_report_body, ReportOutcome::Passed)
+                .expect_err("invalid report body"),
+        );
+
+        let expected = OverlayPlanDiagnosticCode::ALL
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(codes, expected);
+    }
+
     fn assert_has_code(output: &OverlayPlanOutput, expected: OverlayPlanDiagnosticCode) {
         assert_eq!(output.outcome, OverlayPlanOutcome::Failed);
         assert!(
@@ -1328,6 +1853,281 @@ mod tests {
             "missing {expected:?} in {:?}",
             diagnostic
         );
+    }
+
+    fn collect_output_codes(
+        codes: &mut BTreeSet<OverlayPlanDiagnosticCode>,
+        output: &OverlayPlanOutput,
+    ) {
+        collect_diagnostic_codes(codes, &output.diagnostics);
+    }
+
+    fn collect_diagnostic_codes(
+        codes: &mut BTreeSet<OverlayPlanDiagnosticCode>,
+        diagnostics: &[ValidationDiagnostic],
+    ) {
+        for diagnostic in diagnostics {
+            collect_diagnostic_code(codes, diagnostic);
+        }
+    }
+
+    fn collect_diagnostic_code(
+        codes: &mut BTreeSet<OverlayPlanDiagnosticCode>,
+        diagnostic: &ValidationDiagnostic,
+    ) {
+        if let ValidationCode::OverlayPlan { code, .. } = diagnostic.code {
+            codes.insert(code);
+        }
+    }
+
+    fn diagnostic_codes(
+        diagnostics: &[ValidationDiagnostic],
+    ) -> BTreeSet<OverlayPlanDiagnosticCode> {
+        let mut codes = BTreeSet::new();
+        collect_diagnostic_codes(&mut codes, diagnostics);
+        codes
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OverlayPassFixture {
+        fixture_schema: String,
+        fixture_id: String,
+        scenario: OverlayPassScenario,
+        expected_outcome: String,
+        expected_summary: OverlayPlanSummary,
+        expected_overlay_cert_emitted: bool,
+    }
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum OverlayPassScenario {
+        SingleRegionShareClass,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OverlayRejectFixture {
+        fixture_schema: String,
+        fixture_id: String,
+        scenario: OverlayRejectScenario,
+        expected_code: OverlayPlanDiagnosticCode,
+        #[serde(default)]
+        expected_extra_codes: BTreeSet<OverlayPlanDiagnosticCode>,
+    }
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum OverlayRejectScenario {
+        InputHashMismatch,
+        WramOverlayCapExceeded,
+        RegionPayloadExceedsRegionCap,
+        RegionEmptyButPopulated,
+        RegionIdDuplicate,
+        ShareClassEvictionUndefined,
+        InstallSourceNotVisible,
+        InstallEventDefaultMissing,
+        CandidateNotInstalled,
+        InstallReferencesUnknownRegion,
+        InstallReferencesUnknownMember,
+        LeaseShapeIncomplete,
+        MemberPayloadExceedsRegion,
+        CanonicalSortDrift,
+        ReportRoundTripFailed,
+        SectionRoleLeaked,
+        SchedulingFieldLeaked,
+        RepairProvenanceForbidden,
+        ResolvedPolicyProjectionMismatch,
+        TargetProfileLayoutUnsupported,
+        NoCandidatesButReservationDeclared,
+    }
+
+    fn pass_fixture_inputs(scenario: OverlayPassScenario) -> OverlayPlanInputs {
+        match scenario {
+            OverlayPassScenario::SingleRegionShareClass => fixture_inputs(vec![
+                resident_kernel("matvec", 384),
+                resident_lut("gelu", 128),
+            ]),
+        }
+    }
+
+    fn reject_fixture_diagnostics(scenario: OverlayRejectScenario) -> Vec<ValidationDiagnostic> {
+        match scenario {
+            OverlayRejectScenario::InputHashMismatch => {
+                let mut input = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+                input.expected_input_hashes.rom_window_plan_self_hash = hash(88);
+                build_overlay_plan(&input).diagnostics
+            }
+            OverlayRejectScenario::WramOverlayCapExceeded => {
+                let mut input = fixture_inputs(vec![resident_kernel("matvec", 1025)]);
+                input.target_profile.wram_overlay_region_max_bytes = 2048;
+                input.runtime_chrome_budget.wram_reserved = 1024;
+                build_overlay_plan(&input).diagnostics
+            }
+            OverlayRejectScenario::RegionPayloadExceedsRegionCap => {
+                let mut input = fixture_inputs(vec![resident_kernel("matvec", 513)]);
+                input.target_profile.wram_overlay_region_max_bytes = 512;
+                build_overlay_plan(&input).diagnostics
+            }
+            OverlayRejectScenario::RegionEmptyButPopulated => {
+                product_invariant_diagnostics(|product| product.regions[0].members.clear())
+            }
+            OverlayRejectScenario::RegionIdDuplicate => product_invariant_diagnostics(|product| {
+                product.regions.push(product.regions[0].clone());
+            }),
+            OverlayRejectScenario::ShareClassEvictionUndefined => {
+                let mut input = fixture_inputs(vec![
+                    resident_kernel("matvec", 128),
+                    resident_lut("gelu", 128),
+                ]);
+                input.policy.overlay_eviction_default = OverlayEvictionPolicy::Undefined;
+                build_overlay_plan(&input).diagnostics
+            }
+            OverlayRejectScenario::InstallSourceNotVisible => {
+                product_invariant_diagnostics(|product| {
+                    let ghost = OverlayResidentId::Kernel {
+                        kernel: KernelSpecId::from("ghost"),
+                    };
+                    product.installs[0].source =
+                        OverlaySource::RomWindowOverlayDemand { resident: ghost };
+                })
+            }
+            OverlayRejectScenario::InstallEventDefaultMissing => {
+                let mut input = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+                input.policy.overlay_install_event_default = None;
+                build_overlay_plan(&input).diagnostics
+            }
+            OverlayRejectScenario::CandidateNotInstalled => {
+                product_invariant_diagnostics(|product| {
+                    product.installs.pop();
+                })
+            }
+            OverlayRejectScenario::InstallReferencesUnknownRegion => {
+                product_invariant_diagnostics(|product| product.installs[0].region = OverlayId(99))
+            }
+            OverlayRejectScenario::InstallReferencesUnknownMember => {
+                product_invariant_diagnostics(|product| {
+                    product.installs[0].member = OverlayResidentId::Kernel {
+                        kernel: KernelSpecId::from("ghost"),
+                    };
+                })
+            }
+            OverlayRejectScenario::LeaseShapeIncomplete => {
+                product_invariant_diagnostics(|product| {
+                    product.installs[0].lease_shape.wram_region_lease.region = OverlayId(99);
+                })
+            }
+            OverlayRejectScenario::MemberPayloadExceedsRegion => {
+                product_invariant_diagnostics(|product| product.regions[0].bytes = 1)
+            }
+            OverlayRejectScenario::CanonicalSortDrift => product_invariant_diagnostics(|product| {
+                let mut second_region = product.regions[0].clone();
+                second_region.id = OverlayId(1);
+                second_region.bytes = 512;
+                second_region.reservation_floor_bytes = 512;
+                second_region.reservation_ceil_bytes = 512;
+                product.regions.push(second_region);
+            }),
+            OverlayRejectScenario::ReportRoundTripFailed => {
+                let input = fixture_inputs(vec![
+                    resident_kernel("matvec", 128),
+                    resident_lut("gelu", 64),
+                ]);
+                validate_overlay_plan_report_body(
+                    &OverlayPlanReportBody {
+                        pass_version: OVERLAY_PLAN_PASS_VERSION.to_owned(),
+                        input_identity: input.input_identity,
+                        audit_parents: input.audit_parents,
+                        diagnostics: Vec::new(),
+                        result: None,
+                    },
+                    ReportOutcome::Passed,
+                )
+                .expect_err("invalid report body")
+            }
+            OverlayRejectScenario::SectionRoleLeaked => {
+                vec![
+                    validate_overlay_plan_json_surface(&serde_json::json!({
+                        "leak": "SectionRole"
+                    }))
+                    .expect("surface diagnostic"),
+                ]
+            }
+            OverlayRejectScenario::SchedulingFieldLeaked => {
+                vec![
+                    validate_overlay_plan_json_surface(&serde_json::json!({
+                        "leak": "ArenaPlan"
+                    }))
+                    .expect("surface diagnostic"),
+                ]
+            }
+            OverlayRejectScenario::RepairProvenanceForbidden => {
+                vec![
+                    validate_overlay_plan_json_surface(&serde_json::json!({
+                        "leak": "RepairProposal"
+                    }))
+                    .expect("surface diagnostic"),
+                ]
+            }
+            OverlayRejectScenario::ResolvedPolicyProjectionMismatch => {
+                let mut input = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+                input.policy.runtime_modes_requested.clear();
+                build_overlay_plan(&input).diagnostics
+            }
+            OverlayRejectScenario::TargetProfileLayoutUnsupported => {
+                let mut input = fixture_inputs(vec![resident_kernel("matvec", 128)]);
+                input.target_profile.allowed_overlay_constraints.clear();
+                build_overlay_plan(&input).diagnostics
+            }
+            OverlayRejectScenario::NoCandidatesButReservationDeclared => {
+                let mut input = fixture_inputs(Vec::new());
+                input.policy.require_explicit_zero_reservation = true;
+                build_overlay_plan(&input).diagnostics
+            }
+        }
+    }
+
+    fn product_invariant_diagnostics(
+        mutate: impl FnOnce(&mut OverlayPlan),
+    ) -> Vec<ValidationDiagnostic> {
+        let input = fixture_inputs(vec![
+            resident_kernel("matvec", 128),
+            resident_lut("gelu", 64),
+        ]);
+        let mut product = build_overlay_plan(&input)
+            .result
+            .expect("valid overlay result")
+            .product;
+        mutate(&mut product);
+        validate_overlay_plan_product_invariants(&input, &product)
+    }
+
+    fn fixture_dirs(root: &Path) -> Vec<PathBuf> {
+        let mut dirs = fs::read_dir(root)
+            .unwrap_or_else(|error| panic!("fixture root {} reads: {error}", root.display()))
+            .map(|entry| entry.expect("fixture dir entry reads").path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        dirs.sort();
+        assert!(!dirs.is_empty(), "fixture root {} is empty", root.display());
+        dirs
+    }
+
+    fn read_fixture_json<T>(path: &Path) -> T
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let bytes = fs::read(path)
+            .unwrap_or_else(|error| panic!("fixture file {} reads: {error}", path.display()));
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("fixture file {} parses: {error}", path.display()))
+    }
+
+    fn overlay_plan_fixture_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("overlay_plan")
     }
 
     fn fixture_inputs(residents: Vec<OverlayResident>) -> OverlayPlanInputs {
@@ -1396,6 +2196,8 @@ mod tests {
                     kernel: kernel.clone(),
                     byte_size: resident.payload_bytes,
                     reachability: resident.reachability,
+                    source_bank: crate::window::RomBankIndex(1),
+                    active_epochs: Vec::new(),
                 }),
                 OverlayResidentId::Lut { .. } => None,
             })
@@ -1407,12 +2209,19 @@ mod tests {
                     lut: lut.clone(),
                     byte_size: resident.payload_bytes,
                     reachability: resident.reachability,
+                    source_bank: crate::window::RomBankIndex(1),
+                    active_epochs: Vec::new(),
                 }),
                 OverlayResidentId::Kernel { .. } => None,
             })
             .collect::<Vec<_>>();
         RomWindowPlan {
             identity: RomWindowPlanInputIdentity {
+                artifact_validation_self_hash: hash(0x10),
+                policy_resolution_self_hash: hash(0x11),
+                static_budget_self_hash: hash(0x12),
+                quant_graph_self_hash: hash(0x13),
+                infer_ir_self_hash: hash(0),
                 storage_plan_self_hash: hash(1),
                 observation_plan_self_hash: hash(12),
                 range_plan_self_hash: hash(13),
@@ -1437,6 +2246,7 @@ mod tests {
                     .map(|resident| resident.payload_bytes)
                     .sum::<u32>(),
                 total_install_count_per_token_upper_bound: saturating_u16(residents.len()),
+                install_source_visibility: Vec::new(),
                 kernels,
                 luts,
             },

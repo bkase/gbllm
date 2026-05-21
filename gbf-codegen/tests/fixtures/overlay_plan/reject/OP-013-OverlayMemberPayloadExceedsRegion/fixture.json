@@ -1,0 +1,6 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-013-OverlayMemberPayloadExceedsRegion",
+  "scenario": "member_payload_exceeds_region",
+  "expected_code": { "kind": "OverlayMemberPayloadExceedsRegion" }
+}

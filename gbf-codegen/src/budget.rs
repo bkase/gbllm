@@ -1541,6 +1541,7 @@ mod tests {
             max_cycles_per_token: Some(24_000),
             max_bank_switches_per_token: Some(17),
             max_sram_page_switches_per_token: Some(3),
+            min_sustained_throughput_tokens_per_megacycle: None,
             min_ui_headroom_pct: 11,
             max_rom_bytes: Some(2 * 1024 * 1024),
             risk: RiskPolicy {

@@ -1,0 +1,14 @@
+{
+  "fixture_schema": "overlay_plan.pass_fixture.v1",
+  "fixture_id": "single_region_share_class",
+  "scenario": "single_region_share_class",
+  "expected_outcome": "passed",
+  "expected_summary": {
+    "region_count": 1,
+    "share_class_count": 1,
+    "install_count": 2,
+    "reserved_bytes": 384,
+    "cap_bytes": 1024
+  },
+  "expected_overlay_cert_emitted": false
+}

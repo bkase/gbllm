@@ -689,6 +689,7 @@ mod tests {
             },
             observation: ObservationKnob {
                 observability: ObservabilityMode::Invariant,
+                trace_demotion: gbf_policy::TraceDemotionLevel::None,
                 probe_level: ProbeCollectionLevel::Operational,
             },
             range: RangeKnob {
@@ -699,6 +700,7 @@ mod tests {
             },
             sram: SramKnob {
                 page_aggression: SramPageAggression::PackCold,
+                spill_policy: gbf_policy::SramSpillPolicy::SpillOnPressure,
             },
             rom_window: RomWindowKnob {
                 kernel_residency_bias: RomKernelResidencyBias::PreferExpertBank,
@@ -711,6 +713,8 @@ mod tests {
                 tile_search: ScheduleTileSearch::Local,
                 slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 resource_pressure: ScheduleResourcePressure::Balanced,
+                pressure_thresholds: gbf_policy::ResourcePressureThresholds::default(),
+                stage_iteration_ceilings: gbf_policy::StageIterationLimits::uniform(4),
             },
         };
 
@@ -778,6 +782,7 @@ mod tests {
             max_cycles_per_token: Some(8_000),
             max_bank_switches_per_token: Some(5),
             max_sram_page_switches_per_token: Some(1),
+            min_sustained_throughput_tokens_per_megacycle: None,
             min_ui_headroom_pct: 9,
             max_rom_bytes: Some(512 * 1024),
             risk: RiskPolicy {

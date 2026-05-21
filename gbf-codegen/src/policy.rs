@@ -919,6 +919,7 @@ fn conservative_target_values() -> CompileKnobValues {
         },
         observation: ObservationKnob {
             observability: gbf_policy::ObservabilityMode::Invariant,
+            trace_demotion: gbf_policy::TraceDemotionLevel::None,
             probe_level: ProbeCollectionLevel::RequiredOnly,
         },
         range: gbf_policy::RangeKnob {
@@ -929,6 +930,7 @@ fn conservative_target_values() -> CompileKnobValues {
         },
         sram: gbf_policy::SramKnob {
             page_aggression: gbf_policy::SramPageAggression::Preserve,
+            spill_policy: gbf_policy::SramSpillPolicy::NoSpill,
         },
         rom_window: RomWindowKnob {
             kernel_residency_bias: RomKernelResidencyBias::PreferCommonBank,
@@ -941,6 +943,8 @@ fn conservative_target_values() -> CompileKnobValues {
             tile_search: ScheduleTileSearch::Fixed,
             slice_coarsening: ScheduleSliceCoarsening::Fine,
             resource_pressure: ScheduleResourcePressure::Conservative,
+            pressure_thresholds: gbf_policy::ResourcePressureThresholds::default(),
+            stage_iteration_ceilings: gbf_policy::StageIterationLimits::uniform(4),
         },
     }
 }
@@ -1023,7 +1027,8 @@ fn value_within_knob_bounds(
     match knob.top_level() {
         CompileKnobId::Placement => values.placement.profile <= bounds.placement.max_profile,
         CompileKnobId::Observation => {
-            values.observation.probe_level <= bounds.observation.max_probe_level
+            values.observation.trace_demotion <= bounds.observation.max_trace_demotion
+                && values.observation.probe_level <= bounds.observation.max_probe_level
         }
         CompileKnobId::Range => {
             values.range.reduction_ceiling <= bounds.range.max_reduction_ceiling
@@ -1031,7 +1036,10 @@ fn value_within_knob_bounds(
         CompileKnobId::Storage => {
             values.storage.materialization <= bounds.storage.max_materialization
         }
-        CompileKnobId::Sram => values.sram.page_aggression <= bounds.sram.max_page_aggression,
+        CompileKnobId::Sram => {
+            values.sram.page_aggression <= bounds.sram.max_page_aggression
+                && values.sram.spill_policy <= bounds.sram.max_spill_policy
+        }
         CompileKnobId::RomWindow => {
             values.rom_window.kernel_residency_bias <= bounds.rom_window.max_kernel_residency_bias
                 && values.rom_window.kernel_duplication_bias
@@ -1042,6 +1050,14 @@ fn value_within_knob_bounds(
             values.schedule.tile_search <= bounds.schedule.max_tile_search
                 && values.schedule.slice_coarsening <= bounds.schedule.max_slice_coarsening
                 && values.schedule.resource_pressure <= bounds.schedule.max_resource_pressure
+                && values
+                    .schedule
+                    .pressure_thresholds
+                    .all_le(bounds.schedule.max_pressure_thresholds)
+                && values
+                    .schedule
+                    .stage_iteration_ceilings
+                    .all_le(bounds.schedule.max_stage_iteration_ceilings)
         }
         knob @ (CompileKnobId::PlacementProfile
         | CompileKnobId::ObservationTraceDemotion
@@ -1534,7 +1550,6 @@ macro_rules! impl_single_bound_provenance {
 impl_single_value_provenance!(PlacementKnob, profile);
 impl_single_value_provenance!(gbf_policy::RangeKnob, reduction_ceiling);
 impl_single_value_provenance!(gbf_policy::StorageKnob, materialization);
-impl_single_value_provenance!(gbf_policy::SramKnob, page_aggression);
 impl_single_value_provenance!(gbf_policy::OverlayKnob, promotion);
 
 impl ValueProvenanceFields for ObservationKnob {
@@ -1559,10 +1574,50 @@ impl ValueProvenanceFields for ObservationKnob {
         push_leaf_if_changed(
             provenance,
             knob,
+            &before.trace_demotion,
+            &after.trace_demotion,
+            force,
+            &format!("{prefix}.trace_demotion"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
             &before.probe_level,
             &after.probe_level,
             force,
             &format!("{prefix}.probe_level"),
+            &entry,
+        );
+    }
+}
+
+impl ValueProvenanceFields for gbf_policy::SramKnob {
+    fn push_value_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.page_aggression,
+            &after.page_aggression,
+            force,
+            &format!("{prefix}.page_aggression"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.spill_policy,
+            &after.spill_policy,
+            force,
+            &format!("{prefix}.spill_policy"),
             &entry,
         );
     }
@@ -1636,15 +1691,93 @@ impl ValueProvenanceFields for ScheduleKnob {
             &format!("{prefix}.resource_pressure"),
             &entry,
         );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.pressure_thresholds,
+            &after.pressure_thresholds,
+            force,
+            &format!("{prefix}.pressure_thresholds"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.stage_iteration_ceilings,
+            &after.stage_iteration_ceilings,
+            force,
+            &format!("{prefix}.stage_iteration_ceilings"),
+            &entry,
+        );
     }
 }
 
 impl_single_bound_provenance!(gbf_policy::PlacementKnobBounds, max_profile);
-impl_single_bound_provenance!(gbf_policy::ObservationKnobBounds, max_probe_level);
 impl_single_bound_provenance!(gbf_policy::RangeKnobBounds, max_reduction_ceiling);
 impl_single_bound_provenance!(gbf_policy::StorageKnobBounds, max_materialization);
-impl_single_bound_provenance!(gbf_policy::SramKnobBounds, max_page_aggression);
 impl_single_bound_provenance!(gbf_policy::OverlayKnobBounds, max_promotion);
+
+impl BoundProvenanceFields for gbf_policy::ObservationKnobBounds {
+    fn push_bound_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_trace_demotion,
+            &after.max_trace_demotion,
+            force,
+            &format!("{prefix}.max_trace_demotion"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_probe_level,
+            &after.max_probe_level,
+            force,
+            &format!("{prefix}.max_probe_level"),
+            &entry,
+        );
+    }
+}
+
+impl BoundProvenanceFields for gbf_policy::SramKnobBounds {
+    fn push_bound_fields(
+        provenance: &mut BTreeMap<CompileKnobPath, Vec<ConstraintProvenance>>,
+        knob: CompileKnobId,
+        before: Self,
+        after: Self,
+        force: bool,
+        entry: ConstraintProvenance,
+        prefix: &'static str,
+    ) {
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_page_aggression,
+            &after.max_page_aggression,
+            force,
+            &format!("{prefix}.max_page_aggression"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_spill_policy,
+            &after.max_spill_policy,
+            force,
+            &format!("{prefix}.max_spill_policy"),
+            &entry,
+        );
+    }
+}
 
 impl BoundProvenanceFields for gbf_policy::RomWindowKnobBounds {
     fn push_bound_fields(
@@ -1714,6 +1847,24 @@ impl BoundProvenanceFields for gbf_policy::ScheduleKnobBounds {
             &format!("{prefix}.max_resource_pressure"),
             &entry,
         );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_pressure_thresholds,
+            &after.max_pressure_thresholds,
+            force,
+            &format!("{prefix}.max_pressure_thresholds"),
+            &entry,
+        );
+        push_leaf_if_changed(
+            provenance,
+            knob,
+            &before.max_stage_iteration_ceilings,
+            &after.max_stage_iteration_ceilings,
+            force,
+            &format!("{prefix}.max_stage_iteration_ceilings"),
+            &entry,
+        );
     }
 }
 
@@ -1767,14 +1918,18 @@ fn all_required_leaf_paths() -> Vec<CompileKnobPath> {
         field_path(CompileKnobId::Placement, "global.profile"),
         field_path(CompileKnobId::Placement, "bounds.max_profile"),
         field_path(CompileKnobId::Observation, "global.observability"),
+        field_path(CompileKnobId::Observation, "global.trace_demotion"),
         field_path(CompileKnobId::Observation, "global.probe_level"),
+        field_path(CompileKnobId::Observation, "bounds.max_trace_demotion"),
         field_path(CompileKnobId::Observation, "bounds.max_probe_level"),
         field_path(CompileKnobId::Range, "global.reduction_ceiling"),
         field_path(CompileKnobId::Range, "bounds.max_reduction_ceiling"),
         field_path(CompileKnobId::Storage, "global.materialization"),
         field_path(CompileKnobId::Storage, "bounds.max_materialization"),
         field_path(CompileKnobId::Sram, "global.page_aggression"),
+        field_path(CompileKnobId::Sram, "global.spill_policy"),
         field_path(CompileKnobId::Sram, "bounds.max_page_aggression"),
+        field_path(CompileKnobId::Sram, "bounds.max_spill_policy"),
         field_path(CompileKnobId::RomWindow, "global.kernel_residency_bias"),
         field_path(CompileKnobId::RomWindow, "global.kernel_duplication_bias"),
         field_path(CompileKnobId::RomWindow, "bounds.max_kernel_residency_bias"),
@@ -1787,9 +1942,16 @@ fn all_required_leaf_paths() -> Vec<CompileKnobPath> {
         field_path(CompileKnobId::Schedule, "global.tile_search"),
         field_path(CompileKnobId::Schedule, "global.slice_coarsening"),
         field_path(CompileKnobId::Schedule, "global.resource_pressure"),
+        field_path(CompileKnobId::Schedule, "global.pressure_thresholds"),
+        field_path(CompileKnobId::Schedule, "global.stage_iteration_ceilings"),
         field_path(CompileKnobId::Schedule, "bounds.max_tile_search"),
         field_path(CompileKnobId::Schedule, "bounds.max_slice_coarsening"),
         field_path(CompileKnobId::Schedule, "bounds.max_resource_pressure"),
+        field_path(CompileKnobId::Schedule, "bounds.max_pressure_thresholds"),
+        field_path(
+            CompileKnobId::Schedule,
+            "bounds.max_stage_iteration_ceilings",
+        ),
     ]);
     paths
 }
@@ -1835,6 +1997,7 @@ impl BoundMeet for gbf_policy::PlacementKnobBounds {
 impl BoundMeet for gbf_policy::ObservationKnobBounds {
     fn meet(self, other: Self) -> Option<Self> {
         Some(Self {
+            max_trace_demotion: self.max_trace_demotion.min(other.max_trace_demotion),
             max_probe_level: self.max_probe_level.min(other.max_probe_level),
         })
     }
@@ -1860,6 +2023,7 @@ impl BoundMeet for gbf_policy::SramKnobBounds {
     fn meet(self, other: Self) -> Option<Self> {
         Some(Self {
             max_page_aggression: self.max_page_aggression.min(other.max_page_aggression),
+            max_spill_policy: self.max_spill_policy.min(other.max_spill_policy),
         })
     }
 }
@@ -1891,7 +2055,81 @@ impl BoundMeet for gbf_policy::ScheduleKnobBounds {
             max_tile_search: self.max_tile_search.min(other.max_tile_search),
             max_slice_coarsening: self.max_slice_coarsening.min(other.max_slice_coarsening),
             max_resource_pressure: self.max_resource_pressure.min(other.max_resource_pressure),
+            max_pressure_thresholds: pressure_thresholds_min(
+                self.max_pressure_thresholds,
+                other.max_pressure_thresholds,
+            ),
+            max_stage_iteration_ceilings: stage_iteration_limits_min(
+                self.max_stage_iteration_ceilings,
+                other.max_stage_iteration_ceilings,
+            ),
         })
+    }
+}
+
+fn pressure_limit_min<T: Ord>(
+    left: gbf_policy::PressureLimit<T>,
+    right: gbf_policy::PressureLimit<T>,
+) -> gbf_policy::PressureLimit<T> {
+    gbf_policy::PressureLimit {
+        soft: left.soft.min(right.soft),
+        hard: left.hard.min(right.hard),
+    }
+}
+
+fn pressure_thresholds_min(
+    left: gbf_policy::ResourcePressureThresholds,
+    right: gbf_policy::ResourcePressureThresholds,
+) -> gbf_policy::ResourcePressureThresholds {
+    gbf_policy::ResourcePressureThresholds {
+        wram_hot: pressure_limit_min(left.wram_hot, right.wram_hot),
+        hram_hot: pressure_limit_min(left.hram_hot, right.hram_hot),
+        bank0_rom: pressure_limit_min(left.bank0_rom, right.bank0_rom),
+        switchable_rom_window: pressure_limit_min(
+            left.switchable_rom_window,
+            right.switchable_rom_window,
+        ),
+        sram_window: pressure_limit_min(left.sram_window, right.sram_window),
+        slice_cycles: pressure_limit_min(left.slice_cycles, right.slice_cycles),
+        interrupt_latency: pressure_limit_min(left.interrupt_latency, right.interrupt_latency),
+        trace_bytes_per_frame: pressure_limit_min(
+            left.trace_bytes_per_frame,
+            right.trace_bytes_per_frame,
+        ),
+        persist_bytes_per_frame: pressure_limit_min(
+            left.persist_bytes_per_frame,
+            right.persist_bytes_per_frame,
+        ),
+        overlay_installs_per_frame: pressure_limit_min(
+            left.overlay_installs_per_frame,
+            right.overlay_installs_per_frame,
+        ),
+        bank_switches_per_token: pressure_limit_min(
+            left.bank_switches_per_token,
+            right.bank_switches_per_token,
+        ),
+        sram_page_switches_per_token: pressure_limit_min(
+            left.sram_page_switches_per_token,
+            right.sram_page_switches_per_token,
+        ),
+    }
+}
+
+fn stage_iteration_limits_min(
+    left: gbf_policy::StageIterationLimits,
+    right: gbf_policy::StageIterationLimits,
+) -> gbf_policy::StageIterationLimits {
+    gbf_policy::StageIterationLimits {
+        range_plan: left.range_plan.min(right.range_plan),
+        storage_plan: left.storage_plan.min(right.storage_plan),
+        sram_page_plan: left.sram_page_plan.min(right.sram_page_plan),
+        rom_window_plan: left.rom_window_plan.min(right.rom_window_plan),
+        overlay_plan: left.overlay_plan.min(right.overlay_plan),
+        arena_plan: left.arena_plan.min(right.arena_plan),
+        gb_sched_ir: left.gb_sched_ir.min(right.gb_sched_ir),
+        resource_state_validation: left
+            .resource_state_validation
+            .min(right.resource_state_validation),
     }
 }
 
@@ -2180,6 +2418,105 @@ pub(crate) mod tests {
         let failure = resolve_policy(&fixture.validation()).expect_err("out of bounds rejects");
         assert_policy_failure(&failure, |code| {
             matches!(code, ValidationCode::PolicyKnobOutOfBounds { .. })
+        });
+    }
+
+    #[test]
+    fn f_b2_resolve_policy_rejects_out_of_bounds_f_b16_follow_up_values() {
+        let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        fixture.compile_request.constraint_overrides = Some(CompileKnobOverrides {
+            values: CompileKnobPartialValues {
+                observation: Some(ObservationKnob {
+                    observability: ObservabilityMode::Flexible,
+                    trace_demotion: gbf_policy::TraceDemotionLevel::RequiredOnly,
+                    probe_level: ProbeCollectionLevel::RequiredOnly,
+                }),
+                ..CompileKnobPartialValues::default()
+            },
+            bounds: CompileKnobPartialBounds {
+                observation: Some(gbf_policy::ObservationKnobBounds {
+                    max_trace_demotion: gbf_policy::TraceDemotionLevel::DropBestEffort,
+                    max_probe_level: ProbeCollectionLevel::Verbose,
+                }),
+                ..CompileKnobPartialBounds::default()
+            },
+            ..CompileKnobOverrides::default()
+        });
+        let failure =
+            resolve_policy(&fixture.validation()).expect_err("trace demotion bound rejects");
+        assert_policy_failure(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::PolicyKnobOutOfBounds {
+                    knob: CompileKnobId::Observation,
+                    ..
+                }
+            )
+        });
+
+        let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        fixture.compile_request.constraint_overrides = Some(CompileKnobOverrides {
+            values: CompileKnobPartialValues {
+                sram: Some(gbf_policy::SramKnob {
+                    page_aggression: gbf_policy::SramPageAggression::Preserve,
+                    spill_policy: gbf_policy::SramSpillPolicy::SpillEager,
+                }),
+                ..CompileKnobPartialValues::default()
+            },
+            bounds: CompileKnobPartialBounds {
+                sram: Some(gbf_policy::SramKnobBounds {
+                    max_page_aggression: gbf_policy::SramPageAggression::MinimizeResident,
+                    max_spill_policy: gbf_policy::SramSpillPolicy::SpillOnPressure,
+                }),
+                ..CompileKnobPartialBounds::default()
+            },
+            ..CompileKnobOverrides::default()
+        });
+        let failure =
+            resolve_policy(&fixture.validation()).expect_err("spill policy bound rejects");
+        assert_policy_failure(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::PolicyKnobOutOfBounds {
+                    knob: CompileKnobId::Sram,
+                    ..
+                }
+            )
+        });
+
+        let mut fixture = Fixture::new(DEFAULT_COMPILE_PROFILE_ID);
+        let mut pressure_thresholds = gbf_policy::ResourcePressureThresholds::default();
+        pressure_thresholds.wram_hot = gbf_policy::PressureLimit {
+            soft: 7_000,
+            hard: 8_192,
+        };
+        fixture.compile_request.constraint_overrides = Some(CompileKnobOverrides {
+            values: CompileKnobPartialValues {
+                schedule: Some(ScheduleKnob {
+                    pressure_thresholds,
+                    ..conservative_target_values().schedule
+                }),
+                ..CompileKnobPartialValues::default()
+            },
+            bounds: CompileKnobPartialBounds {
+                schedule: Some(gbf_policy::ScheduleKnobBounds {
+                    max_pressure_thresholds: gbf_policy::ResourcePressureThresholds::default(),
+                    ..canonical_default_bounds_fixture().schedule
+                }),
+                ..CompileKnobPartialBounds::default()
+            },
+            ..CompileKnobOverrides::default()
+        });
+        let failure =
+            resolve_policy(&fixture.validation()).expect_err("pressure threshold bound rejects");
+        assert_policy_failure(&failure, |code| {
+            matches!(
+                code,
+                ValidationCode::PolicyKnobOutOfBounds {
+                    knob: CompileKnobId::Schedule,
+                    ..
+                }
+            )
         });
     }
 
@@ -2654,6 +2991,22 @@ pub(crate) mod tests {
                 .iter()
                 .all(|entry| { entry.path.selector.is_none() && entry.path.field.is_some() })
         );
+
+        for (knob, field) in [
+            (CompileKnobId::Observation, "global.trace_demotion"),
+            (CompileKnobId::Observation, "bounds.max_trace_demotion"),
+            (CompileKnobId::Sram, "global.spill_policy"),
+            (CompileKnobId::Sram, "bounds.max_spill_policy"),
+            (CompileKnobId::Schedule, "global.pressure_thresholds"),
+            (CompileKnobId::Schedule, "bounds.max_pressure_thresholds"),
+            (CompileKnobId::Schedule, "global.stage_iteration_ceilings"),
+            (
+                CompileKnobId::Schedule,
+                "bounds.max_stage_iteration_ceilings",
+            ),
+        ] {
+            provenance_entry(&product, knob, field);
+        }
 
         let pressure = provenance_entry(
             &product,
@@ -3152,6 +3505,7 @@ pub(crate) mod tests {
                 max_cycles_per_token: Some(24_000),
                 max_bank_switches_per_token: Some(17),
                 max_sram_page_switches_per_token: Some(3),
+                min_sustained_throughput_tokens_per_megacycle: None,
                 min_ui_headroom_pct: 11,
                 max_rom_bytes: Some(2 * 1024 * 1024),
                 risk: gbf_policy::RiskPolicy {

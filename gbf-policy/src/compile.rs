@@ -465,6 +465,94 @@ pub struct ResourcePressureThresholds {
     pub sram_page_switches_per_token: PressureLimit<u16>,
 }
 
+impl Default for ResourcePressureThresholds {
+    fn default() -> Self {
+        Self {
+            wram_hot: PressureLimit {
+                soft: 6 * 1024,
+                hard: 8 * 1024,
+            },
+            hram_hot: PressureLimit {
+                soft: 96,
+                hard: 127,
+            },
+            bank0_rom: PressureLimit {
+                soft: 14 * 1024,
+                hard: 16 * 1024,
+            },
+            switchable_rom_window: PressureLimit {
+                soft: 14 * 1024,
+                hard: 16 * 1024,
+            },
+            sram_window: PressureLimit {
+                soft: 6 * 1024,
+                hard: 8 * 1024,
+            },
+            slice_cycles: PressureLimit {
+                soft: 4_000,
+                hard: 8_000,
+            },
+            interrupt_latency: PressureLimit {
+                soft: 512,
+                hard: 1_024,
+            },
+            trace_bytes_per_frame: PressureLimit {
+                soft: 512,
+                hard: 1_024,
+            },
+            persist_bytes_per_frame: PressureLimit {
+                soft: 512,
+                hard: 1_024,
+            },
+            overlay_installs_per_frame: PressureLimit { soft: 1, hard: 4 },
+            bank_switches_per_token: PressureLimit { soft: 2, hard: 8 },
+            sram_page_switches_per_token: PressureLimit { soft: 1, hard: 4 },
+        }
+    }
+}
+
+impl ResourcePressureThresholds {
+    #[must_use]
+    pub fn all_le(self, other: Self) -> bool {
+        pressure_limit_le(&self.wram_hot, &other.wram_hot)
+            && pressure_limit_le(&self.hram_hot, &other.hram_hot)
+            && pressure_limit_le(&self.bank0_rom, &other.bank0_rom)
+            && pressure_limit_le(&self.switchable_rom_window, &other.switchable_rom_window)
+            && pressure_limit_le(&self.sram_window, &other.sram_window)
+            && pressure_limit_le(&self.slice_cycles, &other.slice_cycles)
+            && pressure_limit_le(&self.interrupt_latency, &other.interrupt_latency)
+            && pressure_limit_le(&self.trace_bytes_per_frame, &other.trace_bytes_per_frame)
+            && pressure_limit_le(
+                &self.persist_bytes_per_frame,
+                &other.persist_bytes_per_frame,
+            )
+            && pressure_limit_le(
+                &self.overlay_installs_per_frame,
+                &other.overlay_installs_per_frame,
+            )
+            && pressure_limit_le(
+                &self.bank_switches_per_token,
+                &other.bank_switches_per_token,
+            )
+            && pressure_limit_le(
+                &self.sram_page_switches_per_token,
+                &other.sram_page_switches_per_token,
+            )
+    }
+
+    #[must_use]
+    pub fn all_ge(self, other: Self) -> bool {
+        other.all_le(self)
+    }
+}
+
+fn pressure_limit_le<T>(left: &PressureLimit<T>, right: &PressureLimit<T>) -> bool
+where
+    T: PartialOrd,
+{
+    left.soft <= right.soft && left.hard <= right.hard
+}
+
 pub fn resolve_resource_pressure_thresholds(
     profile: &CompileProfileSpec,
     runtime_chrome_budget: Option<&RuntimeChromeBudget>,
@@ -1594,7 +1682,7 @@ pub enum KnobDelta {
         to: PlacementProfile,
     },
     SetTraceDemotion {
-        to: ProbeCollectionLevel,
+        to: TraceDemotionLevel,
     },
     DisableOptionalProbes {
         probes: BTreeSet<TraceProbeId>,
@@ -1611,6 +1699,9 @@ pub enum KnobDelta {
     },
     AdvanceSramPageAggression {
         to: SramPageAggression,
+    },
+    AdvanceSramSpillPolicy {
+        to: SramSpillPolicy,
     },
     AdvanceKernelResidencyBias {
         to: RomKernelResidencyBias,
@@ -1657,6 +1748,9 @@ pub enum ResourcePressureUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum DeltaRejection {
+    AcceptedRefinementBudgetExhausted {
+        max_refinement_iters: u8,
+    },
     KnobLocked {
         knob: CompileKnobId,
     },
@@ -1679,10 +1773,6 @@ pub enum DeltaRejection {
     },
     EffectfulRecompute {
         value: ValueSelector,
-    },
-    UnsupportedMutation {
-        knob: CompileKnobId,
-        reason: String,
     },
 }
 
@@ -1738,17 +1828,38 @@ pub enum ProbeCollectionLevel {
     Verbose = 2,
 }
 
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[repr(u8)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum TraceDemotionLevel {
+    #[default]
+    None = 0,
+    DropBestEffort = 1,
+    DropDiagnosticAndBestEffort = 2,
+    RequiredOnly = 3,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationKnob {
     pub observability: ObservabilityMode,
+    #[serde(default)]
+    pub trace_demotion: TraceDemotionLevel,
     pub probe_level: ProbeCollectionLevel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationKnobBounds {
+    #[serde(default = "default_max_trace_demotion")]
+    pub max_trace_demotion: TraceDemotionLevel,
     pub max_probe_level: ProbeCollectionLevel,
+}
+
+const fn default_max_trace_demotion() -> TraceDemotionLevel {
+    TraceDemotionLevel::RequiredOnly
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1802,16 +1913,36 @@ pub enum SramPageAggression {
     MinimizeResident = 2,
 }
 
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[repr(u8)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SramSpillPolicy {
+    #[default]
+    NoSpill = 0,
+    SpillOnPressure = 1,
+    SpillEager = 2,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SramKnob {
     pub page_aggression: SramPageAggression,
+    #[serde(default)]
+    pub spill_policy: SramSpillPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SramKnobBounds {
     pub max_page_aggression: SramPageAggression,
+    #[serde(default = "default_max_spill_policy")]
+    pub max_spill_policy: SramSpillPolicy,
+}
+
+const fn default_max_spill_policy() -> SramSpillPolicy {
+    SramSpillPolicy::SpillEager
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1895,12 +2026,63 @@ pub enum ScheduleResourcePressure {
     FitFirst = 2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageIterationLimits {
+    pub range_plan: u8,
+    pub storage_plan: u8,
+    pub sram_page_plan: u8,
+    pub rom_window_plan: u8,
+    pub overlay_plan: u8,
+    pub arena_plan: u8,
+    pub gb_sched_ir: u8,
+    pub resource_state_validation: u8,
+}
+
+impl StageIterationLimits {
+    #[must_use]
+    pub const fn uniform(limit: u8) -> Self {
+        Self {
+            range_plan: limit,
+            storage_plan: limit,
+            sram_page_plan: limit,
+            rom_window_plan: limit,
+            overlay_plan: limit,
+            arena_plan: limit,
+            gb_sched_ir: limit,
+            resource_state_validation: limit,
+        }
+    }
+
+    #[must_use]
+    pub const fn all_le(self, other: Self) -> bool {
+        self.range_plan <= other.range_plan
+            && self.storage_plan <= other.storage_plan
+            && self.sram_page_plan <= other.sram_page_plan
+            && self.rom_window_plan <= other.rom_window_plan
+            && self.overlay_plan <= other.overlay_plan
+            && self.arena_plan <= other.arena_plan
+            && self.gb_sched_ir <= other.gb_sched_ir
+            && self.resource_state_validation <= other.resource_state_validation
+    }
+}
+
+impl Default for StageIterationLimits {
+    fn default() -> Self {
+        Self::uniform(4)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleKnob {
     pub tile_search: ScheduleTileSearch,
     pub slice_coarsening: ScheduleSliceCoarsening,
     pub resource_pressure: ScheduleResourcePressure,
+    #[serde(default)]
+    pub pressure_thresholds: ResourcePressureThresholds,
+    #[serde(default)]
+    pub stage_iteration_ceilings: StageIterationLimits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1909,6 +2091,67 @@ pub struct ScheduleKnobBounds {
     pub max_tile_search: ScheduleTileSearch,
     pub max_slice_coarsening: ScheduleSliceCoarsening,
     pub max_resource_pressure: ScheduleResourcePressure,
+    #[serde(default = "default_max_resource_pressure_thresholds")]
+    pub max_pressure_thresholds: ResourcePressureThresholds,
+    #[serde(default = "default_max_stage_iteration_ceilings")]
+    pub max_stage_iteration_ceilings: StageIterationLimits,
+}
+
+const fn default_max_resource_pressure_thresholds() -> ResourcePressureThresholds {
+    ResourcePressureThresholds {
+        wram_hot: PressureLimit {
+            soft: 8 * 1024,
+            hard: 8 * 1024,
+        },
+        hram_hot: PressureLimit {
+            soft: 127,
+            hard: 127,
+        },
+        bank0_rom: PressureLimit {
+            soft: 16 * 1024,
+            hard: 16 * 1024,
+        },
+        switchable_rom_window: PressureLimit {
+            soft: 16 * 1024,
+            hard: 16 * 1024,
+        },
+        sram_window: PressureLimit {
+            soft: 8 * 1024,
+            hard: 8 * 1024,
+        },
+        slice_cycles: PressureLimit {
+            soft: u64::MAX / 2,
+            hard: u64::MAX / 2,
+        },
+        interrupt_latency: PressureLimit {
+            soft: u64::MAX / 2,
+            hard: u64::MAX / 2,
+        },
+        trace_bytes_per_frame: PressureLimit {
+            soft: u16::MAX,
+            hard: u16::MAX,
+        },
+        persist_bytes_per_frame: PressureLimit {
+            soft: u16::MAX,
+            hard: u16::MAX,
+        },
+        overlay_installs_per_frame: PressureLimit {
+            soft: u8::MAX,
+            hard: u8::MAX,
+        },
+        bank_switches_per_token: PressureLimit {
+            soft: u16::MAX,
+            hard: u16::MAX,
+        },
+        sram_page_switches_per_token: PressureLimit {
+            soft: u16::MAX,
+            hard: u16::MAX,
+        },
+    }
+}
+
+const fn default_max_stage_iteration_ceilings() -> StageIterationLimits {
+    StageIterationLimits::uniform(u8::MAX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1993,10 +2236,12 @@ macro_rules! monotone_enum {
 }
 
 monotone_enum!(PlacementProfile);
+monotone_enum!(TraceDemotionLevel);
 monotone_enum!(ProbeCollectionLevel);
 monotone_enum!(ReductionPlanCeiling);
 monotone_enum!(StorageMaterialization);
 monotone_enum!(SramPageAggression);
+monotone_enum!(SramSpillPolicy);
 monotone_enum!(RomKernelResidencyBias);
 monotone_enum!(RomKernelDuplicationBias);
 monotone_enum!(OverlayPromotion);
@@ -2019,14 +2264,18 @@ impl MonotoneKnob for PlacementKnobBounds {
 
 impl MonotoneKnob for ObservationKnob {
     fn is_monotone_successor_of(&self, previous: &Self) -> bool {
-        self.probe_level
-            .is_monotone_successor_of(&previous.probe_level)
+        self.trace_demotion
+            .is_monotone_successor_of(&previous.trace_demotion)
+            && self
+                .probe_level
+                .is_monotone_successor_of(&previous.probe_level)
     }
 }
 
 impl MonotoneKnob for ObservationKnobBounds {
     fn is_monotone_successor_of(&self, previous: &Self) -> bool {
-        self.max_probe_level <= previous.max_probe_level
+        self.max_trace_demotion <= previous.max_trace_demotion
+            && self.max_probe_level <= previous.max_probe_level
     }
 }
 
@@ -2060,12 +2309,16 @@ impl MonotoneKnob for SramKnob {
     fn is_monotone_successor_of(&self, previous: &Self) -> bool {
         self.page_aggression
             .is_monotone_successor_of(&previous.page_aggression)
+            && self
+                .spill_policy
+                .is_monotone_successor_of(&previous.spill_policy)
     }
 }
 
 impl MonotoneKnob for SramKnobBounds {
     fn is_monotone_successor_of(&self, previous: &Self) -> bool {
         self.max_page_aggression <= previous.max_page_aggression
+            && self.max_spill_policy <= previous.max_spill_policy
     }
 }
 
@@ -2108,6 +2361,12 @@ impl MonotoneKnob for ScheduleKnob {
             && self
                 .resource_pressure
                 .is_monotone_successor_of(&previous.resource_pressure)
+            && self
+                .pressure_thresholds
+                .all_ge(previous.pressure_thresholds)
+            && self
+                .stage_iteration_ceilings
+                .all_le(previous.stage_iteration_ceilings)
     }
 }
 
@@ -2116,6 +2375,12 @@ impl MonotoneKnob for ScheduleKnobBounds {
         self.max_tile_search <= previous.max_tile_search
             && self.max_slice_coarsening <= previous.max_slice_coarsening
             && self.max_resource_pressure <= previous.max_resource_pressure
+            && self
+                .max_pressure_thresholds
+                .all_le(previous.max_pressure_thresholds)
+            && self
+                .max_stage_iteration_ceilings
+                .all_le(previous.max_stage_iteration_ceilings)
     }
 }
 
@@ -2137,6 +2402,7 @@ impl KnobDelta {
             Self::PromoteRecomputeLevel { .. } => CompileKnobId::StorageRecomputePromotion,
             Self::ForceRecompute { .. } => CompileKnobId::StorageMaterializationOverrides,
             Self::AdvanceSramPageAggression { .. } => CompileKnobId::SramPageAggression,
+            Self::AdvanceSramSpillPolicy { .. } => CompileKnobId::SramSpillPolicy,
             Self::AdvanceKernelResidencyBias { .. } => CompileKnobId::RomKernelResidencyBias,
             Self::AdvanceKernelDuplicationBias { .. } => CompileKnobId::RomKernelDuplicationBias,
             Self::ForceKernelResidency { .. } => CompileKnobId::RomKernelResidencyOverrides,
@@ -2183,12 +2449,6 @@ pub fn check_delta_admissible_with_recompute_purity(
     }
 
     check_delta_bounds(delta, current)?;
-    if matches!(delta, KnobDelta::UpdatePressureThreshold { .. }) {
-        return Err(DeltaRejection::UnsupportedMutation {
-            knob,
-            reason: "mutable ResourcePressureThresholds are deferred to bd-2n14".to_owned(),
-        });
-    }
     check_delta_monotone(delta, current)?;
     check_recompute_purity(delta, recompute_purity)?;
 
@@ -2309,7 +2569,7 @@ fn check_delta_bounds(delta: &KnobDelta, current: &CompileKnobs) -> Result<(), D
         KnobDelta::SetTraceDemotion { to } => check_ordered_bound(
             CompileKnobId::ObservationTraceDemotion,
             to,
-            &current.bounds.observation.max_probe_level,
+            &current.bounds.observation.max_trace_demotion,
         ),
         KnobDelta::RaiseReductionCeiling { to, .. } => check_ordered_bound(
             CompileKnobId::RangeReductionCeiling,
@@ -2325,6 +2585,11 @@ fn check_delta_bounds(delta: &KnobDelta, current: &CompileKnobs) -> Result<(), D
             CompileKnobId::SramPageAggression,
             to,
             &current.bounds.sram.max_page_aggression,
+        ),
+        KnobDelta::AdvanceSramSpillPolicy { to } => check_ordered_bound(
+            CompileKnobId::SramSpillPolicy,
+            to,
+            &current.bounds.sram.max_spill_policy,
         ),
         KnobDelta::AdvanceKernelResidencyBias { to } => check_ordered_bound(
             CompileKnobId::RomKernelResidencyBias,
@@ -2350,7 +2615,10 @@ fn check_delta_bounds(delta: &KnobDelta, current: &CompileKnobs) -> Result<(), D
         | KnobDelta::ForceRecompute { .. }
         | KnobDelta::ForceKernelResidency { .. }
         | KnobDelta::NarrowTileClasses { .. } => Ok(()),
-        KnobDelta::UpdatePressureThreshold { update } => check_pressure_update_limit(update),
+        KnobDelta::UpdatePressureThreshold { update } => {
+            check_pressure_update_limit(update)?;
+            check_pressure_update_bound(update, &current.bounds.schedule.max_pressure_thresholds)
+        }
     }
 }
 
@@ -2405,6 +2673,166 @@ where
     }
 }
 
+fn check_pressure_update_bound(
+    update: &ResourcePressureUpdate,
+    max: &ResourcePressureThresholds,
+) -> Result<(), DeltaRejection> {
+    match update {
+        ResourcePressureUpdate::WramHot { limit } => {
+            check_pressure_limit_bound("wram_hot", limit, &max.wram_hot)
+        }
+        ResourcePressureUpdate::HramHot { limit } => {
+            check_pressure_limit_bound("hram_hot", limit, &max.hram_hot)
+        }
+        ResourcePressureUpdate::Bank0Rom { limit } => {
+            check_pressure_limit_bound("bank0_rom", limit, &max.bank0_rom)
+        }
+        ResourcePressureUpdate::SwitchableRomWindow { limit } => {
+            check_pressure_limit_bound("switchable_rom_window", limit, &max.switchable_rom_window)
+        }
+        ResourcePressureUpdate::SramWindow { limit } => {
+            check_pressure_limit_bound("sram_window", limit, &max.sram_window)
+        }
+        ResourcePressureUpdate::SliceCycles { limit } => {
+            check_pressure_limit_bound("slice_cycles", limit, &max.slice_cycles)
+        }
+        ResourcePressureUpdate::InterruptLatency { limit } => {
+            check_pressure_limit_bound("interrupt_latency", limit, &max.interrupt_latency)
+        }
+        ResourcePressureUpdate::TraceBytesPerFrame { limit } => {
+            check_pressure_limit_bound("trace_bytes_per_frame", limit, &max.trace_bytes_per_frame)
+        }
+        ResourcePressureUpdate::PersistBytesPerFrame { limit } => check_pressure_limit_bound(
+            "persist_bytes_per_frame",
+            limit,
+            &max.persist_bytes_per_frame,
+        ),
+        ResourcePressureUpdate::OverlayInstallsPerFrame { limit } => check_pressure_limit_bound(
+            "overlay_installs_per_frame",
+            limit,
+            &max.overlay_installs_per_frame,
+        ),
+        ResourcePressureUpdate::BankSwitchesPerToken { limit } => check_pressure_limit_bound(
+            "bank_switches_per_token",
+            limit,
+            &max.bank_switches_per_token,
+        ),
+        ResourcePressureUpdate::SramPageSwitchesPerToken { limit } => check_pressure_limit_bound(
+            "sram_page_switches_per_token",
+            limit,
+            &max.sram_page_switches_per_token,
+        ),
+    }
+}
+
+fn check_pressure_limit_bound<T>(
+    field: &'static str,
+    attempted: &PressureLimit<T>,
+    max: &PressureLimit<T>,
+) -> Result<(), DeltaRejection>
+where
+    T: PartialOrd + fmt::Debug,
+{
+    if attempted.soft <= max.soft && attempted.hard <= max.hard {
+        Ok(())
+    } else {
+        Err(DeltaRejection::BeyondBounds {
+            knob: CompileKnobId::ScheduleResourcePressure,
+            attempted: format!(
+                "{field}.soft={:?}, {field}.hard={:?}",
+                attempted.soft, attempted.hard
+            ),
+            max: format!("{field}.soft={:?}, {field}.hard={:?}", max.soft, max.hard),
+        })
+    }
+}
+
+fn check_pressure_update_monotone(
+    update: &ResourcePressureUpdate,
+    current: &ResourcePressureThresholds,
+) -> Result<(), DeltaRejection> {
+    match update {
+        ResourcePressureUpdate::WramHot { limit } => {
+            check_pressure_limit_monotone("wram_hot", limit, &current.wram_hot)
+        }
+        ResourcePressureUpdate::HramHot { limit } => {
+            check_pressure_limit_monotone("hram_hot", limit, &current.hram_hot)
+        }
+        ResourcePressureUpdate::Bank0Rom { limit } => {
+            check_pressure_limit_monotone("bank0_rom", limit, &current.bank0_rom)
+        }
+        ResourcePressureUpdate::SwitchableRomWindow { limit } => check_pressure_limit_monotone(
+            "switchable_rom_window",
+            limit,
+            &current.switchable_rom_window,
+        ),
+        ResourcePressureUpdate::SramWindow { limit } => {
+            check_pressure_limit_monotone("sram_window", limit, &current.sram_window)
+        }
+        ResourcePressureUpdate::SliceCycles { limit } => {
+            check_pressure_limit_monotone("slice_cycles", limit, &current.slice_cycles)
+        }
+        ResourcePressureUpdate::InterruptLatency { limit } => {
+            check_pressure_limit_monotone("interrupt_latency", limit, &current.interrupt_latency)
+        }
+        ResourcePressureUpdate::TraceBytesPerFrame { limit } => check_pressure_limit_monotone(
+            "trace_bytes_per_frame",
+            limit,
+            &current.trace_bytes_per_frame,
+        ),
+        ResourcePressureUpdate::PersistBytesPerFrame { limit } => check_pressure_limit_monotone(
+            "persist_bytes_per_frame",
+            limit,
+            &current.persist_bytes_per_frame,
+        ),
+        ResourcePressureUpdate::OverlayInstallsPerFrame { limit } => check_pressure_limit_monotone(
+            "overlay_installs_per_frame",
+            limit,
+            &current.overlay_installs_per_frame,
+        ),
+        ResourcePressureUpdate::BankSwitchesPerToken { limit } => check_pressure_limit_monotone(
+            "bank_switches_per_token",
+            limit,
+            &current.bank_switches_per_token,
+        ),
+        ResourcePressureUpdate::SramPageSwitchesPerToken { limit } => {
+            check_pressure_limit_monotone(
+                "sram_page_switches_per_token",
+                limit,
+                &current.sram_page_switches_per_token,
+            )
+        }
+    }
+}
+
+fn check_pressure_limit_monotone<T>(
+    field: &'static str,
+    attempted: &PressureLimit<T>,
+    current: &PressureLimit<T>,
+) -> Result<(), DeltaRejection>
+where
+    T: PartialOrd + PartialEq + fmt::Debug,
+{
+    if attempted.soft >= current.soft
+        && attempted.hard >= current.hard
+        && (attempted.soft != current.soft || attempted.hard != current.hard)
+    {
+        Ok(())
+    } else {
+        Err(DeltaRejection::NotMonotone {
+            knob: CompileKnobId::ScheduleResourcePressure,
+            current: format!(
+                "{field}.soft={:?}, {field}.hard={:?}",
+                current.soft, current.hard
+            ),
+            attempted: format!(
+                "{field}.soft={:?}, {field}.hard={:?}",
+                attempted.soft, attempted.hard
+            ),
+        })
+    }
+}
+
 fn check_ordered_bound<T>(knob: CompileKnobId, attempted: &T, max: &T) -> Result<(), DeltaRejection>
 where
     T: MonotoneKnob + std::fmt::Debug,
@@ -2429,7 +2857,7 @@ fn check_delta_monotone(delta: &KnobDelta, current: &CompileKnobs) -> Result<(),
         ),
         KnobDelta::SetTraceDemotion { to } => check_strict_advance(
             CompileKnobId::ObservationTraceDemotion,
-            &current.global.observation.probe_level,
+            &current.global.observation.trace_demotion,
             to,
         ),
         KnobDelta::RaiseReductionCeiling { to, .. } => check_strict_advance(
@@ -2445,6 +2873,11 @@ fn check_delta_monotone(delta: &KnobDelta, current: &CompileKnobs) -> Result<(),
         KnobDelta::AdvanceSramPageAggression { to } => check_strict_advance(
             CompileKnobId::SramPageAggression,
             &current.global.sram.page_aggression,
+            to,
+        ),
+        KnobDelta::AdvanceSramSpillPolicy { to } => check_strict_advance(
+            CompileKnobId::SramSpillPolicy,
+            &current.global.sram.spill_policy,
             to,
         ),
         KnobDelta::AdvanceKernelResidencyBias { to } => check_strict_advance(
@@ -2489,8 +2922,9 @@ fn check_delta_monotone(delta: &KnobDelta, current: &CompileKnobs) -> Result<(),
                 Ok(())
             }
         }
-        KnobDelta::ForceKernelResidency { .. } | KnobDelta::UpdatePressureThreshold { .. } => {
-            Ok(())
+        KnobDelta::ForceKernelResidency { .. } => Ok(()),
+        KnobDelta::UpdatePressureThreshold { update } => {
+            check_pressure_update_monotone(update, &current.global.schedule.pressure_thresholds)
         }
         KnobDelta::NarrowTileClasses { remaining, .. } => {
             if remaining.is_empty() {
@@ -2532,6 +2966,7 @@ pub const fn canonical_default_bounds_fixture() -> CompileKnobBounds {
             max_profile: PlacementProfile::PackedExperts,
         },
         observation: ObservationKnobBounds {
+            max_trace_demotion: TraceDemotionLevel::RequiredOnly,
             max_probe_level: ProbeCollectionLevel::Verbose,
         },
         range: RangeKnobBounds {
@@ -2542,6 +2977,7 @@ pub const fn canonical_default_bounds_fixture() -> CompileKnobBounds {
         },
         sram: SramKnobBounds {
             max_page_aggression: SramPageAggression::MinimizeResident,
+            max_spill_policy: SramSpillPolicy::SpillEager,
         },
         rom_window: RomWindowKnobBounds {
             max_kernel_residency_bias: RomKernelResidencyBias::PreferWramOverlay,
@@ -2554,6 +2990,8 @@ pub const fn canonical_default_bounds_fixture() -> CompileKnobBounds {
             max_tile_search: ScheduleTileSearch::ProfileGuided,
             max_slice_coarsening: ScheduleSliceCoarsening::Coarse,
             max_resource_pressure: ScheduleResourcePressure::FitFirst,
+            max_pressure_thresholds: default_max_resource_pressure_thresholds(),
+            max_stage_iteration_ceilings: default_max_stage_iteration_ceilings(),
         },
     }
 }
@@ -2582,6 +3020,7 @@ mod tests {
             max_cycles_per_token: Some(8_000),
             max_bank_switches_per_token: Some(5),
             max_sram_page_switches_per_token: Some(1),
+            min_sustained_throughput_tokens_per_megacycle: None,
             min_ui_headroom_pct: 9,
             max_rom_bytes: Some(512 * 1024),
             risk: RiskPolicy {
@@ -2603,6 +3042,7 @@ mod tests {
             },
             observation: ObservationKnob {
                 observability: ObservabilityMode::Invariant,
+                trace_demotion: TraceDemotionLevel::None,
                 probe_level: ProbeCollectionLevel::Operational,
             },
             range: RangeKnob {
@@ -2613,6 +3053,7 @@ mod tests {
             },
             sram: SramKnob {
                 page_aggression: SramPageAggression::PackCold,
+                spill_policy: SramSpillPolicy::SpillOnPressure,
             },
             rom_window: RomWindowKnob {
                 kernel_residency_bias: RomKernelResidencyBias::PreferExpertBank,
@@ -2625,6 +3066,8 @@ mod tests {
                 tile_search: ScheduleTileSearch::Local,
                 slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 resource_pressure: ScheduleResourcePressure::Balanced,
+                pressure_thresholds: ResourcePressureThresholds::default(),
+                stage_iteration_ceilings: StageIterationLimits::uniform(4),
             },
         }
     }
@@ -2761,15 +3204,19 @@ mod tests {
     }
 
     fn values_json() -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "placement": {"profile": {"kind": "Budgeted"}},
             "observation": {
                 "observability": {"kind": "Invariant"},
+                "trace_demotion": {"kind": "None"},
                 "probe_level": {"kind": "Operational"}
             },
             "range": {"reduction_ceiling": {"kind": "Conservative"}},
             "storage": {"materialization": {"kind": "RecomputePureValues"}},
-            "sram": {"page_aggression": {"kind": "PackCold"}},
+            "sram": {
+                "page_aggression": {"kind": "PackCold"},
+                "spill_policy": {"kind": "SpillOnPressure"}
+            },
             "rom_window": {
                 "kernel_residency_bias": {"kind": "PreferExpertBank"},
                 "kernel_duplication_bias": {"kind": "DuplicateHot"}
@@ -2780,16 +3227,27 @@ mod tests {
                 "slice_coarsening": {"kind": "Balanced"},
                 "resource_pressure": {"kind": "Balanced"}
             }
-        })
+        });
+        value["schedule"]["pressure_thresholds"] =
+            serde_json::to_value(ResourcePressureThresholds::default()).expect("thresholds json");
+        value["schedule"]["stage_iteration_ceilings"] =
+            serde_json::to_value(StageIterationLimits::uniform(4)).expect("stage limits json");
+        value
     }
 
     fn default_bounds_json() -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "placement": {"max_profile": {"kind": "PackedExperts"}},
-            "observation": {"max_probe_level": {"kind": "Verbose"}},
+            "observation": {
+                "max_trace_demotion": {"kind": "RequiredOnly"},
+                "max_probe_level": {"kind": "Verbose"}
+            },
             "range": {"max_reduction_ceiling": {"kind": "Adaptive"}},
             "storage": {"max_materialization": {"kind": "SpillColdValues"}},
-            "sram": {"max_page_aggression": {"kind": "MinimizeResident"}},
+            "sram": {
+                "max_page_aggression": {"kind": "MinimizeResident"},
+                "max_spill_policy": {"kind": "SpillEager"}
+            },
             "rom_window": {
                 "max_kernel_residency_bias": {"kind": "PreferWramOverlay"},
                 "max_kernel_duplication_bias": {"kind": "DuplicateAllFit"}
@@ -2800,7 +3258,14 @@ mod tests {
                 "max_slice_coarsening": {"kind": "Coarse"},
                 "max_resource_pressure": {"kind": "FitFirst"}
             }
-        })
+        });
+        value["schedule"]["max_pressure_thresholds"] =
+            serde_json::to_value(default_max_resource_pressure_thresholds())
+                .expect("max thresholds json");
+        value["schedule"]["max_stage_iteration_ceilings"] =
+            serde_json::to_value(default_max_stage_iteration_ceilings())
+                .expect("max stage limits json");
+        value
     }
 
     fn empty_partial_values_json() -> serde_json::Value {
@@ -3650,17 +4115,21 @@ mod tests {
         );
         assert!(
             !ObservationKnobBounds {
+                max_trace_demotion: TraceDemotionLevel::RequiredOnly,
                 max_probe_level: ProbeCollectionLevel::Verbose,
             }
             .is_monotone_successor_of(&ObservationKnobBounds {
+                max_trace_demotion: TraceDemotionLevel::RequiredOnly,
                 max_probe_level: ProbeCollectionLevel::Operational,
             })
         );
         assert!(
             ObservationKnobBounds {
+                max_trace_demotion: TraceDemotionLevel::RequiredOnly,
                 max_probe_level: ProbeCollectionLevel::Operational,
             }
             .is_monotone_successor_of(&ObservationKnobBounds {
+                max_trace_demotion: TraceDemotionLevel::RequiredOnly,
                 max_probe_level: ProbeCollectionLevel::Operational,
             })
         );
@@ -3683,9 +4152,11 @@ mod tests {
         assert!(
             !SramKnobBounds {
                 max_page_aggression: SramPageAggression::MinimizeResident,
+                max_spill_policy: SramSpillPolicy::SpillOnPressure,
             }
             .is_monotone_successor_of(&SramKnobBounds {
                 max_page_aggression: SramPageAggression::PackCold,
+                max_spill_policy: SramSpillPolicy::SpillOnPressure,
             })
         );
         assert!(
@@ -3721,11 +4192,15 @@ mod tests {
                 max_tile_search: ScheduleTileSearch::ProfileGuided,
                 max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 max_resource_pressure: ScheduleResourcePressure::Balanced,
+                max_pressure_thresholds: default_max_resource_pressure_thresholds(),
+                max_stage_iteration_ceilings: default_max_stage_iteration_ceilings(),
             }
             .is_monotone_successor_of(&ScheduleKnobBounds {
                 max_tile_search: ScheduleTileSearch::Local,
                 max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 max_resource_pressure: ScheduleResourcePressure::Balanced,
+                max_pressure_thresholds: default_max_resource_pressure_thresholds(),
+                max_stage_iteration_ceilings: default_max_stage_iteration_ceilings(),
             })
         );
         assert!(
@@ -3733,11 +4208,15 @@ mod tests {
                 max_tile_search: ScheduleTileSearch::Local,
                 max_slice_coarsening: ScheduleSliceCoarsening::Coarse,
                 max_resource_pressure: ScheduleResourcePressure::Balanced,
+                max_pressure_thresholds: default_max_resource_pressure_thresholds(),
+                max_stage_iteration_ceilings: default_max_stage_iteration_ceilings(),
             }
             .is_monotone_successor_of(&ScheduleKnobBounds {
                 max_tile_search: ScheduleTileSearch::Local,
                 max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 max_resource_pressure: ScheduleResourcePressure::Balanced,
+                max_pressure_thresholds: default_max_resource_pressure_thresholds(),
+                max_stage_iteration_ceilings: default_max_stage_iteration_ceilings(),
             })
         );
         assert!(
@@ -3745,11 +4224,15 @@ mod tests {
                 max_tile_search: ScheduleTileSearch::Local,
                 max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 max_resource_pressure: ScheduleResourcePressure::FitFirst,
+                max_pressure_thresholds: default_max_resource_pressure_thresholds(),
+                max_stage_iteration_ceilings: default_max_stage_iteration_ceilings(),
             }
             .is_monotone_successor_of(&ScheduleKnobBounds {
                 max_tile_search: ScheduleTileSearch::Local,
                 max_slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 max_resource_pressure: ScheduleResourcePressure::Balanced,
+                max_pressure_thresholds: default_max_resource_pressure_thresholds(),
+                max_stage_iteration_ceilings: default_max_stage_iteration_ceilings(),
             })
         );
     }
@@ -4258,7 +4741,7 @@ mod tests {
         fn invariant_blocks_demotion() {
             let rejection = check_delta_admissible(
                 &KnobDelta::SetTraceDemotion {
-                    to: ProbeCollectionLevel::Verbose,
+                    to: TraceDemotionLevel::DropBestEffort,
                 },
                 &compile_knobs_fixture(),
                 &RepairPolicy::for_profile(RepairPolicyProfile::Default),
@@ -4317,6 +4800,39 @@ mod tests {
                 &facts,
             )
             .expect("pure force recompute is admissible");
+        }
+
+        #[test]
+        fn sram_spill_policy_delta_is_backed_by_value_and_bounds() {
+            check_delta_admissible(
+                &KnobDelta::AdvanceSramSpillPolicy {
+                    to: SramSpillPolicy::SpillEager,
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect("spill policy advances against explicit sram field");
+
+            let mut knobs = compile_knobs_fixture();
+            knobs.bounds.sram.max_spill_policy = SramSpillPolicy::NoSpill;
+            let rejection = check_delta_admissible(
+                &KnobDelta::AdvanceSramSpillPolicy {
+                    to: SramSpillPolicy::SpillEager,
+                },
+                &knobs,
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect_err("spill policy max bound rejects");
+
+            assert!(matches!(
+                rejection,
+                DeltaRejection::BeyondBounds {
+                    knob: CompileKnobId::SramSpillPolicy,
+                    ..
+                }
+            ));
         }
 
         #[test]
@@ -4655,7 +5171,7 @@ mod tests {
         }
 
         #[test]
-        fn pressure_update_rejects_until_mutable_thresholds_are_wired() {
+        fn pressure_update_rejects_non_monotone_threshold_change() {
             let rejection = check_delta_admissible(
                 &KnobDelta::UpdatePressureThreshold {
                     update: ResourcePressureUpdate::WramHot {
@@ -4669,15 +5185,33 @@ mod tests {
                 &RepairPolicy::for_profile(RepairPolicyProfile::Default),
                 ObservabilityMode::Flexible,
             )
-            .expect_err("valid pressure update is unsupported in narrow-v1");
+            .expect_err("lower pressure threshold rejects");
 
             assert!(matches!(
                 rejection,
-                DeltaRejection::UnsupportedMutation {
+                DeltaRejection::NotMonotone {
                     knob: CompileKnobId::ScheduleResourcePressure,
-                    reason
-                } if reason.contains("bd-2n14")
+                    ..
+                }
             ));
+        }
+
+        #[test]
+        fn pressure_update_accepts_mutable_thresholds() {
+            check_delta_admissible(
+                &KnobDelta::UpdatePressureThreshold {
+                    update: ResourcePressureUpdate::WramHot {
+                        limit: PressureLimit {
+                            soft: 7000,
+                            hard: 8192,
+                        },
+                    },
+                },
+                &compile_knobs_fixture(),
+                &RepairPolicy::for_profile(RepairPolicyProfile::Default),
+                ObservabilityMode::Flexible,
+            )
+            .expect("valid pressure update is repair-mutable");
         }
 
         #[test]

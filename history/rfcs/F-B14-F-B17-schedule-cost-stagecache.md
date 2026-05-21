@@ -958,6 +958,8 @@ pub struct CompileObjective {
     pub primary: ObjectiveAxis,
     pub additional: Vec<ObjectiveAxis>,
     pub quantile_targets: Vec<QuantileTarget>,
+    /// Sustained throughput floor in tokens / 1e6 cycles, Q16.16 report units.
+    pub min_sustained_throughput_tokens_per_megacycle: Option<u32>,
     pub trace_budget: Option<TraceBudgetSatisfaction>,
     pub frame_jitter: Option<FrameJitterTarget>,
 }
@@ -2277,9 +2279,10 @@ while `frame_jitter` is `Heuristic` because the workload mix needed
 to calibrate frame jitter has not been collected yet.
 
 The `Option`-typed fields exist because the relevant axis may be
-structurally absent: `sram_page_switches_per_token` is only meaningful
-when persistent pages exist; `video_commit_cost_margin` only when the
-build has a UI; `frame_jitter` only when the objective requires it.
+structurally absent: `sram_page_switches_per_token` is required when
+the objective sets an SRAM page-switch target and otherwise emitted
+only when persistent pages exist; `video_commit_cost_margin` only when
+the build has a UI; `frame_jitter` only when the objective requires it.
 The semantic validator pins which `Option` fields are required for
 which build shapes (§8.3).
 
@@ -2364,6 +2367,10 @@ materialized in the report for two reasons:
 The semantic validator enforces consistency: every entry in
 `satisfaction.entries` must agree with what would be computed by
 re-projecting `objective` against `per_mode`.
+For ceiling objectives lower cost is better; for
+`SustainedThroughputTokensPerMegacycle`, the target is
+`CompileObjective.min_sustained_throughput_tokens_per_megacycle` and
+higher estimated throughput is better.
 
 #### 8.1.9 Quantile
 
@@ -2638,7 +2645,11 @@ lower(quantile) :=
   similarly, using p95_lower / p50
 
 satisfaction :=
-  if upper(quantile) ≤ target_value + uncertainty_tolerance:
+  if axis is a minimum objective such as SustainedThroughput:
+    if lower(quantile) ≥ target_value - uncertainty_tolerance: Satisfied
+    elif upper(quantile) ≥ target_value - uncertainty_tolerance: Borderline
+    else: Violated
+  else if upper(quantile) ≤ target_value + uncertainty_tolerance:
     Satisfied
   elif lower(quantile) ≤ target_value + uncertainty_tolerance:
     Borderline
@@ -2707,6 +2718,13 @@ resolve_cycle_model(kspec, m, r, tc):
 `default_heuristic` is a closed-form policy documented under
 `HeuristicPolicyId::CyclesPerOpDefault` (§8.5.4).
 
+Implementation note, 2026-05-21 `bd-2ksl`: Stage 11 now consumes a
+typed `ScheduleCostKernelRegistry` body in addition to the registry
+hash. Every `SchedOp::KernelCall` is checked against that typed
+registry and an unregistered `KernelSpecId` fails closed with
+`CostKernelSpecNotInRegistry`; the K14 identity uses the hash derived
+from the registry body.
+
 #### 8.5.3 Residency-class modifiers
 
 A kernel's predicted cycles_per_op depends on residency:
@@ -2771,6 +2789,12 @@ in cosmetic identity (e.g., a profile family rename). This is enough
 to validate the transfer machinery without committing to non-trivial
 transfer math.
 
+Implementation note, 2026-05-21 `bd-20n6`: the landed Stage 11 v1
+surface records transferred estimates with both an `F-B14CalibrationBundle`
+evidence ref and an `F-B14TransferPolicy` evidence ref. The semantic
+validator fails closed if a transferred estimate lacks either ref, or if a
+calibrated estimate carries a transfer ref.
+
 #### 8.5.6 Bundle freshness gate
 
 F-B14 enforces the same calibration freshness gate as F-B2 Stage 0:
@@ -2791,6 +2815,20 @@ estimate to fall back to `Heuristic` with a typed `BundleStale`
 reason. The build proceeds with reduced confidence. Whether F-B14
 emits a top-level `Failed` envelope depends on the active
 `RiskPolicy::calibration_confidence_requirement` (§2.14).
+
+Implementation note, 2026-05-21 `bd-20n6`: Stage 11 checks
+`target_profile_hash`, `kernel_set_hash`, `packer_version`, and
+`calibration_schema_hash` before using a non-bootstrap calibration bundle.
+The affected estimates fall back to axis-specific heuristic policy refs and
+carry `FallbackReason::BundleStale`; the current `ReportEnvelope` is marked
+failed because F-B14 diagnostics are hard in v1.
+
+Implementation note, 2026-05-21 `bd-2ksl`: `ValidityEnvelope` now carries
+typed `CalibrationSessionProfile` entries, and Stage 11 consumes the active
+session profile as a typed input. Non-bootstrap bundles must explicitly
+contain the active session profile or they fall back with
+`StaleCalibrationField::ValidityEnvelope`; K14 also binds the active session
+profile hash.
 
 #### 8.5.7 Calibration bundle hash binding
 
@@ -3509,6 +3547,20 @@ Stage 12 still has no single backend pipeline input/report envelope, so
 `rom::Stage12BackendInputs` / `Stage12BackendProduct` is an explicit narrow-v1
 bundle over `encode_placed_rom`; callers provide the backend report/package
 hash that the cache cell and `cache_status.json` entry should bind.
+
+Implementation note, 2026-05-21 `bd-2c2z` follow-up slice:
+`gbf-codegen::stage_cache` now includes
+`run_compiled_build_stage_cache_pipeline`, a typed production orchestration
+surface that linearly invokes the cache-aware Stage 6, 7, 8, 8.5, 9, 10,
+10.5, 11, and 12 wrappers, records each `StageCacheStatusEntry`, halts on a
+failure memo, fills later stages as `not_applicable`, and returns a
+`BuildReports` package containing canonical `cache_status.json`. The same
+slice expands F-B17 conformance from representative key-drift checks to a
+per-serialized-field typed-input-bundle test across all 16 cache-status
+stages. The remaining non-narrow limitation is that the driver consumes the
+currently landed per-stage input bundles; full backend report-envelope
+collection beyond `cache_status.json` remains with the F-B15/F-F1 report
+owners.
 
 ### 9.6 Per-stage test obligations
 
@@ -4938,7 +4990,7 @@ closes only when every class has at least one passing test.
 | RC-COST-5 | `CostKernelSpecNotInRegistry` | SchedOp invokes unregistered KernelSpec; assert hard fail |
 | RC-COST-6 | `CostPerModeMissing` | requested_runtime_modes contains a mode SchedulePack does not; assert hard fail |
 | RC-COST-7 | `CostPerModeUnexpected` | SchedulePack contains a mode requested_runtime_modes does not; assert hard fail |
-| RC-COST-8 | `CostEvidenceClassRefsInconsistent` | manually-construct CostEstimate with evidence_class=Calibrated, refs=[]; assert validator fails |
+| RC-COST-8 | `CostEvidenceClassRefsInconsistent` | calibrated estimates require calibration refs and no transfer ref; transferred estimates require calibration + transfer refs; assert validator fails closed |
 | RC-COST-9 | `CostFallbackReasonMissing` | manually-construct CostEstimate with evidence_class=Heuristic, fallback_reason=None; assert validator fails |
 | RC-COST-10 | `CostFallbackReasonPresentForCalibrated` | inverse of RC-COST-9 |
 | RC-COST-11 | `CostUncertaintyEnvelopeMalformed` | p95_lower > p50; assert validator fails |

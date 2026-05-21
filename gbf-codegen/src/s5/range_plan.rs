@@ -457,9 +457,64 @@ pub struct RangePlanCoreProduct {
     pub range_cert: RangeCertBody,
     pub range_plan_self_hash: Hash256,
     pub range_cert_body_hash: Hash256,
+    #[serde(default)]
+    pub rom_window_facts: RangeRomWindowFacts,
 }
 
 pub type RangePlanProduct = RangePlanCoreProduct;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeRomWindowFacts {
+    pub source: RangeRomWindowFactSource,
+    pub reduction_subordinates: Vec<RangeRomWindowReductionSubordinateFact>,
+}
+
+impl Default for RangeRomWindowFacts {
+    fn default() -> Self {
+        Self::source_impossible(
+            "range_plan.rom_window_facts",
+            "Stage 5 RangePlan did not publish ROM-window reduction subordinate facts",
+        )
+    }
+}
+
+impl RangeRomWindowFacts {
+    #[must_use]
+    pub fn source_impossible(registry_key: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            source: RangeRomWindowFactSource::SourceImpossible {
+                registry_key: registry_key.into(),
+                reason: reason.into(),
+            },
+            reduction_subordinates: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum RangeRomWindowFactSource {
+    Available {
+        registry_key: String,
+    },
+    Missing {
+        registry_key: String,
+    },
+    SourceImpossible {
+        registry_key: String,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeRomWindowReductionSubordinateFact {
+    pub site: ReductionSiteId,
+    pub main_kernel: gbf_foundation::KernelSpecId,
+    pub subordinate_kernel: gbf_foundation::KernelSpecId,
+    pub source: RangeRomWindowFactSource,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1225,6 +1280,7 @@ pub fn build_range_plan_core(
         range_cert: range_cert.clone(),
         range_plan_self_hash,
         range_cert_body_hash,
+        rom_window_facts: RangeRomWindowFacts::default(),
     };
     let cert_report_self_hash = report_self_hash_for(ReportOutcome::Passed, range_cert.clone());
     let range_plan_body =
@@ -4613,6 +4669,7 @@ mod tests {
             range_cert_body_hash: range_cert_body_hash(&range_cert).expect("cert hashes"),
             range_plan,
             range_cert,
+            rom_window_facts: RangeRomWindowFacts::default(),
         }
     }
 

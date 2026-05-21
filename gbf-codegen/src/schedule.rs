@@ -505,10 +505,10 @@ pub struct ResourceStateCertificate {
     pub pass_version: String,
     pub identity: SchedulePackInputIdentity,
     pub schedule_pack_self_hash: Hash256,
-    pub lease_balance: ProofStatus,
-    pub yield_safety: ProofStatus,
-    pub isr_visible_residency: ProofStatus,
-    pub overlay_bank_shadow: ProofStatus,
+    pub lease_balance: LeaseBalanceSection,
+    pub yield_safety: YieldSafetySection,
+    pub isr_visible_residency: IsrVisibleResidencySection,
+    pub overlay_bank_shadow: OverlayBankShadowSection,
     pub diagnostics: Vec<ValidationDiagnostic>,
     pub resource_state_cert_self_hash: Hash256,
 }
@@ -523,11 +523,84 @@ impl ReportBody for ResourceStateCertificate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseBalanceSection {
+    pub leases: Vec<LeaseBalanceFact>,
+    pub all_balanced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseBalanceFact {
+    pub lease: LeaseId,
+    pub kind_discriminant: ResourceLeaseKindDiscriminant,
+    pub acquired_in: SliceId,
+    pub released_in: SliceId,
+    pub yield_safe: bool,
+    pub paths_checked: u32,
+    pub all_paths_balanced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
-pub enum ProofStatus {
-    Passed,
-    Failed,
+pub enum ResourceLeaseKindDiscriminant {
+    RomWindow,
+    SramPage,
+    Overlay,
+    InterruptMask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct YieldSafetySection {
+    pub yield_events: Vec<YieldSafetyFact>,
+    pub all_yields_safe: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct YieldSafetyFact {
+    pub slice: SliceId,
+    pub yield_kind: YieldKind,
+    pub outstanding_leases: Vec<LeaseId>,
+    pub all_yield_safe: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsrVisibleResidencySection {
+    pub enabled_slices: Vec<IsrVisibleResidencyFact>,
+    pub all_isr_safe: bool,
+    pub computed_reachability_confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsrVisibleResidencyFact {
+    pub slice: SliceId,
+    pub residency: EntryResidency,
+    pub outstanding_leases: Vec<LeaseId>,
+    pub all_safe: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverlayBankShadowSection {
+    pub slices_checked: Vec<OverlayBankShadowConsistencyFact>,
+    pub all_consistent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverlayBankShadowConsistencyFact {
+    pub slice: SliceId,
+    pub epoch_id: SchedEpochId,
+    pub entry_residency_matches: bool,
+    pub overlay_installs_aligned: bool,
+    pub overlay_lease_shape_satisfied: bool,
+    pub bank_switches_bracketed: bool,
+    pub all_consistent: bool,
 }
 
 pub fn build_schedule_pack(input: &SchedulePackInputs) -> SchedulePackOutput {
@@ -595,7 +668,8 @@ pub fn build_schedule_pack(input: &SchedulePackInputs) -> SchedulePackOutput {
     let mut all_leases = BTreeMap::new();
     let mut modes = Vec::new();
     let mut epochs_by_mode = Vec::new();
-    for mode in runtime_modes {
+    for (mode_index, mode) in runtime_modes.into_iter().enumerate() {
+        let id_base = (mode_index as u32).saturating_mul(10_000);
         let (ir, epochs, leases) = build_mode_schedule(
             mode,
             &input.rom_window_plan,
@@ -603,6 +677,7 @@ pub fn build_schedule_pack(input: &SchedulePackInputs) -> SchedulePackOutput {
             overlay_for_active_epoch,
             &live_wram,
             &live_sram,
+            id_base,
         );
         for lease in leases {
             all_leases.entry(lease.id).or_insert(lease);
@@ -628,6 +703,10 @@ pub fn build_schedule_pack(input: &SchedulePackInputs) -> SchedulePackOutput {
             );
         }
     };
+    let legal_epoch_boundaries = epochs_by_mode
+        .iter()
+        .flat_map(|entry| entry.epochs.iter().map(|epoch| epoch.id))
+        .collect();
     let mut pack = SchedulePack {
         identity: input.input_identity.clone(),
         modes,
@@ -637,7 +716,7 @@ pub fn build_schedule_pack(input: &SchedulePackInputs) -> SchedulePackOutput {
         continuation_abi_hash,
         switch_policy: ModeSwitchPolicy {
             legal_switch_points: Vec::new(),
-            legal_epoch_boundaries: Vec::new(),
+            legal_epoch_boundaries,
             ui_pressure_thresholds: vec![UiPressureThreshold {
                 max_pending_frames: 1,
             }],
@@ -741,11 +820,11 @@ pub fn build_schedule_pack(input: &SchedulePackInputs) -> SchedulePackOutput {
 }
 
 pub fn validate_resource_state(pack: &SchedulePack) -> ResourceStateValidation {
-    let mut diagnostics = Vec::new();
+    let mut validation = ResourceStateValidation::new();
     let lease_map: BTreeMap<LeaseId, &ResourceLease> =
         pack.leases.iter().map(|lease| (lease.id, lease)).collect();
     if lease_map.len() != pack.leases.len() {
-        diagnostics.push(diagnostic(
+        validation.diagnostics.push(diagnostic(
             ResourceStateDiagnosticCode::LeaseDoubleAcquire,
             ResourceStateDiagnosticProvenance::Lease {
                 invariant: "lease ids are unique".to_owned(),
@@ -755,6 +834,17 @@ pub fn validate_resource_state(pack: &SchedulePack) -> ResourceStateValidation {
         ));
     }
 
+    for requested in &pack.identity.requested_runtime_modes {
+        if !pack.modes.iter().any(|entry| entry.mode == *requested) {
+            validation.diagnostics.push(diagnostic(
+                ResourceStateDiagnosticCode::ModeRequestedModeNotEmitted,
+                ResourceStateDiagnosticProvenance::Mode { mode: *requested },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+        }
+    }
+
+    let mut computed_reachability_confirmed = !pack.modes.is_empty();
     for mode_schedule in &pack.modes {
         let mode = mode_schedule.mode;
         let ir = &mode_schedule.ir;
@@ -764,18 +854,23 @@ pub fn validate_resource_state(pack: &SchedulePack) -> ResourceStateValidation {
             .find(|entry| entry.mode == mode)
             .map(|entry| entry.epochs.as_slice())
         else {
-            diagnostics.push(diagnostic(
+            validation.diagnostics.push(diagnostic(
                 ResourceStateDiagnosticCode::SchedEpochCoverageGap,
                 ResourceStateDiagnosticProvenance::Mode { mode },
                 ValidationOrigin::ResourceStateValidation,
             ));
+            computed_reachability_confirmed = false;
             continue;
         };
-        validate_mode_resource_state(ir, epochs, &lease_map, &mut diagnostics);
+        computed_reachability_confirmed &=
+            validate_mode_resource_state(ir, epochs, &lease_map, &mut validation);
     }
+    validation
+        .isr_visible_residency
+        .computed_reachability_confirmed = computed_reachability_confirmed;
 
     if !pack.drift_monitor.observed.is_all_none() {
-        diagnostics.push(diagnostic(
+        validation.diagnostics.push(diagnostic(
             ResourceStateDiagnosticCode::DriftObservedNotAllNoneAtCompileTime,
             ResourceStateDiagnosticProvenance::Drift {
                 invariant: "observed drift envelope must be empty at compile time".to_owned(),
@@ -785,7 +880,7 @@ pub fn validate_resource_state(pack: &SchedulePack) -> ResourceStateValidation {
         ));
     }
     if pack.drift_monitor.consecutive_violations != 0 {
-        diagnostics.push(diagnostic(
+        validation.diagnostics.push(diagnostic(
             ResourceStateDiagnosticCode::DriftConsecutiveViolationsNonZeroAtCompileTime,
             ResourceStateDiagnosticProvenance::Drift {
                 invariant: "consecutive violations must start at zero".to_owned(),
@@ -795,37 +890,101 @@ pub fn validate_resource_state(pack: &SchedulePack) -> ResourceStateValidation {
         ));
     }
 
-    ResourceStateValidation { diagnostics }
+    validation.finish();
+    validation
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceStateValidation {
     pub diagnostics: Vec<ValidationDiagnostic>,
+    pub lease_balance: LeaseBalanceSection,
+    pub yield_safety: YieldSafetySection,
+    pub isr_visible_residency: IsrVisibleResidencySection,
+    pub overlay_bank_shadow: OverlayBankShadowSection,
 }
 
 impl ResourceStateValidation {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            diagnostics: Vec::new(),
+            lease_balance: LeaseBalanceSection {
+                leases: Vec::new(),
+                all_balanced: true,
+            },
+            yield_safety: YieldSafetySection {
+                yield_events: Vec::new(),
+                all_yields_safe: true,
+            },
+            isr_visible_residency: IsrVisibleResidencySection {
+                enabled_slices: Vec::new(),
+                all_isr_safe: true,
+                computed_reachability_confirmed: false,
+            },
+            overlay_bank_shadow: OverlayBankShadowSection {
+                slices_checked: Vec::new(),
+                all_consistent: true,
+            },
+        }
+    }
+
+    fn finish(&mut self) {
+        self.lease_balance.leases.sort_by_key(|fact| fact.lease);
+        self.lease_balance.leases.dedup_by_key(|fact| fact.lease);
+        self.yield_safety
+            .yield_events
+            .sort_by_key(|fact| fact.slice);
+        self.isr_visible_residency
+            .enabled_slices
+            .sort_by_key(|fact| fact.slice);
+        self.overlay_bank_shadow
+            .slices_checked
+            .sort_by_key(|fact| fact.slice);
+        self.lease_balance.all_balanced = self
+            .lease_balance
+            .leases
+            .iter()
+            .all(|fact| fact.all_paths_balanced);
+        self.yield_safety.all_yields_safe = self
+            .yield_safety
+            .yield_events
+            .iter()
+            .all(|fact| fact.all_yield_safe);
+        self.isr_visible_residency.all_isr_safe = self
+            .isr_visible_residency
+            .enabled_slices
+            .iter()
+            .all(|fact| fact.all_safe);
+        self.overlay_bank_shadow.all_consistent = self
+            .overlay_bank_shadow
+            .slices_checked
+            .iter()
+            .all(|fact| fact.all_consistent);
+    }
+
     #[must_use]
     pub fn certificate(
         &self,
         identity: SchedulePackInputIdentity,
         schedule_pack_self_hash: Hash256,
     ) -> ResourceStateCertificate {
-        let status = if self.diagnostics.is_empty() {
-            ProofStatus::Passed
-        } else {
-            ProofStatus::Failed
-        };
         ResourceStateCertificate {
             pass_version: RESOURCE_STATE_CERT_PASS_VERSION.to_owned(),
             identity,
             schedule_pack_self_hash,
-            lease_balance: status,
-            yield_safety: status,
-            isr_visible_residency: status,
-            overlay_bank_shadow: status,
+            lease_balance: self.lease_balance.clone(),
+            yield_safety: self.yield_safety.clone(),
+            isr_visible_residency: self.isr_visible_residency.clone(),
+            overlay_bank_shadow: self.overlay_bank_shadow.clone(),
             diagnostics: self.diagnostics.clone(),
             resource_state_cert_self_hash: Hash256::ZERO,
         }
+    }
+}
+
+impl Default for ResourceStateValidation {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -836,6 +995,7 @@ fn build_mode_schedule(
     overlay_for_active_epoch: Option<OverlayId>,
     live_wram: &[ArenaSlotId],
     live_sram: &[ArenaSlotId],
+    id_base: u32,
 ) -> (GbSchedIR, Vec<ResidencyEpoch>, Vec<ResourceLease>) {
     let source_epochs = if rom_window_plan.residency_epochs.is_empty() {
         Vec::new()
@@ -852,8 +1012,9 @@ fn build_mode_schedule(
     let mut leases = Vec::new();
     let mut next_lease = 0_u32;
     for (index, source_epoch) in source_epochs.iter().enumerate() {
-        let slice_id = SliceId(index as u32);
-        let successor = (index + 1 < source_epochs.len()).then(|| SliceId(index as u32 + 1));
+        let slice_id = SliceId(id_base.saturating_add(index as u32));
+        let successor =
+            (index + 1 < source_epochs.len()).then(|| SliceId(id_base + index as u32 + 1));
         let binding = binding_map.get(&source_epoch.rom_window_binding);
         let visibility = binding
             .map(|binding| binding.visibility)
@@ -868,7 +1029,7 @@ fn build_mode_schedule(
         let mut resources = ResourceVector::default();
 
         if let Some(bank) = visibility.switchable {
-            let lease_id = LeaseId(next_lease);
+            let lease_id = LeaseId(id_base.saturating_add(next_lease));
             next_lease += 1;
             leases.push(ResourceLease {
                 id: lease_id,
@@ -889,7 +1050,7 @@ fn build_mode_schedule(
         }
 
         if let Some(binding) = source_epoch.sram_page_binding {
-            let lease_id = LeaseId(next_lease);
+            let lease_id = LeaseId(id_base.saturating_add(next_lease));
             next_lease += 1;
             leases.push(ResourceLease {
                 id: lease_id,
@@ -905,7 +1066,7 @@ fn build_mode_schedule(
         }
 
         if let Some(overlay) = overlay {
-            let lease_id = LeaseId(next_lease);
+            let lease_id = LeaseId(id_base.saturating_add(next_lease));
             next_lease += 1;
             leases.push(ResourceLease {
                 id: lease_id,
@@ -956,17 +1117,21 @@ fn build_mode_schedule(
         } else {
             InterruptPolicy::Enabled
         };
+        let cadence = mode_cadence(mode);
+        if mode == RuntimeMode::Trace {
+            resources.trace_bytes = resources.trace_bytes.saturating_add(64);
+        }
         slices.push(SchedSlice {
             id: slice_id,
             ops,
-            hard_cycles_to_safe_point: 17_556,
-            soft_target_cycles: 14_000,
-            max_interrupt_latency: 40,
+            hard_cycles_to_safe_point: cadence.hard_cycles_to_safe_point,
+            soft_target_cycles: cadence.soft_target_cycles,
+            max_interrupt_latency: cadence.max_interrupt_latency,
             resources,
             live_wram: live_wram.to_vec(),
             live_sram: live_sram.to_vec(),
             yield_kind: yield_kind_from_hint(source_epoch.yield_kind),
-            yield_check: YieldCheckClass::OnceAtEnd,
+            yield_check: cadence.yield_check,
             entry_residency,
             interrupt_policy,
             required_leases,
@@ -980,7 +1145,7 @@ fn build_mode_schedule(
             successors: successor.into_iter().collect(),
         });
         epochs.push(ResidencyEpoch {
-            id: SchedEpochId(index as u32),
+            id: SchedEpochId(id_base.saturating_add(index as u32)),
             rom_window: source_epoch.rom_window_binding,
             overlay,
             residency: entry_residency,
@@ -989,17 +1154,18 @@ fn build_mode_schedule(
     }
 
     if slices.is_empty() {
+        let cadence = mode_cadence(mode);
         slices.push(SchedSlice {
-            id: SliceId(0),
+            id: SliceId(id_base),
             ops: vec![SchedOp::Halt],
-            hard_cycles_to_safe_point: 17_556,
-            soft_target_cycles: 14_000,
-            max_interrupt_latency: 40,
+            hard_cycles_to_safe_point: cadence.hard_cycles_to_safe_point,
+            soft_target_cycles: cadence.soft_target_cycles,
+            max_interrupt_latency: cadence.max_interrupt_latency,
             resources: ResourceVector::default(),
             live_wram: live_wram.to_vec(),
             live_sram: live_sram.to_vec(),
             yield_kind: YieldKind::Finished,
-            yield_check: YieldCheckClass::OnceAtEnd,
+            yield_check: cadence.yield_check,
             entry_residency: EntryResidency::Bank0,
             interrupt_policy: InterruptPolicy::Enabled,
             required_leases: Vec::new(),
@@ -1009,18 +1175,18 @@ fn build_mode_schedule(
             successors: Vec::new(),
         });
         epochs.push(ResidencyEpoch {
-            id: SchedEpochId(0),
+            id: SchedEpochId(id_base),
             rom_window: RomWindowBindingId(0),
             overlay: None,
             residency: EntryResidency::Bank0,
-            slices: vec![SliceId(0)],
+            slices: vec![SliceId(id_base)],
         });
     }
 
     (
         GbSchedIR {
             mode,
-            entry_slice: SliceId(0),
+            entry_slice: SliceId(id_base),
             slices,
         },
         epochs,
@@ -1028,23 +1194,96 @@ fn build_mode_schedule(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModeCadence {
+    hard_cycles_to_safe_point: u32,
+    soft_target_cycles: u32,
+    max_interrupt_latency: u32,
+    yield_check: YieldCheckClass,
+}
+
+fn mode_cadence(mode: RuntimeMode) -> ModeCadence {
+    match mode {
+        RuntimeMode::Interactive => ModeCadence {
+            hard_cycles_to_safe_point: 17_556,
+            soft_target_cycles: 8_778,
+            max_interrupt_latency: 256,
+            yield_check: YieldCheckClass::OnceAtEnd,
+        },
+        RuntimeMode::Trace => ModeCadence {
+            hard_cycles_to_safe_point: 17_556,
+            soft_target_cycles: 4_389,
+            max_interrupt_latency: 128,
+            yield_check: YieldCheckClass::EveryNTiles { n: 1 },
+        },
+        RuntimeMode::Steady => ModeCadence {
+            hard_cycles_to_safe_point: 35_112,
+            soft_target_cycles: 17_556,
+            max_interrupt_latency: 512,
+            yield_check: YieldCheckClass::OnceAtEnd,
+        },
+        RuntimeMode::Safe => ModeCadence {
+            hard_cycles_to_safe_point: 17_556,
+            soft_target_cycles: 4_389,
+            max_interrupt_latency: 128,
+            yield_check: YieldCheckClass::EveryLoadStore,
+        },
+    }
+}
+
 fn validate_mode_resource_state(
     ir: &GbSchedIR,
     epochs: &[ResidencyEpoch],
     lease_map: &BTreeMap<LeaseId, &ResourceLease>,
-    diagnostics: &mut Vec<ValidationDiagnostic>,
-) {
+    validation: &mut ResourceStateValidation,
+) -> bool {
     let slice_map: BTreeMap<SliceId, &SchedSlice> =
         ir.slices.iter().map(|slice| (slice.id, slice)).collect();
     let mut slice_to_epoch = BTreeMap::new();
     for epoch in epochs {
         for slice in &epoch.slices {
-            slice_to_epoch.insert(*slice, epoch);
+            if slice_to_epoch.insert(*slice, epoch).is_some() {
+                validation.diagnostics.push(diagnostic(
+                    ResourceStateDiagnosticCode::SchedEpochCoverageGap,
+                    ResourceStateDiagnosticProvenance::Slice {
+                        invariant: "slice is covered by more than one residency epoch".to_owned(),
+                        slice_id: slice.0,
+                    },
+                    ValidationOrigin::ResourceStateValidation,
+                ));
+            }
         }
     }
+    let flow = analyze_slice_graph(ir, &slice_map, lease_map, &mut validation.diagnostics);
+    let mut all_slices_reachable = !ir.slices.is_empty() && slice_map.contains_key(&ir.entry_slice);
+
+    for lease in lease_map.values().filter(|lease| {
+        slice_map.contains_key(&lease.acquired_in) || slice_map.contains_key(&lease.released_in)
+    }) {
+        let acquired_seen = flow
+            .values()
+            .any(|fact| fact.reachable && fact.acquired.contains(&lease.id));
+        let released_seen = flow
+            .values()
+            .any(|fact| fact.reachable && fact.released.contains(&lease.id));
+        let terminal_balanced = flow
+            .values()
+            .filter(|fact| fact.reachable && fact.terminal)
+            .all(|fact| !fact.exit_active.contains(&lease.id));
+        validation.lease_balance.leases.push(LeaseBalanceFact {
+            lease: lease.id,
+            kind_discriminant: lease_kind_discriminant(&lease.kind),
+            acquired_in: lease.acquired_in,
+            released_in: lease.released_in,
+            yield_safe: lease.yield_safe,
+            paths_checked: flow.values().filter(|fact| fact.reachable).count() as u32,
+            all_paths_balanced: acquired_seen && released_seen && terminal_balanced,
+        });
+    }
+
     for slice in &ir.slices {
         let Some(epoch) = slice_to_epoch.get(&slice.id) else {
-            diagnostics.push(diagnostic(
+            validation.diagnostics.push(diagnostic(
                 ResourceStateDiagnosticCode::SchedEpochCoverageGap,
                 ResourceStateDiagnosticProvenance::Slice {
                     invariant: "slice is not covered by any residency epoch".to_owned(),
@@ -1054,8 +1293,31 @@ fn validate_mode_resource_state(
             ));
             continue;
         };
+        let Some(slice_flow) = flow.get(&slice.id) else {
+            validation.diagnostics.push(diagnostic(
+                ResourceStateDiagnosticCode::SchedEpochCoverageGap,
+                ResourceStateDiagnosticProvenance::Slice {
+                    invariant: "slice is unreachable from mode entry".to_owned(),
+                    slice_id: slice.id.0,
+                },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+            continue;
+        };
+        if !slice_flow.reachable {
+            all_slices_reachable = false;
+            validation.diagnostics.push(diagnostic(
+                ResourceStateDiagnosticCode::SchedEpochCoverageGap,
+                ResourceStateDiagnosticProvenance::Slice {
+                    invariant: "slice is unreachable from mode entry".to_owned(),
+                    slice_id: slice.id.0,
+                },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+            continue;
+        }
         if slice.entry_residency != epoch.residency {
-            diagnostics.push(diagnostic(
+            validation.diagnostics.push(diagnostic(
                 ResourceStateDiagnosticCode::SchedEntryResidencyEpochMismatch,
                 ResourceStateDiagnosticProvenance::Epoch {
                     invariant: "slice entry residency must match epoch residency".to_owned(),
@@ -1066,7 +1328,7 @@ fn validate_mode_resource_state(
         }
         for lease in &slice.required_leases {
             if !lease_map.contains_key(lease) {
-                diagnostics.push(diagnostic(
+                validation.diagnostics.push(diagnostic(
                     ResourceStateDiagnosticCode::LeaseRequiredLeaseNotAcquired,
                     ResourceStateDiagnosticProvenance::Lease {
                         invariant: "required lease is absent from pack lease table".to_owned(),
@@ -1076,51 +1338,14 @@ fn validate_mode_resource_state(
                 ));
             }
         }
-        if matches!(slice.entry_residency, EntryResidency::Expert { .. })
-            && slice.interrupt_policy == InterruptPolicy::Enabled
-        {
-            diagnostics.push(diagnostic(
-                ResourceStateDiagnosticCode::ResIsrEnabledInExpertBank,
-                ResourceStateDiagnosticProvenance::Slice {
-                    invariant: "interrupt-enabled slices must not enter expert residency"
-                        .to_owned(),
-                    slice_id: slice.id.0,
-                },
-                ValidationOrigin::ResourceStateValidation,
-            ));
-        }
-        if slice.interrupt_policy == InterruptPolicy::Enabled {
-            for lease in &slice.required_leases {
-                if let Some(resource_lease) = lease_map.get(lease) {
-                    let code = match resource_lease.kind {
-                        ResourceLeaseKind::RomWindow { .. } => {
-                            Some(ResourceStateDiagnosticCode::ResIsrEnabledHoldsRomWindowLease)
-                        }
-                        ResourceLeaseKind::SramPage { .. } => {
-                            Some(ResourceStateDiagnosticCode::ResIsrEnabledHoldsSramPageLease)
-                        }
-                        _ => None,
-                    };
-                    if let Some(code) = code {
-                        diagnostics.push(diagnostic(
-                            code,
-                            ResourceStateDiagnosticProvenance::Lease {
-                                invariant: "interrupt-enabled slice holds switchable lease"
-                                    .to_owned(),
-                                lease_id: lease.0,
-                            },
-                            ValidationOrigin::ResourceStateValidation,
-                        ));
-                    }
-                }
-            }
-        }
-        validate_ops(slice, epoch, lease_map, diagnostics);
+        append_yield_safety_fact(slice, slice_flow, lease_map, validation);
+        append_isr_visible_residency_fact(slice, slice_flow, lease_map, validation);
+        append_overlay_bank_shadow_fact(slice, epoch, slice_flow, lease_map, validation);
     }
     for slice in &ir.slices {
         for successor in &slice.successors {
             if !slice_map.contains_key(successor) {
-                diagnostics.push(diagnostic(
+                validation.diagnostics.push(diagnostic(
                     ResourceStateDiagnosticCode::SchedEpochCoverageGap,
                     ResourceStateDiagnosticProvenance::Slice {
                         invariant: "successor slice is missing".to_owned(),
@@ -1131,20 +1356,123 @@ fn validate_mode_resource_state(
             }
         }
     }
+    all_slices_reachable && flow.values().all(|fact| fact.reachable)
 }
 
-fn validate_ops(
-    slice: &SchedSlice,
-    epoch: &ResidencyEpoch,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SliceFlowFact {
+    before_ops: Vec<BTreeSet<LeaseId>>,
+    acquired: BTreeSet<LeaseId>,
+    released: BTreeSet<LeaseId>,
+    exit_active: BTreeSet<LeaseId>,
+    terminal: bool,
+    reachable: bool,
+}
+
+fn analyze_slice_graph(
+    ir: &GbSchedIR,
+    slice_map: &BTreeMap<SliceId, &SchedSlice>,
     lease_map: &BTreeMap<LeaseId, &ResourceLease>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) {
-    let mut active = BTreeSet::new();
+) -> BTreeMap<SliceId, SliceFlowFact> {
+    let mut flow = BTreeMap::new();
+    let mut entry_states = BTreeMap::from([(ir.entry_slice, BTreeSet::new())]);
+    let mut pending = BTreeSet::from([ir.entry_slice]);
+
+    while let Some(slice_id) = pending.pop_first() {
+        if flow.contains_key(&slice_id) {
+            continue;
+        }
+        let Some(slice) = slice_map.get(&slice_id) else {
+            diagnostics.push(diagnostic(
+                ResourceStateDiagnosticCode::SchedEpochCoverageGap,
+                ResourceStateDiagnosticProvenance::Slice {
+                    invariant: "reachable slice is missing".to_owned(),
+                    slice_id: slice_id.0,
+                },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+            continue;
+        };
+        let entry_active = entry_states
+            .get(&slice_id)
+            .cloned()
+            .unwrap_or_else(BTreeSet::new);
+        let slice_flow = simulate_slice_flow(slice, entry_active, lease_map, diagnostics);
+        let mut successors = slice.successors.clone();
+        successors.sort();
+        successors.dedup();
+        for successor in successors {
+            if !slice_map.contains_key(&successor) {
+                diagnostics.push(diagnostic(
+                    ResourceStateDiagnosticCode::SchedEpochCoverageGap,
+                    ResourceStateDiagnosticProvenance::Slice {
+                        invariant: "successor slice is missing".to_owned(),
+                        slice_id: successor.0,
+                    },
+                    ValidationOrigin::ResourceStateValidation,
+                ));
+                continue;
+            }
+            match entry_states.get(&successor) {
+                Some(existing) if existing != &slice_flow.exit_active => {
+                    diagnostics.push(diagnostic(
+                        ResourceStateDiagnosticCode::LeaseUnbalanced,
+                        ResourceStateDiagnosticProvenance::Slice {
+                            invariant: "successor has divergent incoming lease state".to_owned(),
+                            slice_id: successor.0,
+                        },
+                        ValidationOrigin::ResourceStateValidation,
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    entry_states.insert(successor, slice_flow.exit_active.clone());
+                    pending.insert(successor);
+                }
+            }
+        }
+        flow.insert(slice_id, slice_flow);
+    }
+
+    for slice in &ir.slices {
+        flow.entry(slice.id).or_insert_with(|| SliceFlowFact {
+            before_ops: vec![BTreeSet::new(); slice.ops.len()],
+            acquired: BTreeSet::new(),
+            released: BTreeSet::new(),
+            exit_active: BTreeSet::new(),
+            terminal: matches!(slice.exit_kind, ExitKind::Halt | ExitKind::Fault),
+            reachable: false,
+        });
+    }
+
+    flow
+}
+
+fn simulate_slice_flow(
+    slice: &SchedSlice,
+    entry_active: BTreeSet<LeaseId>,
+    lease_map: &BTreeMap<LeaseId, &ResourceLease>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) -> SliceFlowFact {
+    let mut active = entry_active;
+    let mut before_ops = Vec::with_capacity(slice.ops.len());
     let mut acquired = BTreeSet::new();
     let mut released = BTreeSet::new();
     for op in &slice.ops {
+        before_ops.push(active.clone());
         match op {
             SchedOp::AcquireLease { lease } => {
+                if !lease_map.contains_key(lease) {
+                    diagnostics.push(diagnostic(
+                        ResourceStateDiagnosticCode::LeaseRequiredLeaseNotAcquired,
+                        ResourceStateDiagnosticProvenance::Lease {
+                            invariant: "acquired lease is absent from pack lease table".to_owned(),
+                            lease_id: lease.0,
+                        },
+                        ValidationOrigin::ResourceStateValidation,
+                    ));
+                }
                 if !active.insert(*lease) || !acquired.insert(*lease) {
                     diagnostics.push(diagnostic(
                         ResourceStateDiagnosticCode::LeaseDoubleAcquire,
@@ -1210,27 +1538,227 @@ fn validate_ops(
                     }
                 }
             }
-            SchedOp::OverlayInstall { install } if epoch.overlay.is_none() => {
-                diagnostics.push(diagnostic(
-                    ResourceStateDiagnosticCode::SchedOverlayInstallEpochMismatch,
-                    ResourceStateDiagnosticProvenance::Epoch {
-                        invariant: format!(
-                            "overlay install {} in epoch without overlay",
-                            install.0
-                        ),
-                        epoch_id: epoch.id.0,
-                    },
-                    ValidationOrigin::ResourceStateValidation,
-                ));
+            _ => {}
+        }
+    }
+    for lease in &slice.required_leases {
+        if !lease_map.contains_key(lease) {
+            diagnostics.push(diagnostic(
+                ResourceStateDiagnosticCode::LeaseRequiredLeaseNotAcquired,
+                ResourceStateDiagnosticProvenance::Lease {
+                    invariant: "required lease is absent from pack lease table".to_owned(),
+                    lease_id: lease.0,
+                },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+        }
+    }
+    if matches!(slice.exit_kind, ExitKind::Halt | ExitKind::Fault) {
+        for lease in &active {
+            diagnostics.push(diagnostic(
+                ResourceStateDiagnosticCode::LeaseUnbalanced,
+                ResourceStateDiagnosticProvenance::Lease {
+                    invariant: "terminal slice exits with active lease".to_owned(),
+                    lease_id: lease.0,
+                },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+        }
+    }
+    SliceFlowFact {
+        before_ops,
+        acquired,
+        released,
+        exit_active: active,
+        terminal: matches!(slice.exit_kind, ExitKind::Halt | ExitKind::Fault),
+        reachable: true,
+    }
+}
+
+fn append_yield_safety_fact(
+    slice: &SchedSlice,
+    flow: &SliceFlowFact,
+    lease_map: &BTreeMap<LeaseId, &ResourceLease>,
+    validation: &mut ResourceStateValidation,
+) {
+    if slice.exit_kind != ExitKind::SaveContinuationAndYield {
+        return;
+    }
+    let Some((index, yield_kind)) =
+        slice
+            .ops
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, op)| match op {
+                SchedOp::Yield { kind } => Some((index, *kind)),
+                _ => None,
+            })
+    else {
+        validation.diagnostics.push(diagnostic(
+            ResourceStateDiagnosticCode::LeaseYieldCrossesNonResumable,
+            ResourceStateDiagnosticProvenance::Slice {
+                invariant: "yielding slice has no terminal yield op".to_owned(),
+                slice_id: slice.id.0,
+            },
+            ValidationOrigin::ResourceStateValidation,
+        ));
+        return;
+    };
+    let outstanding = flow.before_ops.get(index).cloned().unwrap_or_default();
+    let all_yield_safe = outstanding
+        .iter()
+        .all(|lease| lease_map.get(lease).is_some_and(|lease| lease.yield_safe));
+    for lease in &outstanding {
+        if lease_map.get(lease).is_some_and(|lease| !lease.yield_safe) {
+            validation.diagnostics.push(diagnostic(
+                ResourceStateDiagnosticCode::LeaseYieldCrossesNonResumable,
+                ResourceStateDiagnosticProvenance::Lease {
+                    invariant: "yield crosses non-resumable lease".to_owned(),
+                    lease_id: lease.0,
+                },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+        }
+    }
+    validation.yield_safety.yield_events.push(YieldSafetyFact {
+        slice: slice.id,
+        yield_kind,
+        outstanding_leases: outstanding.into_iter().collect(),
+        all_yield_safe,
+    });
+}
+
+fn append_isr_visible_residency_fact(
+    slice: &SchedSlice,
+    flow: &SliceFlowFact,
+    lease_map: &BTreeMap<LeaseId, &ResourceLease>,
+    validation: &mut ResourceStateValidation,
+) {
+    if slice.interrupt_policy != InterruptPolicy::Enabled {
+        return;
+    }
+    let mut outstanding = BTreeSet::new();
+    for active in &flow.before_ops {
+        outstanding.extend(active.iter().copied());
+    }
+    let mut all_safe = !matches!(slice.entry_residency, EntryResidency::Expert { .. });
+    if !all_safe {
+        validation.diagnostics.push(diagnostic(
+            ResourceStateDiagnosticCode::ResIsrEnabledInExpertBank,
+            ResourceStateDiagnosticProvenance::Slice {
+                invariant: "interrupt-enabled slices must not enter expert residency".to_owned(),
+                slice_id: slice.id.0,
+            },
+            ValidationOrigin::ResourceStateValidation,
+        ));
+    }
+    for lease in &outstanding {
+        let code = match lease_map.get(lease).map(|lease| &lease.kind) {
+            Some(ResourceLeaseKind::RomWindow { .. }) => {
+                Some(ResourceStateDiagnosticCode::ResIsrEnabledHoldsRomWindowLease)
+            }
+            Some(ResourceLeaseKind::SramPage { .. }) => {
+                Some(ResourceStateDiagnosticCode::ResIsrEnabledHoldsSramPageLease)
+            }
+            _ => None,
+        };
+        if let Some(code) = code {
+            all_safe = false;
+            validation.diagnostics.push(diagnostic(
+                code,
+                ResourceStateDiagnosticProvenance::Lease {
+                    invariant: "interrupt-enabled slice holds switchable lease".to_owned(),
+                    lease_id: lease.0,
+                },
+                ValidationOrigin::ResourceStateValidation,
+            ));
+        }
+    }
+    validation
+        .isr_visible_residency
+        .enabled_slices
+        .push(IsrVisibleResidencyFact {
+            slice: slice.id,
+            residency: slice.entry_residency,
+            outstanding_leases: outstanding.into_iter().collect(),
+            all_safe,
+        });
+}
+
+fn append_overlay_bank_shadow_fact(
+    slice: &SchedSlice,
+    epoch: &ResidencyEpoch,
+    flow: &SliceFlowFact,
+    lease_map: &BTreeMap<LeaseId, &ResourceLease>,
+    validation: &mut ResourceStateValidation,
+) {
+    let entry_residency_matches = slice.entry_residency == epoch.residency;
+    let mut overlay_installs_aligned = true;
+    let mut overlay_lease_shape_satisfied = true;
+    let mut bank_switches_bracketed = true;
+    for (index, op) in slice.ops.iter().enumerate() {
+        match op {
+            SchedOp::OverlayInstall { install } => {
+                let active = flow.before_ops.get(index).cloned().unwrap_or_default();
+                let active_overlay_matches_epoch = epoch.overlay.is_some_and(|epoch_overlay| {
+                    active.iter().any(|lease| {
+                        lease_map.get(lease).is_some_and(|lease| {
+                            matches!(
+                                lease.kind,
+                                ResourceLeaseKind::Overlay { overlay } if overlay == epoch_overlay
+                            )
+                        })
+                    })
+                });
+                if epoch.overlay.is_none() {
+                    overlay_installs_aligned = false;
+                    validation.diagnostics.push(diagnostic(
+                        ResourceStateDiagnosticCode::SchedOverlayInstallEpochMismatch,
+                        ResourceStateDiagnosticProvenance::Epoch {
+                            invariant: format!(
+                                "overlay install {} is not aligned with active epoch lease",
+                                install.0
+                            ),
+                            epoch_id: epoch.id.0,
+                        },
+                        ValidationOrigin::ResourceStateValidation,
+                    ));
+                }
+                let active_overlay_lease_satisfies_shape = active.iter().any(|lease| {
+                    lease_map.get(lease).is_some_and(|lease| {
+                        matches!(
+                            lease.kind,
+                            ResourceLeaseKind::Overlay { overlay }
+                                if Some(overlay) == epoch.overlay
+                        )
+                    })
+                });
+                if !active_overlay_matches_epoch || !active_overlay_lease_satisfies_shape {
+                    overlay_lease_shape_satisfied = false;
+                    validation.diagnostics.push(diagnostic(
+                        ResourceStateDiagnosticCode::SchedOverlayInstallEpochMismatch,
+                        ResourceStateDiagnosticProvenance::Epoch {
+                            invariant: format!(
+                                "overlay install {} lease shape is not satisfied by active leases",
+                                install.0
+                            ),
+                            epoch_id: epoch.id.0,
+                        },
+                        ValidationOrigin::ResourceStateValidation,
+                    ));
+                }
             }
             SchedOp::BankSwitch { .. } => {
+                let active = flow.before_ops.get(index).cloned().unwrap_or_default();
                 let bracketed = active.iter().any(|lease| {
                     lease_map.get(lease).is_some_and(|lease| {
                         matches!(lease.kind, ResourceLeaseKind::RomWindow { .. })
                     })
                 });
                 if !bracketed {
-                    diagnostics.push(diagnostic(
+                    bank_switches_bracketed = false;
+                    validation.diagnostics.push(diagnostic(
                         ResourceStateDiagnosticCode::ResBankSwitchUnbracketed,
                         ResourceStateDiagnosticProvenance::Slice {
                             invariant: "bank switch must be bracketed by rom-window lease"
@@ -1244,27 +1772,30 @@ fn validate_ops(
             _ => {}
         }
     }
-    for lease in &slice.required_leases {
-        if !acquired.contains(lease) || !released.contains(lease) {
-            diagnostics.push(diagnostic(
-                ResourceStateDiagnosticCode::LeaseUnbalanced,
-                ResourceStateDiagnosticProvenance::Lease {
-                    invariant: "required lease was not acquired and released in slice".to_owned(),
-                    lease_id: lease.0,
-                },
-                ValidationOrigin::ResourceStateValidation,
-            ));
-        }
-    }
-    for lease in active {
-        diagnostics.push(diagnostic(
-            ResourceStateDiagnosticCode::LeaseUnbalanced,
-            ResourceStateDiagnosticProvenance::Lease {
-                invariant: "lease still active at slice exit".to_owned(),
-                lease_id: lease.0,
-            },
-            ValidationOrigin::ResourceStateValidation,
-        ));
+    let all_consistent = entry_residency_matches
+        && overlay_installs_aligned
+        && overlay_lease_shape_satisfied
+        && bank_switches_bracketed;
+    validation
+        .overlay_bank_shadow
+        .slices_checked
+        .push(OverlayBankShadowConsistencyFact {
+            slice: slice.id,
+            epoch_id: epoch.id,
+            entry_residency_matches,
+            overlay_installs_aligned,
+            overlay_lease_shape_satisfied,
+            bank_switches_bracketed,
+            all_consistent,
+        });
+}
+
+fn lease_kind_discriminant(kind: &ResourceLeaseKind) -> ResourceLeaseKindDiscriminant {
+    match kind {
+        ResourceLeaseKind::RomWindow { .. } => ResourceLeaseKindDiscriminant::RomWindow,
+        ResourceLeaseKind::SramPage { .. } => ResourceLeaseKindDiscriminant::SramPage,
+        ResourceLeaseKind::Overlay { .. } => ResourceLeaseKindDiscriminant::Overlay,
+        ResourceLeaseKind::InterruptMask { .. } => ResourceLeaseKindDiscriminant::InterruptMask,
     }
 }
 
@@ -1829,14 +2360,18 @@ mod tests {
     use gbf_store::stage_cache::StageCache;
 
     use crate::arena::{ArenaBindings, OverlayReservationHonor};
-    use crate::overlay_plan::OverlayReservation;
+    use crate::overlay_plan::{
+        OverlayInstall, OverlayInstallEvent, OverlayLeaseShape, OverlayRegion, OverlayReservation,
+        OverlayReservationEntry, OverlayReservationKind, OverlayResident, OverlayResidentId,
+        OverlaySource, OverlaySourceLease, OverlayWramRegionLease, WramRegionConstraint,
+    };
     use crate::s3::infer_ir::NodeId;
     use crate::stage_cache::{
         CacheStatus, StoreBackedStageExpectedHashes, StoreBackedStageRunOutput,
     };
     use crate::window::{
-        Bank0Demand, RomSwitchProjections, RomWindowBinding, RomWindowPlanInputIdentity,
-        RomWindowPlanProvenance,
+        Bank0Demand, RomReachabilityClass, RomSwitchProjections, RomWindowBinding,
+        RomWindowPlanInputIdentity, RomWindowPlanProvenance,
     };
 
     #[test]
@@ -1853,9 +2388,32 @@ mod tests {
         assert_eq!(result.summary.lease_count, 1);
         assert_eq!(result.summary.total_bank_switches, 1);
         assert_ne!(result.product.continuation_abi_hash, Hash256::ZERO);
+        assert!(
+            output
+                .cert
+                .as_ref()
+                .expect("cert")
+                .lease_balance
+                .all_balanced,
+            "lease-balance certificate facts should pass"
+        );
+        let cert = output.cert.as_ref().expect("cert");
         assert_eq!(
-            output.cert.as_ref().expect("cert").lease_balance,
-            ProofStatus::Passed
+            cert.lease_balance.leases.len(),
+            result.summary.lease_count as usize
+        );
+        assert!(cert.yield_safety.all_yields_safe);
+        assert!(cert.isr_visible_residency.all_isr_safe);
+        assert!(cert.isr_visible_residency.computed_reachability_confirmed);
+        assert_eq!(
+            cert.overlay_bank_shadow.slices_checked.len(),
+            result.summary.slice_count as usize
+        );
+        assert!(
+            cert.overlay_bank_shadow
+                .slices_checked
+                .iter()
+                .all(|fact| fact.overlay_lease_shape_satisfied)
         );
 
         let sched_bytes = emit_schedule_pack_json_bytes(&output).expect("sched report");
@@ -1980,6 +2538,170 @@ mod tests {
             &validation,
             ResourceStateDiagnosticCode::LeaseYieldCrossesNonResumable,
         );
+    }
+
+    #[test]
+    fn resource_state_validation_traverses_cross_slice_lease_flow() {
+        let output = build_schedule_pack(&fixture_inputs());
+        let mut pack = output.result.expect("schedule result").product;
+        let lease = pack.leases[0].id;
+        pack.leases[0].released_in = SliceId(1);
+
+        let mode = &mut pack.modes[0].ir;
+        let slice0 = &mut mode.slices[0];
+        slice0
+            .ops
+            .retain(|op| !matches!(op, SchedOp::ReleaseLease { .. } | SchedOp::Halt));
+        slice0.ops.push(SchedOp::TailCall { target: SliceId(1) });
+        slice0.exit_kind = ExitKind::TailCall;
+        slice0.successors = vec![SliceId(1)];
+
+        let mut slice1 = slice0.clone();
+        slice1.id = SliceId(1);
+        slice1.ops = vec![SchedOp::ReleaseLease { lease }, SchedOp::Halt];
+        slice1.exit_kind = ExitKind::Halt;
+        slice1.successors.clear();
+        mode.slices.push(slice1);
+        pack.epochs[0].epochs[0].slices = vec![SliceId(0), SliceId(1)];
+
+        let validation = validate_resource_state(&pack);
+        assert_eq!(validation.diagnostics, Vec::new());
+        assert!(validation.lease_balance.all_balanced);
+        assert_eq!(validation.lease_balance.leases[0].paths_checked, 2);
+        assert!(
+            validation
+                .isr_visible_residency
+                .computed_reachability_confirmed
+        );
+    }
+
+    #[test]
+    fn resource_state_validation_rejects_divergent_incoming_lease_state() {
+        let output = build_schedule_pack(&fixture_inputs());
+        let mut pack = output.result.expect("schedule result").product;
+        let lease = pack.leases[0].id;
+
+        let mode = &mut pack.modes[0].ir;
+        let slice0 = &mut mode.slices[0];
+        slice0
+            .ops
+            .retain(|op| !matches!(op, SchedOp::ReleaseLease { .. } | SchedOp::Halt));
+        slice0.ops.push(SchedOp::TailCall { target: SliceId(2) });
+        slice0.exit_kind = ExitKind::TailCall;
+        slice0.successors = vec![SliceId(1), SliceId(2)];
+
+        let mut slice1 = slice0.clone();
+        slice1.id = SliceId(1);
+        slice1.ops = vec![
+            SchedOp::ReleaseLease { lease },
+            SchedOp::TailCall { target: SliceId(2) },
+        ];
+        slice1.exit_kind = ExitKind::TailCall;
+        slice1.successors = vec![SliceId(2)];
+
+        let mut slice2 = slice0.clone();
+        slice2.id = SliceId(2);
+        slice2.ops = vec![SchedOp::ReleaseLease { lease }, SchedOp::Halt];
+        slice2.exit_kind = ExitKind::Halt;
+        slice2.successors.clear();
+
+        mode.slices.push(slice1);
+        mode.slices.push(slice2);
+        pack.epochs[0].epochs[0].slices = vec![SliceId(0), SliceId(1), SliceId(2)];
+
+        let validation = validate_resource_state(&pack);
+        assert_has_resource_code(&validation, ResourceStateDiagnosticCode::LeaseUnbalanced);
+    }
+
+    #[test]
+    fn schedule_modes_carry_distinct_cadence_and_yield_checks() {
+        let mut inputs = fixture_inputs();
+        inputs.input_identity.requested_runtime_modes = BTreeSet::from([
+            RuntimeMode::Interactive,
+            RuntimeMode::Safe,
+            RuntimeMode::Steady,
+            RuntimeMode::Trace,
+        ]);
+        inputs.expected_input_hashes = inputs.input_identity.hashes();
+
+        let output = build_schedule_pack(&inputs);
+        assert_eq!(
+            output.outcome,
+            SchedulePackOutcome::Succeeded,
+            "{:?}",
+            output.diagnostics
+        );
+        let pack = output.result.expect("schedule result").product;
+        let cadence_by_mode = pack
+            .modes
+            .iter()
+            .map(|entry| {
+                let slice = &entry.ir.slices[0];
+                (
+                    entry.mode,
+                    (
+                        slice.hard_cycles_to_safe_point,
+                        slice.soft_target_cycles,
+                        slice.max_interrupt_latency,
+                        slice.yield_check,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            cadence_by_mode[&RuntimeMode::Interactive],
+            (17_556, 8_778, 256, YieldCheckClass::OnceAtEnd)
+        );
+        assert_eq!(
+            cadence_by_mode[&RuntimeMode::Trace],
+            (17_556, 4_389, 128, YieldCheckClass::EveryNTiles { n: 1 })
+        );
+        assert_eq!(
+            cadence_by_mode[&RuntimeMode::Steady],
+            (35_112, 17_556, 512, YieldCheckClass::OnceAtEnd)
+        );
+        assert_eq!(
+            cadence_by_mode[&RuntimeMode::Safe],
+            (17_556, 4_389, 128, YieldCheckClass::EveryLoadStore)
+        );
+    }
+
+    #[test]
+    fn resource_state_validation_proves_overlay_install_lease_shape() {
+        let mut inputs = fixture_inputs();
+        inputs.rom_window_plan.residency_epochs[0].overlay_state = OverlayState::OverlayActive;
+        inputs.overlay_plan = fixture_overlay_plan_with_install(&inputs.input_identity);
+
+        let output = build_schedule_pack(&inputs);
+        assert_eq!(
+            output.outcome,
+            SchedulePackOutcome::Succeeded,
+            "{:?}",
+            output.diagnostics
+        );
+        let result = output.result.as_ref().expect("schedule result");
+        assert_eq!(result.summary.total_overlay_installs, 1);
+        let cert = output.cert.as_ref().expect("cert");
+        assert!(cert.isr_visible_residency.computed_reachability_confirmed);
+        assert!(cert.overlay_bank_shadow.all_consistent);
+        assert!(
+            cert.overlay_bank_shadow
+                .slices_checked
+                .iter()
+                .all(|fact| fact.overlay_installs_aligned && fact.overlay_lease_shape_satisfied)
+        );
+
+        let mut pack = result.product.clone();
+        pack.modes[0].ir.slices[0]
+            .ops
+            .retain(|op| !matches!(op, SchedOp::AcquireLease { lease } if *lease == LeaseId(1)));
+        let validation = validate_resource_state(&pack);
+        assert_has_resource_code(
+            &validation,
+            ResourceStateDiagnosticCode::SchedOverlayInstallEpochMismatch,
+        );
+        assert!(!validation.overlay_bank_shadow.all_consistent);
     }
 
     #[test]
@@ -2137,6 +2859,11 @@ mod tests {
     fn fixture_rom_window_plan(identity: &SchedulePackInputIdentity) -> RomWindowPlan {
         RomWindowPlan {
             identity: RomWindowPlanInputIdentity {
+                artifact_validation_self_hash: hash(0x2d),
+                policy_resolution_self_hash: identity.policy_resolution_self_hash,
+                static_budget_self_hash: hash(0x2e),
+                quant_graph_self_hash: hash(0x2f),
+                infer_ir_self_hash: identity.infer_ir_self_hash,
                 storage_plan_self_hash: identity.storage_plan_self_hash,
                 observation_plan_self_hash: identity.observation_plan_self_hash,
                 range_plan_self_hash: identity.range_plan_self_hash,
@@ -2180,6 +2907,7 @@ mod tests {
             overlay_demand: crate::window::WramOverlayDemand {
                 kernels: Vec::new(),
                 luts: Vec::new(),
+                install_source_visibility: Vec::new(),
                 total_overlay_bytes: 0,
                 total_install_count_per_token_upper_bound: 0,
             },
@@ -2232,6 +2960,62 @@ mod tests {
             },
             overlay_plan_self_hash: identity.overlay_plan_self_hash,
         }
+    }
+
+    fn fixture_overlay_plan_with_install(identity: &SchedulePackInputIdentity) -> OverlayPlan {
+        let overlay = OverlayId(0);
+        let resident = OverlayResidentId::Kernel {
+            kernel: KernelSpecId::from("kernel.overlay"),
+        };
+        let source = OverlaySource::RomWindowOverlayDemand {
+            resident: resident.clone(),
+        };
+        let install_event = OverlayInstallEvent::TokenBoundary;
+        let mut plan = fixture_overlay_plan(identity);
+        plan.regions = vec![OverlayRegion {
+            id: overlay,
+            bytes: 128,
+            constraint: WramRegionConstraint::DmgWramC000Dfff,
+            members: vec![OverlayResident {
+                id: resident.clone(),
+                payload_bytes: 128,
+                reachability: RomReachabilityClass::HotPath,
+                source: source.clone(),
+            }],
+            reservation_kind: OverlayReservationKind::WramOverlay,
+            reservation_floor_bytes: 128,
+            reservation_ceil_bytes: 128,
+        }];
+        plan.installs = vec![OverlayInstall {
+            id: OverlayInstallId(0),
+            region: overlay,
+            member: resident,
+            source: source.clone(),
+            install_event,
+            lease_shape: OverlayLeaseShape {
+                source_lease: OverlaySourceLease {
+                    source,
+                    acquire_at: install_event,
+                    release_at: install_event,
+                },
+                wram_region_lease: OverlayWramRegionLease {
+                    region: overlay,
+                    acquire_at: install_event,
+                    release_at: install_event,
+                },
+            },
+        }];
+        plan.reservation = OverlayReservation {
+            total_bytes: 128,
+            per_region: vec![OverlayReservationEntry {
+                region: overlay,
+                bytes: 128,
+                reservation_kind: OverlayReservationKind::WramOverlay,
+            }],
+            cap_bytes: 1024,
+            region_max_bytes: 512,
+        };
+        plan
     }
 
     fn fixture_arena_plan(identity: &SchedulePackInputIdentity) -> ArenaPlan {

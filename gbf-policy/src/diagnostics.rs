@@ -2976,12 +2976,18 @@ mod tests {
     #[test]
     fn validation_code_pins_amendment_variant_json_shapes() {
         let bounds = canonical_default_bounds_fixture();
-        let default_bounds_json = serde_json::json!({
+        let mut default_bounds_json = serde_json::json!({
             "placement": {"max_profile": {"kind": "PackedExperts"}},
-            "observation": {"max_probe_level": {"kind": "Verbose"}},
+            "observation": {
+                "max_trace_demotion": {"kind": "RequiredOnly"},
+                "max_probe_level": {"kind": "Verbose"}
+            },
             "range": {"max_reduction_ceiling": {"kind": "Adaptive"}},
             "storage": {"max_materialization": {"kind": "SpillColdValues"}},
-            "sram": {"max_page_aggression": {"kind": "MinimizeResident"}},
+            "sram": {
+                "max_page_aggression": {"kind": "MinimizeResident"},
+                "max_spill_policy": {"kind": "SpillEager"}
+            },
             "rom_window": {
                 "max_kernel_residency_bias": {"kind": "PreferWramOverlay"},
                 "max_kernel_duplication_bias": {"kind": "DuplicateAllFit"}
@@ -2993,6 +2999,12 @@ mod tests {
                 "max_resource_pressure": {"kind": "FitFirst"}
             }
         });
+        default_bounds_json["schedule"]["max_pressure_thresholds"] =
+            serde_json::to_value(bounds.schedule.max_pressure_thresholds)
+                .expect("max thresholds json");
+        default_bounds_json["schedule"]["max_stage_iteration_ceilings"] =
+            serde_json::to_value(bounds.schedule.max_stage_iteration_ceilings)
+                .expect("max stage limits json");
 
         assert_eq!(
             serde_json::to_value(ValidationCode::PolicyConstraintUnsatisfiable {

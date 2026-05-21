@@ -13,8 +13,9 @@ use gbf_foundation::FieldPath;
 use gbf_policy::{
     CompileKnobId, CompileKnobPath, CompileKnobProvenanceEntry, CompileKnobs, ConstraintDelta,
     ConstraintOperation, ConstraintProvenance, DeltaRejection, KnobDelta, ObservabilityMode,
-    PolicySource, RecomputePurityFacts, RepairPolicy, RepairProposalId, RepairReason,
-    ResourcePressureUpdate, check_delta_admissible_with_recompute_purity,
+    PolicySource, RecomputePurityFacts, RepairPolicy, RepairPolicyProfile, RepairProposalId,
+    RepairReason, ResourcePressureUpdate, StageIterationLimits,
+    check_delta_admissible_with_recompute_purity,
 };
 use gbf_report::report_schemas::repair_report_v1::{
     CompileKnobsSnapshot, RepairReportBody, RepairReportInputsSection, RepairReportProposalRecord,
@@ -41,9 +42,35 @@ pub struct LoopState {
     pub repair_policy: RepairPolicy,
     pub observability: ObservabilityMode,
     pub recompute_purity: RecomputePurityFacts,
+    pub accepted_iters_remaining: u8,
     pub global_iters_remaining: u8,
     pub stage_iters_remaining: StageIterationCeilings,
     pub history: RepairHistory,
+}
+
+impl LoopState {
+    #[must_use]
+    pub fn from_profile(
+        knobs: CompileKnobs,
+        profile: RepairPolicyProfile,
+        observability: ObservabilityMode,
+        recompute_purity: RecomputePurityFacts,
+    ) -> Self {
+        let repair_policy = RepairPolicy::for_profile(profile);
+        let stage_iters_remaining =
+            StageIterationCeilings::from_limits(knobs.global.schedule.stage_iteration_ceilings);
+        let global_iters_remaining = stage_iters_remaining.total_saturating();
+        Self {
+            knobs,
+            repair_policy,
+            observability,
+            recompute_purity,
+            accepted_iters_remaining: repair_policy.max_refinement_iters,
+            global_iters_remaining,
+            stage_iters_remaining,
+            history: RepairHistory::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +101,32 @@ impl StageIterationCeilings {
             gb_sched_ir: limit,
             resource_state_validation: limit,
         }
+    }
+
+    #[must_use]
+    pub const fn from_limits(limits: StageIterationLimits) -> Self {
+        Self {
+            range_plan: limits.range_plan,
+            storage_plan: limits.storage_plan,
+            sram_page_plan: limits.sram_page_plan,
+            rom_window_plan: limits.rom_window_plan,
+            overlay_plan: limits.overlay_plan,
+            arena_plan: limits.arena_plan,
+            gb_sched_ir: limits.gb_sched_ir,
+            resource_state_validation: limits.resource_state_validation,
+        }
+    }
+
+    #[must_use]
+    pub const fn total_saturating(self) -> u8 {
+        let mut total = self.range_plan;
+        total = total.saturating_add(self.storage_plan);
+        total = total.saturating_add(self.sram_page_plan);
+        total = total.saturating_add(self.rom_window_plan);
+        total = total.saturating_add(self.overlay_plan);
+        total = total.saturating_add(self.arena_plan);
+        total = total.saturating_add(self.gb_sched_ir);
+        total.saturating_add(self.resource_state_validation)
     }
 
     #[must_use]
@@ -211,6 +264,9 @@ pub enum StageRunOutcome {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum TerminalState {
     Converged,
+    AcceptedRefinementBudgetExhausted {
+        stage: PlanningStage,
+    },
     GlobalBudgetExhausted,
     StageBudgetExhausted {
         stage: PlanningStage,
@@ -268,6 +324,15 @@ pub trait CompilerPipeline {
         stage: PlanningStage,
         state: &LoopState,
     ) -> Result<StageRunOutcome, RefinementLoopError>;
+
+    fn handle_rejected_repair(
+        &mut self,
+        _stage: PlanningStage,
+        _state: &LoopState,
+        _rejected: &RepairProposalRecord,
+    ) -> Result<Option<RepairProposal>, RefinementLoopError> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,50 +394,81 @@ where
                     ));
                 }
                 StageRunOutcome::ProposedRepair { proposal } => {
-                    let iter_emitted = accepted_iters.saturating_add(1);
-                    if proposal.source_stage != stage {
-                        return Err(RefinementLoopError::ProposalStageMismatch {
-                            expected: stage,
-                            actual: proposal.source_stage,
-                        });
-                    }
-                    match first_rejection(&proposal.delta, &state) {
-                        Some(rejection) => {
-                            record_rejected(
-                                &mut state.history,
-                                proposal,
-                                iter_emitted,
-                                rejection.clone(),
-                            );
-                            // Narrow-v1 stops on the first rejected proposal. Full rejection
-                            // feedback to the originating stage is tracked by bd-2130.
-                            return Ok(terminal(
-                                state,
-                                TerminalState::StagedFailureUnrepairable {
-                                    stage,
-                                    last_error: format!("repair proposal rejected: {rejection:?}"),
-                                },
-                            ));
+                    let mut proposal = proposal;
+                    loop {
+                        let iter_emitted = accepted_iters.saturating_add(1);
+                        if proposal.source_stage != stage {
+                            return Err(RefinementLoopError::ProposalStageMismatch {
+                                expected: stage,
+                                actual: proposal.source_stage,
+                            });
                         }
-                        None => {
-                            let before = state.knobs.clone();
-                            apply_constraint_delta(&mut state.knobs, &proposal);
-                            let after = state.knobs.clone();
-                            let summary = KnobDeltaSummary::from_delta(
-                                &proposal.delta,
-                                before,
-                                after,
-                                &proposal.id,
-                            );
-                            accepted_iters = accepted_iters.saturating_add(1);
-                            record_accepted(
-                                &mut state.history,
-                                proposal,
-                                iter_emitted,
-                                accepted_iters,
-                                summary,
-                            );
-                            continue 'restart;
+                        match first_rejection(&proposal.delta, &state) {
+                            Some(rejection) => {
+                                let record = record_rejected(
+                                    &mut state.history,
+                                    proposal,
+                                    iter_emitted,
+                                    rejection.clone(),
+                                );
+                                match pipeline.handle_rejected_repair(stage, &state, &record)? {
+                                    Some(alternative) => {
+                                        proposal = alternative;
+                                        continue;
+                                    }
+                                    None => {
+                                        return Ok(terminal(
+                                            state,
+                                            TerminalState::StagedFailureUnrepairable {
+                                                stage,
+                                                last_error: format!(
+                                                    "repair proposal rejected: {rejection:?}"
+                                                ),
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                            None => {
+                                if state.accepted_iters_remaining == 0 {
+                                    let rejection =
+                                        DeltaRejection::AcceptedRefinementBudgetExhausted {
+                                            max_refinement_iters: state
+                                                .repair_policy
+                                                .max_refinement_iters,
+                                        };
+                                    record_rejected(
+                                        &mut state.history,
+                                        proposal,
+                                        iter_emitted,
+                                        rejection,
+                                    );
+                                    return Ok(terminal(
+                                        state,
+                                        TerminalState::AcceptedRefinementBudgetExhausted { stage },
+                                    ));
+                                }
+                                let before = state.knobs.clone();
+                                apply_constraint_delta(&mut state.knobs, &proposal);
+                                let after = state.knobs.clone();
+                                let summary = KnobDeltaSummary::from_delta(
+                                    &proposal.delta,
+                                    before,
+                                    after,
+                                    &proposal.id,
+                                );
+                                accepted_iters = accepted_iters.saturating_add(1);
+                                state.accepted_iters_remaining =
+                                    state.accepted_iters_remaining.saturating_sub(1);
+                                record_accepted(
+                                    &mut state.history,
+                                    proposal,
+                                    iter_emitted,
+                                    accepted_iters,
+                                    summary,
+                                );
+                                continue 'restart;
+                            }
                         }
                     }
                 }
@@ -436,14 +532,14 @@ fn record_rejected(
     proposal: RepairProposal,
     iter_emitted: u8,
     reason: DeltaRejection,
-) {
+) -> RepairProposalRecord {
     let knob_delta = proposal.delta.changes.first().cloned();
     let resource_pressure = proposal
         .delta
         .changes
         .iter()
         .find_map(resource_pressure_update);
-    history.proposals.push(RepairProposalRecord {
+    let record = RepairProposalRecord {
         id: proposal.id,
         source_stage: proposal.source_stage,
         reason: proposal.reason,
@@ -453,7 +549,9 @@ fn record_rejected(
         estimated_cost_delta: Some(proposal.estimated_cost),
         iter_emitted,
         outcome: ProposalOutcome::Rejected { reason },
-    });
+    };
+    history.proposals.push(record.clone());
+    record
 }
 
 impl KnobDeltaSummary {
@@ -500,7 +598,7 @@ fn knob_value_string(knobs: &CompileKnobs, knob: CompileKnobId) -> String {
         CompileKnobId::Observation
         | CompileKnobId::ObservationTraceDemotion
         | CompileKnobId::ObservationProbeSelection => {
-            serde_json::to_value(knobs.global.observation.probe_level)
+            serde_json::to_value(knobs.global.observation.trace_demotion)
         }
         CompileKnobId::Range | CompileKnobId::RangeReductionCeiling => {
             serde_json::to_value(knobs.global.range.reduction_ceiling)
@@ -510,9 +608,10 @@ fn knob_value_string(knobs: &CompileKnobs, knob: CompileKnobId) -> String {
         | CompileKnobId::StorageMaterializationOverrides => {
             serde_json::to_value(knobs.global.storage.materialization)
         }
-        CompileKnobId::Sram
-        | CompileKnobId::SramPageAggression
-        | CompileKnobId::SramSpillPolicy => serde_json::to_value(knobs.global.sram.page_aggression),
+        CompileKnobId::Sram | CompileKnobId::SramPageAggression => {
+            serde_json::to_value(knobs.global.sram.page_aggression)
+        }
+        CompileKnobId::SramSpillPolicy => serde_json::to_value(knobs.global.sram.spill_policy),
         CompileKnobId::RomWindow | CompileKnobId::RomKernelResidencyBias => {
             serde_json::to_value(knobs.global.rom_window.kernel_residency_bias)
         }
@@ -528,8 +627,12 @@ fn knob_value_string(knobs: &CompileKnobs, knob: CompileKnobId) -> String {
         CompileKnobId::ScheduleSliceCoarsening => {
             serde_json::to_value(knobs.global.schedule.slice_coarsening)
         }
-        CompileKnobId::ScheduleResourcePressure | CompileKnobId::StageIterationCeilings => {
-            serde_json::to_value(knobs.global.schedule.resource_pressure)
+        CompileKnobId::ScheduleResourcePressure => Ok(serde_json::json!({
+            "resource_pressure": knobs.global.schedule.resource_pressure,
+            "pressure_thresholds": knobs.global.schedule.pressure_thresholds,
+        })),
+        CompileKnobId::StageIterationCeilings => {
+            serde_json::to_value(knobs.global.schedule.stage_iteration_ceilings)
         }
     }
     .expect("knob value serializes");
@@ -540,9 +643,10 @@ fn knob_value_string(knobs: &CompileKnobs, knob: CompileKnobId) -> String {
 pub fn repair_report_body(
     initial_state: &LoopState,
     result: &RefinementLoopResult,
+    report_inputs: RepairReportInputsSection,
 ) -> RefinementRepairReportBody {
     RepairReportBody {
-        report_inputs: RepairReportInputsSection::narrow_v1_unknown(),
+        report_inputs,
         initial_knobs: CompileKnobsSnapshot::from_compile_knobs(&initial_state.knobs)
             .expect("initial compile knobs snapshot hashes"),
         final_knobs: CompileKnobsSnapshot::from_compile_knobs(&result.state.knobs)
@@ -569,25 +673,31 @@ pub fn repair_report_body(
 pub fn repair_report(
     initial_state: &LoopState,
     result: &RefinementLoopResult,
+    report_inputs: RepairReportInputsSection,
 ) -> RefinementRepairReport {
     ReportEnvelope::new(
         repair_report_outcome(&result.terminal),
-        repair_report_body(initial_state, result),
+        repair_report_body(initial_state, result, report_inputs),
     )
     .expect("repair_report.v1 schema constants are valid")
     .with_computed_self_hash()
     .expect("repair_report.v1 self-hash computes")
 }
 
-pub fn repair_report_json(initial_state: &LoopState, result: &RefinementLoopResult) -> Vec<u8> {
-    canonicalize_report(&repair_report(initial_state, result))
+pub fn repair_report_json(
+    initial_state: &LoopState,
+    result: &RefinementLoopResult,
+    report_inputs: RepairReportInputsSection,
+) -> Vec<u8> {
+    canonicalize_report(&repair_report(initial_state, result, report_inputs))
         .expect("repair_report.v1 canonicalizes")
 }
 
 fn repair_report_outcome(terminal: &TerminalState) -> ReportOutcome {
     match terminal {
         TerminalState::Converged => ReportOutcome::Passed,
-        TerminalState::GlobalBudgetExhausted
+        TerminalState::AcceptedRefinementBudgetExhausted { .. }
+        | TerminalState::GlobalBudgetExhausted
         | TerminalState::StageBudgetExhausted { .. }
         | TerminalState::StagedFailureUnrepairable { .. } => ReportOutcome::Failed,
     }
@@ -617,7 +727,7 @@ fn apply_constraint_delta(knobs: &mut CompileKnobs, proposal: &RepairProposal) {
 fn apply_knob_delta(knobs: &mut CompileKnobs, delta: &KnobDelta) {
     match delta {
         KnobDelta::AdvancePlacementProfile { to } => knobs.global.placement.profile = *to,
-        KnobDelta::SetTraceDemotion { to } => knobs.global.observation.probe_level = *to,
+        KnobDelta::SetTraceDemotion { to } => knobs.global.observation.trace_demotion = *to,
         KnobDelta::DisableOptionalProbes { probes } => {
             knobs
                 .overrides
@@ -641,6 +751,7 @@ fn apply_knob_delta(knobs: &mut CompileKnobs, delta: &KnobDelta) {
                 .extend(values.iter().cloned());
         }
         KnobDelta::AdvanceSramPageAggression { to } => knobs.global.sram.page_aggression = *to,
+        KnobDelta::AdvanceSramSpillPolicy { to } => knobs.global.sram.spill_policy = *to,
         KnobDelta::AdvanceKernelResidencyBias { to } => {
             knobs.global.rom_window.kernel_residency_bias = *to;
         }
@@ -664,11 +775,71 @@ fn apply_knob_delta(knobs: &mut CompileKnobs, delta: &KnobDelta) {
                 .insert(selector.clone(), remaining.clone());
         }
         KnobDelta::SetSliceCoarsening { to } => knobs.global.schedule.slice_coarsening = *to,
-        KnobDelta::UpdatePressureThreshold { .. } => {
-            debug_assert!(
-                false,
-                "UpdatePressureThreshold must be rejected until bd-2n14 wires mutable thresholds"
-            );
+        KnobDelta::UpdatePressureThreshold { update } => apply_pressure_update(knobs, update),
+    }
+}
+
+fn apply_pressure_update(knobs: &mut CompileKnobs, update: &ResourcePressureUpdate) {
+    match update {
+        ResourcePressureUpdate::WramHot { limit } => {
+            knobs.global.schedule.pressure_thresholds.wram_hot = *limit;
+        }
+        ResourcePressureUpdate::HramHot { limit } => {
+            knobs.global.schedule.pressure_thresholds.hram_hot = *limit;
+        }
+        ResourcePressureUpdate::Bank0Rom { limit } => {
+            knobs.global.schedule.pressure_thresholds.bank0_rom = *limit;
+        }
+        ResourcePressureUpdate::SwitchableRomWindow { limit } => {
+            knobs
+                .global
+                .schedule
+                .pressure_thresholds
+                .switchable_rom_window = *limit;
+        }
+        ResourcePressureUpdate::SramWindow { limit } => {
+            knobs.global.schedule.pressure_thresholds.sram_window = *limit;
+        }
+        ResourcePressureUpdate::SliceCycles { limit } => {
+            knobs.global.schedule.pressure_thresholds.slice_cycles = *limit;
+        }
+        ResourcePressureUpdate::InterruptLatency { limit } => {
+            knobs.global.schedule.pressure_thresholds.interrupt_latency = *limit;
+        }
+        ResourcePressureUpdate::TraceBytesPerFrame { limit } => {
+            knobs
+                .global
+                .schedule
+                .pressure_thresholds
+                .trace_bytes_per_frame = *limit;
+        }
+        ResourcePressureUpdate::PersistBytesPerFrame { limit } => {
+            knobs
+                .global
+                .schedule
+                .pressure_thresholds
+                .persist_bytes_per_frame = *limit;
+        }
+        ResourcePressureUpdate::OverlayInstallsPerFrame { limit } => {
+            knobs
+                .global
+                .schedule
+                .pressure_thresholds
+                .overlay_installs_per_frame = *limit;
+        }
+        ResourcePressureUpdate::BankSwitchesPerToken { limit } => {
+            knobs
+                .global
+                .schedule
+                .pressure_thresholds
+                .bank_switches_per_token = *limit;
+        }
+        ResourcePressureUpdate::SramPageSwitchesPerToken { limit } => {
+            knobs
+                .global
+                .schedule
+                .pressure_thresholds
+                .sram_page_switches_per_token = *limit;
         }
     }
 }
@@ -694,28 +865,43 @@ fn repair_provenance_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gbf_foundation::Hash256;
     use gbf_policy::{
         CompileKnobBounds, CompileKnobOverrides, CompileKnobValues, KernelResidency,
         KernelSelector, KernelSpecId, KnobLockSet, ObservationKnob, ObservationKnobBounds,
         OverlayKnob, OverlayKnobBounds, OverlayPromotion, PlacementKnob, PlacementKnobBounds,
         PlacementProfile, PressureLimit, ProbeCollectionLevel, RangeKnob, RangeKnobBounds,
-        ReductionPlanCeiling, RepairPolicyProfile, ResourcePressureUpdate,
-        RomKernelDuplicationBias, RomKernelResidencyBias, RomWindowKnob, RomWindowKnobBounds,
-        ScheduleKnob, ScheduleKnobBounds, ScheduleResourcePressure, ScheduleSliceCoarsening,
-        ScheduleTileSearch, SramKnob, SramKnobBounds, SramPageAggression, StorageKnob,
-        StorageKnobBounds, StorageMaterialization, ValueId, ValueSelector,
+        ReductionPlanCeiling, RepairPolicyProfile, ResourcePressureThresholds,
+        ResourcePressureUpdate, RomKernelDuplicationBias, RomKernelResidencyBias, RomWindowKnob,
+        RomWindowKnobBounds, ScheduleKnob, ScheduleKnobBounds, ScheduleResourcePressure,
+        ScheduleSliceCoarsening, ScheduleTileSearch, SramKnob, SramKnobBounds, SramPageAggression,
+        SramSpillPolicy, StageIterationLimits, StorageKnob, StorageKnobBounds,
+        StorageMaterialization, TraceDemotionLevel, ValueId, ValueSelector,
     };
     use gbf_report::round_trip_self_hash;
 
     #[derive(Default)]
     struct ScriptedPipeline {
         outcomes: BTreeMap<PlanningStage, Vec<StageRunOutcome>>,
+        rejection_alternatives: BTreeMap<PlanningStage, Vec<RepairProposal>>,
     }
 
     impl ScriptedPipeline {
         fn with(stage: PlanningStage, outcomes: Vec<StageRunOutcome>) -> Self {
             Self {
                 outcomes: BTreeMap::from([(stage, outcomes)]),
+                rejection_alternatives: BTreeMap::new(),
+            }
+        }
+
+        fn with_rejection_alternatives(
+            stage: PlanningStage,
+            outcomes: Vec<StageRunOutcome>,
+            alternatives: Vec<RepairProposal>,
+        ) -> Self {
+            Self {
+                outcomes: BTreeMap::from([(stage, outcomes)]),
+                rejection_alternatives: BTreeMap::from([(stage, alternatives)]),
             }
         }
     }
@@ -738,6 +924,24 @@ mod tests {
                 })
                 .unwrap_or(StageRunOutcome::Succeeded))
         }
+
+        fn handle_rejected_repair(
+            &mut self,
+            stage: PlanningStage,
+            _state: &LoopState,
+            _rejected: &RepairProposalRecord,
+        ) -> Result<Option<RepairProposal>, RefinementLoopError> {
+            Ok(self
+                .rejection_alternatives
+                .get_mut(&stage)
+                .and_then(|alternatives| {
+                    if alternatives.is_empty() {
+                        None
+                    } else {
+                        Some(alternatives.remove(0))
+                    }
+                }))
+        }
     }
 
     #[test]
@@ -758,6 +962,37 @@ mod tests {
                 .stage_iteration_counts
                 .get(&PlanningStage::RangePlan),
             Some(&1)
+        );
+    }
+
+    #[test]
+    fn loop_state_from_profile_separates_repair_and_stage_budgets() {
+        let mut knobs = compile_knobs_fixture();
+        knobs.global.schedule.stage_iteration_ceilings = StageIterationLimits {
+            range_plan: 1,
+            storage_plan: 2,
+            sram_page_plan: 3,
+            rom_window_plan: 4,
+            overlay_plan: 5,
+            arena_plan: 6,
+            gb_sched_ir: 7,
+            resource_state_validation: 8,
+        };
+
+        let state = LoopState::from_profile(
+            knobs,
+            RepairPolicyProfile::Recovery,
+            ObservabilityMode::Flexible,
+            RecomputePurityFacts::default(),
+        );
+
+        assert_eq!(state.accepted_iters_remaining, 6);
+        assert_eq!(state.global_iters_remaining, 36);
+        assert_eq!(state.stage_iters_remaining.range_plan, 1);
+        assert_eq!(state.stage_iters_remaining.resource_state_validation, 8);
+        assert_eq!(
+            state.repair_policy,
+            RepairPolicy::for_profile(RepairPolicyProfile::Recovery)
         );
     }
 
@@ -861,13 +1096,58 @@ mod tests {
     }
 
     #[test]
+    fn rejected_proposal_can_return_to_stage_for_alternative() {
+        let rejected = proposal(
+            "rp-1-trace",
+            PlanningStage::RangePlan,
+            RepairReason::ScheduleCostMissedTarget,
+            KnobDelta::SetTraceDemotion {
+                to: TraceDemotionLevel::DropBestEffort,
+            },
+        );
+        let alternative = proposal(
+            "rp-2-placement",
+            PlanningStage::RangePlan,
+            RepairReason::PlacementProfileFallback,
+            KnobDelta::AdvancePlacementProfile {
+                to: PlacementProfile::Budgeted,
+            },
+        );
+        let mut pipeline = ScriptedPipeline::with_rejection_alternatives(
+            PlanningStage::RangePlan,
+            vec![StageRunOutcome::ProposedRepair { proposal: rejected }],
+            vec![alternative],
+        );
+        let mut state = loop_state(16, StageIterationCeilings::uniform(4));
+        state.observability = ObservabilityMode::Invariant;
+
+        let result = run_refinement_loop(state, &mut pipeline).expect("loop runs");
+
+        assert_eq!(result.terminal, TerminalState::Converged);
+        assert_eq!(
+            result.state.knobs.global.placement.profile,
+            PlacementProfile::Budgeted
+        );
+        assert!(matches!(
+            result.state.history.proposals[0].outcome,
+            ProposalOutcome::Rejected {
+                reason: DeltaRejection::InvariantObservabilityViolation { .. }
+            }
+        ));
+        assert!(matches!(
+            result.state.history.proposals[1].outcome,
+            ProposalOutcome::Accepted { .. }
+        ));
+    }
+
+    #[test]
     fn invariant_blocks_trace_demotion() {
         let proposal = proposal(
             "rp-trace",
             PlanningStage::RangePlan,
             RepairReason::ScheduleCostMissedTarget,
             KnobDelta::SetTraceDemotion {
-                to: ProbeCollectionLevel::Operational,
+                to: TraceDemotionLevel::DropBestEffort,
             },
         );
         let mut pipeline = ScriptedPipeline::with(
@@ -888,7 +1168,38 @@ mod tests {
     }
 
     #[test]
-    fn pressure_threshold_update_rejected_without_mutable_threshold_store() {
+    fn sram_spill_policy_advance_applies_to_compile_knobs() {
+        let proposal = proposal(
+            "rp-spill",
+            PlanningStage::SramPagePlan,
+            RepairReason::ResourceStateValidationFailed,
+            KnobDelta::AdvanceSramSpillPolicy {
+                to: SramSpillPolicy::SpillOnPressure,
+            },
+        );
+        let mut pipeline = ScriptedPipeline::with(
+            PlanningStage::SramPagePlan,
+            vec![StageRunOutcome::ProposedRepair { proposal }],
+        );
+
+        let result = run_refinement_loop(
+            loop_state(8, StageIterationCeilings::uniform(2)),
+            &mut pipeline,
+        )
+        .expect("loop runs");
+
+        assert_eq!(
+            result.state.knobs.global.sram.spill_policy,
+            SramSpillPolicy::SpillOnPressure
+        );
+        assert!(matches!(
+            result.state.history.proposals[0].outcome,
+            ProposalOutcome::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn pressure_threshold_update_applies_to_compile_knobs() {
         let proposal = proposal(
             "rp-pressure",
             PlanningStage::ResourceStateValidation,
@@ -896,8 +1207,8 @@ mod tests {
             KnobDelta::UpdatePressureThreshold {
                 update: ResourcePressureUpdate::WramHot {
                     limit: PressureLimit {
-                        soft: 1024,
-                        hard: 2048,
+                        soft: 7000,
+                        hard: 8192,
                     },
                 },
             },
@@ -915,13 +1226,43 @@ mod tests {
 
         assert!(matches!(
             result.state.history.proposals[0].outcome,
-            ProposalOutcome::Rejected {
-                reason: DeltaRejection::UnsupportedMutation {
-                    knob: CompileKnobId::ScheduleResourcePressure,
-                    ..
-                }
-            }
+            ProposalOutcome::Accepted { .. }
         ));
+        assert_eq!(
+            result
+                .state
+                .knobs
+                .global
+                .schedule
+                .pressure_thresholds
+                .wram_hot,
+            PressureLimit {
+                soft: 7000,
+                hard: 8192
+            }
+        );
+        match &result.state.history.proposals[0].outcome {
+            ProposalOutcome::Accepted { knobs_delta, .. } => {
+                assert_eq!(
+                    knobs_delta.per_knob[0].knob,
+                    CompileKnobId::ScheduleResourcePressure
+                );
+                assert!(
+                    knobs_delta.per_knob[0]
+                        .before
+                        .contains("\"resource_pressure\"")
+                );
+                assert!(knobs_delta.per_knob[0].before.contains("Conservative"));
+                assert!(
+                    knobs_delta.per_knob[0]
+                        .after
+                        .contains("\"pressure_thresholds\"")
+                );
+                assert!(knobs_delta.per_knob[0].before.contains("\"soft\":6144"));
+                assert!(knobs_delta.per_knob[0].after.contains("\"soft\":7000"));
+            }
+            ProposalOutcome::Rejected { .. } => panic!("pressure update should be accepted"),
+        }
     }
 
     #[test]
@@ -983,6 +1324,50 @@ mod tests {
     }
 
     #[test]
+    fn accepted_refinement_budget_exhausted_records_admissible_proposal() {
+        let proposal = proposal(
+            "rp-budget",
+            PlanningStage::StoragePlan,
+            RepairReason::PlacementProfileFallback,
+            KnobDelta::AdvancePlacementProfile {
+                to: PlacementProfile::Budgeted,
+            },
+        );
+        let mut pipeline = ScriptedPipeline::with(
+            PlanningStage::StoragePlan,
+            vec![StageRunOutcome::ProposedRepair { proposal }],
+        );
+        let mut initial = loop_state(8, StageIterationCeilings::uniform(2));
+        initial.accepted_iters_remaining = 0;
+
+        let result = run_refinement_loop(initial.clone(), &mut pipeline).expect("loop runs");
+
+        assert_eq!(
+            result.terminal,
+            TerminalState::AcceptedRefinementBudgetExhausted {
+                stage: PlanningStage::StoragePlan
+            }
+        );
+        assert_eq!(
+            result.state.knobs.global.placement.profile,
+            PlacementProfile::StrictOnePerBank
+        );
+        assert_eq!(result.state.history.proposals.len(), 1);
+        assert!(matches!(
+            &result.state.history.proposals[0].outcome,
+            ProposalOutcome::Rejected {
+                reason: DeltaRejection::AcceptedRefinementBudgetExhausted {
+                    max_refinement_iters
+                }
+            } if *max_refinement_iters == initial.repair_policy.max_refinement_iters
+        ));
+        assert_eq!(
+            repair_report(&initial, &result, report_inputs()).outcome,
+            ReportOutcome::Failed
+        );
+    }
+
+    #[test]
     fn accepted_force_kernel_residency_records_repair_provenance() {
         let proposal = proposal(
             "rp-kernel",
@@ -1027,11 +1412,19 @@ mod tests {
         );
         let initial = loop_state(16, StageIterationCeilings::uniform(4));
         let result = run_refinement_loop(initial.clone(), &mut pipeline).expect("loop runs");
-        let report = repair_report(&initial, &result);
+        let report = repair_report(&initial, &result, report_inputs());
 
         assert_eq!(REPAIR_REPORT_FILE_NAME, "repair_report.json");
         assert_eq!(report.schema.as_str(), "repair_report.v1");
         assert_eq!(report.outcome, ReportOutcome::Passed);
+        assert_eq!(
+            report.body.report_inputs.policy_resolution_self_hash,
+            Hash256::from_bytes([1; 32])
+        );
+        assert_eq!(
+            report.body.report_inputs.artifact_validation_self_hash,
+            Hash256::from_bytes([2; 32])
+        );
         assert_eq!(
             report.body.initial_knobs.values.placement.profile,
             PlacementProfile::StrictOnePerBank
@@ -1098,8 +1491,8 @@ mod tests {
         initial.recompute_purity.effectful_values.insert(value);
 
         let result = run_refinement_loop(initial.clone(), &mut pipeline).expect("loop runs");
-        let report = repair_report(&initial, &result);
-        let bytes = repair_report_json(&initial, &result);
+        let report = repair_report(&initial, &result, report_inputs());
+        let bytes = repair_report_json(&initial, &result, report_inputs());
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).expect("canonical report parses");
 
@@ -1143,6 +1536,15 @@ mod tests {
         }
     }
 
+    fn report_inputs() -> RepairReportInputsSection {
+        RepairReportInputsSection {
+            policy_resolution_self_hash: Hash256::from_bytes([1; 32]),
+            artifact_validation_self_hash: Hash256::from_bytes([2; 32]),
+            static_budget_self_hash: Some(Hash256::from_bytes([3; 32])),
+            schedule_cost_self_hash: Some(Hash256::from_bytes([4; 32])),
+        }
+    }
+
     fn loop_state(
         global_iters_remaining: u8,
         stage_iters_remaining: StageIterationCeilings,
@@ -1156,6 +1558,8 @@ mod tests {
             repair_policy: RepairPolicy::for_profile(RepairPolicyProfile::Default),
             observability: ObservabilityMode::Flexible,
             recompute_purity,
+            accepted_iters_remaining: RepairPolicy::for_profile(RepairPolicyProfile::Default)
+                .max_refinement_iters,
             global_iters_remaining,
             stage_iters_remaining,
             history: RepairHistory::default(),
@@ -1170,6 +1574,7 @@ mod tests {
                 },
                 observation: ObservationKnob {
                     observability: ObservabilityMode::Flexible,
+                    trace_demotion: TraceDemotionLevel::None,
                     probe_level: ProbeCollectionLevel::RequiredOnly,
                 },
                 range: RangeKnob {
@@ -1180,6 +1585,7 @@ mod tests {
                 },
                 sram: SramKnob {
                     page_aggression: SramPageAggression::Preserve,
+                    spill_policy: SramSpillPolicy::NoSpill,
                 },
                 rom_window: RomWindowKnob {
                     kernel_residency_bias: RomKernelResidencyBias::PreferCommonBank,
@@ -1192,6 +1598,8 @@ mod tests {
                     tile_search: ScheduleTileSearch::Fixed,
                     slice_coarsening: ScheduleSliceCoarsening::Fine,
                     resource_pressure: ScheduleResourcePressure::Conservative,
+                    pressure_thresholds: ResourcePressureThresholds::default(),
+                    stage_iteration_ceilings: StageIterationLimits::uniform(4),
                 },
             },
             bounds: CompileKnobBounds {
@@ -1199,6 +1607,7 @@ mod tests {
                     max_profile: PlacementProfile::PackedExperts,
                 },
                 observation: ObservationKnobBounds {
+                    max_trace_demotion: TraceDemotionLevel::RequiredOnly,
                     max_probe_level: ProbeCollectionLevel::Verbose,
                 },
                 range: RangeKnobBounds {
@@ -1209,6 +1618,7 @@ mod tests {
                 },
                 sram: SramKnobBounds {
                     max_page_aggression: SramPageAggression::MinimizeResident,
+                    max_spill_policy: SramSpillPolicy::SpillEager,
                 },
                 rom_window: RomWindowKnobBounds {
                     max_kernel_residency_bias: RomKernelResidencyBias::PreferWramOverlay,
@@ -1221,6 +1631,10 @@ mod tests {
                     max_tile_search: ScheduleTileSearch::ProfileGuided,
                     max_slice_coarsening: ScheduleSliceCoarsening::Coarse,
                     max_resource_pressure: ScheduleResourcePressure::FitFirst,
+                    max_pressure_thresholds: gbf_policy::canonical_default_bounds_fixture()
+                        .schedule
+                        .max_pressure_thresholds,
+                    max_stage_iteration_ceilings: StageIterationLimits::uniform(u8::MAX),
                 },
             },
             locks: KnobLockSet::default(),

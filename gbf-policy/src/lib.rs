@@ -22,7 +22,8 @@ pub mod trace_event_layout;
 pub use budget::{BudgetSlotClass, RomBudgetSlot, RuntimeChromeBudget, RuntimeMemoryCapSection};
 pub use calibration::{
     BootstrapCalibrationBundle, CalibrationBundle, CalibrationBundleSet, CalibrationLayer,
-    CalibrationSetRef, MeasurementBlob, ValidityEnvelope, ValidityEnvelopeFuturePlaceholder,
+    CalibrationSessionProfile, CalibrationSetRef, MeasurementBlob, ValidityEnvelope,
+    ValidityEnvelopeFuturePlaceholder,
 };
 pub use capabilities::{
     STAGE0_CLASS10_TARGET_CAPABILITY_OWNER, STAGE0_CLASS10_TARGET_CAPABILITY_RULES,
@@ -53,14 +54,14 @@ pub use compile::{
     RomKernelResidencyBias, RomWindowKnob, RomWindowKnobBounds, RuntimeMode, ScheduleKnob,
     ScheduleKnobBounds, ScheduleResourcePressure, ScheduleSliceCoarsening, ScheduleTileSearch,
     SectionId, SelectorPath, SequenceSemanticsRef, SliceClass, SramKnob, SramKnobBounds,
-    SramPageAggression, StorageKnob, StorageKnobBounds, StorageMaterialization,
-    TRACE_COMPILE_PROFILE_ID, TRACE_COMPILE_PROFILE_TOML, TileCandidateClass, TileSelector,
-    TraceBudget, TraceDropPolicy, ValueId, ValueSelector, canonical_compile_profile_specs,
-    canonical_default_bounds_fixture, check_delta_admissible,
-    check_delta_admissible_with_recompute_purity, compile_profile_defaults_hash,
-    f_b16_profile_lock_set, f_b16_refinement_knob_ids, load_compile_profile_spec,
-    resolve_initial_knobs_from_profile_spec, resolve_repair_policy_from_profile_spec,
-    resolve_resource_pressure_thresholds,
+    SramPageAggression, SramSpillPolicy, StageIterationLimits, StorageKnob, StorageKnobBounds,
+    StorageMaterialization, TRACE_COMPILE_PROFILE_ID, TRACE_COMPILE_PROFILE_TOML,
+    TileCandidateClass, TileSelector, TraceBudget, TraceDemotionLevel, TraceDropPolicy, ValueId,
+    ValueSelector, canonical_compile_profile_specs, canonical_default_bounds_fixture,
+    check_delta_admissible, check_delta_admissible_with_recompute_purity,
+    compile_profile_defaults_hash, f_b16_profile_lock_set, f_b16_refinement_knob_ids,
+    load_compile_profile_spec, resolve_initial_knobs_from_profile_spec,
+    resolve_repair_policy_from_profile_spec, resolve_resource_pressure_thresholds,
 };
 pub use cost::{
     CostBucketTotals, CostEstimate, EstimatedCostDelta, EvidenceClass, FallbackReason,

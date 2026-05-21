@@ -38,21 +38,6 @@ pub struct RepairReportInputsSection {
     pub schedule_cost_self_hash: Option<Hash256>,
 }
 
-impl RepairReportInputsSection {
-    /// Narrow-v1 placeholder used by the loop driver until Stage 0/0.5 hands
-    /// self-hashes into F-B16. Required upstream hashes use the zero hash as an
-    /// explicit "not yet plumbed" sentinel rather than omitting the fields.
-    #[must_use]
-    pub const fn narrow_v1_unknown() -> Self {
-        Self {
-            policy_resolution_self_hash: Hash256::ZERO,
-            artifact_validation_self_hash: Hash256::ZERO,
-            static_budget_self_hash: None,
-            schedule_cost_self_hash: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompileKnobsSnapshot {
@@ -122,6 +107,23 @@ where
 
         if (outcome == ReportOutcome::Passed) != self.termination.is_converged() {
             errors.push(semantic_error("termination"));
+        }
+
+        if self.report_inputs.policy_resolution_self_hash == Hash256::ZERO {
+            errors.push(semantic_error("report_inputs.policy_resolution_self_hash"));
+        }
+        if self.report_inputs.artifact_validation_self_hash == Hash256::ZERO {
+            errors.push(semantic_error(
+                "report_inputs.artifact_validation_self_hash",
+            ));
+        }
+        if matches!(self.report_inputs.static_budget_self_hash, Some(hash) if hash == Hash256::ZERO)
+        {
+            errors.push(semantic_error("report_inputs.static_budget_self_hash"));
+        }
+        if matches!(self.report_inputs.schedule_cost_self_hash, Some(hash) if hash == Hash256::ZERO)
+        {
+            errors.push(semantic_error("report_inputs.schedule_cost_self_hash"));
         }
 
         if self
@@ -300,7 +302,18 @@ mod tests {
 
         assert_eq!(value["schema"], serde_json::json!("repair_report.v1"));
         assert_eq!(value["schema_version"], serde_json::json!("1.0.0"));
-        assert!(value["report_inputs"].is_object());
+        assert_eq!(
+            value["report_inputs"]["policy_resolution_self_hash"],
+            serde_json::json!(
+                "sha256:0101010101010101010101010101010101010101010101010101010101010101"
+            )
+        );
+        assert_eq!(
+            value["report_inputs"]["artifact_validation_self_hash"],
+            serde_json::json!(
+                "sha256:0202020202020202020202020202020202020202020202020202020202020202"
+            )
+        );
         assert!(value["initial_knobs"]["snapshot_hash"].is_string());
         assert!(value["final_knobs"]["snapshot_hash"].is_string());
         assert!(value["stage_iteration_counts"].is_array());
@@ -336,6 +349,35 @@ mod tests {
         ];
 
         assert!(body.validate_semantics(ReportOutcome::Passed).is_err());
+    }
+
+    #[test]
+    fn repair_report_rejects_zero_report_input_hashes() {
+        let mut body = report_fixture().body;
+        body.report_inputs.policy_resolution_self_hash = Hash256::ZERO;
+        body.report_inputs.artifact_validation_self_hash = Hash256::ZERO;
+        body.report_inputs.static_budget_self_hash = Some(Hash256::ZERO);
+        body.report_inputs.schedule_cost_self_hash = Some(Hash256::ZERO);
+
+        let errors = body
+            .validate_semantics(ReportOutcome::Passed)
+            .expect_err("zero input hashes reject");
+        assert!(errors.iter().any(|diagnostic| matches!(
+            &diagnostic.detail,
+            ValidationDetail::Field { field } if field.as_str() == "report_inputs.policy_resolution_self_hash"
+        )));
+        assert!(errors.iter().any(|diagnostic| matches!(
+            &diagnostic.detail,
+            ValidationDetail::Field { field } if field.as_str() == "report_inputs.artifact_validation_self_hash"
+        )));
+        assert!(errors.iter().any(|diagnostic| matches!(
+            &diagnostic.detail,
+            ValidationDetail::Field { field } if field.as_str() == "report_inputs.static_budget_self_hash"
+        )));
+        assert!(errors.iter().any(|diagnostic| matches!(
+            &diagnostic.detail,
+            ValidationDetail::Field { field } if field.as_str() == "report_inputs.schedule_cost_self_hash"
+        )));
     }
 
     #[test]
@@ -472,6 +514,7 @@ mod tests {
                 },
                 observation: ObservationKnob {
                     observability: ObservabilityMode::Flexible,
+                    trace_demotion: gbf_policy::TraceDemotionLevel::None,
                     probe_level: ProbeCollectionLevel::RequiredOnly,
                 },
                 range: RangeKnob {
@@ -482,6 +525,7 @@ mod tests {
                 },
                 sram: SramKnob {
                     page_aggression: SramPageAggression::Preserve,
+                    spill_policy: gbf_policy::SramSpillPolicy::NoSpill,
                 },
                 rom_window: RomWindowKnob {
                     kernel_residency_bias: RomKernelResidencyBias::PreferCommonBank,
@@ -494,6 +538,8 @@ mod tests {
                     tile_search: ScheduleTileSearch::Fixed,
                     slice_coarsening: ScheduleSliceCoarsening::Fine,
                     resource_pressure: ScheduleResourcePressure::Conservative,
+                    pressure_thresholds: gbf_policy::ResourcePressureThresholds::default(),
+                    stage_iteration_ceilings: gbf_policy::StageIterationLimits::uniform(4),
                 },
             },
             bounds: canonical_default_bounds_fixture(),
