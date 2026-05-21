@@ -2802,6 +2802,36 @@ overlay_install_alignment, bank_switch_bracketing }`.
 The certificate is `certs/resource_state.cert.json`, schema
 `resource_state.cert.v1`.
 
+**Implementation amendment — bd-9ae narrow v1.** Amends F-B13 §9.2 and
+§9.3.1 for the first landed Stage 10/10.5 surface. The v1 implementation
+emits compact `ProofStatus` fields for the four proof sections rather than
+the full per-fact vectors below. The validator is an intra-slice typed flow
+checker over the v1 schedule emitted by this bead: leases are acquired and
+released within the same slice, overlay leases are treated as reservable for
+v1, mode schedules share the same conservative slice body, and cycle/drift
+numbers are static placeholders until F-B14 owns cost derivation. The full
+lease-flow graph traversal, per-fact certificate bodies, conditional overlay
+lease-shape proof, mode-specific cadence differences, and computed
+reachability confirmation remain deferred to follow-up certificate/scheduler
+expansion beads (F-F2/F-C3/F-D6/F-B15 as appropriate). The public diagnostic
+codes for unknown arena slots, upstream lease-kind mismatch, requested-mode
+omission, and checkpoint-schema mismatch are reserved by the v1 schema and
+are not emitted by the narrow builder.
+
+**Implementation amendment — bd-y8w1 closure expansion.** Amends the
+bd-9ae narrow-v1 note above. Stage 10.5 now emits per-fact certificate
+sections and re-runs a computed reachability traversal over the
+`SchedulePack` slice graph. The
+`computed_reachability_confirmed` bit means "all schedule slices in the
+pack are reachable from their mode entry under the Stage 10 slice graph."
+It does **not** claim F-B15 whole-program reachability after far-call
+legalization. Overlay lease-shape proof is likewise schedule-local:
+every `OverlayInstall` op must execute in an overlay residency epoch and
+be bracketed by an active `ResourceLeaseKind::Overlay` for that epoch's
+overlay. Validation remains independently re-runnable from the
+`SchedulePack` alone; upstream `OverlayPlan` totality is still owned by
+Stage 8.5.
+
 ```rust
 pub struct ResourceStateCertBody {
     pub identity: ResourceStateIdentitySection,
@@ -2866,11 +2896,11 @@ pub struct YieldSafetyFact {
 pub struct IsrVisibleResidencySection {
     pub enabled_slices: Vec<IsrVisibleResidencyFact>,
     pub all_isr_safe: bool,
-    /// True iff F-B15 ReachabilityValidation has independently confirmed
-    /// the annotated residency at the computed-reachability level. v1
-    /// always sets this to false; F-B15's pass updates the certificate
-    /// or emits a separate certs/reachability.cert.json that supersedes
-    /// the annotation-driven evidence.
+    /// True iff Stage 10.5 has traversed the SchedulePack slice graph and
+    /// confirmed that every schedule slice is reachable from its mode entry.
+    /// F-B15 still owns whole-program reachability after far-call legalization
+    /// and may emit a separate certs/reachability.cert.json that supersedes
+    /// the annotation-driven residency evidence.
     pub computed_reachability_confirmed: bool,
 }
 
@@ -3112,7 +3142,9 @@ The ISR-visible-residency check (§9.1.3) has two regimes:
   one bank.
 
 The `ResourceStateCertBody.isr_visible_residency.computed_reachability_confirmed`
-field is `false` in v1. F-B15's pass either:
+field is `true` once Stage 10.5 has traversed the schedule slice graph
+and confirmed every slice is reachable from its mode entry. This is a
+schedule-graph confirmation only. F-B15's pass either:
 
 * updates the existing `resource_state.cert.json` to set
   `computed_reachability_confirmed = true` and emit additional
@@ -4795,8 +4827,9 @@ F-IsrVisibleResidency (T-B13.15 verifies):
         {RomWindow(_), SramPage(_)}.
 
   Note: F-B15 ReachabilityValidation supersedes this with the computed
-  whole-program counterpart; the certificate field
-  `computed_reachability_confirmed` is false in v1.
+  whole-program counterpart. The certificate field
+  `computed_reachability_confirmed` confirms only the Stage 10 schedule
+  slice graph.
 ```
 
 ### 19.5 Overlay/bank-shadow consistency
@@ -5044,7 +5077,9 @@ chunk:
 * `observed = DriftEnvelope::all_none()`, `consecutive_violations = 0`;
 * `legal_switch_points` may be empty for v1 (multi-mode is schema-only
   until F-D6 unblocks);
-* `computed_reachability_confirmed = false` (F-B15 supersedes).
+* `computed_reachability_confirmed = true` when every Stage 10 schedule
+  slice is reachable from its mode entry; F-B15 supersedes with
+  whole-program reachability.
 
 **Inheritance:** F-B2/F-B4 (envelope, JSON, hash, StageCache,
 diagnostic taxonomy); F-B3/F-B5 (`GbInferIR`, no-partial-product law);

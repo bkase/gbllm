@@ -1,0 +1,9 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-004-OverlayRegionEmptyButPopulated",
+  "scenario": "region_empty_but_populated",
+  "expected_code": { "kind": "OverlayRegionEmptyButPopulated" },
+  "expected_extra_codes": [
+    { "kind": "OverlayInstallReferencesUnknownMember" }
+  ]
+}

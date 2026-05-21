@@ -1218,6 +1218,7 @@ The loop's terminal classification.
 ```rust
 pub enum TerminalState {
     Converged,
+    AcceptedRefinementBudgetExhausted { stage: PlanningStage },
     GlobalBudgetExhausted,
     StageBudgetExhausted { stage: PlanningStage },
     StagedFailureUnrepairable { stage: PlanningStage, last_error: String },
@@ -1232,6 +1233,7 @@ The driver's typed reason for rejecting a proposal.
 
 ```rust
 pub enum DeltaRejection {
+    AcceptedRefinementBudgetExhausted { max_refinement_iters: u8 },
     KnobLocked { knob: CompileKnobId },
     PolicyToggleDisabled { knob: CompileKnobId, toggle: &'static str },
     BeyondBounds { knob: CompileKnobId, attempted: String, max: String },
@@ -1460,14 +1462,19 @@ The loop ends in one of four states:
 
 1. `TerminalState::Converged` — every stage succeeded with no
    proposal in the most recent iteration.
-2. `TerminalState::GlobalBudgetExhausted` — `global_iters_remaining`
+2. `TerminalState::AcceptedRefinementBudgetExhausted { stage }` — a
+   stage produced an admissible repair proposal after
+   `RepairPolicy::max_refinement_iters` accepted deltas had already
+   been consumed. The proposal is recorded as rejected with
+   `DeltaRejection::AcceptedRefinementBudgetExhausted`.
+3. `TerminalState::GlobalBudgetExhausted` — `global_iters_remaining`
    reached 0 with at least one stage still needing repair.
-3. `TerminalState::StageBudgetExhausted { stage }` — a per-stage
+4. `TerminalState::StageBudgetExhausted { stage }` — a per-stage
    counter reached 0 while the stage was still needing repair.
-4. `TerminalState::StagedFailureUnrepairable { stage, last_error }` —
+5. `TerminalState::StagedFailureUnrepairable { stage, last_error }` —
    a stage returned `UnrepairableFailure`.
 
-Only the first is a build success. The other three are typed
+Only the first is a build success. The other four are typed
 build failures that emit `repair_report.json` plus
 `policy_resolution.json` (with the *current* — possibly partially
 mutated — knobs and provenance, recording every accepted delta up to
@@ -2273,8 +2280,10 @@ iteration absorbs deterministic local tile/slice fixes while still
 failing loudly on placement / overlay / recompute / trace policy."
 
 This RFC tracks both as candidates and asks **OQ-R1** (§21) to pick.
-A `BringupFirstFit` / `--strict-first-fit` mode setting iters=0
-explicitly is mentioned as a separate setting, regardless of which
+A `BringupFirstFit` / `--strict-first-fit` mode setting iters=0 is
+implemented as a narrow policy artifact (`RepairPolicyProfile::
+BringupFirstFit` and `RepairPolicy::bringup_strict_first_fit()`).
+It is a separate setting from canonical Bringup, regardless of which
 candidate wins.
 
 #### 9.2.2 Default profile
@@ -2480,6 +2489,23 @@ At Stage 0.5 (F-B2), `RepairPolicy` is resolved as follows:
 The resolved `RepairPolicy` is recorded in `policy_resolution.json`'s
 `resolved.repair` field (already wired by F-B2/F-B4 §7.5).
 
+Implementation note: the checked-in resolver consumes the typed profile
+spec directly:
+
+```rust
+pub fn resolve_initial_knobs_from_profile_spec(
+    profile: &CompileProfileSpec,
+) -> Result<CompileKnobs, InitialKnobsResolveError>;
+
+pub fn resolve_repair_policy_from_profile_spec(
+    profile: &CompileProfileSpec,
+) -> Result<RepairPolicy, InitialKnobsResolveError>;
+```
+
+Runtime chrome, objective, scheduler, and trace-budget inputs feed the
+separate `resolve_resource_pressure_thresholds(...)` path rather than
+the initial profile-spec-only knob resolver.
+
 ### 9.5 Oracle question summary for §9
 
 | ID     | Question                                                            | This RFC's candidate                                       |
@@ -2517,7 +2543,8 @@ Most proposals carry exactly one `KnobDelta` and use the
 `knob_delta: Some(...)` field. Multi-knob proposals (rare) leave
 `knob_delta: None` and the driver iterates over `tighten.changes`.
 
-The full `KnobDelta` enum (14 variants — bd-3ix oracle answer):
+The full `KnobDelta` enum (15 variants — bd-3ix plus the
+SramSpillPolicy follow-up):
 
 ```rust
 pub enum KnobDelta {
@@ -2531,6 +2558,7 @@ pub enum KnobDelta {
     PromoteRecomputeLevel { to: RecomputePromotionLevel },
     ForceRecompute { values: BTreeSet<ValueSelector> },
     AdvanceSramPageAggression { to: SramPageAggression },
+    AdvanceSramSpillPolicy { to: SramSpillPolicy },
     AdvanceKernelResidencyBias { to: KernelResidencyBias },
     AdvanceKernelDuplicationBias { to: KernelDuplicationBias },
     ForceKernelResidency {
@@ -2562,7 +2590,7 @@ pub enum ResourcePressureUpdate {
 }
 ```
 
-`Oracle question (OQ-D1)`: is the `KnobDelta` enum closed at 14
+`Oracle question (OQ-D1)`: is the `KnobDelta` enum closed at 15
 variants? Specifically:
 
 * Should there be a `RaiseSlackReservation { arena: ArenaId, bytes:
@@ -2591,7 +2619,7 @@ pass is the tiebreaker.
 | PromoteRecomputeLevel              | StorageRecomputePromotion                     |
 | ForceRecompute                     | StorageMaterializationOverrides               |
 | AdvanceSramPageAggression          | SramPageAggression                            |
-| (no KnobDelta yet for SpillPolicy) | SramSpillPolicy                               |
+| AdvanceSramSpillPolicy             | SramSpillPolicy                               |
 | AdvanceKernelResidencyBias         | RomKernelResidencyBias                        |
 | AdvanceKernelDuplicationBias       | RomKernelDuplicationBias                      |
 | ForceKernelResidency               | RomKernelResidencyOverrides                   |
@@ -2601,15 +2629,21 @@ pass is the tiebreaker.
 | UpdatePressureThreshold            | ScheduleResourcePressure                      |
 | (no KnobDelta yet for StageIters)  | StageIterationCeilings                         |
 
-`Oracle question (OQ-D1.b)`: should `SramSpillPolicy` get its own
-`KnobDelta` variant (e.g. `AdvanceSpillPolicy { to: SpillPolicy }`)?
-This RFC's candidate: yes — add `AdvanceSpillPolicy { to: SpillPolicy }`
-to the enum. This makes the 1:1 mapping complete. The bd-3ix oracle
-answer is silent; the chunk-10 oracle pass should confirm.
+`OQ-D1.b resolution`: `SramSpillPolicy` has a backing field and the
+typed `AdvanceSramSpillPolicy { to: SramSpillPolicy }` delta. The only
+remaining knob without a mutation variant is `StageIterationCeilings`,
+which is intentionally loop-internal construction input rather than a
+runtime repair lever.
+
+`ScheduleTileSearch` intentionally remains an enum-only knob. Per-stage
+or per-tile narrowing is not modeled as a second public knob; it is
+carried by `KnobDelta::NarrowTileClasses { selector, remaining }`, so
+the report preserves one stable `CompileKnobId::ScheduleTileSearch`
+surface while still naming selector-specific narrowing evidence.
 
 ### 10.2 Admissibility predicate
 
-A proposed `KnobDelta` is **admissible** iff all six checks pass:
+A proposed `KnobDelta` is **admissible** iff all seven checks pass:
 
 ```rust
 pub fn check_delta_admissible(
@@ -2620,7 +2654,7 @@ pub fn check_delta_admissible(
 ) -> Result<(), DeltaRejection>;
 ```
 
-The six checks, in order:
+The seven checks, in order:
 
 1. **Knob not locked.** `current.locks.is_locked(delta.knob_id())`
    must be false. Else `DeltaRejection::KnobLocked { knob }`.
@@ -2631,16 +2665,20 @@ The six checks, in order:
    `current.bounds.<corresponding-max>` (for ordered enums) or in
    `current.bounds.<corresponding-allowed-set>` (for unordered).
    Else `DeltaRejection::BeyondBounds { knob, attempted, max }`.
-4. **Monotone.** The new value's rank must be ≥ the current value's
+4. **Supported mutable surface.** Every delta variant either mutates a
+   backing `CompileKnobs` field/override or is rejected before
+   application. `UpdatePressureThreshold` writes the typed
+   `ResourcePressureThresholds` field in `ScheduleKnob`.
+5. **Monotone.** The new value's rank must be ≥ the current value's
    rank (for ordered enums), or the new set must be a subset (for
    subset-removal sets) or superset (for superset-addition sets).
    Else `DeltaRejection::NotMonotone { knob, current, attempted }`.
-5. **Pure recompute (for `KnobDelta::ForceRecompute` only).** Every
+6. **Pure recompute (for `KnobDelta::ForceRecompute` only).** Every
    `ValueSelector` in the delta must reference a value whose
    `effects_out: BTreeSet<EffectClass>` is empty (no `SequenceWrite`,
    `RngAdvance`, `PersistenceCommit`, or `TraceEmit`). Else
    `DeltaRejection::EffectfulRecompute { value }`.
-6. **Invariant observability.** If `observability ==
+7. **Invariant observability.** If `observability ==
    ObservabilityMode::Invariant`, the delta must not affect any of
    `ObservationTraceDemotion`, `ObservationProbeSelection`. Else
    `DeltaRejection::InvariantObservabilityViolation { knob }`.
@@ -2666,10 +2704,12 @@ the next:
 1. Lock checks need no other inputs.
 2. Policy-toggle checks need `RepairPolicy`.
 3. Bounds checks need `current.bounds`.
-4. Monotone checks need `current.values`.
-5. Pure-recompute checks need `GbInferIR` effect-edge data
+4. Supported-mutable-surface checks need only the closed `KnobDelta`
+   implementation capabilities.
+5. Monotone checks need `current.values`.
+6. Pure-recompute checks need `GbInferIR` effect-edge data
    (expensive — performed last among the cheap checks).
-6. Invariant-observability is a derived check that may or may not
+7. Invariant-observability is a derived check that may or may not
    apply; checked last so the rejection type is precise.
 
 #### 10.2.2 KnobDelta-to-toggle mapping
@@ -2683,6 +2723,7 @@ the next:
 | PromoteRecomputeLevel              | allow_recompute_promotion        |
 | ForceRecompute                     | allow_recompute_promotion        |
 | AdvanceSramPageAggression          | (always allowed if not locked)   |
+| AdvanceSramSpillPolicy             | (always allowed if not locked)   |
 | AdvanceKernelResidencyBias         | (always allowed if not locked)   |
 | AdvanceKernelDuplicationBias       | (always allowed if not locked)   |
 | ForceKernelResidency (target=WramOverlay) | allow_overlay_promotion   |
@@ -2690,7 +2731,7 @@ the next:
 | PromoteOverlay                     | allow_overlay_promotion          |
 | NarrowTileClasses                  | (always allowed if not locked)   |
 | SetSliceCoarsening                 | (always allowed if not locked)   |
-| UpdatePressureThreshold            | (always allowed if not locked — but ScheduleResourcePressure is locked under Default/Trace/Recovery, see §9.2) |
+| UpdatePressureThreshold            | (always allowed if not locked and monotone within `max_pressure_thresholds`) |
 
 `Oracle question (OQ-D1.c)`: are the four `allow_*` toggles
 (placement_profile_fallback, trace_demotion, overlay_promotion,
@@ -3238,14 +3279,16 @@ hitting the ceiling without converging — is in fact
 
 #### 11.4.2 Loop hits ceiling
 
-`TerminalState::GlobalBudgetExhausted` or
+`TerminalState::AcceptedRefinementBudgetExhausted { stage }`,
+`TerminalState::GlobalBudgetExhausted`, or
 `TerminalState::StageBudgetExhausted { stage }` are the typed
-ceiling-hit terminal states. Both are build failures.
+ceiling-hit terminal states. All three are build failures.
 
 `repair_report.json` records:
 
 ```rust
 TerminalStateRecord::GlobalBudgetExhausted
+TerminalStateRecord::AcceptedRefinementBudgetExhausted { stage }
 TerminalStateRecord::StageBudgetExhausted { stage }
 ```
 
@@ -3271,6 +3314,12 @@ A rejection becomes a loop-level failure only when:
 In that case, the stage will eventually exhaust its
 `stage_iters_remaining` budget (or the global budget), and the loop
 terminates with `*BudgetExhausted`.
+
+Implementation note: `gbf-codegen::refinement_loop` records the
+rejection, invokes the wrapped-stage `handle_rejected_repair` callback,
+and applies a returned alternative proposal in the same stage attempt.
+If the stage returns no alternative, the loop records a terminal
+`StagedFailureUnrepairable` with the rejection reason.
 
 #### 11.4.4 AuthorizedRelaxation requested but not policy-allowed
 
@@ -3625,10 +3674,15 @@ pub struct RepairReportBody {
     pub initial_knobs: CompileKnobsSnapshot,
     pub final_knobs: CompileKnobsSnapshot,
     pub proposals: Vec<RepairProposalRecord>,
-    pub stage_iteration_counts: BTreeMap<PlanningStage, u8>,
+    pub stage_iteration_counts: Vec<StageIterationCount>,
     pub global_iters_used: u8,
     pub termination: TerminalStateRecord,
-    pub authorized_relaxation_used: bool,
+    pub authorized_relaxation_applied: bool,
+}
+
+pub struct StageIterationCount {
+    pub stage: PlanningStage,
+    pub iterations: u8,
 }
 
 pub struct CompileKnobsSnapshot {
@@ -3663,6 +3717,14 @@ pub enum ProposalOutcome {
 }
 
 pub struct KnobDeltaSummary {
+    pub changed_knobs: BTreeSet<CompileKnobId>,
+    pub changes: Vec<KnobDelta>,
+    pub per_knob: Vec<PerKnobDeltaSummary>,
+    pub before: CompileKnobs,
+    pub after: CompileKnobs,
+}
+
+pub struct PerKnobDeltaSummary {
     pub knob: CompileKnobId,
     pub before: String,    // canonical-string of the prior value
     pub after: String,     // canonical-string of the new value
@@ -3671,11 +3733,27 @@ pub struct KnobDeltaSummary {
 
 pub enum TerminalStateRecord {
     Converged,
+    AcceptedRefinementBudgetExhausted { stage: PlanningStage },
     GlobalBudgetExhausted,
     StageBudgetExhausted { stage: PlanningStage },
     StagedFailureUnrepairable { stage: PlanningStage, last_error: String },
 }
 ```
+
+Implementation note: the public JSON uses a deterministic row list for
+`stage_iteration_counts` instead of a JSON object keyed by
+`PlanningStage`, preserving the order invariant while avoiding
+non-string report-facing map keys. `RepairReportInputsSection` is
+required to carry non-zero `policy_resolution_self_hash` and
+`artifact_validation_self_hash`; optional static-budget/schedule-cost
+hashes may be `null` when those upstream reports are absent, but a
+present hash may not be zero.
+
+`CompileKnobsSnapshot` excludes provenance and hashes
+`{values,bounds,overrides,locks}`. The report also retains whole
+before/after `CompileKnobs` in `KnobDeltaSummary` for debugging, while
+the RFC per-knob before/after/operation shape is emitted as
+`knobs_delta.per_knob`.
 
 #### 13.2.1 Semantic invariants
 
@@ -3689,15 +3767,18 @@ pub enum TerminalStateRecord {
 * For every `Accepted` outcome, the `knobs_delta.after` must match
   the corresponding chain entry in `policy_resolution.json`'s
   `compile_knobs.provenance.<knob>` final value.
-* `body.global_iters_used <= initial_state.repair_policy.max_refinement_iters`.
-* `body.stage_iteration_counts` is keyed exactly by
-  `PlanningStage` variants (no missing or extra keys for stages that
-  ran at all).
+* `body.global_iters_used` counts wrapped-stage execution attempts, not
+  just accepted deltas. `LoopState::from_profile(...)` initializes that
+  attempt budget from `ScheduleKnobs::stage_iteration_ceilings`, while
+  `RepairPolicy::max_refinement_iters` separately bounds accepted repair
+  deltas.
+* `body.stage_iteration_counts` is a deterministic row list ordered by
+  `PlanningStage` for stages that ran at all.
 * `body.initial_knobs` is the `CompileKnobs` state at loop entry
   (i.e. the result of Stage 0.5 resolution).
 * `body.final_knobs` is the `CompileKnobs` state at loop exit
   (whether Converged or Failed).
-* `body.authorized_relaxation_used` is true iff at least one
+* `body.authorized_relaxation_applied` is true iff at least one
   `RepairProposalRecord.outcome == Accepted` carries a
   `knobs_delta.operation == AuthorizedRelaxation(_)`.
 
@@ -4524,7 +4605,16 @@ cargo test -p gbf-codegen -- refinement_loop::relaxation_used_twice_rejected
 #          consumed → AuthorizedRelaxationAlreadyUsed rejection.
 ```
 
-### 18.8 Loop-level rejection: GlobalBudgetExhausted
+### 18.8 Loop-level rejection: AcceptedRefinementBudgetExhausted
+
+```bash
+cargo test -p gbf-codegen -- refinement_loop::accepted_refinement_budget_exhausted_records_admissible_proposal
+# Asserts: an admissible proposal emitted after the accepted-delta
+#          budget is consumed is recorded as a rejected proposal and
+#          terminates with TerminalState::AcceptedRefinementBudgetExhausted.
+```
+
+### 18.9 Loop-level rejection: GlobalBudgetExhausted
 
 ```bash
 cargo test -p gbf-codegen -- refinement_loop::global_budget_exhausted
@@ -4533,7 +4623,7 @@ cargo test -p gbf-codegen -- refinement_loop::global_budget_exhausted
 #          max_refinement_iters iterations.
 ```
 
-### 18.9 Loop-level rejection: StageBudgetExhausted
+### 18.10 Loop-level rejection: StageBudgetExhausted
 
 ```bash
 cargo test -p gbf-codegen -- refinement_loop::stage_budget_exhausted
@@ -4541,7 +4631,7 @@ cargo test -p gbf-codegen -- refinement_loop::stage_budget_exhausted
 #          TerminalState::StageBudgetExhausted { stage: ArenaPlan }.
 ```
 
-### 18.10 Unrepairable failure pass-through
+### 18.11 Unrepairable failure pass-through
 
 ```bash
 cargo test -p gbf-codegen -- refinement_loop::unrepairable_failure_passes_through

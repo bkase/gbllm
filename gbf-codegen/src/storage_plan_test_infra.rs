@@ -379,6 +379,7 @@ pub mod synth {
                 max_cycles_per_token: Some(24_000),
                 max_bank_switches_per_token: Some(8),
                 max_sram_page_switches_per_token: Some(2),
+                min_sustained_throughput_tokens_per_megacycle: None,
                 min_ui_headroom_pct: 10,
                 max_rom_bytes: Some(2 * 1024 * 1024),
                 risk: RiskPolicy {
@@ -412,6 +413,7 @@ pub mod synth {
                     },
                     observation: ObservationKnob {
                         observability: ObservabilityMode::Flexible,
+                        trace_demotion: gbf_policy::TraceDemotionLevel::None,
                         probe_level: ProbeCollectionLevel::Operational,
                     },
                     range: RangeKnob {
@@ -422,6 +424,7 @@ pub mod synth {
                     },
                     sram: SramKnob {
                         page_aggression: SramPageAggression::PackCold,
+                        spill_policy: gbf_policy::SramSpillPolicy::SpillOnPressure,
                     },
                     rom_window: RomWindowKnob {
                         kernel_residency_bias: RomKernelResidencyBias::PreferCommonBank,
@@ -434,6 +437,8 @@ pub mod synth {
                         tile_search: ScheduleTileSearch::Local,
                         slice_coarsening: ScheduleSliceCoarsening::Balanced,
                         resource_pressure: ScheduleResourcePressure::Balanced,
+                        pressure_thresholds: gbf_policy::ResourcePressureThresholds::default(),
+                        stage_iteration_ceilings: gbf_policy::StageIterationLimits::uniform(4),
                     },
                 },
                 bounds,
@@ -441,6 +446,7 @@ pub mod synth {
                 overrides: CompileKnobOverrides {
                     values: CompileKnobPartialValues::default(),
                     bounds: CompileKnobPartialBounds::default(),
+                    ..CompileKnobOverrides::default()
                 },
                 provenance: Vec::new(),
             },

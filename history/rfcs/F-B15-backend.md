@@ -1306,10 +1306,12 @@ after placement):
   pre-placement edge graph, classifying every section by the
   classes that depend only on the *call graph topology* (ISR
   reachability, harness reachability, fault reachability) — not on
-  bank assignments. The classes that depend on bank assignments
-  (`BankLeaseProtected`) are computed inside PlacedRom as a
-  byproduct of placement. The §9 lattice (§9.1) makes this split
-  explicit.
+  bank assignments. The lease-scope class (`BankLeaseProtected`)
+  may be pre-seeded from symbolic `BankLease`/`BankRelease`
+  boundaries before placement, then carried through PlacedRom and
+  checked against final placement. The §9 lattice (§9.1) makes
+  this split explicit: topology roots are production roots, while
+  lease protection is a seed fact attached to lease-bearing code.
 * The four-sub-pass ordering is therefore: AsmIR codegen →
   topological reachability classification → placement (which
   enforces the topological classes against bank assignments and
@@ -3107,13 +3109,17 @@ pub enum EdgeKind {
     JumpAbsolute { target: SectionId },
 
     /// Cross-bank call lowered through a Bank-0 thunk. After
-    /// thunk insertion, this edge has three legs:
+    /// thunk insertion, this edge has four logical legs:
     ///   caller -> thunk
     ///   thunk  -> callee (in target bank)
     ///   callee -> thunk (return)
     ///   thunk  -> caller (return)
-    /// The reachability walker treats the chain as a single
-    /// "call into bank" edge for class propagation.
+    /// The emitted reachability edge rows model the forward
+    /// classification legs: the rewritten caller -> thunk
+    /// instruction is a normal `Call`/jump edge, and
+    /// `FarCallViaThunk` denotes the thunk -> callee leg. The two
+    /// return legs document control-flow semantics but do not seed
+    /// new forward reachability classes.
     FarCallViaThunk { thunk: SectionId, callee: SectionId,
                        return_via: SectionId },
 
@@ -3158,12 +3164,13 @@ The walker produces two reachability reports:
 * **Pre-placement topology** — runs after AsmIR codegen, before
   PlacedRom. Computes `IsrReachable`, `YieldResumeReachable`,
   `FaultPathReachable`, `HarnessEntryReachable`, `NormalOnly`
-  classes. Does **not** compute `BankLeaseProtected` (which
-  requires bank assignments).
+  classes. It may also seed `BankLeaseProtected` from symbolic
+  lease regions already present in AsmIR; this seed is a
+  lease-boundary fact, not a placement-profile inference.
 * **Post-placement final** — runs after PlacedRom, before
-  EncodedRom. Augments the pre-placement classes with
-  `BankLeaseProtected` based on lease-acquire/release boundaries.
-  Verifies the seven hard rules (§9.3) on the legalized graph.
+  EncodedRom. Carries the pre-placement classes, merges any
+  placement-discovered lease facts, and verifies the seven hard
+  rules (§9.3) on the legalized graph.
 
 Per §2.7, this is one reachability sub-pass with two phases. The
 typed product `ReachabilityReport` carries both the pre-placement
@@ -3221,9 +3228,30 @@ The walker enumerates roots by reading
 plus the F-A2-defined `INT_VECTOR_*` constants. The enumeration
 is deterministic.
 
+Production callers MUST provide the real root set described above.
+An implementation may offer an empty-input fallback for harnesses,
+fixtures, or narrow-v1 compatibility, but that fallback is not a
+production proof of root completeness.
+
 #### 9.2.3 Walker algorithm
 
 The walker is a forward-flow analysis on the typed edge graph:
+
+```text
+merge pre-placement seed facts and root facts into class_set
+initialize work_queue with every section that owns at least one
+seed/root fact
+while work_queue not empty:
+    node = dequeue
+    for each outgoing edge (node, edge_kind, target):
+        for each class in node.class_set:
+            propagated_class = propagate(class, edge_kind, target)
+            if propagated_class not in target.class_set:
+                target.class_set ∪= propagated_class
+                enqueue target
+```
+
+Equivalently, for each individual root class:
 
 ```text
 for each root in roots:

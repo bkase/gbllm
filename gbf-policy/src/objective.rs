@@ -13,6 +13,8 @@ pub struct CompileObjective {
     pub max_cycles_per_token: Option<u32>,
     pub max_bank_switches_per_token: Option<u16>,
     pub max_sram_page_switches_per_token: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_sustained_throughput_tokens_per_megacycle: Option<u32>,
     pub min_ui_headroom_pct: u8,
     pub max_rom_bytes: Option<u32>,
     pub risk: RiskPolicy,
@@ -53,6 +55,7 @@ mod tests {
             max_cycles_per_token: Some(24_000),
             max_bank_switches_per_token: Some(17),
             max_sram_page_switches_per_token: Some(3),
+            min_sustained_throughput_tokens_per_megacycle: Some(42),
             min_ui_headroom_pct: 11,
             max_rom_bytes: Some(2 * 1024 * 1024),
             risk: RiskPolicy {
@@ -90,6 +93,7 @@ mod tests {
             "max_cycles_per_token": 24000,
             "max_bank_switches_per_token": 17,
             "max_sram_page_switches_per_token": 3,
+            "min_sustained_throughput_tokens_per_megacycle": 42,
             "min_ui_headroom_pct": 11,
             "max_rom_bytes": 2097152,
             "risk": expected_risk.clone()

@@ -1,0 +1,10 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-011-OverlayInstallReferencesUnknownMember",
+  "scenario": "install_references_unknown_member",
+  "expected_code": { "kind": "OverlayInstallReferencesUnknownMember" },
+  "expected_extra_codes": [
+    { "kind": "OverlayInstallSourceNotVisible" },
+    { "kind": "OverlayCandidateNotInstalled" }
+  ]
+}

@@ -14,7 +14,7 @@ use gbf_abi::{
     SemanticStratum, TraceBudget, TraceDropPolicy as AbiTraceDropPolicy,
 };
 use gbf_foundation::{
-    CompileProfileId, EvidenceRef, ExpertId, FieldPath, Hash256, LayerId, WorkloadId,
+    CompileProfileId, EvidenceRef, ExpertId, FieldPath, Hash256, KernelSpecId, LayerId, WorkloadId,
 };
 use gbf_policy::MetricSource as RegistryMetricSource;
 use gbf_policy::{
@@ -393,9 +393,98 @@ pub struct ObservationPlanCoreProduct {
     pub build_active_checkpoint_schema_hash: Hash256,
     pub operational_probe_schema: OperationalProbeSchema,
     pub operational_probe_schema_hash: Hash256,
+    #[serde(default)]
+    pub rom_window_facts: ObservationRomWindowFacts,
 }
 
 pub type ObservationPlanProduct = ObservationPlanCoreProduct;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRomWindowFacts {
+    pub source: ObservationRomWindowFactSource,
+    pub kernels: Vec<ObservationRomKernelWindowFact>,
+    pub luts: Vec<ObservationRomLutWindowFact>,
+}
+
+impl Default for ObservationRomWindowFacts {
+    fn default() -> Self {
+        Self::source_impossible(
+            "observation_plan.rom_window_facts",
+            "Stage 4 ObservationPlan did not publish ROM-window kernel/LUT facts",
+        )
+    }
+}
+
+impl ObservationRomWindowFacts {
+    #[must_use]
+    pub fn source_impossible(registry_key: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            source: ObservationRomWindowFactSource::SourceImpossible {
+                registry_key: registry_key.into(),
+                reason: reason.into(),
+            },
+            kernels: Vec::new(),
+            luts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ObservationRomWindowFactSource {
+    Available {
+        registry_key: String,
+    },
+    Missing {
+        registry_key: String,
+    },
+    SourceImpossible {
+        registry_key: String,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObservationRomBankIndex(pub u16);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObservationResidencyEpochId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ObservationRomReachabilityClass {
+    HotPath,
+    IsrReachable,
+    YieldResumeReachable,
+    FaultPathReachable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRomKernelWindowFact {
+    pub kernel: KernelSpecId,
+    pub byte_size: u32,
+    pub reachability: Option<ObservationRomReachabilityClass>,
+    pub overlay_eligible: bool,
+    pub active_epochs: Vec<ObservationResidencyEpochId>,
+    pub requested_bank: Option<ObservationRomBankIndex>,
+    pub source: ObservationRomWindowFactSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRomLutWindowFact {
+    pub lut: String,
+    pub byte_size: u32,
+    pub reachability: Option<ObservationRomReachabilityClass>,
+    pub overlay_eligible: bool,
+    pub active_epochs: Vec<ObservationResidencyEpochId>,
+    pub requested_bank: Option<ObservationRomBankIndex>,
+    pub source: ObservationRomWindowFactSource,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1591,6 +1680,7 @@ pub fn build_observation_plan_core(
         build_active_checkpoint_schema_hash: final_build_active_checkpoint_schema_hash,
         operational_probe_schema,
         operational_probe_schema_hash: final_operational_probe_schema_hash,
+        rom_window_facts: ObservationRomWindowFacts::default(),
     };
     let sc_re_emit_body = semantic_checkpoint_schema_re_emit_body(
         inputs,
@@ -5974,6 +6064,7 @@ mod tests {
             observation_plan,
             build_active_checkpoint_schema,
             operational_probe_schema,
+            rom_window_facts: ObservationRomWindowFacts::default(),
         }
     }
 

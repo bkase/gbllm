@@ -958,6 +958,8 @@ pub struct CompileObjective {
     pub primary: ObjectiveAxis,
     pub additional: Vec<ObjectiveAxis>,
     pub quantile_targets: Vec<QuantileTarget>,
+    /// Sustained throughput floor in tokens / 1e6 cycles, Q16.16 report units.
+    pub min_sustained_throughput_tokens_per_megacycle: Option<u32>,
     pub trace_budget: Option<TraceBudgetSatisfaction>,
     pub frame_jitter: Option<FrameJitterTarget>,
 }
@@ -2277,9 +2279,10 @@ while `frame_jitter` is `Heuristic` because the workload mix needed
 to calibrate frame jitter has not been collected yet.
 
 The `Option`-typed fields exist because the relevant axis may be
-structurally absent: `sram_page_switches_per_token` is only meaningful
-when persistent pages exist; `video_commit_cost_margin` only when the
-build has a UI; `frame_jitter` only when the objective requires it.
+structurally absent: `sram_page_switches_per_token` is required when
+the objective sets an SRAM page-switch target and otherwise emitted
+only when persistent pages exist; `video_commit_cost_margin` only when
+the build has a UI; `frame_jitter` only when the objective requires it.
 The semantic validator pins which `Option` fields are required for
 which build shapes (§8.3).
 
@@ -2364,6 +2367,10 @@ materialized in the report for two reasons:
 The semantic validator enforces consistency: every entry in
 `satisfaction.entries` must agree with what would be computed by
 re-projecting `objective` against `per_mode`.
+For ceiling objectives lower cost is better; for
+`SustainedThroughputTokensPerMegacycle`, the target is
+`CompileObjective.min_sustained_throughput_tokens_per_megacycle` and
+higher estimated throughput is better.
 
 #### 8.1.9 Quantile
 
@@ -2638,7 +2645,11 @@ lower(quantile) :=
   similarly, using p95_lower / p50
 
 satisfaction :=
-  if upper(quantile) ≤ target_value + uncertainty_tolerance:
+  if axis is a minimum objective such as SustainedThroughput:
+    if lower(quantile) ≥ target_value - uncertainty_tolerance: Satisfied
+    elif upper(quantile) ≥ target_value - uncertainty_tolerance: Borderline
+    else: Violated
+  else if upper(quantile) ≤ target_value + uncertainty_tolerance:
     Satisfied
   elif lower(quantile) ≤ target_value + uncertainty_tolerance:
     Borderline
@@ -2707,6 +2718,13 @@ resolve_cycle_model(kspec, m, r, tc):
 `default_heuristic` is a closed-form policy documented under
 `HeuristicPolicyId::CyclesPerOpDefault` (§8.5.4).
 
+Implementation note, 2026-05-21 `bd-2ksl`: Stage 11 now consumes a
+typed `ScheduleCostKernelRegistry` body in addition to the registry
+hash. Every `SchedOp::KernelCall` is checked against that typed
+registry and an unregistered `KernelSpecId` fails closed with
+`CostKernelSpecNotInRegistry`; the K14 identity uses the hash derived
+from the registry body.
+
 #### 8.5.3 Residency-class modifiers
 
 A kernel's predicted cycles_per_op depends on residency:
@@ -2771,6 +2789,12 @@ in cosmetic identity (e.g., a profile family rename). This is enough
 to validate the transfer machinery without committing to non-trivial
 transfer math.
 
+Implementation note, 2026-05-21 `bd-20n6`: the landed Stage 11 v1
+surface records transferred estimates with both an `F-B14CalibrationBundle`
+evidence ref and an `F-B14TransferPolicy` evidence ref. The semantic
+validator fails closed if a transferred estimate lacks either ref, or if a
+calibrated estimate carries a transfer ref.
+
 #### 8.5.6 Bundle freshness gate
 
 F-B14 enforces the same calibration freshness gate as F-B2 Stage 0:
@@ -2791,6 +2815,20 @@ estimate to fall back to `Heuristic` with a typed `BundleStale`
 reason. The build proceeds with reduced confidence. Whether F-B14
 emits a top-level `Failed` envelope depends on the active
 `RiskPolicy::calibration_confidence_requirement` (§2.14).
+
+Implementation note, 2026-05-21 `bd-20n6`: Stage 11 checks
+`target_profile_hash`, `kernel_set_hash`, `packer_version`, and
+`calibration_schema_hash` before using a non-bootstrap calibration bundle.
+The affected estimates fall back to axis-specific heuristic policy refs and
+carry `FallbackReason::BundleStale`; the current `ReportEnvelope` is marked
+failed because F-B14 diagnostics are hard in v1.
+
+Implementation note, 2026-05-21 `bd-2ksl`: `ValidityEnvelope` now carries
+typed `CalibrationSessionProfile` entries, and Stage 11 consumes the active
+session profile as a typed input. Non-bootstrap bundles must explicitly
+contain the active session profile or they fall back with
+`StaleCalibrationField::ValidityEnvelope`; K14 also binds the active session
+profile hash.
 
 #### 8.5.7 Calibration bundle hash binding
 
@@ -3447,6 +3485,83 @@ Like every other v1 report, `cache_status.json` carries a
 `report_self_hash`. The self-hash is computed by the F-B2/F-B4 §2.4
 convention.
 
+Implementation note, 2026-05-20 narrow v1 slice: `gbf-codegen::stage_cache`
+now owns the typed `cache_status.v1` body, deterministic 16-stage set,
+summary validator, hash-presence rules, self-hashing envelope helper, and a
+store `StageKey` adapter for stages whose F-A6-backed wrappers already exist.
+Full store-backed wrappers for stages 6-12, plus final backend report-package
+aggregation, remain follow-up work rather than hidden acceptance for this
+bounded F-B17 slice.
+
+Implementation note, 2026-05-20 follow-up slice: the same module now exposes
+store-backed success/failure-memo cells for stages 6-12, typed adapters from
+the existing K6/K7/K8/K8.5/K9/K10/K10.5/K11 key newtypes, a non-circular K12
+backend key material, stale-cache replay representation for poisoned cells,
+and a `cache_status.json` package-entry emitter. This lands the F-B17 substrate
+for downstream stage drivers; stage-local call-site adoption can use these
+helpers without redefining cache cells.
+
+Implementation note, 2026-05-20/21 backend-driver slice: the first scan found
+per-stage report emitters and Stage 12 product/report helper modules, but no
+concrete `BuildReports` / `CompiledBuild` / backend report-package writer.
+`bd-3s4e` therefore added a minimal typed writer in `gbf-report::build`:
+`BuildReportPackageEntry`, `BuildReportPackage::from_entries`, and
+`BuildReportPackage::write_to_dir`. `cache_status_report_package_entry()` now
+returns that shared package-entry type, making the F-B17 `cache_status.json`
+handoff a real build-report package call-site without inventing the rest of
+the F-B15 backend driver.
+
+Implementation note, 2026-05-21 review-response slice: `cache_status.v1`
+entries now carry an explicit `result_kind` (`product`, `failure_memo`, or
+`not_applicable`) so `CS-ProductHashPresence` can be enforced without
+inferring from `Hit/Miss/Stale`. The store-backed helper tests exercise every
+downstream adapter for stages 6-12 through success replay, failure-memo replay,
+and stale mismatch replay. Concrete per-stage runner adoption remains outside
+the narrow-v1 substrate because stages 6-12 currently expose mostly pure
+builder/cache-key/report helpers rather than uniform runner call sites; `bd-30q8`
+owns the literal driver adoption plus the full per-stage TIB and cross-stage
+drift suite needed before parent `bd-1g7k` can close under the full RFC.
+
+Implementation note, 2026-05-21 `bd-30q8` slice: `gbf-codegen::stage_cache`
+now exposes a typed, callable `run_store_backed_stage_with_cache` API for
+stages 6-12. It accepts concrete success/failure-memo keys, optional expected
+product/report hashes, executes replay before recompute, stores success or
+failure-memo results, and returns the matching `StageCacheStatusEntry`. The
+same slice adds central F-B17 key-conformance coverage for the exact 16 stage
+ids, side-channel exclusion checks for audit-only inputs where local key
+materials expose that boundary, and representative cross-stage drift checks.
+This is still not full RFC closure: the codebase scan did not find uniform
+stage-run driver call sites for every stage 6-12, so literal adoption by real
+pipeline drivers remains a downstream owner task once those runner surfaces
+exist.
+
+Implementation note, 2026-05-21 literal runner-adoption slice: stages 6-11 now
+expose module-level cache-aware runner APIs around their concrete local inputs
+and builders (`run_storage_plan_with_cache`, `run_sram_page_plan_with_cache`,
+`run_rom_window_plan_with_cache`, `run_overlay_plan_with_cache`,
+`run_arena_plan_with_cache`, `run_schedule_pack_with_cache`,
+`run_resource_state_validation_with_cache`, and
+`run_schedule_cost_with_cache`). Each wrapper builds the stage-specific
+success/failure keys and calls the shared F-B17 store-backed runner substrate.
+Stage 12 still has no single backend pipeline input/report envelope, so
+`rom::Stage12BackendInputs` / `Stage12BackendProduct` is an explicit narrow-v1
+bundle over `encode_placed_rom`; callers provide the backend report/package
+hash that the cache cell and `cache_status.json` entry should bind.
+
+Implementation note, 2026-05-21 `bd-2c2z` follow-up slice:
+`gbf-codegen::stage_cache` now includes
+`run_compiled_build_stage_cache_pipeline`, a typed production orchestration
+surface that linearly invokes the cache-aware Stage 6, 7, 8, 8.5, 9, 10,
+10.5, 11, and 12 wrappers, records each `StageCacheStatusEntry`, halts on a
+failure memo, fills later stages as `not_applicable`, and returns a
+`BuildReports` package containing canonical `cache_status.json`. The same
+slice expands F-B17 conformance from representative key-drift checks to a
+per-serialized-field typed-input-bundle test across all 16 cache-status
+stages. The remaining non-narrow limitation is that the driver consumes the
+currently landed per-stage input bundles; full backend report-envelope
+collection beyond `cache_status.json` remains with the F-B15/F-F1 report
+owners.
+
 ### 9.6 Per-stage test obligations
 
 For each stage S, F-B17 lands the following tests:
@@ -3999,6 +4114,7 @@ problematic in JSON path notation; the convention is shared with
   "stage_id": "stage_<n>",
   "k_key": "sha256:<hex>",
   "status": "hit" | "miss" | "stale" | "not_applicable",
+  "result_kind": "product" | "failure_memo" | "not_applicable",
   "input_identity_hash": "sha256:<hex>",
   "product_self_hash": null | "sha256:<hex>",
   "report_self_hash": null | "sha256:<hex>"
@@ -4008,16 +4124,17 @@ problematic in JSON path notation; the convention is shared with
 Allowed `null` fields in `cache_status.v1`:
 
 ```text
-per_stage.*.product_self_hash       -- when status == not_applicable
-                                       OR when stage failed (no product)
-per_stage.*.report_self_hash        -- when status == not_applicable
+per_stage.*.product_self_hash       -- when result_kind == failure_memo
+                                       OR result_kind == not_applicable
+per_stage.*.report_self_hash        -- when result_kind == not_applicable
 ```
 
-`product_self_hash` may be present-but-`None` when the stage failed
-(failure-memo cache hits replay the failure report but the product
-is None). `report_self_hash` is always present except on
-`not_applicable` (failure-memo replays still produce the failure
-report).
+`status` records cache behavior; `result_kind` records what reached a
+terminal stage state. `product_self_hash` is required exactly when
+`result_kind == product`. Failure-memo cache hits replay the failure
+report but have no product, so they use `result_kind == failure_memo`
+with `product_self_hash == null` and a populated `report_self_hash`.
+`not_applicable` requires both hashes to be null.
 
 #### 10.2.3 `CacheStatusBuildSummary` shape
 
@@ -4873,7 +4990,7 @@ closes only when every class has at least one passing test.
 | RC-COST-5 | `CostKernelSpecNotInRegistry` | SchedOp invokes unregistered KernelSpec; assert hard fail |
 | RC-COST-6 | `CostPerModeMissing` | requested_runtime_modes contains a mode SchedulePack does not; assert hard fail |
 | RC-COST-7 | `CostPerModeUnexpected` | SchedulePack contains a mode requested_runtime_modes does not; assert hard fail |
-| RC-COST-8 | `CostEvidenceClassRefsInconsistent` | manually-construct CostEstimate with evidence_class=Calibrated, refs=[]; assert validator fails |
+| RC-COST-8 | `CostEvidenceClassRefsInconsistent` | calibrated estimates require calibration refs and no transfer ref; transferred estimates require calibration + transfer refs; assert validator fails closed |
 | RC-COST-9 | `CostFallbackReasonMissing` | manually-construct CostEstimate with evidence_class=Heuristic, fallback_reason=None; assert validator fails |
 | RC-COST-10 | `CostFallbackReasonPresentForCalibrated` | inverse of RC-COST-9 |
 | RC-COST-11 | `CostUncertaintyEnvelopeMalformed` | p95_lower > p50; assert validator fails |

@@ -236,7 +236,7 @@ Epic A → Epic B
   - gbf-foundation (Hash256, BlobRef, sized-byte-budget wrappers)  consumed
   - gbf-hw (TargetProfile, MemoryMap regions: WRAM/HRAM/SRAM/ROM)  consumed
   - gbf-abi (PersistHeader, PersistKind, PageState, CommitGroupId,
-             InferenceState liveness fields, HarnessCommandBlock,
+             InferenceStateHeader + tail liveness window, HarnessCommandBlock,
              HarnessResultBlock layouts)                            consumed
   - gbf-runtime::banking (BankLease/BankGuard ABI; install
              trampolines must conform)                              consumed
@@ -918,8 +918,10 @@ banking ABI, panic, harness entry, and far-call trampolines. F-B11/F-B12
 do not allocate Bank0 ROM bytes — F-B15's PlacedRom does — but Bank0
 **WRAM** and **HRAM** are partially F-B12's:
 
-* `WramContinuationRecord` is a fixed-size arena whose layout matches
-  `gbf-abi::InferenceState` (`#[repr(C)]`, with liveness fields).
+* `WramContinuationRecord` starts with the fixed
+  `gbf-abi::InferenceStateHeader` (`#[repr(C)]`) and extends by the
+  session continuation tail window required for materialized session
+  state.
 * `HramFrameFlags`, `HramBankShadow`, `HramFaultCode`,
   `HramSchedulerScratch`, `HramYieldRequested` are pinned HRAM
   assignments whose byte addresses are stable across runs.
@@ -1777,8 +1779,7 @@ arena_for(StorageBinding b) :=
          (selected by ping_index from StoragePlan)
     Materialize { class: StorageClass::Activation,      lifetime: ResumeWindow }
       -> WramActivationsPingA | WramActivationsPingB
-    Materialize { class: StorageClass::ContinuationRecord,
-                  lifetime: Session }
+    Materialize { class: StorageClass::WramHot, lifetime: Session }
       -> WramContinuationRecord
     Materialize { class: StorageClass::PersistedTranscript,
                   lifetime: Session }
@@ -1949,7 +1950,13 @@ AP-SC-14 HRAM single-byte alignment:
 
 AP-SC-15 Continuation record matches abi:
    ∃! a ∈ wram_arenas with a.named = WramContinuationRecord.
-   a.byte_range.len = sizeof_repr_c(InferenceState).
+   a.byte_range.len =
+       sizeof_repr_c(InferenceStateHeader) + continuation_tail_window_bytes.
+   a.slots[header_slot].byte_offset = 0.
+   a.slots[header_slot].size_bytes = sizeof_repr_c(InferenceStateHeader).
+   arena.cert.v1.continuation_record.tail_slots is sorted by byte_offset
+       then ArenaSlotId, resolves every WramHot/Session materialized
+       ValueId, and its maximum tail slot end equals a.byte_range.len.
 
 AP-SC-16 Bank0 WRAM/HRAM caps:
    wram_arenas.bank0_wram_bytes <=
@@ -2076,7 +2083,7 @@ F-Addr-9 (HRAM page bound):
 
 F-Addr-10 (continuation record sized):
   ap.wram_arenas.lookup(WramContinuationRecord).byte_range.len
-    = sizeof_repr_c(InferenceState)
+    = sizeof_repr_c(InferenceStateHeader) + continuation_tail_window_bytes
 
 F-Addr-11 (harness arena disjoint from data arenas):
   ap.sram_arenas.lookup(SramHarnessCommandBlock).byte_range
@@ -2297,14 +2304,13 @@ ArenaPlanSummary := {
 arena.cert.v1.body := ArenaCertBody {
     schema_id:                "arena.cert.v1",
     pass_version:             "stage9/v1",
+    input_hashes:             ArenaPlanInputHashes, -- all non-zero, pins
+                                                     -- storage/sram/window/
+                                                     -- overlay/runtime/policy
     arena_plan_self_hash:     Hash256,
-    overlay_plan_self_hash:   Hash256,
-    storage_plan_self_hash:   Hash256,
-    sram_page_plan_self_hash: Hash256,
-    rom_window_plan_self_hash: Hash256,
-    runtime_chrome_budget_hash: Hash256,
     address_invariants:       AddressInvariantsCertificate,
     reservation_honor:        OverlayReservationHonor,
+    continuation_record:      ContinuationRecordCertificate,
     persistent_page_geometry: PersistentPageGeometryCertificate,
     harness_no_leak:          HarnessNoLeakCertificate,
 }
@@ -2338,6 +2344,24 @@ PersistentPageRecord := {
     page_a_byte_range:  ByteRange,
     page_b_byte_range:  ByteRange,
     page_size_bytes:    u16,
+}
+
+ContinuationRecordCertificate := {
+    abi_symbol:         "gbf_abi::InferenceStateHeader",
+    arena_id:           ArenaId,
+    byte_range:         ByteRange,
+    header_slot:        ArenaSlotId,
+    header_size_bytes:  sizeof_repr_c(InferenceStateHeader),
+    tail_size_bytes:    u16,
+    total_size_bytes:   header_size_bytes + tail_size_bytes,
+    tail_slots:         SortedVec<ContinuationTailSlotCertificate>,
+}
+
+ContinuationTailSlotCertificate := {
+    slot:         ArenaSlotId,
+    value:        ValueId,
+    byte_offset:  u16,
+    size_bytes:   u16,
 }
 
 HarnessNoLeakCertificate := {
@@ -2729,7 +2753,7 @@ F-B15 consumes `ArenaPlan` for code emission:
 - Persistent-page geometry: PersistHeader / commit_word lay out at the
   arena's slot offsets.
 - Continuation record: WramContinuationRecord arena binds the
-  InferenceState symbol address.
+  InferenceStateHeader symbol address and the continuation tail window.
 - Harness command/result blocks: Sram*HarnessCommandBlock /
   Sram*HarnessResultBlock arenas bind harness symbols.
 ```
@@ -2769,7 +2793,8 @@ a `NamedArena` enum bump in this RFC.
 ```text
 - gbf-abi::PersistHeader sizeof and alignment is consumed by §9.6.
 - gbf-abi::PersistGroupCommit sizeof is consumed by §9.6.
-- gbf-abi::InferenceState sizeof is consumed by AP-SC-15.
+- gbf-abi::InferenceStateHeader sizeof plus continuation tail bytes are
+  consumed by AP-SC-15.
 - gbf-abi::HarnessCommandBlock and HarnessResultBlock sizeofs are
   consumed by the harness arena slot allocation.
 - gbf-runtime::banking BankLease/BankGuard ABI is named in
@@ -3022,9 +3047,11 @@ O12 Harness arena no-leak:
   disjoint from every SramSequenceStatePages, SramPersistedTranscript,
   SramColdSpill, and SramTracePages slot.
 
-O13 Continuation record matches gbf-abi::InferenceState:
+O13 Continuation record matches gbf-abi::InferenceStateHeader + tail:
   ap.wram_arenas.lookup(WramContinuationRecord).byte_range.len
-    = sizeof_repr_c(InferenceState).
+    = sizeof_repr_c(InferenceStateHeader) + continuation_tail_window_bytes,
+  with arena.cert.v1 recording header slot, tail slots, byte offsets,
+  sizes, and source ValueIds.
 
 O14 Bank0 WRAM/HRAM caps honored:
   - Σ bank0-WRAM arena bytes ≤ rcb.wram_runtime_floor_bytes.
@@ -3182,7 +3209,8 @@ Then:
      - SRAM arenas do not span 8 KiB bank boundaries.
      - HRAM assignments live within [hram_base, hram_base + 0x80).
      - WramContinuationRecord arena byte_range.len equals
-       sizeof_repr_c(InferenceState).
+       sizeof_repr_c(InferenceStateHeader) plus the continuation tail
+       window, with arena.cert.v1 tail-slot witnesses.
      - SramHarnessCommandBlock / SramHarnessResultBlock disjoint from
        every model-data SRAM arena.
      - Σ Bank0-WRAM bytes ≤ rcb.wram_runtime_floor_bytes.
@@ -3307,7 +3335,8 @@ F-B11 / F-B12 is correct when:
     - Σ Bank0-WRAM bytes ≤ rcb.wram_runtime_floor_bytes
     - Σ HRAM bytes ≤ rcb.hram_usable_bytes
     - Σ overlay reservation bytes ≤ rcb.wram_overlay_cap_bytes
-    Continuation record byte_range.len = sizeof_repr_c(InferenceState).
+    Continuation record byte_range.len = sizeof_repr_c(InferenceStateHeader)
+    plus the continuation tail window.
     Harness command/result blocks live in dedicated SRAM arenas
     disjoint from sequence-state, transcript, cold-spill, and trace
     arenas.
@@ -3374,4 +3403,3 @@ F-B11 / F-B12 is correct when:
     rules. Cross-major schema changes require a new RFC and a
     StageCache key migration.
 ```
-
