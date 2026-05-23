@@ -1,11 +1,11 @@
 //! Stage 12 whole-program reachability validation.
 //!
-//! This narrow F-B15 implementation has two typed surfaces:
-//! pre-placement symbolic section class seeds, and post-placement validation.
-//! Full F-B15 will run the edge walker before placement; v1 makes the bridge
-//! explicit by letting placement consume symbolic class rows and then
-//! revalidating the placed/legalized ROM. Report-facing data deliberately uses
-//! row lists instead of JSON maps keyed by typed IDs.
+//! The F-B15 surface has two typed passes: pre-placement symbolic section class
+//! seeding from `AsmIR`, and post-placement validation over the placed/legalized
+//! ROM plus the lowered section stream. Placement consumes the symbolic class
+//! rows, then the validator re-runs the edge walker and lease-marker checks
+//! against the final Stage 12 product. Report-facing data deliberately uses row
+//! lists instead of JSON maps keyed by typed IDs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -190,7 +190,6 @@ pub enum ReachabilityDiagnosticCode {
     ContinuationUnreachable,
     DeadCode,
     FaultPathNonresidentData,
-    DeferredNarrowV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,17 +298,7 @@ pub fn preplacement_reachability_from_asmir(
     section_classes.sort();
     PrePlacementReachability {
         section_classes,
-        findings: vec![ReachabilityFinding {
-            rule: ReachabilityRule::R5NoLeaseReentrancy,
-            status: FindingStatus::Deferred,
-            code: Some(ReachabilityDiagnosticCode::DeferredNarrowV1),
-            evidence: vec![
-                "narrow_v1: build_asmir_bundle validates per-section lease balance before placement"
-                    .to_owned(),
-                "deferred: whole-program/cross-section runtime BankGuard reentrancy proof".to_owned(),
-            ],
-            witnesses: Vec::new(),
-        }],
+        findings: Vec::new(),
     }
 }
 
@@ -633,16 +622,12 @@ fn evaluate_rules(
         ReachabilityDiagnosticCode::PrivilegedSwitchableDependency,
         switchable_privileged_witnesses(placed, class_by_section)?,
     );
-    findings.push(ReachabilityFinding {
-        rule: ReachabilityRule::R5NoLeaseReentrancy,
-        status: FindingStatus::Deferred,
-        code: Some(ReachabilityDiagnosticCode::LeaseReentrancy),
-        evidence: vec![
-            "narrow_v1: symbolic AsmIR construction rejects per-section lease imbalance before lowering".to_owned(),
-            "deferred: cross-section BankGuard reentrancy proof after runtime integration".to_owned(),
-        ],
-        witnesses: Vec::new(),
-    });
+    push_rule(
+        &mut findings,
+        ReachabilityRule::R5NoLeaseReentrancy,
+        ReachabilityDiagnosticCode::LeaseReentrancy,
+        lease_reentrancy_witnesses(placed),
+    );
     push_rule(
         &mut findings,
         ReachabilityRule::R6ContinuationReachable,
@@ -753,7 +738,7 @@ fn mbc_write_witnesses(
                     section_id: section.id.get(),
                     symbol: Some(section.name.as_str().to_owned()),
                     detail: format!(
-                        "dynamic-address write/RMW at item {} cannot prove it avoids MBC registers in narrow-v1",
+                        "dynamic-address write/RMW at item {} lacks static proof that it avoids MBC registers",
                         instr.seq_index
                     ),
                 });
@@ -761,6 +746,61 @@ fn mbc_write_witnesses(
         }
     }
     witnesses
+}
+
+fn lease_reentrancy_witnesses(placed: &PlacedRom) -> Vec<ReachabilityWitness> {
+    let mut witnesses = Vec::new();
+    for section in &placed.lowered_sections {
+        let mut active_lease: Option<(u32, String)> = None;
+        let mut branches = section.branches.iter().collect::<Vec<_>>();
+        branches.sort_by_key(|branch| branch.order());
+        for branch in branches {
+            let target = branch.data.target.as_str();
+            if is_lease_acquire_symbol(target) {
+                if let Some((seq_index, existing)) = active_lease.as_ref() {
+                    witnesses.push(ReachabilityWitness {
+                        section_id: section.id.get(),
+                        symbol: Some(section.name.as_str().to_owned()),
+                        detail: format!(
+                            "lease acquire {target} at item {} re-enters active lease {existing} opened at item {seq_index}",
+                            branch.seq_index
+                        ),
+                    });
+                } else {
+                    active_lease = Some((branch.seq_index, target.to_owned()));
+                }
+            } else if is_lease_release_symbol(target) && active_lease.take().is_none() {
+                witnesses.push(ReachabilityWitness {
+                    section_id: section.id.get(),
+                    symbol: Some(section.name.as_str().to_owned()),
+                    detail: format!(
+                        "lease release {target} at item {} has no active acquire in lowered section",
+                        branch.seq_index
+                    ),
+                });
+            }
+        }
+        if let Some((seq_index, target)) = active_lease {
+            witnesses.push(ReachabilityWitness {
+                section_id: section.id.get(),
+                symbol: Some(section.name.as_str().to_owned()),
+                detail: format!("lease acquire {target} at item {seq_index} is not released"),
+            });
+        }
+    }
+    witnesses
+}
+
+fn is_lease_acquire_symbol(target: &str) -> bool {
+    target
+        .strip_prefix("runtime.stub_runtime.")
+        .is_some_and(|symbol| symbol.starts_with("lease_rom_") || symbol.starts_with("lease_sram_"))
+}
+
+fn is_lease_release_symbol(target: &str) -> bool {
+    target
+        .strip_prefix("runtime.stub_runtime.")
+        .is_some_and(|symbol| symbol.starts_with("release_"))
 }
 
 fn privilege_witnesses(placed: &PlacedRom) -> Vec<ReachabilityWitness> {
@@ -965,7 +1005,10 @@ fn class_disagreements(
 mod tests {
     use gbf_asm::builder::Builder;
     use gbf_asm::isa::{DirectAddr, Instr};
-    use gbf_asm::section::{Section, SectionId, SectionPrivilege, SectionRole, SymbolicBranch};
+    use gbf_asm::provenance::{InstrProvenance, PlanningStage};
+    use gbf_asm::section::{
+        OrderedItem, Section, SectionId, SectionPrivilege, SectionRole, SymbolicBranch,
+    };
     use gbf_asm::symbols::SymbolName;
     use gbf_policy::PlacementProfile;
 
@@ -993,6 +1036,17 @@ mod tests {
         })
         .expect("bundle");
         place_asmir_bundle(&bundle, PlacementProfile::Budgeted).expect("place")
+    }
+
+    fn lowered_runtime_call(target: &'static str, seq_index: u32) -> OrderedItem<SymbolicBranch> {
+        OrderedItem::new(
+            SymbolicBranch::call(
+                SymbolName::runtime("stub_runtime", target).expect("runtime symbol"),
+                None,
+            ),
+            seq_index,
+            InstrProvenance::new(PlanningStage::Backend).with_source_op("test.lease_marker"),
+        )
     }
 
     #[test]
@@ -1120,7 +1174,43 @@ mod tests {
         );
         assert!(first_cert.findings.iter().any(|finding| finding.rule
             == ReachabilityRule::R5NoLeaseReentrancy
-            && finding.status == FindingStatus::Deferred));
+            && finding.status == FindingStatus::Holds));
+    }
+
+    #[test]
+    fn lease_reentrancy_rule_rejects_nested_lowered_markers() {
+        let mut placed = placed(vec![section(
+            1,
+            SectionRole::Bank0Nucleus,
+            "runtime.test.entry",
+            Instr::Nop,
+        )]);
+        placed.lowered_sections[0].branches = vec![
+            lowered_runtime_call("lease_rom_3", 1),
+            lowered_runtime_call("lease_sram_1", 2),
+            lowered_runtime_call("release_1", 3),
+            lowered_runtime_call("release_2", 4),
+        ];
+
+        let (report, _) = validate_reachability(&placed, ReachabilityValidationInput::default())
+            .expect("reachability");
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.rule == ReachabilityRule::R5NoLeaseReentrancy)
+            .expect("R5 finding");
+        assert_eq!(finding.status, FindingStatus::Violated);
+        assert_eq!(
+            finding.code,
+            Some(ReachabilityDiagnosticCode::LeaseReentrancy)
+        );
+        assert!(
+            finding
+                .witnesses
+                .iter()
+                .any(|witness| witness.detail.contains("re-enters active lease"))
+        );
     }
 
     #[test]

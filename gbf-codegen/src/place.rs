@@ -320,10 +320,10 @@ pub fn address_map_report_with_reachability(
                 .map(provenance_summary)
                 .unwrap_or_else(AddressMapProvenanceSummary::empty),
             cycles_estimate: legalized.map(cycles_estimate),
-            // F-B14 ScheduleCostReport annotations are not wired into the
-            // Stage-12 narrow-v1 bridge yet. Keep the field present and
-            // explicit rather than silently emitting a zero that would look
-            // like a computed bank-switch budget.
+            // F-B14 ScheduleCostReport annotations are consumed by
+            // ScheduleCostAnalysis rather than duplicated into the address map.
+            // Keep the field explicit instead of emitting a zero that would
+            // look like a computed bank-switch budget.
             bank_switches_estimate: None,
         });
     }

@@ -3317,7 +3317,7 @@ mod tests {
         assert_eq!(sram_page_plan_inputs, 0);
         assert!(
             rom_window_plan_inputs > 0,
-            "F-B10 stub has RomConst bindings to consume"
+            "F-B10 RomWindowPlan has RomConst bindings to consume"
         );
         assert_eq!(arena_plan_inputs, result.bindings.len());
         assert!(result.repair_proposals.is_empty());

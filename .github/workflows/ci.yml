@@ -74,12 +74,12 @@ jobs:
           artifact_root="target/f-b8-debug-artifacts"
           rm -rf "$artifact_root"
           mkdir -p "$artifact_root/tiny_routed_ffn" "$artifact_root/sc11_forbidden_key_leak"
-          cargo run -p gbf-codegen --bin gbf-storage-plan-debug -- \
+          cargo run -p gbf-codegen --features test-infra --bin gbf-storage-plan-debug -- \
             --inputs builtin:tiny_routed_ffn \
             --out "$artifact_root/tiny_routed_ffn" \
             --trace-format json
           set +e
-          cargo run -p gbf-codegen --bin gbf-storage-plan-debug -- \
+          cargo run -p gbf-codegen --features test-infra --bin gbf-storage-plan-debug -- \
             --inputs builtin:sc11_forbidden_key_leak \
             --out "$artifact_root/sc11_forbidden_key_leak" \
             --trace-format json

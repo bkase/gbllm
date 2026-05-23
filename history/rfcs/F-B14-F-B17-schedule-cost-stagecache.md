@@ -3485,13 +3485,13 @@ Like every other v1 report, `cache_status.json` carries a
 `report_self_hash`. The self-hash is computed by the F-B2/F-B4 §2.4
 convention.
 
-Implementation note, 2026-05-20 narrow v1 slice: `gbf-codegen::stage_cache`
+Implementation note, 2026-05-20 initial substrate slice: `gbf-codegen::stage_cache`
 now owns the typed `cache_status.v1` body, deterministic 16-stage set,
 summary validator, hash-presence rules, self-hashing envelope helper, and a
 store `StageKey` adapter for stages whose F-A6-backed wrappers already exist.
-Full store-backed wrappers for stages 6-12, plus final backend report-package
-aggregation, remain follow-up work rather than hidden acceptance for this
-bounded F-B17 slice.
+Store-backed wrappers for stages 6-12 and final backend report-package
+aggregation were intentionally moved to follow-up beads and are closed by the
+bd-30q8/bd-2c2z notes below.
 
 Implementation note, 2026-05-20 follow-up slice: the same module now exposes
 store-backed success/failure-memo cells for stages 6-12, typed adapters from
@@ -3516,8 +3516,8 @@ entries now carry an explicit `result_kind` (`product`, `failure_memo`, or
 `not_applicable`) so `CS-ProductHashPresence` can be enforced without
 inferring from `Hit/Miss/Stale`. The store-backed helper tests exercise every
 downstream adapter for stages 6-12 through success replay, failure-memo replay,
-and stale mismatch replay. Concrete per-stage runner adoption remains outside
-the narrow-v1 substrate because stages 6-12 currently expose mostly pure
+and stale mismatch replay. Concrete per-stage runner adoption remained outside
+the initial substrate because stages 6-12 exposed mostly pure
 builder/cache-key/report helpers rather than uniform runner call sites; `bd-30q8`
 owns the literal driver adoption plus the full per-stage TIB and cross-stage
 drift suite needed before parent `bd-1g7k` can close under the full RFC.
@@ -3530,10 +3530,9 @@ failure-memo results, and returns the matching `StageCacheStatusEntry`. The
 same slice adds central F-B17 key-conformance coverage for the exact 16 stage
 ids, side-channel exclusion checks for audit-only inputs where local key
 materials expose that boundary, and representative cross-stage drift checks.
-This is still not full RFC closure: the codebase scan did not find uniform
-stage-run driver call sites for every stage 6-12, so literal adoption by real
-pipeline drivers remains a downstream owner task once those runner surfaces
-exist.
+This made the shared runner substrate available. The bd-2c2z production
+pipeline wrapper below closes the remaining literal orchestration path for the
+landed stage surfaces.
 
 Implementation note, 2026-05-21 literal runner-adoption slice: stages 6-11 now
 expose module-level cache-aware runner APIs around their concrete local inputs
@@ -3543,10 +3542,10 @@ and builders (`run_storage_plan_with_cache`, `run_sram_page_plan_with_cache`,
 `run_resource_state_validation_with_cache`, and
 `run_schedule_cost_with_cache`). Each wrapper builds the stage-specific
 success/failure keys and calls the shared F-B17 store-backed runner substrate.
-Stage 12 still has no single backend pipeline input/report envelope, so
-`rom::Stage12BackendInputs` / `Stage12BackendProduct` is an explicit narrow-v1
-bundle over `encode_placed_rom`; callers provide the backend report/package
-hash that the cache cell and `cache_status.json` entry should bind.
+Stage 12 uses `rom::Stage12BackendInputs` / `Stage12BackendProduct` as the
+typed bundle over `encode_placed_rom`; callers provide the backend
+report/package hash that the cache cell and `cache_status.json` entry should
+bind.
 
 Implementation note, 2026-05-21 `bd-2c2z` follow-up slice:
 `gbf-codegen::stage_cache` now includes
@@ -3557,7 +3556,7 @@ failure memo, fills later stages as `not_applicable`, and returns a
 `BuildReports` package containing canonical `cache_status.json`. The same
 slice expands F-B17 conformance from representative key-drift checks to a
 per-serialized-field typed-input-bundle test across all 16 cache-status
-stages. The remaining non-narrow limitation is that the driver consumes the
+stages. The remaining integration boundary is that the driver consumes the
 currently landed per-stage input bundles; full backend report-envelope
 collection beyond `cache_status.json` remains with the F-B15/F-F1 report
 owners.

@@ -3230,7 +3230,7 @@ is deterministic.
 
 Production callers MUST provide the real root set described above.
 An implementation may offer an empty-input fallback for harnesses,
-fixtures, or narrow-v1 compatibility, but that fallback is not a
+fixtures, or legacy compatibility, but that fallback is not a
 production proof of root completeness.
 
 #### 9.2.3 Walker algorithm

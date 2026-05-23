@@ -2802,24 +2802,14 @@ overlay_install_alignment, bank_switch_bracketing }`.
 The certificate is `certs/resource_state.cert.json`, schema
 `resource_state.cert.v1`.
 
-**Implementation amendment — bd-9ae narrow v1.** Amends F-B13 §9.2 and
-§9.3.1 for the first landed Stage 10/10.5 surface. The v1 implementation
-emits compact `ProofStatus` fields for the four proof sections rather than
-the full per-fact vectors below. The validator is an intra-slice typed flow
-checker over the v1 schedule emitted by this bead: leases are acquired and
-released within the same slice, overlay leases are treated as reservable for
-v1, mode schedules share the same conservative slice body, and cycle/drift
-numbers are static placeholders until F-B14 owns cost derivation. The full
-lease-flow graph traversal, per-fact certificate bodies, conditional overlay
-lease-shape proof, mode-specific cadence differences, and computed
-reachability confirmation remain deferred to follow-up certificate/scheduler
-expansion beads (F-F2/F-C3/F-D6/F-B15 as appropriate). The public diagnostic
-codes for unknown arena slots, upstream lease-kind mismatch, requested-mode
-omission, and checkpoint-schema mismatch are reserved by the v1 schema and
-are not emitted by the narrow builder.
+**Implementation amendment — bd-9ae initial Stage 10/10.5 landing.** Amends
+F-B13 §9.2 and §9.3.1 for the first landed schedule/resource-state surface.
+That landing emitted compact `ProofStatus` fields for the four proof sections
+while the follow-up certificate/scheduler expansion beads filled in the
+per-fact evidence and graph checks below.
 
-**Implementation amendment — bd-y8w1 closure expansion.** Amends the
-bd-9ae narrow-v1 note above. Stage 10.5 now emits per-fact certificate
+**Implementation amendment — bd-y8w1 closure expansion.** Supersedes the
+bd-9ae initial landing note above. Stage 10.5 now emits per-fact certificate
 sections and re-runs a computed reachability traversal over the
 `SchedulePack` slice graph. The
 `computed_reachability_confirmed` bit means "all schedule slices in the
