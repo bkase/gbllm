@@ -166,7 +166,6 @@ pub enum ReachabilityRule {
 pub enum FindingStatus {
     Holds,
     Violated,
-    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -751,6 +750,9 @@ fn mbc_write_witnesses(
 fn lease_reentrancy_witnesses(placed: &PlacedRom) -> Vec<ReachabilityWitness> {
     let mut witnesses = Vec::new();
     for section in &placed.lowered_sections {
+        // Lowering represents bank leases as a single active acquire/release
+        // lifecycle per section; nested acquires are reported while the outer
+        // lease remains the active lifecycle for release/unclosed checks.
         let mut active_lease: Option<(u32, String)> = None;
         let mut branches = section.branches.iter().collect::<Vec<_>>();
         branches.sort_by_key(|branch| branch.order());
@@ -1049,6 +1051,14 @@ mod tests {
         )
     }
 
+    fn r5_finding(report: &ReachabilityReport) -> &ReachabilityFinding {
+        report
+            .findings
+            .iter()
+            .find(|finding| finding.rule == ReachabilityRule::R5NoLeaseReentrancy)
+            .expect("R5 finding")
+    }
+
     #[test]
     fn continuation_reachability_holds_through_call_edge() {
         let entry = named("runtime.test.entry");
@@ -1195,11 +1205,7 @@ mod tests {
         let (report, _) = validate_reachability(&placed, ReachabilityValidationInput::default())
             .expect("reachability");
 
-        let finding = report
-            .findings
-            .iter()
-            .find(|finding| finding.rule == ReachabilityRule::R5NoLeaseReentrancy)
-            .expect("R5 finding");
+        let finding = r5_finding(&report);
         assert_eq!(finding.status, FindingStatus::Violated);
         assert_eq!(
             finding.code,
@@ -1210,6 +1216,60 @@ mod tests {
                 .witnesses
                 .iter()
                 .any(|witness| witness.detail.contains("re-enters active lease"))
+        );
+    }
+
+    #[test]
+    fn lease_reentrancy_rule_rejects_orphan_release_marker() {
+        let mut placed = placed(vec![section(
+            1,
+            SectionRole::Bank0Nucleus,
+            "runtime.test.entry",
+            Instr::Nop,
+        )]);
+        placed.lowered_sections[0].branches = vec![lowered_runtime_call("release_7", 1)];
+
+        let (report, _) = validate_reachability(&placed, ReachabilityValidationInput::default())
+            .expect("reachability");
+
+        let finding = r5_finding(&report);
+        assert_eq!(finding.status, FindingStatus::Violated);
+        assert_eq!(
+            finding.code,
+            Some(ReachabilityDiagnosticCode::LeaseReentrancy)
+        );
+        assert!(
+            finding
+                .witnesses
+                .iter()
+                .any(|witness| witness.detail.contains("has no active acquire"))
+        );
+    }
+
+    #[test]
+    fn lease_reentrancy_rule_rejects_unreleased_acquire_marker() {
+        let mut placed = placed(vec![section(
+            1,
+            SectionRole::Bank0Nucleus,
+            "runtime.test.entry",
+            Instr::Nop,
+        )]);
+        placed.lowered_sections[0].branches = vec![lowered_runtime_call("lease_rom_3", 1)];
+
+        let (report, _) = validate_reachability(&placed, ReachabilityValidationInput::default())
+            .expect("reachability");
+
+        let finding = r5_finding(&report);
+        assert_eq!(finding.status, FindingStatus::Violated);
+        assert_eq!(
+            finding.code,
+            Some(ReachabilityDiagnosticCode::LeaseReentrancy)
+        );
+        assert!(
+            finding
+                .witnesses
+                .iter()
+                .any(|witness| witness.detail.contains("is not released"))
         );
     }
 
