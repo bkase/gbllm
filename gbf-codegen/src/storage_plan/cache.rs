@@ -15,6 +15,7 @@ use crate::storage_plan::types::{
 };
 
 pub const STORAGE_PLAN_CACHE_KEY_SCHEMA: &str = "storage_plan.cache_key.v1";
+pub const STORAGE_PLAN_PASS_VERSION: &str = "stage6/v1";
 pub const PERSIST_COMPAT_MANIFEST_SCHEMA: &str = "storage_plan.persist_compat.v1";
 pub const ALIAS_RULE_SET_MANIFEST_SCHEMA: &str = "storage_plan.alias_rule_set.v1";
 pub const STORAGE_PLAN_RULE_MANIFEST_RFC_REVISION: &str = "F-B8-v2";
@@ -37,6 +38,8 @@ pub struct StoragePlanCacheKeyInputs {
     pub decision_rule_set_hash: Hash256,
     pub persist_compat_hash: Hash256,
     pub alias_rule_set_hash: Hash256,
+    pub pass_version: String,
+    pub crate_feature_set_hash: Hash256,
 }
 
 impl StoragePlanCacheKeyInputs {
@@ -55,6 +58,8 @@ impl StoragePlanCacheKeyInputs {
             decision_rule_set_hash: decision_rule_set_hash()?,
             persist_compat_hash: persist_compat_manifest_hash()?,
             alias_rule_set_hash: alias_rule_set_manifest_hash()?,
+            pass_version: STORAGE_PLAN_PASS_VERSION.to_owned(),
+            crate_feature_set_hash: crate::stage_cache::crate_feature_set_hash(),
         })
     }
 

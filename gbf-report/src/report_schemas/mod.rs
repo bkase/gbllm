@@ -7,4 +7,5 @@ pub mod observation_plan_v1;
 pub mod policy_resolution_v1;
 pub mod quant_graph_v1;
 pub mod range_plan_v1;
+pub mod repair_report_v1;
 pub mod static_budget_v1;

@@ -622,6 +622,13 @@ fn validation_origin_rank(origin: ValidationOrigin) -> u8 {
         ValidationOrigin::PolicyResolution => 11,
         ValidationOrigin::Budget => 12,
         ValidationOrigin::StoragePlanConstruction => 13,
+        ValidationOrigin::SramPagePlanConstruction => 14,
+        ValidationOrigin::RomWindowPlanConstruction => 15,
+        ValidationOrigin::OverlayPlanConstruction => 16,
+        ValidationOrigin::ArenaPlanConstruction => 17,
+        ValidationOrigin::SchedIrConstruction => 18,
+        ValidationOrigin::ResourceStateValidation => 19,
+        ValidationOrigin::ScheduleCostAnalysis => 20,
     }
 }
 
@@ -638,7 +645,12 @@ fn validation_code_rank(code: &ValidationCode) -> u8 {
         ValidationCode::BudgetSwitchesPerTokenOverCap { .. } => 8,
         ValidationCode::BudgetSramPageSwitchesPerTokenOverCap { .. } => 9,
         ValidationCode::BudgetPlacementProfileInfeasible { .. } => 10,
-        _ => 100,
+        ValidationCode::SramPagePlan { code, .. } => 30 + code.number() as u8,
+        ValidationCode::RomWindowPlan { code, .. } => 50 + code.number() as u8,
+        ValidationCode::OverlayPlan { code, .. } => 70 + code.number() as u8,
+        ValidationCode::ArenaPlan { code, .. } => 100 + code.number() as u8,
+        ValidationCode::ResourceState { code, .. } => 140 + code.number() as u8,
+        _ => 250,
     }
 }
 
@@ -775,6 +787,61 @@ fn cmp_validation_codes(left: &ValidationCode, right: &ValidationCode) -> Orderi
             },
         ) => (left_profile, placement_reason_rank(left_reason))
             .cmp(&(right_profile, placement_reason_rank(right_reason))),
+        (
+            ValidationCode::SramPagePlan {
+                code: left_code,
+                provenance: left_provenance,
+            },
+            ValidationCode::SramPagePlan {
+                code: right_code,
+                provenance: right_provenance,
+            },
+        ) => (left_code.number(), format!("{left_provenance:?}"))
+            .cmp(&(right_code.number(), format!("{right_provenance:?}"))),
+        (
+            ValidationCode::RomWindowPlan {
+                code: left_code,
+                provenance: left_provenance,
+            },
+            ValidationCode::RomWindowPlan {
+                code: right_code,
+                provenance: right_provenance,
+            },
+        ) => (left_code.number(), format!("{left_provenance:?}"))
+            .cmp(&(right_code.number(), format!("{right_provenance:?}"))),
+        (
+            ValidationCode::OverlayPlan {
+                code: left_code,
+                provenance: left_provenance,
+            },
+            ValidationCode::OverlayPlan {
+                code: right_code,
+                provenance: right_provenance,
+            },
+        ) => (left_code.number(), format!("{left_provenance:?}"))
+            .cmp(&(right_code.number(), format!("{right_provenance:?}"))),
+        (
+            ValidationCode::ArenaPlan {
+                code: left_code,
+                provenance: left_provenance,
+            },
+            ValidationCode::ArenaPlan {
+                code: right_code,
+                provenance: right_provenance,
+            },
+        ) => (left_code.number(), format!("{left_provenance:?}"))
+            .cmp(&(right_code.number(), format!("{right_provenance:?}"))),
+        (
+            ValidationCode::ResourceState {
+                code: left_code,
+                provenance: left_provenance,
+            },
+            ValidationCode::ResourceState {
+                code: right_code,
+                provenance: right_provenance,
+            },
+        ) => (left_code.number(), format!("{left_provenance:?}"))
+            .cmp(&(right_code.number(), format!("{right_provenance:?}"))),
         _ => format!("{left:?}").cmp(&format!("{right:?}")),
     }
 }

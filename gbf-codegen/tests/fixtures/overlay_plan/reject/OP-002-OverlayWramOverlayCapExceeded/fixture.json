@@ -1,0 +1,6 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-002-OverlayWramOverlayCapExceeded",
+  "scenario": "wram_overlay_cap_exceeded",
+  "expected_code": { "kind": "OverlayWramOverlayCapExceeded" }
+}

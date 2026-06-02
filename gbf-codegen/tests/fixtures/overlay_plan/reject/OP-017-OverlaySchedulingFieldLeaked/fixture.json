@@ -1,0 +1,6 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-017-OverlaySchedulingFieldLeaked",
+  "scenario": "scheduling_field_leaked",
+  "expected_code": { "kind": "OverlaySchedulingFieldLeaked" }
+}

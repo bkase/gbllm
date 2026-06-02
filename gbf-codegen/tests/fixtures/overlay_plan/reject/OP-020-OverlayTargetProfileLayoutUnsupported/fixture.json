@@ -1,0 +1,6 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-020-OverlayTargetProfileLayoutUnsupported",
+  "scenario": "target_profile_layout_unsupported",
+  "expected_code": { "kind": "OverlayTargetProfileLayoutUnsupported" }
+}

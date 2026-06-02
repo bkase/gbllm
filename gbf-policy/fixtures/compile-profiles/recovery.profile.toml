@@ -1,6 +1,6 @@
 id = "Recovery"
 schema_version = "2.0.0"
-defaults_hash = "sha256:175048c41adaed3a2d99245ebf6f4d59db521d074e549ee73ff92f0e44cf03ac"
+defaults_hash = "sha256:333648a61f113c28b2b088f5d8efcb7703bd2a41cf6c722c06789a9af2411391"
 observability = { kind = "Flexible" }
 
 [trace_budget]

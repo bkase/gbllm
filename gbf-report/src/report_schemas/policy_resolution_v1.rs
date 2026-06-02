@@ -415,6 +415,32 @@ mod tests {
         assert!(value["schema_version"].is_string());
         assert!(value.get("body").is_none());
         assert!(value["result"].get("schema_version").is_none());
+        assert!(value["result"]["compile_knobs"]["global"].is_object());
+        assert!(value["result"]["compile_knobs"]["bounds"].is_object());
+        assert!(value["result"]["compile_knobs"]["locks"].is_object());
+        assert!(value["result"]["compile_knobs"]["overrides"].is_object());
+        assert!(value["result"]["compile_knobs"]["provenance"].is_array());
+        assert_eq!(
+            value["result"]["compile_knobs"]["global"]["placement"]["profile"]["kind"],
+            serde_json::json!("StrictOnePerBank")
+        );
+        assert_eq!(
+            value["result"]["compile_knobs"]["global"]["observation"]["probe_level"]["kind"],
+            serde_json::json!("Operational")
+        );
+        assert_eq!(
+            value["result"]["compile_knobs"]["bounds"]["placement"]["max_profile"]["kind"],
+            serde_json::json!("PackedExperts")
+        );
+        assert_eq!(
+            value["result"]["compile_knobs"]["locks"]["locked"],
+            serde_json::json!([])
+        );
+        assert!(
+            value["result"]["compile_knobs"]["overrides"]
+                .get("forced_recompute")
+                .is_none()
+        );
 
         serde_json::from_value::<ReportEnvelope<PolicyResolutionReportBody>>(value)
             .expect("canonical policy_resolution.v1 fixture decodes");
@@ -663,6 +689,7 @@ mod tests {
             },
             observation: ObservationKnob {
                 observability: ObservabilityMode::Invariant,
+                trace_demotion: gbf_policy::TraceDemotionLevel::None,
                 probe_level: ProbeCollectionLevel::Operational,
             },
             range: RangeKnob {
@@ -673,6 +700,7 @@ mod tests {
             },
             sram: SramKnob {
                 page_aggression: SramPageAggression::PackCold,
+                spill_policy: gbf_policy::SramSpillPolicy::SpillOnPressure,
             },
             rom_window: RomWindowKnob {
                 kernel_residency_bias: RomKernelResidencyBias::PreferExpertBank,
@@ -685,6 +713,8 @@ mod tests {
                 tile_search: ScheduleTileSearch::Local,
                 slice_coarsening: ScheduleSliceCoarsening::Balanced,
                 resource_pressure: ScheduleResourcePressure::Balanced,
+                pressure_thresholds: gbf_policy::ResourcePressureThresholds::default(),
+                stage_iteration_ceilings: gbf_policy::StageIterationLimits::uniform(4),
             },
         };
 
@@ -752,6 +782,7 @@ mod tests {
             max_cycles_per_token: Some(8_000),
             max_bank_switches_per_token: Some(5),
             max_sram_page_switches_per_token: Some(1),
+            min_sustained_throughput_tokens_per_megacycle: None,
             min_ui_headroom_pct: 9,
             max_rom_bytes: Some(512 * 1024),
             risk: RiskPolicy {

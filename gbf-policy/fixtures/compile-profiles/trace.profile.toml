@@ -1,6 +1,6 @@
 id = "Trace"
 schema_version = "2.0.0"
-defaults_hash = "sha256:94efb1aa7a8384b1435a187a697804c973eb7024399e84209c0b98f326c446fd"
+defaults_hash = "sha256:ae9f47469138b80b0e5c5b9bc2a72d5b41d1b57166493fb3df0f4e2d01014c62"
 observability = { kind = "Invariant" }
 
 [trace_budget]

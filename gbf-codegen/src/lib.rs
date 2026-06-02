@@ -10,10 +10,12 @@ pub mod lower_asm;
 pub mod lower_infer;
 pub mod lower_quant;
 pub mod observe;
+pub mod overlay_plan;
 pub mod place;
 pub mod policy;
 pub mod range;
 pub mod reachability;
+pub mod refinement_loop;
 pub mod report;
 pub mod rom;
 pub mod s1;
@@ -21,6 +23,8 @@ pub mod s3;
 pub mod s4;
 pub mod s5;
 pub mod schedule;
+pub mod schedule_cost;
+pub mod sram_page_plan;
 pub mod stage_cache;
 pub mod storage;
 pub mod storage_plan;
@@ -40,6 +44,22 @@ pub mod stages {
 
     pub mod validate {
         pub use crate::validate::*;
+    }
+
+    pub mod window {
+        pub use crate::window::*;
+    }
+
+    pub mod overlay_plan {
+        pub use crate::overlay_plan::*;
+    }
+
+    pub mod schedule {
+        pub use crate::schedule::*;
+    }
+
+    pub mod schedule_cost {
+        pub use crate::schedule_cost::*;
     }
 }
 

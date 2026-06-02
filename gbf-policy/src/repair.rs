@@ -10,16 +10,38 @@ pub struct RepairProposalId(pub String);
 #[serde(deny_unknown_fields)]
 pub struct RepairPolicy {
     pub max_refinement_iters: u8,
+    /// PlacementProfile fallback only:
+    /// StrictOnePerBank -> Budgeted -> PackedExperts.
+    ///
+    /// Full CompileProfile fallback remains RiskPolicy::fallback_profile.
     pub allow_placement_profile_fallback: bool,
     pub allow_trace_demotion: bool,
     pub allow_overlay_promotion: bool,
     pub allow_recompute_promotion: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum RepairReason {
+    AccumulatorOverflow,
+    ArenaOverflow,
+    SramPagePressure,
+    RomWindowOverflow,
+    KernelResidencyImpossible,
+    OverlayBudgetExceeded,
+    BankNotFitting,
+    SliceCycleOverrun,
+    InterruptLatencyExceeded,
+    ResourceStateValidationFailed,
+    ScheduleCostMissedTarget,
+    PlacementProfileFallback,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum RepairPolicyProfile {
     Bringup,
+    BringupFirstFit,
     Default,
     TraceInvariant,
     Recovery,
@@ -36,6 +58,7 @@ impl RepairPolicy {
                 allow_overlay_promotion: false,
                 allow_recompute_promotion: false,
             },
+            RepairPolicyProfile::BringupFirstFit => Self::bringup_strict_first_fit(),
             RepairPolicyProfile::Default => Self {
                 max_refinement_iters: 4,
                 allow_placement_profile_fallback: true,
@@ -57,6 +80,19 @@ impl RepairPolicy {
                 allow_overlay_promotion: true,
                 allow_recompute_promotion: true,
             },
+        }
+    }
+
+    /// Strict-first-fit bring-up override: zero repair iterations, with the
+    /// same structural repair toggles disabled as canonical Bringup.
+    #[must_use]
+    pub const fn bringup_strict_first_fit() -> Self {
+        Self {
+            max_refinement_iters: 0,
+            allow_placement_profile_fallback: false,
+            allow_trace_demotion: false,
+            allow_overlay_promotion: false,
+            allow_recompute_promotion: false,
         }
     }
 }
@@ -88,6 +124,10 @@ mod tests {
             }
         );
         assert_eq!(
+            RepairPolicy::for_profile(RepairPolicyProfile::BringupFirstFit),
+            RepairPolicy::bringup_strict_first_fit()
+        );
+        assert_eq!(
             RepairPolicy::for_profile(RepairPolicyProfile::TraceInvariant),
             RepairPolicy {
                 max_refinement_iters: 2,
@@ -107,6 +147,17 @@ mod tests {
                 allow_recompute_promotion: true,
             }
         );
+    }
+
+    #[test]
+    fn bringup_strict_first_fit_disables_refinement_iters() {
+        let policy = RepairPolicy::bringup_strict_first_fit();
+
+        assert_eq!(policy.max_refinement_iters, 0);
+        assert!(!policy.allow_placement_profile_fallback);
+        assert!(!policy.allow_trace_demotion);
+        assert!(!policy.allow_overlay_promotion);
+        assert!(!policy.allow_recompute_promotion);
     }
 
     #[test]
@@ -139,5 +190,15 @@ mod tests {
         value["unexpected"] = serde_json::json!(true);
 
         assert!(serde_json::from_value::<RepairPolicy>(value).is_err());
+    }
+
+    #[test]
+    fn placement_profile_fallback_field_named_correctly() {
+        let policy = RepairPolicy {
+            allow_placement_profile_fallback: true,
+            ..RepairPolicy::for_profile(RepairPolicyProfile::Bringup)
+        };
+
+        assert!(policy.allow_placement_profile_fallback);
     }
 }

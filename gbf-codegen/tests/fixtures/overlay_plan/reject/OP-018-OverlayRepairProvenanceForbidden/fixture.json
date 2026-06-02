@@ -1,0 +1,6 @@
+{
+  "fixture_schema": "overlay_plan.reject_fixture.v1",
+  "fixture_id": "OP-018-OverlayRepairProvenanceForbidden",
+  "scenario": "repair_provenance_forbidden",
+  "expected_code": { "kind": "OverlayRepairProvenanceForbidden" }
+}

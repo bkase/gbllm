@@ -515,6 +515,7 @@ fn policy_fixture() -> gbf_policy::ResolvedCompilePolicy {
         },
         observation: ObservationKnob {
             observability: ObservabilityMode::Invariant,
+            trace_demotion: gbf_policy::TraceDemotionLevel::None,
             probe_level: ProbeCollectionLevel::RequiredOnly,
         },
         range: RangeKnob {
@@ -525,6 +526,7 @@ fn policy_fixture() -> gbf_policy::ResolvedCompilePolicy {
         },
         sram: SramKnob {
             page_aggression: SramPageAggression::PackCold,
+            spill_policy: gbf_policy::SramSpillPolicy::SpillOnPressure,
         },
         rom_window: RomWindowKnob {
             kernel_residency_bias: RomKernelResidencyBias::PreferExpertBank,
@@ -537,6 +539,8 @@ fn policy_fixture() -> gbf_policy::ResolvedCompilePolicy {
             tile_search: ScheduleTileSearch::Local,
             slice_coarsening: ScheduleSliceCoarsening::Balanced,
             resource_pressure: ScheduleResourcePressure::Conservative,
+            pressure_thresholds: gbf_policy::ResourcePressureThresholds::default(),
+            stage_iteration_ceilings: gbf_policy::StageIterationLimits::uniform(4),
         },
     };
     let bounds = canonical_default_bounds_fixture();
@@ -765,6 +769,7 @@ fn objective_fixture() -> CompileObjective {
         max_cycles_per_token: Some(24_000),
         max_bank_switches_per_token: Some(17),
         max_sram_page_switches_per_token: Some(3),
+        min_sustained_throughput_tokens_per_megacycle: None,
         min_ui_headroom_pct: 11,
         max_rom_bytes: Some(8 * 1024 * 1024),
         risk: RiskPolicy {

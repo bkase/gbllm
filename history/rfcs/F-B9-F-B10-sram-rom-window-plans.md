@@ -1907,6 +1907,19 @@ distilled the relevant information).
 
 ### 8.2 Output product
 
+> **F-B9 v1 implementation amendment (bd-3ns, 2026-05-20).**
+> The landed Stage 7 v1 public product is intentionally narrowed to the
+> bead's closure surface: typed input identity and hashes, sorted
+> `SramPageBinding` rows, resolved `PersistentPage` rows, a stream index,
+> `SramBudgetTally`, `PersistentPageGeometry`, canonical self-hash,
+> deterministic report emission/parsing, diagnostics, and K7 cache-key
+> inputs. The fuller RFC product below (`SramWorkingSet`,
+> `CommitBoundary`, `PageRotation`, `SpillPolicy`,
+> `SramSwitchProjections`, and SRAM cert emission) remains the design target
+> for later explicitly owned beads. Downstream stages must not infer those
+> omitted fields from Stage 7 v1 reports until a future bead lands and
+> amends the schema.
+
 ```rust
 pub struct SramPagePlan {
     pub identity: SramPagePlanIdentity,
@@ -1946,6 +1959,7 @@ pub struct SramPageBindingRef {
 
 pub enum SramResidencyRole {
     PersistentSequenceState,
+    PersistentContinuation,
     PersistentTranscript,
     PersistentHarness,
     PersistentTrace,
@@ -1957,7 +1971,10 @@ pub enum SramResidencyRole {
 A working set is the typed set of SRAM-paged bindings active in one
 epoch. The `bytes_in_use` field is the sum of the active members'
 nominal byte demand; `bytes_reserved` includes alignment and
-manifest-page overhead.
+manifest-page overhead. When Stage 7 has no SRAM-relevant bindings at
+all, the product may emit `active_sets = []` even if an upstream smoke
+fixture carries a point sentinel epoch such as `0..0`; otherwise every
+emitted `SramWorkingSet` is non-empty.
 
 #### `SramPageBinding`
 
@@ -2051,7 +2068,11 @@ pub enum YieldSafetyClass {
 
 `CommitBoundary.id` values are assigned in canonical order and are
 totally ordered by canonical IR position. The `serialization_order`
-list is canonical (lexicographic by `SramPageBindingId`).
+list is canonical (lexicographic by `SramPageBindingId`). Stage 7 v1
+records `generation_delta = 1` per emitted commit boundary because the
+current StoragePlan input surface does not carry a persisted generation
+counter or `PersistPageStateMachine` reference; the state-machine owner
+must amend this field when that data becomes available.
 
 #### `PageRotation`
 
@@ -2211,7 +2232,7 @@ F-SPP-CommitOrdered:
 
 F-SPP-SerializationCanonical:
   CommitBoundary.serialization_order is the canonical
-  lexicographic order over member_pages by SramPageBindingId.
+  lexicographic order over member SramPageBindingIds.
 
 F-SPP-EpochCoverage:
   ⋃ epoch.op_range = full op range of the GbInferIR product cited in
@@ -2439,6 +2460,37 @@ slack for overlays, ROM bank count, and `max_bank_switches_per_token`.
 references (consumed by hash; F-B10 doesn't perform the writes).
 
 ### 9.2 Output product
+
+> **F-B10 full-closure implementation amendment (bd-iats/bd-1kq0/bd-3ual,
+> 2026-05-21).** Stage 8 now exposes the registry-backed construction path:
+> `ObservationPlan` registry rows enumerate kernels and LUTs, `RangePlan`
+> reduction subordinates are checked against the resulting co-residency
+> decisions, and registry rows fail closed for missing or source-impossible
+> inputs. The Stage 8 identity and K8 cache key make artifact validation,
+> policy resolution, static budget, QuantGraph, InferIR, ObservationPlan,
+> RangePlan, StoragePlan, and SramPagePlan hashes load-bearing. Window
+> certificate emission, `GbInferIR`-backed hot-node epoch coverage, F-B9
+> epoch-boundary alignment, and overlay install-source visibility proof are
+> all part of the Stage 8 v1 closure surface.
+
+> **Registry extraction boundary audit (bd-iats, 2026-05-21).** Stage 4
+> `ObservationPlanCoreProduct` now exposes typed ROM-window kernel/LUT fact
+> rows with byte size, ROM reachability class, overlay eligibility, active
+> epochs, requested bank, and explicit row source. Stage 5 `RangePlanCoreProduct`
+> now exposes typed ROM-window reduction-subordinate mappings with explicit row
+> source. The current Stage 4/5 constructors still publish collection-level
+> `SourceImpossible` fact bundles because the real producers for those facts are
+> not yet available; Stage 8 maps that absence into
+> `RomWindowRegistrySource::SourceImpossible` and fails closed instead of
+> synthesizing kernels, LUTs, byte sizes, epochs, banks, or subordinate mappings.
+
+Implementation note (bd-1kq0, 2026-05-21): Stage 8 overlay demand now carries
+the ROM source bank and active epochs for every `WramOverlay` kernel and
+`WramStaged` LUT, plus a per-epoch install-source visibility manifest derived
+from `RomWindowBinding.visibility`. Overlay source banks participate in the
+same phase demand set as co-resident kernels/LUTs/tensors, so conflicting
+source/data banks fail closed with `RomMultipleSwitchableBanksDemandedInPhase`
+instead of becoming synthetic F-B11 install claims.
 
 ```rust
 pub struct RomWindowPlan {
@@ -2820,6 +2872,7 @@ pub struct RomWindowPlanCacheKey {
     pub sram_page_plan_self_hash: Hash256,
     pub runtime_chrome_budget_hash: Hash256,
     pub target_profile_hash: Hash256,
+    pub rom_window_plan_policy_projection_hash: Hash256,
     pub runtime_mode: RuntimeMode,
 }
 ```
@@ -3288,6 +3341,14 @@ itself.
 diagnostics; no certificate is emitted. This matches the
 `certs/range.cert.json` and `certs/arena.cert.json` discipline from
 planv0.md line 2825.
+
+Implementation note (bd-b2ls, 2026-05-21): Stage 7 carries the resolved
+`max_sram_page_switches_per_token` cap as a typed `SramSwitchCaps` input,
+records it in `SramSwitchProjections.cap_per_token`, rejects over-cap
+projections before success emission, and emits `sram_cert.v1` only for
+successful plans. The certificate claim pins the SRAM plan self-hash,
+single-page/resolution/spill/commit/yield claims, page-switch decision
+value, page-switch cap, and compact distribution/count evidence.
 
 ### 11.3 `rom_window_plan.v1`
 
@@ -4575,4 +4636,3 @@ Every later optimization stops second-guessing whether a kernel
 should live in Bank 0 or an overlay.
 
 That is what this chunk buys.
-
