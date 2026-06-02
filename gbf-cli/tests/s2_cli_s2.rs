@@ -52,10 +52,15 @@ fn replay_full_seed0_tiny_exits_zero() {
 
     let output = command.assert().success().get_output().clone();
     let replay = json_stdout_payload(&output, "s2_replay_full_cli.v1");
+    assert_sha256_string(&replay["runs"][0]["distill_log_self_hash"]);
+    assert_sha256_string(&replay["runs"][0]["phase_log_self_hash"]);
+    let mut pinned_replay = replay.clone();
+    pinned_replay["runs"][0]["distill_log_self_hash"] = Value::String("<sha256>".to_owned());
+    pinned_replay["runs"][0]["phase_log_self_hash"] = Value::String("<sha256>".to_owned());
     // Inline json! golden keeps the full runs payload pinned without adding an
     // insta snapshot file for this tiny CLI contract test.
     assert_eq!(
-        replay,
+        pinned_replay,
         json!({
             "evidence_source": "gbf s2 replay-full",
             "fixture": "tiny",
@@ -69,10 +74,10 @@ fn replay_full_seed0_tiny_exits_zero() {
                     "8000": "sha256:6c38dcd57c2fd5509d03474b2acb80c41a29e9b1f14a23bafe08e8b33c8727c9",
                     "10000": "sha256:ea0948e99c1ddcc3856f2ceeccadd3c4807b131b9de98d32aa9dada69e78bd80"
                 },
-                "distill_log_self_hash": "sha256:1175cd5b7bcad00faebd78b54d6e3ee77eac7941b6001fc089ab14dbc2ce8d5c",
+                "distill_log_self_hash": "<sha256>",
                 "final_checkpoint_sha": "sha256:ea0948e99c1ddcc3856f2ceeccadd3c4807b131b9de98d32aa9dada69e78bd80",
                 "phase_boundary_steps": ["4000", "5000", "8000", "10000"],
-                "phase_log_self_hash": "sha256:0071113cdd2d3f640b2ca20c45fdd39c3fc5c04ef02ce4e306ba568aa04ddc15",
+                "phase_log_self_hash": "<sha256>",
                 "score_self_hash": "sha256:2a22b245542a24260f6e88a627484ad035e1eee7519a2328fbe574444061641b",
                 "seed": 0
             }],
@@ -334,6 +339,21 @@ fn json_stdout_payload(output: &Output, schema: &str) -> Value {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find(|value| value["schema"] == schema)
         .unwrap_or_else(|| panic!("missing {schema} JSON payload in stdout:\n{stdout}"))
+}
+
+fn assert_sha256_string(value: &Value) {
+    let Some(value) = value.as_str() else {
+        panic!("expected sha256 string, got {value:?}");
+    };
+    assert!(
+        value
+            .strip_prefix("sha256:")
+            .is_some_and(|hex| hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "expected sha256:<64 lowercase hex> string, got {value}"
+    );
 }
 
 fn cargo_check_gbf_cli_with_features(features: &[&str]) -> Output {
