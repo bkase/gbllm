@@ -1,0 +1,8 @@
+# owner_bead = "bd-38fj"
+schema = "s5_h5_long_range_sequence_fixture.v1"
+intent = "L_MT4 has lower long-range repetition than L_FIX1"
+l_fix1_tokens = [7, 1, 2, 3, 4, 5, 6, 7]
+l_mt4_tokens = [7, 1, 2, 3, 4, 5, 6, 8]
+min_distance = 7
+expected_relation = "l_mt4_lower"
+

@@ -23,7 +23,8 @@ use gbf_foundation::{
 };
 use gbf_policy::{
     BudgetSlotClass, PlacementProfile, RomBudgetSlot, RuntimeChromeBudget, RuntimeMemoryCapSection,
-    SramKnob, SramPageAggression, SramPagePlanDiagnosticCode, SramSpillPolicy, ValidationCode,
+    RuntimeNucleusHash, SramKnob, SramPageAggression, SramPagePlanDiagnosticCode, SramSpillPolicy,
+    ValidationCode,
 };
 use gbf_report::{canonicalize, round_trip_self_hash};
 use serde_json::json;
@@ -623,7 +624,7 @@ fn fixture_inputs(bindings: Vec<SramPagePlanBindingInput>) -> SramPagePlanInputs
         runtime_chrome_budget: RuntimeChromeBudget {
             target: TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Bringup"),
-            runtime_nucleus_hash: hash(7),
+            runtime_nucleus_hash: RuntimeNucleusHash::real(hash(7)),
             rom_slots: vec![RomBudgetSlot {
                 id: BudgetSlotId::new(0),
                 class: BudgetSlotClass::CommonBank,

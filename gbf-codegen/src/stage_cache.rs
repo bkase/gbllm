@@ -8303,7 +8303,7 @@ mod tests {
         gbf_policy::RuntimeChromeBudget {
             target: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Bringup"),
-            runtime_nucleus_hash: hash(0x91),
+            runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(0x91)),
             rom_slots: vec![
                 gbf_policy::RomBudgetSlot {
                     id: gbf_foundation::BudgetSlotId::new(0),
@@ -9184,7 +9184,7 @@ mod tests {
         static_budget_v1::RuntimeChromeBudgetSection {
             target: "dmg-mbc5-8mib-128kib".into(),
             profile: "Bringup".into(),
-            runtime_nucleus_hash: hash(45),
+            runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(45)),
             rom_slots: vec![static_budget_v1::RomBudgetSlotEntry {
                 id: gbf_foundation::BudgetSlotId::new(1),
                 class: BudgetSlotClass::ExpertBank,

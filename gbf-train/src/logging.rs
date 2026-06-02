@@ -11,6 +11,9 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use gbf_foundation::{BudgetSlotId, CanonicalJson, CompileProfileId, DomainHash, Hash256};
+use gbf_policy::ShadowEmissionId;
+use gbf_policy::s5::{FrontierRecommendation, HypothesisStatus, S5FrontierVariantId, S5Outcome};
 use serde::{Deserialize, Serialize};
 use tracing::Span;
 use tracing_subscriber::EnvFilter;
@@ -23,8 +26,18 @@ pub const EVENT_NAME_STUDENT_FREEZE: &str = "s3::student_freeze";
 pub const EVENT_NAME_EXPORT_COMPLETE: &str = "export_complete";
 pub const EVENT_NAME_PREFLIGHT: &str = "preflight";
 pub const EVENT_NAME_SHADOW_COMPILE: &str = "shadow_compile";
+pub const EVENT_NAME_S5_CLOSURE_FLOW: &str = "s5_closure_flow";
+pub const S5_CLOSURE_LOG_SCHEMA_ID: &str = "s5_closure_log";
+pub const S5_CLOSURE_LOG_SCHEMA_VERSION: &str = "v1";
 pub const DEFAULT_LOGGING_OVERHEAD_LIMIT: f64 = 0.01;
 pub const PREFLIGHT_CHECK_EXPERT_SLOT_BUDGET: &str = "expert_slot_budget";
+
+const S5_CLOSURE_LOG_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-train",
+    "S5ClosureLogRecord",
+    S5_CLOSURE_LOG_SCHEMA_ID,
+    S5_CLOSURE_LOG_SCHEMA_VERSION,
+);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -595,6 +608,319 @@ pub struct ShadowCompileEvent {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S5ClosureLogRecord {
+    schema_id: String,
+    schema_version: String,
+    spec_sha: String,
+    run_id: String,
+    event: S5ClosureLogEvent,
+}
+
+impl S5ClosureLogRecord {
+    pub fn new(
+        spec_sha: impl Into<String>,
+        run_id: impl Into<String>,
+        event: S5ClosureLogEvent,
+    ) -> Result<Self, LoggingEventError> {
+        let spec_sha = spec_sha.into();
+        let run_id = run_id.into();
+        validate_nonempty("spec_sha", &spec_sha)?;
+        validate_nonempty("run_id", &run_id)?;
+        event.validate()?;
+
+        Ok(Self {
+            schema_id: S5_CLOSURE_LOG_SCHEMA_ID.to_owned(),
+            schema_version: S5_CLOSURE_LOG_SCHEMA_VERSION.to_owned(),
+            spec_sha,
+            run_id,
+            event,
+        })
+    }
+
+    pub fn schema_id(&self) -> &str {
+        &self.schema_id
+    }
+
+    pub fn schema_version(&self) -> &str {
+        &self.schema_version
+    }
+
+    pub fn spec_sha(&self) -> &str {
+        &self.spec_sha
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn event(&self) -> &S5ClosureLogEvent {
+        &self.event
+    }
+
+    pub fn event_kind(&self) -> &'static str {
+        self.event.kind_name()
+    }
+
+    pub fn documented_level(&self) -> LogLevel {
+        self.event.documented_level()
+    }
+
+    pub fn canonical_json_bytes(&self) -> Result<Vec<u8>, LoggingEventError> {
+        CanonicalJson::to_vec(self).map_err(|error| LoggingEventError::CanonicalPayload {
+            detail: error.to_string(),
+        })
+    }
+
+    pub fn canonical_json_string(&self) -> Result<String, LoggingEventError> {
+        String::from_utf8(self.canonical_json_bytes()?).map_err(|error| {
+            LoggingEventError::CanonicalPayload {
+                detail: error.to_string(),
+            }
+        })
+    }
+
+    pub fn payload_hash(&self) -> Result<Hash256, LoggingEventError> {
+        let canonical = self.canonical_json_bytes()?;
+        S5_CLOSURE_LOG_DOMAIN
+            .hash_canonical_bytes(&canonical)
+            .map_err(|error| LoggingEventError::CanonicalPayload {
+                detail: error.to_string(),
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum S5ClosureLogEvent {
+    StateTransition {
+        from: String,
+        to: String,
+        seed: Option<u64>,
+        variant: Option<S5FrontierVariantId>,
+    },
+    CadenceEmission {
+        variant: S5FrontierVariantId,
+        seed: u64,
+        emission_id: ShadowEmissionId,
+        cadence_kind: S5CadenceKind,
+        sample_self_hash: Hash256,
+    },
+    NegativeControlSample {
+        variant: S5FrontierVariantId,
+        seed: u64,
+        fixture_id: String,
+        shadow_compile_ok: bool,
+        failure_stage: Option<String>,
+    },
+    GateEvaluation {
+        hypothesis_id: String,
+        verdict: HypothesisStatus,
+        predicate_value: String,
+        threshold: Option<String>,
+        refute_reason: Option<String>,
+    },
+    PreflightSummary {
+        profile: CompileProfileId,
+        succeeded: bool,
+        fits_envelope: bool,
+        wram_fit_report_present: bool,
+    },
+    FrontierEmitted {
+        frontier_self_hash: Hash256,
+        recommendation: FrontierRecommendation,
+        leader_variant: Option<S5FrontierVariantId>,
+        pick_points_count: u32,
+        fit_points_count: u32,
+    },
+    OracleReportEmitted {
+        seed: u64,
+        oracle_self_hash: Hash256,
+        phase_a_checkpoint_sha: Hash256,
+        projection_tensors_sha: Hash256,
+        quant_spec_sha: Hash256,
+        activation_clip_sha: Hash256,
+        aggregate_agreement: bool,
+    },
+    HarnessRun {
+        seed: u64,
+        ticks_used: u64,
+        ticks_exhausted: bool,
+        first_commit_payload_len: u32,
+        oracle_agreement: bool,
+    },
+    RevalidationVerdict {
+        seed: u64,
+        outcome: S5RevalidationOutcome,
+        hashes_match: bool,
+        max_delta_bytes: u32,
+        offending_slot: Option<BudgetSlotId>,
+    },
+    EncodedRomEmitted {
+        seed: u64,
+        build_identity_block_self_hash: Hash256,
+        artifact_core_hash: Hash256,
+        rom_byte_length: u32,
+    },
+    FalsifierTrigger {
+        f_case: String,
+        expected_verdict: HypothesisStatus,
+        observed_verdict: HypothesisStatus,
+    },
+    OutcomeDispatch {
+        outcome: S5Outcome,
+        decision: String,
+        warning_band: Option<String>,
+    },
+}
+
+impl S5ClosureLogEvent {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::StateTransition { .. } => "state_transition",
+            Self::CadenceEmission { .. } => "cadence_emission",
+            Self::NegativeControlSample { .. } => "negative_control_sample",
+            Self::GateEvaluation { .. } => "gate_evaluation",
+            Self::PreflightSummary { .. } => "preflight_summary",
+            Self::FrontierEmitted { .. } => "frontier_emitted",
+            Self::OracleReportEmitted { .. } => "oracle_report_emitted",
+            Self::HarnessRun { .. } => "harness_run",
+            Self::RevalidationVerdict { .. } => "revalidation_verdict",
+            Self::EncodedRomEmitted { .. } => "encoded_rom_emitted",
+            Self::FalsifierTrigger { .. } => "falsifier_trigger",
+            Self::OutcomeDispatch { .. } => "outcome_dispatch",
+        }
+    }
+
+    pub fn documented_level(&self) -> LogLevel {
+        match self {
+            Self::StateTransition { .. }
+            | Self::CadenceEmission { .. }
+            | Self::GateEvaluation { .. } => LogLevel::Trace,
+            Self::NegativeControlSample { .. } | Self::EncodedRomEmitted { .. } => LogLevel::Debug,
+            Self::PreflightSummary { succeeded, .. } => {
+                if *succeeded {
+                    LogLevel::Info
+                } else {
+                    LogLevel::Error
+                }
+            }
+            Self::FrontierEmitted { .. } => LogLevel::Info,
+            Self::OracleReportEmitted {
+                aggregate_agreement,
+                ..
+            } => {
+                if *aggregate_agreement {
+                    LogLevel::Debug
+                } else {
+                    LogLevel::Error
+                }
+            }
+            Self::HarnessRun {
+                ticks_exhausted,
+                oracle_agreement,
+                ..
+            } => {
+                if *ticks_exhausted || !*oracle_agreement {
+                    LogLevel::Error
+                } else {
+                    LogLevel::Info
+                }
+            }
+            Self::RevalidationVerdict { outcome, .. } => match outcome {
+                S5RevalidationOutcome::Pass => LogLevel::Debug,
+                S5RevalidationOutcome::Warn => LogLevel::Warn,
+                S5RevalidationOutcome::BlockExport => LogLevel::Error,
+            },
+            Self::FalsifierTrigger {
+                expected_verdict,
+                observed_verdict,
+                ..
+            } => {
+                if expected_verdict == observed_verdict {
+                    LogLevel::Debug
+                } else {
+                    LogLevel::Error
+                }
+            }
+            Self::OutcomeDispatch {
+                outcome,
+                warning_band,
+                ..
+            } => {
+                if s5_outcome_blocks_closure(*outcome) {
+                    LogLevel::Error
+                } else if warning_band.is_some() || s5_outcome_warns(*outcome) {
+                    LogLevel::Warn
+                } else {
+                    LogLevel::Info
+                }
+            }
+        }
+    }
+
+    fn validate(&self) -> Result<(), LoggingEventError> {
+        match self {
+            Self::StateTransition { from, to, .. } => {
+                validate_nonempty("from", from)?;
+                validate_nonempty("to", to)
+            }
+            Self::NegativeControlSample {
+                fixture_id,
+                failure_stage,
+                ..
+            } => {
+                validate_nonempty("fixture_id", fixture_id)?;
+                validate_optional_nonempty("failure_stage", failure_stage)
+            }
+            Self::GateEvaluation {
+                hypothesis_id,
+                predicate_value,
+                threshold,
+                refute_reason,
+                ..
+            } => {
+                validate_nonempty("hypothesis_id", hypothesis_id)?;
+                validate_nonempty("predicate_value", predicate_value)?;
+                validate_optional_nonempty("threshold", threshold)?;
+                validate_optional_nonempty("refute_reason", refute_reason)
+            }
+            Self::FalsifierTrigger { f_case, .. } => validate_nonempty("f_case", f_case),
+            Self::OutcomeDispatch {
+                decision,
+                warning_band,
+                ..
+            } => {
+                validate_nonempty("decision", decision)?;
+                validate_optional_nonempty("warning_band", warning_band)
+            }
+            Self::CadenceEmission { .. }
+            | Self::PreflightSummary { .. }
+            | Self::FrontierEmitted { .. }
+            | Self::OracleReportEmitted { .. }
+            | Self::HarnessRun { .. }
+            | Self::RevalidationVerdict { .. }
+            | Self::EncodedRomEmitted { .. } => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum S5CadenceKind {
+    Shadow,
+    Feedback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum S5RevalidationOutcome {
+    Pass,
+    Warn,
+    BlockExport,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TrainingLogEmitter {
     test_collector: Option<TestEventCollector>,
@@ -615,6 +941,9 @@ impl TrainingLogEmitter {
         &self,
         fields: &TrainingPhaseSpanFields,
     ) -> Result<Span, LoggingEventError> {
+        #[cfg(feature = "s5-no-log")]
+        let span = Span::none();
+        #[cfg(not(feature = "s5-no-log"))]
         let span = tracing::info_span!(
             "training_phase",
             phase_name = %fields.phase_name,
@@ -665,6 +994,7 @@ impl TrainingLogEmitter {
     pub fn loss_step(&self, fields: &LossBreakdown) -> Result<(), LoggingEventError> {
         validate_loss_breakdown(fields)?;
 
+        #[cfg(not(feature = "s5-no-log"))]
         tracing::info!(
             event_name = EVENT_NAME_LOSS_STEP,
             step = fields.step,
@@ -709,6 +1039,7 @@ impl TrainingLogEmitter {
         validate_nonempty("from_phase", &fields.from_phase)?;
         validate_nonempty("to_phase", &fields.to_phase)?;
 
+        #[cfg(not(feature = "s5-no-log"))]
         tracing::info!(
             event_name = EVENT_NAME_PHASE_TRANSITION,
             from_phase = %fields.from_phase,
@@ -798,6 +1129,7 @@ impl TrainingLogEmitter {
             &fields.frozen_weight_fingerprint,
         )?;
 
+        #[cfg(not(feature = "s5-no-log"))]
         tracing::info!(
             event_name = EVENT_NAME_TEACHER_FREEZE,
             step = fields.step,
@@ -882,6 +1214,7 @@ impl TrainingLogEmitter {
             return Err(LoggingEventError::ZeroField { name: "n_experts" });
         }
 
+        #[cfg(not(feature = "s5-no-log"))]
         tracing::info!(
             event_name = EVENT_NAME_EXPORT_COMPLETE,
             step = fields.step,
@@ -932,6 +1265,7 @@ impl TrainingLogEmitter {
         validate_finite("numeric_value", fields.numeric_value)?;
         validate_finite("threshold", fields.threshold)?;
 
+        #[cfg(not(feature = "s5-no-log"))]
         tracing::info!(
             event_name = EVENT_NAME_PREFLIGHT,
             check_name = %fields.check_name,
@@ -968,6 +1302,7 @@ impl TrainingLogEmitter {
     ) -> Result<(), LoggingEventError> {
         validate_nonempty("detail", fields.detail())?;
 
+        #[cfg(not(feature = "s5-no-log"))]
         tracing::info!(
             event_name = EVENT_NAME_PREFLIGHT,
             check_name = PREFLIGHT_CHECK_EXPERT_SLOT_BUDGET,
@@ -1016,6 +1351,7 @@ impl TrainingLogEmitter {
         validate_nonempty("fit_status", &fields.fit_status)?;
         validate_nonempty("quality_summary", &fields.quality_summary)?;
 
+        #[cfg(not(feature = "s5-no-log"))]
         tracing::info!(
             event_name = EVENT_NAME_SHADOW_COMPILE,
             step = fields.step,
@@ -1057,6 +1393,54 @@ impl TrainingLogEmitter {
         ));
 
         Ok(())
+    }
+
+    pub fn s5_closure_flow(&self, record: &S5ClosureLogRecord) -> Result<(), LoggingEventError> {
+        #[cfg(feature = "s5-no-log")]
+        {
+            let _ = record;
+            Ok(())
+        }
+
+        #[cfg(not(feature = "s5-no-log"))]
+        {
+            let payload_canonical_json = record.canonical_json_string()?;
+            let payload_hash = record.payload_hash()?.to_string();
+            let level = record.documented_level();
+
+            emit_s5_closure_flow_tracing(record, level, &payload_hash, &payload_canonical_json);
+
+            self.record_test_event(TestEvent::new(
+                TestEventKind::S5ClosureFlow,
+                level,
+                fields_map([
+                    (
+                        "schema_id",
+                        TestFieldValue::String(record.schema_id().to_owned()),
+                    ),
+                    (
+                        "schema_version",
+                        TestFieldValue::String(record.schema_version().to_owned()),
+                    ),
+                    (
+                        "spec_sha",
+                        TestFieldValue::String(record.spec_sha().to_owned()),
+                    ),
+                    ("run_id", TestFieldValue::String(record.run_id().to_owned())),
+                    (
+                        "event_kind",
+                        TestFieldValue::String(record.event_kind().to_owned()),
+                    ),
+                    ("payload_hash", TestFieldValue::String(payload_hash)),
+                    (
+                        "payload_canonical_json",
+                        TestFieldValue::String(payload_canonical_json),
+                    ),
+                ]),
+            ));
+
+            Ok(())
+        }
     }
 
     fn record_test_event(&self, event: TestEvent) {
@@ -1109,6 +1493,7 @@ pub enum TestEventKind {
     ExportComplete,
     Preflight,
     ShadowCompile,
+    S5ClosureFlow,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1161,6 +1546,7 @@ pub enum LoggingEventError {
     NegativeField { name: &'static str, value: f32 },
     HardnessOutOfRange { name: &'static str, value: f32 },
     InvalidStepRange { step_start: u64, step_end: u64 },
+    CanonicalPayload { detail: String },
 }
 
 impl fmt::Display for LoggingEventError {
@@ -1184,6 +1570,9 @@ impl fmt::Display for LoggingEventError {
                 f,
                 "training phase step_start {step_start} must be <= step_end {step_end}"
             ),
+            Self::CanonicalPayload { detail } => {
+                write!(f, "failed to canonicalize S5 closure log payload: {detail}")
+            }
         }
     }
 }
@@ -1377,6 +1766,9 @@ fn fields_map<const N: usize>(
 }
 
 fn emit_student_freeze_tracing(fields: &StudentFreezeEvent) {
+    #[cfg(feature = "s5-no-log")]
+    let _ = fields;
+    #[cfg(not(feature = "s5-no-log"))]
     tracing::info!(
         target: "gbf_train::student",
         event_name = EVENT_NAME_STUDENT_FREEZE,
@@ -1386,6 +1778,40 @@ fn emit_student_freeze_tracing(fields: &StudentFreezeEvent) {
         source_storage_identity = fields.source_storage_identity,
         frozen_storage_identity = fields.frozen_storage_identity,
     );
+}
+
+#[cfg(not(feature = "s5-no-log"))]
+fn emit_s5_closure_flow_tracing(
+    record: &S5ClosureLogRecord,
+    level: LogLevel,
+    payload_hash: &str,
+    payload_canonical_json: &str,
+) {
+    macro_rules! emit {
+        ($level:expr) => {
+            tracing::event!(
+                target: "gbf_train::log::s5",
+                $level,
+                event_name = EVENT_NAME_S5_CLOSURE_FLOW,
+                schema_id = record.schema_id(),
+                schema_version = record.schema_version(),
+                spec_sha = record.spec_sha(),
+                run_id = record.run_id(),
+                event_kind = record.event_kind(),
+                payload_hash = %payload_hash,
+                payload_canonical_json = %payload_canonical_json,
+            )
+        };
+    }
+
+    match level {
+        LogLevel::Trace => emit!(tracing::Level::TRACE),
+        LogLevel::Debug => emit!(tracing::Level::DEBUG),
+        LogLevel::Info => emit!(tracing::Level::INFO),
+        LogLevel::Warn => emit!(tracing::Level::WARN),
+        LogLevel::Error => emit!(tracing::Level::ERROR),
+        LogLevel::Off => {}
+    }
 }
 
 fn validate_loss_breakdown(fields: &LossBreakdown) -> Result<(), LoggingEventError> {
@@ -1406,6 +1832,41 @@ fn validate_nonempty(name: &'static str, value: &str) -> Result<(), LoggingEvent
         return Err(LoggingEventError::EmptyField { name });
     }
     Ok(())
+}
+
+fn validate_optional_nonempty(
+    name: &'static str,
+    value: &Option<String>,
+) -> Result<(), LoggingEventError> {
+    if let Some(value) = value {
+        validate_nonempty(name, value)?;
+    }
+    Ok(())
+}
+
+fn s5_outcome_warns(outcome: S5Outcome) -> bool {
+    matches!(
+        outcome,
+        S5Outcome::PassWithFrontierWarning | S5Outcome::PassWithShadowGapWarning
+    )
+}
+
+fn s5_outcome_blocks_closure(outcome: S5Outcome) -> bool {
+    matches!(
+        outcome,
+        S5Outcome::FailFrontierIncomplete
+            | S5Outcome::FailAttentionOracle
+            | S5Outcome::FailBoundedKvGrad
+            | S5Outcome::FailLinearstateGrad
+            | S5Outcome::FailRuntimeBudget
+            | S5Outcome::FailCompileProfile
+            | S5Outcome::FailShadowCompile
+            | S5Outcome::FailEncodedRom
+            | S5Outcome::FailEmulatorHarness
+            | S5Outcome::FailFeedbackLoop
+            | S5Outcome::FailLoggingOverhead
+            | S5Outcome::FailSubstrate { .. }
+    )
 }
 
 fn validate_hardness(name: &'static str, value: f32) -> Result<(), LoggingEventError> {
@@ -1682,6 +2143,134 @@ mod tests {
     }
 
     #[test]
+    fn s5_closure_log_event_round_trips_and_hashes_canonical_payloads() {
+        for record in sample_s5_closure_records() {
+            let canonical = record.canonical_json_bytes().unwrap();
+            let decoded: S5ClosureLogRecord = serde_json::from_slice(&canonical).unwrap();
+
+            assert_eq!(decoded, record);
+            assert_eq!(record.schema_id(), S5_CLOSURE_LOG_SCHEMA_ID);
+            assert_eq!(record.schema_version(), S5_CLOSURE_LOG_SCHEMA_VERSION);
+            assert_eq!(
+                record.payload_hash().unwrap(),
+                decoded.payload_hash().unwrap()
+            );
+            assert_ne!(record.payload_hash().unwrap(), Hash256::ZERO);
+        }
+    }
+
+    #[test]
+    fn s5_closure_log_level_table_covers_taxonomy() {
+        let records = sample_s5_closure_records();
+        assert_eq!(records.len(), 12, "one fixture per F-S5 LogEvent variant");
+
+        assert_level(&records, "state_transition", LogLevel::Trace);
+        assert_level(&records, "cadence_emission", LogLevel::Trace);
+        assert_level(&records, "gate_evaluation", LogLevel::Trace);
+        assert_level(&records, "negative_control_sample", LogLevel::Debug);
+        assert_level(&records, "preflight_summary", LogLevel::Info);
+        assert_level(&records, "frontier_emitted", LogLevel::Info);
+        assert_level(&records, "oracle_report_emitted", LogLevel::Debug);
+        assert_level(&records, "harness_run", LogLevel::Info);
+        assert_level(&records, "revalidation_verdict", LogLevel::Warn);
+        assert_level(&records, "encoded_rom_emitted", LogLevel::Debug);
+        assert_level(&records, "falsifier_trigger", LogLevel::Error);
+        assert_level(&records, "outcome_dispatch", LogLevel::Warn);
+    }
+
+    #[test]
+    fn s5_closure_log_test_capture_is_typed_and_canonical() {
+        let collector = TestEventCollector::new();
+        let emitter = TrainingLogEmitter::with_test_collector(collector.clone());
+        let record = sample_s5_outcome_dispatch_record();
+
+        emitter.s5_closure_flow(&record).unwrap();
+
+        let events = collector.events();
+        assert_eq!(
+            events.len(),
+            if cfg!(feature = "s5-no-log") { 0 } else { 1 }
+        );
+        if cfg!(feature = "s5-no-log") {
+            return;
+        }
+
+        assert_eq!(events[0].kind(), TestEventKind::S5ClosureFlow);
+        assert_eq!(events[0].level(), LogLevel::Warn);
+        assert_eq!(
+            events[0].field("event_kind"),
+            Some(&TestFieldValue::String("outcome_dispatch".to_owned()))
+        );
+        assert_eq!(
+            events[0].field("spec_sha"),
+            Some(&TestFieldValue::String("sha256:spec".to_owned()))
+        );
+        let TestFieldValue::String(payload) = events[0]
+            .field("payload_canonical_json")
+            .expect("payload json field")
+        else {
+            panic!("payload json must be string");
+        };
+        assert!(payload.contains("\"kind\":\"outcome_dispatch\""));
+        assert!(payload.contains("\"schema_id\":\"s5_closure_log\""));
+    }
+
+    #[test]
+    #[cfg(not(feature = "s5-no-log"))]
+    fn s5_closure_log_subscriber_captures_record_shape() {
+        let capture = TraceCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let record = sample_s5_outcome_dispatch_record();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let emitter = TrainingLogEmitter::new();
+            emitter.s5_closure_flow(&record).unwrap();
+        });
+
+        let records = capture.records();
+        let event = records
+            .iter()
+            .find(|record| {
+                record.kind == TraceRecordKind::Event
+                    && record.field("event_name") == Some(EVENT_NAME_S5_CLOSURE_FLOW)
+            })
+            .expect("S5 closure flow event should be captured by tracing subscriber");
+        assert_eq!(event.field("schema_id"), Some(S5_CLOSURE_LOG_SCHEMA_ID));
+        assert_eq!(
+            event.field("schema_version"),
+            Some(S5_CLOSURE_LOG_SCHEMA_VERSION)
+        );
+        assert_eq!(event.field("spec_sha"), Some("sha256:spec"));
+        assert_eq!(event.field("run_id"), Some("run-7"));
+        assert_eq!(event.field("event_kind"), Some("outcome_dispatch"));
+        assert!(event.field("payload_hash").is_some());
+        assert!(
+            event
+                .field("payload_canonical_json")
+                .expect("canonical payload field")
+                .contains("\"warning_band\":\"frontier\"")
+        );
+        assert!(event.field("message").is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "s5-no-log")]
+    fn s5_no_log_feature_suppresses_s5_closure_flow_event() {
+        let collector = TestEventCollector::new();
+        let capture = TraceCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let record = sample_s5_outcome_dispatch_record();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let emitter = TrainingLogEmitter::with_test_collector(collector.clone());
+            emitter.s5_closure_flow(&record).unwrap();
+        });
+
+        assert!(collector.events().is_empty());
+        assert!(capture.records().is_empty());
+    }
+
+    #[test]
     fn logging_overhead_gate_requires_measurement_and_enforces_one_percent_limit() {
         assert_eq!(
             LoggingOverheadMeasurement::new(0, 1).unwrap_err(),
@@ -1712,6 +2301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "s5-no-log"))]
     fn actual_tracing_subscriber_observes_training_phase_span_fields() {
         let capture = TraceCapture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
@@ -1739,6 +2329,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "s5-no-log")]
+    fn s5_no_log_feature_suppresses_training_phase_span_callsite() {
+        let capture = TraceCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let hardness = QatHardnessLevels::new(0.0, 0.25, 0.4, 0.5, 1.0).unwrap();
+        let span_fields =
+            TrainingPhaseSpanFields::new("qat_warmup", 10, 20, 0.001, hardness).unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let emitter = TrainingLogEmitter::new();
+            let _span = emitter.training_phase_span(&span_fields).unwrap();
+        });
+
+        let records = capture.records();
+        for record in &records {
+            let _ = (&record.kind, &record.name, &record.fields);
+        }
+        assert!(
+            records.is_empty(),
+            "s5-no-log must compile out tracing spans for the D14 baseline"
+        );
+    }
+
+    #[test]
     fn structured_logging_source_avoids_message_strings_on_required_events() {
         let source = include_str!("logging.rs");
         let burn_source = include_str!("adapter/burn.rs");
@@ -1751,6 +2365,7 @@ mod tests {
             EVENT_NAME_EXPORT_COMPLETE,
             EVENT_NAME_PREFLIGHT,
             EVENT_NAME_SHADOW_COMPILE,
+            EVENT_NAME_S5_CLOSURE_FLOW,
         ] {
             assert!(
                 source.contains(event_name),
@@ -1779,6 +2394,7 @@ mod tests {
     }
 
     impl TraceRecord {
+        #[cfg(not(feature = "s5-no-log"))]
         fn field(&self, name: &str) -> Option<&str> {
             self.fields.get(name).map(String::as_str)
         }
@@ -1889,5 +2505,161 @@ mod tests {
             overflow_loss: 0.08,
             total_loss: 1.33,
         }
+    }
+
+    fn assert_level(records: &[S5ClosureLogRecord], event_kind: &str, expected: LogLevel) {
+        let record = records
+            .iter()
+            .find(|record| record.event_kind() == event_kind)
+            .unwrap_or_else(|| panic!("missing S5 closure log fixture {event_kind}"));
+        assert_eq!(record.documented_level(), expected);
+    }
+
+    fn sample_s5_outcome_dispatch_record() -> S5ClosureLogRecord {
+        S5ClosureLogRecord::new(
+            "sha256:spec",
+            "run-7",
+            S5ClosureLogEvent::OutcomeDispatch {
+                outcome: S5Outcome::PassWithFrontierWarning,
+                decision: "pass_with_warning".to_owned(),
+                warning_band: Some("frontier".to_owned()),
+            },
+        )
+        .unwrap()
+    }
+
+    fn sample_s5_closure_records() -> Vec<S5ClosureLogRecord> {
+        vec![
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::StateTransition {
+                    from: "PickRunning".to_owned(),
+                    to: "PickEvalDone".to_owned(),
+                    seed: Some(0),
+                    variant: Some(S5FrontierVariantId::BoundedKv),
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::CadenceEmission {
+                    variant: S5FrontierVariantId::LFix1,
+                    seed: 1,
+                    emission_id: ShadowEmissionId::cadence(gbf_policy::ShadowStep::new(4000)),
+                    cadence_kind: S5CadenceKind::Shadow,
+                    sample_self_hash: Hash256::from_bytes([1; 32]),
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::NegativeControlSample {
+                    variant: S5FrontierVariantId::LMt4,
+                    seed: 2,
+                    fixture_id: "shr-1-broken".to_owned(),
+                    shadow_compile_ok: false,
+                    failure_stage: Some("shadow_compile".to_owned()),
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::GateEvaluation {
+                    hypothesis_id: "H13".to_owned(),
+                    verdict: HypothesisStatus::Confirmed,
+                    predicate_value: "true".to_owned(),
+                    threshold: Some("all_shadow_stages_present".to_owned()),
+                    refute_reason: None,
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::PreflightSummary {
+                    profile: CompileProfileId::from("Bringup"),
+                    succeeded: true,
+                    fits_envelope: true,
+                    wram_fit_report_present: true,
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::FrontierEmitted {
+                    frontier_self_hash: Hash256::from_bytes([2; 32]),
+                    recommendation: FrontierRecommendation::A,
+                    leader_variant: Some(S5FrontierVariantId::BoundedKv),
+                    pick_points_count: 15,
+                    fit_points_count: 5,
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::OracleReportEmitted {
+                    seed: 0,
+                    oracle_self_hash: Hash256::from_bytes([3; 32]),
+                    phase_a_checkpoint_sha: Hash256::from_bytes([4; 32]),
+                    projection_tensors_sha: Hash256::from_bytes([5; 32]),
+                    quant_spec_sha: Hash256::from_bytes([6; 32]),
+                    activation_clip_sha: Hash256::from_bytes([7; 32]),
+                    aggregate_agreement: true,
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::HarnessRun {
+                    seed: 0,
+                    ticks_used: 42_000,
+                    ticks_exhausted: false,
+                    first_commit_payload_len: 24,
+                    oracle_agreement: true,
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::RevalidationVerdict {
+                    seed: 3,
+                    outcome: S5RevalidationOutcome::Warn,
+                    hashes_match: false,
+                    max_delta_bytes: 8,
+                    offending_slot: Some(BudgetSlotId::new(7)),
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::EncodedRomEmitted {
+                    seed: 4,
+                    build_identity_block_self_hash: Hash256::from_bytes([8; 32]),
+                    artifact_core_hash: Hash256::from_bytes([9; 32]),
+                    rom_byte_length: 32_768,
+                },
+            )
+            .unwrap(),
+            S5ClosureLogRecord::new(
+                "sha256:spec",
+                "run-7",
+                S5ClosureLogEvent::FalsifierTrigger {
+                    f_case: "F-H13-shadow-missing".to_owned(),
+                    expected_verdict: HypothesisStatus::Refuted,
+                    observed_verdict: HypothesisStatus::Confirmed,
+                },
+            )
+            .unwrap(),
+            sample_s5_outcome_dispatch_record(),
+        ]
     }
 }

@@ -186,6 +186,62 @@ impl TrainingPhaseSchedule {
         Self::new(phases)
     }
 
+    /// F-S5 Pick-and-Fit phase ladder.
+    ///
+    /// The RFC numbers optimizer steps as 1-based ranges. This scheduler uses
+    /// half-open ranges and retains step 0 for the existing restart/fixture
+    /// convention, so Phase A covers `[0, 6001)` and Phase C begins at the
+    /// unambiguous global step 6002.
+    pub fn s5_pick_and_fit() -> Result<Self, PhaseScheduleError> {
+        Self::new(vec![
+            TrainPhaseSpec::new(
+                TrainPhaseKind::DenseTeacherWarmup,
+                0,
+                6001,
+                QuantHardness::Off,
+                QuantHardness::Off,
+                QuantHardness::Off,
+                RouterTrainMode::SoftTop1,
+            )?,
+            TrainPhaseSpec::new(
+                TrainPhaseKind::RouterWarmup,
+                6001,
+                6002,
+                QuantHardness::Off,
+                QuantHardness::Off,
+                QuantHardness::Off,
+                RouterTrainMode::SoftTop1,
+            )?,
+            TrainPhaseSpec::new(
+                TrainPhaseKind::ExpertTernaryQat,
+                6002,
+                12001,
+                QuantHardness::Hard,
+                QuantHardness::Soft,
+                QuantHardness::Soft,
+                RouterTrainMode::SoftTop1,
+            )?,
+            TrainPhaseSpec::new(
+                TrainPhaseKind::FullNumericQat,
+                12001,
+                20001,
+                QuantHardness::Hard,
+                QuantHardness::Hard,
+                QuantHardness::Hard,
+                RouterTrainMode::HardTop1,
+            )?,
+            TrainPhaseSpec::new(
+                TrainPhaseKind::HardenAndSelect,
+                20001,
+                20002,
+                QuantHardness::Hard,
+                QuantHardness::Hard,
+                QuantHardness::Hard,
+                RouterTrainMode::HardTop1,
+            )?,
+        ])
+    }
+
     #[must_use]
     pub fn phases(&self) -> &[TrainPhaseSpec] {
         &self.phases
@@ -514,6 +570,27 @@ mod tests {
         assert_eq!(schedule.phases(), expected.as_slice());
         assert_eq!(schedule.phases()[0].len_steps(), 10);
         assert_eq!(schedule.phases()[4].end_step(), 50);
+    }
+
+    #[test]
+    fn s5_pick_and_fit_schedule_pins_phase_c_to_step_6002() {
+        let schedule = TrainingPhaseSchedule::s5_pick_and_fit().unwrap();
+
+        assert_eq!(
+            schedule
+                .phases()
+                .iter()
+                .map(|phase| (phase.kind(), phase.start_step(), phase.end_step()))
+                .collect::<Vec<_>>(),
+            vec![
+                (TrainPhaseKind::DenseTeacherWarmup, 0, 6001),
+                (TrainPhaseKind::RouterWarmup, 6001, 6002),
+                (TrainPhaseKind::ExpertTernaryQat, 6002, 12001),
+                (TrainPhaseKind::FullNumericQat, 12001, 20001),
+                (TrainPhaseKind::HardenAndSelect, 20001, 20002),
+            ]
+        );
+        assert_eq!(schedule.phases()[1].len_steps(), 1);
     }
 
     #[test]

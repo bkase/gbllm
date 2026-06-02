@@ -2,17 +2,25 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(feature = "s5-no-log"))]
 use gbf_artifact::weight_plan::{
     ScaleFormat, ScaleGranularity, TernaryWeightPlan, ThresholdPlan, WeightEncoding,
 };
+#[cfg(not(feature = "s5-no-log"))]
 use gbf_foundation::ByteCost;
+#[cfg(not(feature = "s5-no-log"))]
 use gbf_train::logging::{
     EVENT_NAME_EXPORT_COMPLETE, EVENT_NAME_LOSS_STEP, EVENT_NAME_PHASE_TRANSITION,
     EVENT_NAME_PREFLIGHT, EVENT_NAME_SHADOW_COMPILE, EVENT_NAME_TEACHER_FREEZE, ExportEvent,
     LossBreakdown, PREFLIGHT_CHECK_EXPERT_SLOT_BUDGET, PhaseTransitionEvent, QatHardnessLevels,
-    ShadowCompileEvent, TeacherFreezeEvent, TrainingLogEmitter,
+    TeacherFreezeEvent,
 };
+#[cfg(feature = "s5-no-log")]
+use gbf_train::logging::{PreflightEvent, PreflightStatus};
+use gbf_train::logging::{ShadowCompileEvent, TrainingLogEmitter};
+#[cfg(not(feature = "s5-no-log"))]
 use gbf_train::preflight::ExpertBudgetPreflightReport;
+#[cfg(not(feature = "s5-no-log"))]
 use gbf_train::teacher::{
     DenseTeacherModel, TeacherFreezeMetadata, TeacherStorageFingerprint, TeacherStorageIdentity,
     TeacherWeightFingerprint, freeze_teacher_with_logging,
@@ -20,6 +28,7 @@ use gbf_train::teacher::{
 use tracing_subscriber::prelude::*;
 
 #[test]
+#[cfg(not(feature = "s5-no-log"))]
 fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
     let capture = TraceCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
@@ -240,6 +249,7 @@ fn canonical_event_helpers_are_captured_by_tracing_subscriber() {
 }
 
 #[test]
+#[cfg(not(feature = "s5-no-log"))]
 fn teacher_freeze_producer_is_captured_by_tracing_subscriber() {
     let capture = TraceCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
@@ -279,6 +289,7 @@ fn teacher_freeze_producer_is_captured_by_tracing_subscriber() {
 }
 
 #[test]
+#[cfg(not(feature = "s5-no-log"))]
 fn preflight_producer_is_captured_by_tracing_subscriber() {
     let capture = TraceCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
@@ -323,6 +334,7 @@ fn preflight_producer_is_captured_by_tracing_subscriber() {
 }
 
 #[cfg(feature = "burn-adapter")]
+#[cfg(not(feature = "s5-no-log"))]
 #[test]
 fn scalar_metric_sink_uses_canonical_event_name() {
     use gbf_train::adapter::burn::{MetricSink, ScalarMetric, TracingMetricSink};
@@ -342,6 +354,47 @@ fn scalar_metric_sink_uses_canonical_event_name() {
     assert_no_message_field(&records, EVENT_NAME_SCALAR_METRIC);
 }
 
+#[test]
+#[cfg(feature = "s5-no-log")]
+fn s5_no_log_suppresses_preflight_and_shadow_compile_tracing() {
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let emitter = TrainingLogEmitter::new();
+        emitter
+            .preflight(&PreflightEvent {
+                check_name: "expert_slot_budget".to_owned(),
+                status: PreflightStatus::Pass,
+                detail: "tiny D14 preflight fits".to_owned(),
+                numeric_value: 15_090.0,
+                threshold: 16_384.0,
+            })
+            .unwrap();
+        emitter
+            .shadow_compile(&ShadowCompileEvent {
+                step: 30,
+                checkpoint_id: "ckpt-d14-tiny".to_owned(),
+                compile_profile: "tiny-ci".to_owned(),
+                fit_status: "fits".to_owned(),
+                quality_summary: "frontier stable".to_owned(),
+                frontier_size: 3,
+                duration_ms: 42,
+            })
+            .unwrap();
+    });
+
+    let records = capture.records();
+    for record in &records {
+        let _ = (&record.kind, &record.fields);
+    }
+    assert!(
+        records.is_empty(),
+        "s5-no-log must compile out D14 preflight/shadow_compile tracing events"
+    );
+}
+
+#[cfg(not(feature = "s5-no-log"))]
 fn event_record<'a>(records: &'a [TraceRecord], event_name: &str) -> &'a TraceRecord {
     records
         .iter()
@@ -351,11 +404,13 @@ fn event_record<'a>(records: &'a [TraceRecord], event_name: &str) -> &'a TraceRe
         .unwrap_or_else(|| panic!("missing structured event {event_name}"))
 }
 
+#[cfg(not(feature = "s5-no-log"))]
 fn assert_event_field(records: &[TraceRecord], event_name: &str, field: &str, expected: &str) {
     let record = event_record(records, event_name);
     assert_eq!(record.field(field), Some(expected));
 }
 
+#[cfg(not(feature = "s5-no-log"))]
 fn assert_no_message_field(records: &[TraceRecord], event_name: &str) {
     let record = event_record(records, event_name);
     assert!(
@@ -364,6 +419,7 @@ fn assert_no_message_field(records: &[TraceRecord], event_name: &str) {
     );
 }
 
+#[cfg(not(feature = "s5-no-log"))]
 fn assert_event_f64_close(records: &[TraceRecord], event_name: &str, field: &str, expected: f64) {
     let record = event_record(records, event_name);
     let actual = record
@@ -379,6 +435,7 @@ fn assert_event_f64_close(records: &[TraceRecord], event_name: &str, field: &str
     );
 }
 
+#[cfg(not(feature = "s5-no-log"))]
 fn sample_loss_breakdown() -> LossBreakdown {
     LossBreakdown {
         step: 7,
@@ -396,11 +453,13 @@ fn sample_loss_breakdown() -> LossBreakdown {
 }
 
 #[derive(Clone)]
+#[cfg(not(feature = "s5-no-log"))]
 struct LoggingTeacherModel {
     weights: Vec<f32>,
     requires_grad: bool,
 }
 
+#[cfg(not(feature = "s5-no-log"))]
 impl DenseTeacherModel for LoggingTeacherModel {
     type Input = Vec<f32>;
     type Output = f32;
@@ -447,6 +506,7 @@ impl DenseTeacherModel for LoggingTeacherModel {
     }
 }
 
+#[cfg(not(feature = "s5-no-log"))]
 fn default_plan() -> TernaryWeightPlan {
     TernaryWeightPlan::new(
         WeightEncoding::Ternary2,
@@ -468,6 +528,7 @@ struct TraceRecord {
 }
 
 impl TraceRecord {
+    #[cfg(not(feature = "s5-no-log"))]
     fn field(&self, name: &str) -> Option<&str> {
         self.fields.get(name).map(String::as_str)
     }

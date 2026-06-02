@@ -1,0 +1,3 @@
+{"timestamp":"2026-05-20T00:00:00Z","run_id":"fixture-run-a","event":"StateTransition","state":"FitEncodedRomEmitted","seed":0,"state_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"timestamp":"2026-05-20T00:00:01Z","run_id":"fixture-run-a","event":"StateTransition","state":"FitHarnessRun","seed":0,"state_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+{"timestamp":"2026-05-20T00:00:02Z","run_id":"fixture-run-a","event":"StateTransition","state":"FrontierEmitted","seed":0,"state_hash":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
