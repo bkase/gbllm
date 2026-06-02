@@ -2983,7 +2983,7 @@ mod tests {
             runtime_chrome_budget: RuntimeChromeBudget {
                 target: TargetProfileId::from("dmg-mbc5"),
                 profile: CompileProfileId::from("Bringup"),
-                runtime_nucleus_hash: hash(7),
+                runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(7)),
                 rom_slots: vec![RomBudgetSlot {
                     id: gbf_foundation::BudgetSlotId::new(0),
                     class: BudgetSlotClass::CommonBank,

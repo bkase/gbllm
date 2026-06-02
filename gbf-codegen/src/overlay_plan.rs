@@ -2160,7 +2160,7 @@ mod tests {
             runtime_chrome_budget: RuntimeChromeBudget {
                 target: TargetProfileId::from("dmg-mbc5"),
                 profile: CompileProfileId::from("Bringup"),
-                runtime_nucleus_hash: hash(10),
+                runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(10)),
                 rom_slots: Vec::<RomBudgetSlot>::new(),
                 memory_caps: RuntimeMemoryCapSection {
                     wram_usable_bytes: 8 * 1024,

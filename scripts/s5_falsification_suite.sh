@@ -16,7 +16,8 @@ s5-falsify-1 through s5-falsify-15.
 Honesty note: upstream full S5 producer replay APIs are not implemented yet.
 The gbf-experiments::s5 harness therefore runs explicit producer-contract
 fixtures for cases that cannot replay closure artifacts, and records that
-limitation in each case report.
+limitation in each case report. Full replay-input replacement is owned by
+bd-rh33.
 USAGE
 }
 
@@ -51,6 +52,7 @@ if [[ "$self_test" == "1" ]]; then
   bash -n "$0"
   "$0" --help | grep -F "s5-falsify-1 through s5-falsify-15" >/dev/null
   "$0" --help | grep -F "producer-contract" >/dev/null
+  "$0" --help | grep -F "bd-rh33" >/dev/null
   grep -F "cargo test -p gbf-policy --lib s5::tests::f13" "$0" >/dev/null
   grep -F "cargo test -p gbf-policy --lib s5::tests::f14" "$0" >/dev/null
   grep -F "cargo test -p gbf-policy --lib s5::tests::f15" "$0" >/dev/null
@@ -110,7 +112,8 @@ report = {
     "passed": len(cases) == 15 and all(case["matches_expected"] for case in cases),
     "limitation": (
         "full S5 producer replay APIs are not implemented; gbf-experiments::s5 "
-        "runs explicit producer-contract fixtures where replay inputs do not exist"
+        "runs explicit producer-contract fixtures where replay inputs do not exist; "
+        "full replay-input replacement is owned by bd-rh33"
     ),
 }
 report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -121,5 +124,5 @@ PY
 cat <<NOTE
 S5 falsification suite PASS substrate=gbf-policy F13/F14/F15 + live gbf-experiments::s5 F1..F15 feature loop + dry-run feature matrix
 report=$REPORT_PATH
-LIMITATION: full S5 producer replay APIs are not implemented; explicit gbf-experiments::s5 producer-contract fixtures are used where replay inputs do not exist.
+LIMITATION: full S5 producer replay APIs are not implemented; explicit gbf-experiments::s5 producer-contract fixtures are used where replay inputs do not exist; full replay-input replacement is owned by bd-rh33.
 NOTE

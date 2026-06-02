@@ -1632,7 +1632,7 @@ fn runtime_chrome_provenance(budget: &RuntimeChromeBudget) -> ConstraintProvenan
         evidence: vec![EvidenceRef {
             kind: "RuntimeChromeBudget".to_owned(),
             reference: format!("{}:{}", budget.target.as_str(), budget.profile.as_str()),
-            hash: Some(budget.runtime_nucleus_hash),
+            hash: Some(budget.runtime_nucleus_hash.hash()),
         }],
     }
 }
@@ -5711,7 +5711,7 @@ mod tests {
             let chrome_budget = RuntimeChromeBudget {
                 target: TargetProfileId::from("dmg-mbc5"),
                 profile: CompileProfileId::from("Default"),
-                runtime_nucleus_hash: Hash256::from_bytes([0x44; 32]),
+                runtime_nucleus_hash: RuntimeNucleusHash::real(Hash256::from_bytes([0x44; 32])),
                 rom_slots: vec![
                     crate::budget::RomBudgetSlot {
                         id: gbf_foundation::BudgetSlotId::new(1),

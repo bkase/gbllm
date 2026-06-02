@@ -4,7 +4,7 @@ owner_bead = "bd-u4fh"
 fixture_scope = "SUBSTRATE_ONLY"
 spec_sha = "UNSET_PLACEHOLDER_F_S5_RFC_SHA"
 spec_sha_status = "placeholder_unset"
-producer_replay_owner = "bd-q3zo"
+producer_replay_owner = "bd-rh33"
 
 [[files]]
 path = "boundary/h13/delta_1024_pass.toml"
@@ -38,7 +38,7 @@ owner_bead = "bd-2rjw"
 
 [[files]]
 path = "chrome_budget/synthetic_canonical.toml"
-sha256 = "08b337081e6a375d130622c420cfb947b266f400019f65b29c43c6634bd829c6"
+sha256 = "52a8e63f995ed8cd5f21666266ac98533afac1f5f6c71446d7ffbdd7f430b3cc"
 intent = "RuntimeChromeBudget synthetic-reference runtime nucleus hash fixture"
 owner_bead = "bd-2rjw"
 

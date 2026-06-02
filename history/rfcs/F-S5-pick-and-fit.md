@@ -115,8 +115,9 @@ Owns:
     determinism, frontier byte-equality, emulator deterministic
     execution)
   S5 falsification suite (fifteen deliberately-broken substitutes;
-    current in-repo wrapper is substrate-only until bd-q3zo wires live
-    gbf-experiments::s5 producer execution)
+    bd-q3zo wires the bounded gbf-experiments::s5 producer-contract
+    feature loop; replacing fixture-backed cases with full producer
+    replay inputs is owned by bd-rh33)
 
 Does not own:
   charset_v1 (S3)
@@ -3070,9 +3071,10 @@ Closure protocol:
    - scripts/check-nucleus-drift.sh
    - scripts/s5_logging_overhead_check.sh
    - scripts/s5_predictions_ancestry.sh (RP-Predictions-Ancestry)
-   - scripts/s5_falsification_suite.sh  (substrate-only F13/F14/F15 policy
-       checks + dry-run feature matrix; live F1..F15 producer loop owner:
-       bd-q3zo)
+   - scripts/s5_falsification_suite.sh  (F13/F14/F15 policy checks +
+       bounded gbf-experiments::s5 F1..F15 feature loop + dry-run
+       feature matrix; full producer replay-input replacement owner:
+       bd-rh33)
    - scripts/s5_reproducibility_smoke.sh (Rep-S5-1, Rep-S5-2, Rep-S5-5,
        Rep-S5-7, Rep-S5-8, Rep-S5-12 on the tiny in-repo fixture)
 

@@ -40,13 +40,13 @@ if [[ "$self_test" == "1" ]]; then
   test -f "$REAL_FIXTURE"
   test -f "$SYNTHETIC_FIXTURE"
   grep -F 'runtime_nucleus_hash = "sha256:' "$REAL_FIXTURE" >/dev/null
-  grep -F 'runtime_nucleus_hash = "SYNTHETIC_REFERENCE:' "$SYNTHETIC_FIXTURE" >/dev/null
+  grep -F 'runtime_nucleus_hash = "SYNTHETIC_REFERENCE:sha256:' "$SYNTHETIC_FIXTURE" >/dev/null
   echo "[S5 NUCLEUS DRIFT] self-test PASS"
   exit 0
 fi
 
 grep -F 'runtime_nucleus_hash = "sha256:' "$REAL_FIXTURE" >/dev/null
-grep -F 'runtime_nucleus_hash = "SYNTHETIC_REFERENCE:' "$SYNTHETIC_FIXTURE" >/dev/null
+grep -F 'runtime_nucleus_hash = "SYNTHETIC_REFERENCE:sha256:' "$SYNTHETIC_FIXTURE" >/dev/null
 cargo test -p gbf-policy --test re_validation
 
 cat <<'NOTE'

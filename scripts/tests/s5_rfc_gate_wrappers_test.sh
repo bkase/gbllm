@@ -52,6 +52,7 @@ grep -F "SUBSTRATE_ONLY" "$TMPDIR/reproducibility.out" >/dev/null
 grep -F "S5 falsification suite PASS" "$TMPDIR/falsification.out" >/dev/null
 grep -F "live gbf-experiments::s5 F1..F15 feature loop" "$TMPDIR/falsification.out" >/dev/null
 grep -F "LIMITATION: full S5 producer replay APIs are not implemented" "$TMPDIR/falsification.out" >/dev/null
+grep -F "bd-rh33" "$TMPDIR/falsification.out" >/dev/null
 test -f "$TMPDIR/falsification-suite.json"
 
 echo "[S5 RFC GATE WRAPPERS TEST] script checks passed"

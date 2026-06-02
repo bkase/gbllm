@@ -50,7 +50,7 @@ expected_metadata = {
     "fixture_scope": "SUBSTRATE_ONLY",
     "spec_sha": "UNSET_PLACEHOLDER_F_S5_RFC_SHA",
     "spec_sha_status": "placeholder_unset",
-    "producer_replay_owner": "bd-q3zo",
+    "producer_replay_owner": "bd-rh33",
 }
 for key, expected in expected_metadata.items():
     observed = metadata.get(key)
@@ -137,7 +137,7 @@ for rel in [
     frontier_hashes.append(hashlib.sha256((fixture_root / rel).read_bytes()).hexdigest())
 
 print("s5 replay fixture verification passed SUBSTRATE_ONLY")
-print("SUBSTRATE_ONLY: fixtures/s5 replay verifies committed fixture hashes and normalization only; live producer replay is owned by bd-q3zo.")
+print("SUBSTRATE_ONLY: fixtures/s5 replay verifies committed fixture hashes and normalization only; full producer replay is owned by bd-rh33.")
 print(f"manifest_entries={len(entries)}")
 print(f"normalized_log_sha256={first}")
 print("frontier_fixture_sha256s=" + ",".join(frontier_hashes))

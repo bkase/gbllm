@@ -43,7 +43,7 @@ fn s5_fixture_manifest_is_self_consistent_and_has_no_orphans() {
     assert_eq!(manifest.fixture_scope, "SUBSTRATE_ONLY");
     assert_eq!(manifest.spec_sha, "UNSET_PLACEHOLDER_F_S5_RFC_SHA");
     assert_eq!(manifest.spec_sha_status, "placeholder_unset");
-    assert_eq!(manifest.producer_replay_owner, "bd-q3zo");
+    assert_eq!(manifest.producer_replay_owner, "bd-rh33");
 
     for entry in &manifest.files {
         assert!(

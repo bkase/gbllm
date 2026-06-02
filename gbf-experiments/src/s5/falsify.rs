@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 pub const S5_FALSIFICATION_CASE_COUNT: usize = 15;
 
 /// Stable limitation string for cases that cannot replay missing upstream producers.
-pub const S5_EXPLICIT_FIXTURE_LIMITATION: &str = "upstream S5 producer replay APIs are not implemented; this case uses an explicit gbf-experiments::s5 producer-contract fixture";
+pub const S5_EXPLICIT_FIXTURE_LIMITATION: &str = "upstream S5 producer replay APIs are not implemented; this case uses an explicit gbf-experiments::s5 producer-contract fixture; full replay-input replacement is owned by bd-rh33";
 
 /// F-S5 hypothesis id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

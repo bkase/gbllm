@@ -8303,7 +8303,7 @@ mod tests {
         gbf_policy::RuntimeChromeBudget {
             target: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Bringup"),
-            runtime_nucleus_hash: hash(0x91),
+            runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(0x91)),
             rom_slots: vec![
                 gbf_policy::RomBudgetSlot {
                     id: gbf_foundation::BudgetSlotId::new(0),
