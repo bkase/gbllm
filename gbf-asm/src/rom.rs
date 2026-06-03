@@ -403,6 +403,7 @@ fn build_header_section(header: &CartridgeHeader) -> Result<LegalizedSection, Ro
         id: HEADER_SECTION_ID,
         role: SectionRole::HeaderCartridge,
         name: name.clone(),
+        interrupt_vector: None,
         privilege: SectionPrivilege::normal(),
         align: NonZeroU16::new(1).expect("1 is nonzero"),
         size_hint_bytes: Some((HEADER_END_EXCLUSIVE - HEADER_START) as u32),

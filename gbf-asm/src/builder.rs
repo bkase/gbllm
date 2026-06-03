@@ -20,13 +20,14 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use crate::effect::{
     MachineEffect, classify_effect, classify_legalization_op, classify_pre_layout_op,
 };
+use crate::interrupt::InterruptVectorSlot;
 use crate::isa::Instr;
 use crate::provenance::{InstrProvenance, PlanningStage};
 use crate::section::{
-    Align, BankLeaseSpec, BankReleaseDisposition, DataBlock, Label, LeaseId, LegalizationOp,
-    MbcBankClass, PreLayoutOp, PrivilegeViolation, ProbeLevel, Section, SectionId,
-    SectionPrivilege, SectionPrivilegeError, SectionRole, SymbolId, SymbolicBranch, TraceProbeId,
-    YieldKind,
+    Align, BankLeaseSpec, BankReleaseDisposition, BranchKind, DataBlock, InterruptVector, Label,
+    LeaseId, LegalizationOp, MbcBankClass, PreLayoutOp, PrivilegeViolation, ProbeLevel, Section,
+    SectionId, SectionPrivilege, SectionPrivilegeError, SectionRole, SymbolId, SymbolicBranch,
+    TraceProbeId, YieldKind,
 };
 use crate::symbols::SymbolName;
 
@@ -61,6 +62,12 @@ pub enum BuilderError {
         violation: PrivilegeViolation,
     },
     SectionPrivilegeViolation(SectionPrivilegeError),
+    InterruptVectorPayloadSealed {
+        role: SectionRole,
+    },
+    ConditionalAbsoluteJumpUnsupported {
+        target: SymbolName,
+    },
     /// `db` / `dw` was called inside a section whose `SectionRole` is
     /// executable (Bank0Nucleus, CommonBank, ExpertBank). Inline data in an
     /// executable section is the opaque-bytes escape hatch we closed by
@@ -122,6 +129,19 @@ impl fmt::Display for BuilderError {
                     error.seq_index, error.effect, error.violation
                 )
             }
+            Self::InterruptVectorPayloadSealed { role } => {
+                write!(
+                    f,
+                    "section role {role:?} has a canonical interrupt-vector payload; \
+                     emit through Builder::interrupt_vector instead"
+                )
+            }
+            Self::ConditionalAbsoluteJumpUnsupported { target } => {
+                write!(
+                    f,
+                    "conditional absolute jump to {target} is not a supported symbolic builder form"
+                )
+            }
             Self::InlineDataInExecutableSection { role } => {
                 write!(
                     f,
@@ -162,6 +182,33 @@ impl Builder {
             labels: BTreeSet::new(),
             active_leases: BTreeMap::new(),
         }
+    }
+
+    pub fn interrupt_vector(
+        slot: InterruptVectorSlot,
+        owner: SymbolName,
+        target: SymbolName,
+    ) -> Self {
+        Self::interrupt_vector_with_id(SectionId::new(0), slot, owner, target)
+    }
+
+    /// Builds a fixed ROM0 interrupt-vector section with a canonical `jp target` stub.
+    ///
+    /// The target stays symbolic until relaxation and is lowered through
+    /// `Instr::JpAbs`; this API deliberately does not expose vector bytes.
+    pub fn interrupt_vector_with_id(
+        id: SectionId,
+        slot: InterruptVectorSlot,
+        owner: SymbolName,
+        target: SymbolName,
+    ) -> Self {
+        let mut builder = Self::new_with_id(id, SectionRole::InterruptVector, owner.clone());
+        builder.label(owner);
+        builder.branch(SymbolicBranch::interrupt_vector_jp(target.clone()));
+        builder
+            .section
+            .set_interrupt_vector(InterruptVector { slot, target });
+        builder
     }
 
     #[must_use]
@@ -241,6 +288,7 @@ impl Builder {
     }
 
     pub fn try_emit(&mut self, instr: Instr) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         self.validate_effect(classify_effect(&instr))?;
         self.section.push_instr(instr, self.cur_provenance.clone());
         Ok(())
@@ -261,6 +309,7 @@ impl Builder {
     }
 
     pub fn try_db_bytes(&mut self, bytes: impl Into<Vec<u8>>) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         self.guard_inline_data()?;
         self.section
             .push_data_block(DataBlock::Bytes(bytes.into()), self.cur_provenance.clone());
@@ -321,13 +370,15 @@ impl Builder {
     }
 
     pub fn align(&mut self, align: NonZeroU16) {
-        self.section
-            .push_align(Align(align), self.cur_provenance.clone());
+        self.try_align(align.get())
+            .expect("section rejected alignment in Builder::align");
     }
 
     pub fn try_align(&mut self, align: u16) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         let align = NonZeroU16::new(align).ok_or(BuilderError::ZeroAlignment)?;
-        self.align(align);
+        self.section
+            .push_align(Align(align), self.cur_provenance.clone());
         Ok(())
     }
 
@@ -352,6 +403,7 @@ impl Builder {
     }
 
     pub fn try_bank_lease(&mut self, lease: BankLeaseSpec) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         let op = PreLayoutOp::BankLease(lease.clone());
         self.validate_effect(classify_pre_layout_op(&op))?;
         let lease_id = lease.lease_id();
@@ -392,6 +444,7 @@ impl Builder {
         lease_id: LeaseId,
         return_to: BankReleaseDisposition,
     ) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         let op = PreLayoutOp::BankRelease {
             lease_id,
             return_to,
@@ -415,6 +468,12 @@ impl Builder {
     }
 
     pub fn try_branch(&mut self, branch: SymbolicBranch) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
+        if branch.kind == BranchKind::AbsoluteJump && branch.cond.is_some() {
+            return Err(BuilderError::ConditionalAbsoluteJumpUnsupported {
+                target: branch.target,
+            });
+        }
         self.validate_effect(branch.machine_effect())?;
         self.section
             .push_branch(branch, self.cur_provenance.clone());
@@ -431,6 +490,7 @@ impl Builder {
         target: SymbolName,
         lease_chain: &[LeaseId],
     ) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         let op = LegalizationOp::FarCall {
             target,
             lease_chain: lease_chain.to_vec(),
@@ -485,6 +545,7 @@ impl Builder {
         expected: MbcBankClass,
         expected_n: u16,
     ) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         let op = PreLayoutOp::AssertBank {
             expected,
             expected_n,
@@ -523,8 +584,20 @@ impl Builder {
     }
 
     fn pre_layout_op(&mut self, op: PreLayoutOp) -> Result<(), BuilderError> {
+        self.guard_interrupt_vector_payload()?;
         self.validate_effect(classify_pre_layout_op(&op))?;
         self.pre_layout_op_unchecked(op);
+        Ok(())
+    }
+
+    fn guard_interrupt_vector_payload(&self) -> Result<(), BuilderError> {
+        if self.section.role() == SectionRole::InterruptVector
+            && self.section.interrupt_vector().is_some()
+        {
+            return Err(BuilderError::InterruptVectorPayloadSealed {
+                role: self.section.role(),
+            });
+        }
         Ok(())
     }
 

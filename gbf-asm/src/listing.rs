@@ -186,6 +186,14 @@ pub fn emit_listing(
             format_addr(placed.cpu_start, opts.address_radix),
             placed.final_size
         ));
+        if let Some(vector) = &section.interrupt_vector {
+            out.push_str(&format!(
+                "; interrupt_vector: {} {} target={}\n",
+                vector.slot,
+                format_addr(vector.slot.address(), opts.address_radix),
+                vector.target
+            ));
+        }
     }
 
     let spans = span_map(section.id, &encoded.item_spans)?;
@@ -603,6 +611,7 @@ mod tests {
             id: SectionId::new(1),
             role: SectionRole::Bank0Data,
             name: SymbolName::runtime("listing", "section").expect("symbol"),
+            interrupt_vector: None,
             privilege: crate::section::SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,

@@ -12,6 +12,7 @@ use std::fmt;
 
 use gbf_asm::effect::{MachineEffect, classify_effect};
 use gbf_asm::encoder;
+use gbf_asm::interrupt::InterruptVectorSlot;
 use gbf_asm::isa::Instr;
 use gbf_asm::layout::{AddressSpace, BankIndex, PlacedSection};
 use gbf_asm::section::{ExecutionContext, SectionId};
@@ -26,9 +27,9 @@ use crate::place::{PlacedRom, is_fixed_resident_bank, placed_section};
 
 pub const REACHABILITY_WALKER_VERSION: &str = "f-b15-reachability-v1";
 const REACHABILITY_REPORT_SCHEMA_ID: &str = "gbf.codegen.f_b15.reachability_report";
-const REACHABILITY_REPORT_SCHEMA_VERSION: &str = "1.0.0";
+const REACHABILITY_REPORT_SCHEMA_VERSION: &str = "1.1.0";
 const REACHABILITY_CERT_SCHEMA_ID: &str = "gbf.codegen.f_b15.reachability_cert";
-const REACHABILITY_CERT_SCHEMA_VERSION: &str = "1.0.0";
+const REACHABILITY_CERT_SCHEMA_VERSION: &str = "1.1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +57,8 @@ pub enum ReachabilityRootKind {
 pub struct ReachabilityRoot {
     pub symbol: SymbolName,
     pub root_kind: ReachabilityRootKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_name: Option<String>,
     pub classes: Vec<ReachabilityClass>,
 }
 
@@ -88,6 +91,8 @@ pub struct PrePlacementSectionClass {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReachabilityReport {
     pub walker_version: String,
+    #[serde(default)]
+    pub roots: Vec<ReachabilityRoot>,
     pub section_classes: Vec<ReachabilitySectionClass>,
     pub class_per_byte: Vec<ClassPerByteRow>,
     pub edges: Vec<ReachabilityEdge>,
@@ -100,6 +105,7 @@ pub struct ReachabilityReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReachabilityCertificate {
     pub walker_version: String,
+    #[serde(default)]
     pub roots: Vec<ReachabilityRoot>,
     pub class_summary: Vec<ReachabilityClassSummary>,
     pub class_per_byte: Vec<ClassPerByteRow>,
@@ -146,6 +152,7 @@ pub enum EdgeKind {
     /// Thunk-to-callee transfer for a legalized far call. The caller-to-thunk
     /// leg is emitted from the rewritten call instruction as `Call`.
     FarCallViaThunk,
+    InterruptVector,
     RstVector,
 }
 
@@ -214,8 +221,14 @@ pub struct ClassDisagreement {
 #[derive(Debug)]
 pub enum ReachabilityValidationError {
     MissingRootSymbol(SymbolName),
+    MissingInterruptVectorTarget {
+        vector: SymbolName,
+        target: SymbolName,
+    },
     MissingContinuationSymbol(SymbolName),
-    MissingPlacement { section_id: SectionId },
+    MissingPlacement {
+        section_id: SectionId,
+    },
     Encode(encoder::EncodeError),
     CanonicalHash(String),
 }
@@ -224,6 +237,12 @@ impl fmt::Display for ReachabilityValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingRootSymbol(symbol) => write!(f, "reachability root {symbol} is missing"),
+            Self::MissingInterruptVectorTarget { vector, target } => {
+                write!(
+                    f,
+                    "interrupt vector {vector} targets missing symbol {target}"
+                )
+            }
             Self::MissingContinuationSymbol(symbol) => {
                 write!(f, "continuation target {symbol} is missing")
             }
@@ -333,6 +352,7 @@ pub fn validate_reachability(
     let class_per_byte = class_per_byte_rows(placed, &class_by_section)?;
     let mut report = ReachabilityReport {
         walker_version: REACHABILITY_WALKER_VERSION.to_owned(),
+        roots: input.roots.clone(),
         section_classes: section_class_rows(placed, &class_by_section)?,
         class_per_byte: class_per_byte.clone(),
         edges,
@@ -399,6 +419,7 @@ fn reachability_witness_hash(
     )
     .hash(&(
         &report.section_classes,
+        &report.roots,
         &report.class_per_byte,
         &report.edges,
         &report.findings,
@@ -410,6 +431,15 @@ fn reachability_witness_hash(
 fn inferred_roots(placed: &PlacedRom) -> Vec<ReachabilityRoot> {
     let mut roots = Vec::new();
     for section in &placed.legalized_sections {
+        if let Some(vector) = &section.interrupt_vector {
+            roots.push(ReachabilityRoot {
+                symbol: section.name.clone(),
+                root_kind: ReachabilityRootKind::InterruptVector,
+                root_name: Some(interrupt_vector_root_name(vector.slot).to_owned()),
+                classes: vec![ReachabilityClass::IsrReachable],
+            });
+            continue;
+        }
         let (root_kind, classes) = match section.privilege.execution_context {
             ExecutionContext::InterruptHandler => (
                 ReachabilityRootKind::InterruptVector,
@@ -424,6 +454,7 @@ fn inferred_roots(placed: &PlacedRom) -> Vec<ReachabilityRoot> {
         roots.push(ReachabilityRoot {
             symbol: section.name.clone(),
             root_kind,
+            root_name: None,
             classes,
         });
     }
@@ -433,6 +464,7 @@ fn inferred_roots(placed: &PlacedRom) -> Vec<ReachabilityRoot> {
         roots.push(ReachabilityRoot {
             symbol: section.name.clone(),
             root_kind: ReachabilityRootKind::HarnessEntry,
+            root_name: None,
             classes: vec![
                 ReachabilityClass::HarnessEntryReachable,
                 ReachabilityClass::NormalOnly,
@@ -442,9 +474,32 @@ fn inferred_roots(placed: &PlacedRom) -> Vec<ReachabilityRoot> {
     roots
 }
 
+fn interrupt_vector_root_name(slot: InterruptVectorSlot) -> &'static str {
+    match slot {
+        InterruptVectorSlot::VBlank => "VBlank",
+        InterruptVectorSlot::LcdStat => "LcdStat",
+        InterruptVectorSlot::Timer => "Timer",
+        InterruptVectorSlot::Serial => "Serial",
+        InterruptVectorSlot::Joypad => "Joypad",
+    }
+}
+
 fn collect_edges(placed: &PlacedRom) -> Result<Vec<ReachabilityEdge>, ReachabilityValidationError> {
     let mut edges = BTreeSet::new();
     for section in &placed.legalized_sections {
+        if let Some(vector) = &section.interrupt_vector {
+            let Some(target) = placed.symbol_table.resolve(&vector.target) else {
+                return Err(ReachabilityValidationError::MissingInterruptVectorTarget {
+                    vector: section.name.clone(),
+                    target: vector.target.clone(),
+                });
+            };
+            edges.insert(ReachabilityEdge {
+                from_section_id: section.id.get(),
+                to_section_id: target.section.get(),
+                edge_kind: EdgeKind::InterruptVector,
+            });
+        }
         let Some(source_placed) = placed_section(placed, section.id) else {
             return Err(ReachabilityValidationError::MissingPlacement {
                 section_id: section.id,
@@ -852,8 +907,37 @@ fn switchable_privileged_witnesses(
                 detail: "privileged path depends on switchable ROM".to_owned(),
             });
         }
+        for instr in &section.instrs {
+            let effect = classify_effect(&instr.data);
+            if let Some(detail) = switchable_effect_obligation(effect, instr.seq_index) {
+                witnesses.push(ReachabilityWitness {
+                    section_id: section.id.get(),
+                    symbol: Some(section.name.as_str().to_owned()),
+                    detail,
+                });
+            }
+        }
     }
     Ok(witnesses)
+}
+
+fn switchable_effect_obligation(effect: MachineEffect, seq_index: u32) -> Option<String> {
+    match effect {
+        MachineEffect::LoadFromSwitchableRom => Some(format!(
+            "item {seq_index} reads switchable ROM on a privileged path without residency proof"
+        )),
+        MachineEffect::LoadFromSwitchableSram | MachineEffect::StoreToSwitchableSram => {
+            Some(format!(
+                "item {seq_index} touches switchable SRAM on a privileged path without residency proof"
+            ))
+        }
+        MachineEffect::LoadFromDynamic { .. }
+        | MachineEffect::StoreToDynamic { .. }
+        | MachineEffect::ReadModifyWriteDynamic { .. } => Some(format!(
+            "item {seq_index} has a dynamic-address dependency on a privileged path without residency proof"
+        )),
+        _ => None,
+    }
 }
 
 fn continuation_witnesses(
@@ -1006,17 +1090,21 @@ fn class_disagreements(
 #[cfg(test)]
 mod tests {
     use gbf_asm::builder::Builder;
+    use gbf_asm::interrupt::InterruptVectorSlot;
     use gbf_asm::isa::{DirectAddr, Instr};
     use gbf_asm::provenance::{InstrProvenance, PlanningStage};
+    use gbf_asm::rom::{CartridgeHeader, RomSize};
     use gbf_asm::section::{
         OrderedItem, Section, SectionId, SectionPrivilege, SectionRole, SymbolicBranch,
     };
     use gbf_asm::symbols::SymbolName;
+    use gbf_foundation::Hash256;
     use gbf_policy::PlacementProfile;
 
     use super::*;
     use crate::lower_asm::{AsmIRCodegenInput, build_asmir_bundle};
     use crate::place::{place_asmir_bundle, place_asmir_bundle_with_reachability};
+    use crate::rom::encode_placed_rom;
 
     fn named(name: &'static str) -> SymbolName {
         SymbolName::new(name).expect("symbol")
@@ -1038,6 +1126,17 @@ mod tests {
         })
         .expect("bundle");
         place_asmir_bundle(&bundle, PlacementProfile::Budgeted).expect("place")
+    }
+
+    fn vblank_vector_program(handler: Section) -> PlacedRom {
+        let vector = Builder::interrupt_vector_with_id(
+            SectionId::new(1),
+            InterruptVectorSlot::VBlank,
+            named("runtime.interrupt.vblank_vector"),
+            named("runtime.interrupt.vblank_handler"),
+        )
+        .finish();
+        placed(vec![vector, handler])
     }
 
     fn lowered_runtime_call(target: &'static str, seq_index: u32) -> OrderedItem<SymbolicBranch> {
@@ -1080,6 +1179,7 @@ mod tests {
                 roots: vec![ReachabilityRoot {
                     symbol: entry,
                     root_kind: ReachabilityRootKind::ModeEntry,
+                    root_name: None,
                     classes: vec![ReachabilityClass::YieldResumeReachable],
                 }],
                 continuation_targets: vec![cont],
@@ -1111,6 +1211,7 @@ mod tests {
                 roots: vec![ReachabilityRoot {
                     symbol: named("expert.0.9"),
                     root_kind: ReachabilityRootKind::InterruptVector,
+                    root_name: None,
                     classes: vec![ReachabilityClass::IsrReachable],
                 }],
                 ..ReachabilityValidationInput::default()
@@ -1141,6 +1242,7 @@ mod tests {
                 roots: vec![ReachabilityRoot {
                     symbol: named("expert.0.8"),
                     root_kind: ReachabilityRootKind::FaultEntry,
+                    root_name: None,
                     classes: vec![ReachabilityClass::FaultPathReachable],
                 }],
                 ..ReachabilityValidationInput::default()
@@ -1176,8 +1278,27 @@ mod tests {
         );
         assert_eq!(first_cert.cert_self_hash, second_cert.cert_self_hash);
         let value = serde_json::to_value(first_report).expect("json");
+        assert!(value["roots"].is_array());
         assert!(value["section_classes"].is_array());
         assert!(value["class_per_byte"].is_array());
+        let mut legacy_report_value = value.clone();
+        legacy_report_value
+            .as_object_mut()
+            .expect("report object")
+            .remove("roots");
+        let legacy_report: ReachabilityReport =
+            serde_json::from_value(legacy_report_value).expect("legacy report roots default");
+        assert!(legacy_report.roots.is_empty());
+
+        let mut legacy_cert_value = serde_json::to_value(&first_cert).expect("cert json");
+        legacy_cert_value
+            .as_object_mut()
+            .expect("cert object")
+            .remove("roots");
+        let legacy_cert: ReachabilityCertificate =
+            serde_json::from_value(legacy_cert_value).expect("legacy cert roots default");
+        assert!(legacy_cert.roots.is_empty());
+
         assert_eq!(
             first_cert.class_per_byte.len(),
             second_cert.class_per_byte.len()
@@ -1352,6 +1473,7 @@ mod tests {
                 roots: vec![ReachabilityRoot {
                     symbol: entry,
                     root_kind: ReachabilityRootKind::HarnessEntry,
+                    root_name: None,
                     classes: vec![ReachabilityClass::HarnessEntryReachable],
                 }],
                 ..ReachabilityValidationInput::default()
@@ -1406,6 +1528,7 @@ mod tests {
                 roots: vec![ReachabilityRoot {
                     symbol: name,
                     root_kind: ReachabilityRootKind::HarnessEntry,
+                    root_name: None,
                     classes: vec![ReachabilityClass::HarnessEntryReachable],
                 }],
                 ..ReachabilityValidationInput::default()
@@ -1462,6 +1585,7 @@ mod tests {
                 roots: vec![ReachabilityRoot {
                     symbol: named("runtime.test.entry"),
                     root_kind: ReachabilityRootKind::InterruptVector,
+                    root_name: None,
                     classes: vec![ReachabilityClass::IsrReachable],
                 }],
                 ..ReachabilityValidationInput::default()
@@ -1476,5 +1600,156 @@ mod tests {
                 .find(|finding| finding.rule == ReachabilityRule::R2PrivilegedMbcWriteProtected)
                 .is_some_and(|finding| finding.status == FindingStatus::Violated)
         );
+    }
+
+    #[test]
+    fn installed_vblank_vector_becomes_named_isr_root_and_listing_symbol() {
+        let placed = vblank_vector_program(section(
+            2,
+            SectionRole::Bank0Nucleus,
+            "runtime.interrupt.vblank_handler",
+            Instr::Ret { cond: None },
+        ));
+        let (report, cert) = validate_reachability(&placed, ReachabilityValidationInput::default())
+            .expect("reachability");
+
+        assert!(report.roots.iter().any(|root| {
+            root.root_kind == ReachabilityRootKind::InterruptVector
+                && root.root_name.as_deref() == Some("VBlank")
+                && root.symbol.as_str() == "runtime.interrupt.vblank_vector"
+        }));
+        assert!(cert.roots.iter().any(|root| {
+            root.root_kind == ReachabilityRootKind::InterruptVector
+                && root.root_name.as_deref() == Some("VBlank")
+        }));
+        assert!(report.edges.iter().any(|edge| {
+            edge.from_section_id == 1
+                && edge.to_section_id == 2
+                && edge.edge_kind == EdgeKind::InterruptVector
+        }));
+        assert!(
+            report
+                .section_classes
+                .iter()
+                .find(|row| row.section_id == 2)
+                .is_some_and(|row| row.classes.contains(&ReachabilityClass::IsrReachable))
+        );
+        let value = serde_json::to_value(&report).expect("json");
+        assert_eq!(value["roots"][0]["root_name"], serde_json::json!("VBlank"));
+        assert_eq!(
+            value["roots"][0]["root_kind"],
+            serde_json::json!("interrupt_vector")
+        );
+
+        let header = CartridgeHeader {
+            rom_size: RomSize::Kib64,
+            ..CartridgeHeader::new("GBFTEST").expect("header")
+        };
+        let encoded =
+            encode_placed_rom(&placed, &header, Hash256::from_bytes([0x44; 32])).expect("encode");
+        assert!(encoded.sym_lines.iter().any(|line| {
+            line.contains("00:0040") && line.contains("gbf_runtime_dinterrupt_dvblank__vector")
+        }));
+        assert!(encoded.lst_text.contains("interrupt_vector: vblank"));
+        assert!(
+            encoded
+                .lst_text
+                .contains("target=runtime.interrupt.vblank_handler")
+        );
+    }
+
+    #[test]
+    fn installed_vector_with_missing_target_fails_clearly() {
+        let mut placed = vblank_vector_program(section(
+            2,
+            SectionRole::Bank0Nucleus,
+            "runtime.interrupt.vblank_handler",
+            Instr::Ret { cond: None },
+        ));
+        placed
+            .legalized_sections
+            .iter_mut()
+            .find(|section| section.interrupt_vector.is_some())
+            .expect("vector section")
+            .interrupt_vector
+            .as_mut()
+            .expect("vector metadata")
+            .target = named("runtime.interrupt.missing_handler");
+
+        let err = validate_reachability(&placed, ReachabilityValidationInput::default())
+            .expect_err("missing vector target fails validation");
+        assert!(matches!(
+            err,
+            ReachabilityValidationError::MissingInterruptVectorTarget {
+                vector,
+                target,
+            } if vector.as_str() == "runtime.interrupt.vblank_vector"
+                && target.as_str() == "runtime.interrupt.missing_handler"
+        ));
+    }
+
+    #[test]
+    fn vblank_vector_targeting_romx_fails_residency_validation() {
+        let mut placed = vblank_vector_program(section(
+            2,
+            SectionRole::Bank0Nucleus,
+            "runtime.interrupt.vblank_handler",
+            Instr::Ret { cond: None },
+        ));
+        let handler = placed
+            .layout
+            .sections
+            .iter_mut()
+            .find(|section| section.id == SectionId::new(2))
+            .expect("handler placement");
+        handler.space = AddressSpace::RomX;
+        handler.bank = BankIndex::Rom(1);
+        handler.cpu_start = 0x4000;
+        let (report, _) = validate_reachability(&placed, ReachabilityValidationInput::default())
+            .expect("reachability");
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.rule == ReachabilityRule::R1IsrResident)
+            .expect("R1 finding");
+        assert_eq!(finding.status, FindingStatus::Violated);
+        assert_eq!(
+            finding.code,
+            Some(ReachabilityDiagnosticCode::IsrBankDependency)
+        );
+        assert!(finding.witnesses.iter().any(|witness| {
+            witness.symbol.as_deref() == Some("runtime.interrupt.vblank_handler")
+                && witness.detail.contains("not fixed-resident")
+        }));
+    }
+
+    #[test]
+    fn isr_reaching_switchable_data_without_proof_fails() {
+        let placed = vblank_vector_program(section(
+            2,
+            SectionRole::Bank0Nucleus,
+            "runtime.interrupt.vblank_handler",
+            Instr::LdAFromDirect {
+                addr: DirectAddr::new(0x4000).expect("ROMX direct read"),
+            },
+        ));
+        let (report, _) = validate_reachability(&placed, ReachabilityValidationInput::default())
+            .expect("reachability");
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.rule == ReachabilityRule::R4NoPrivilegedSwitchableDependency)
+            .expect("R4 finding");
+        assert_eq!(finding.status, FindingStatus::Violated);
+        assert_eq!(
+            finding.code,
+            Some(ReachabilityDiagnosticCode::PrivilegedSwitchableDependency)
+        );
+        assert!(finding.witnesses.iter().any(|witness| {
+            witness.symbol.as_deref() == Some("runtime.interrupt.vblank_handler")
+                && witness.detail.contains("reads switchable ROM")
+        }));
     }
 }

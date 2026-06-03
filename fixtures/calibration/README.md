@@ -5,9 +5,10 @@ fixture for the current canonical target profile:
 `gbf_hw::target::dmg_mbc5_8mib_128kib()`.
 
 The pinned bootstrap target profile hash is derived from
-`gbf_hw::target::dmg_mbc5_8mib_128kib().content_hash()`, using the
-`gbf:gbf-hw:TargetProfile:content_hash:1.0.0\0` domain separator documented
-by `gbf_hw::target::TARGET_PROFILE_CONTENT_HASH_DOMAIN`.
+`gbf_codegen::stages::validate::target_profile_content_hash` over
+`gbf_hw::target::dmg_mbc5_8mib_128kib()`, using the
+`gbf:gbf-hw:TargetProfile:content_hash:1.0.0\0` domain separator defined by
+`gbf_hw::target::TARGET_PROFILE_CONTENT_HASH_DOMAIN`.
 
 The bundle intentionally declares `CalibrationConfidenceClass::None` and
 contains no measurements. Bringup accepts this only because its

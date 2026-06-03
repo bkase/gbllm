@@ -566,6 +566,7 @@ fn legalize_without_branches(
         id: section.id,
         role: section.role,
         name: section.name,
+        interrupt_vector: section.interrupt_vector,
         privilege: section.privilege,
         align: section.align,
         size_hint_bytes: section.size_hint_bytes,

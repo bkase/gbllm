@@ -4,6 +4,7 @@ pub mod builder;
 pub mod cycle_model;
 pub mod effect;
 pub mod encoder;
+pub mod interrupt;
 pub mod isa;
 pub mod layout;
 pub mod listing;

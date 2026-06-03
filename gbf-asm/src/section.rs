@@ -10,6 +10,7 @@ use crate::effect::{
     MachineEffect, MachineEffectKind, MbcRegisterClass, PrivilegeClass, classify_effect,
     classify_legalization_op, classify_pre_layout_op, privilege_of,
 };
+use crate::interrupt::InterruptVectorSlot;
 use crate::isa::{Cond, Instr};
 use crate::provenance::InstrProvenance;
 use crate::symbols::SymbolName;
@@ -22,6 +23,7 @@ use crate::symbols::SymbolName;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SectionRole {
+    InterruptVector,
     Bank0Nucleus,
     Bank0Data,
     CommonBank,
@@ -38,7 +40,8 @@ pub enum SectionRole {
 }
 
 impl SectionRole {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
+        Self::InterruptVector,
         Self::Bank0Nucleus,
         Self::Bank0Data,
         Self::CommonBank,
@@ -57,6 +60,7 @@ impl SectionRole {
     #[must_use]
     pub const fn canonical_name(self) -> &'static str {
         match self {
+            Self::InterruptVector => "interrupt_vector",
             Self::Bank0Nucleus => "bank0_nucleus",
             Self::Bank0Data => "bank0_data",
             Self::CommonBank => "common_bank",
@@ -87,7 +91,9 @@ impl SectionRole {
     #[must_use]
     pub const fn permits_inline_data(self) -> bool {
         match self {
-            Self::Bank0Nucleus | Self::CommonBank | Self::ExpertBank => false,
+            Self::InterruptVector | Self::Bank0Nucleus | Self::CommonBank | Self::ExpertBank => {
+                false
+            }
             Self::HeaderCartridge
             | Self::Bank0Data
             | Self::CommonData
@@ -576,6 +582,18 @@ pub enum LegalizationOp {
     },
 }
 
+/// Symbolic ownership for one fixed interrupt-vector slot.
+///
+/// This is pre-layout intent: layout owns the fixed ROM0 address reservation,
+/// relaxation resolves `target` to a concrete `Instr::JpAbs`, and the encoder
+/// remains the only byte-lowering path. The owner is the containing section's
+/// validated symbol name; this record carries the slot and target edge.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InterruptVector {
+    pub slot: InterruptVectorSlot,
+    pub target: SymbolName,
+}
+
 /// Authoring intent for a symbolic branch's emitted shape.
 ///
 /// `Jump` items relax to `JR` when the resolved target is in range and to `JP`
@@ -584,6 +602,7 @@ pub enum LegalizationOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchKind {
+    AbsoluteJump,
     Jump,
     Call,
 }
@@ -619,6 +638,21 @@ impl SymbolicBranch {
             target,
             call_reachability: CallReachability::NearOnly,
         }
+    }
+
+    #[must_use]
+    pub const fn absolute_jump(target: SymbolName) -> Self {
+        Self {
+            kind: BranchKind::AbsoluteJump,
+            cond: None,
+            target,
+            call_reachability: CallReachability::NearOnly,
+        }
+    }
+
+    #[must_use]
+    pub const fn interrupt_vector_jp(target: SymbolName) -> Self {
+        Self::absolute_jump(target)
     }
 
     #[must_use]
@@ -658,6 +692,8 @@ impl SymbolicBranch {
     #[must_use]
     pub const fn machine_effect(&self) -> MachineEffect {
         match (self.kind, self.cond) {
+            (BranchKind::AbsoluteJump, None) => MachineEffect::UnconditionalBranch,
+            (BranchKind::AbsoluteJump, Some(_)) => MachineEffect::ConditionalBranch,
             (BranchKind::Jump, None) => MachineEffect::UnconditionalBranch,
             (BranchKind::Jump, Some(_)) => MachineEffect::ConditionalBranch,
             (BranchKind::Call, _) => MachineEffect::Call,
@@ -863,6 +899,7 @@ pub struct Section {
     id: SectionId,
     role: SectionRole,
     name: SymbolName,
+    interrupt_vector: Option<InterruptVector>,
     #[serde(default)]
     privilege: SectionPrivilege,
     align: NonZeroU16,
@@ -883,6 +920,7 @@ impl Section {
             id,
             role,
             name,
+            interrupt_vector: None,
             privilege: SectionPrivilege::default(),
             align,
             size_hint_bytes: None,
@@ -895,6 +933,17 @@ impl Section {
             legalization_ops: Vec::new(),
             branches: Vec::new(),
         }
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn with_interrupt_vector(mut self, interrupt_vector: InterruptVector) -> Self {
+        self.interrupt_vector = Some(interrupt_vector);
+        self
+    }
+
+    pub(crate) fn set_interrupt_vector(&mut self, interrupt_vector: InterruptVector) {
+        self.interrupt_vector = Some(interrupt_vector);
     }
 
     #[must_use]
@@ -995,6 +1044,11 @@ impl Section {
     #[must_use]
     pub fn name(&self) -> &SymbolName {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn interrupt_vector(&self) -> Option<&InterruptVector> {
+        self.interrupt_vector.as_ref()
     }
 
     #[must_use]
@@ -1115,6 +1169,7 @@ pub struct LoweredSection {
     pub id: SectionId,
     pub role: SectionRole,
     pub name: SymbolName,
+    pub interrupt_vector: Option<InterruptVector>,
     pub privilege: SectionPrivilege,
     pub align: NonZeroU16,
     pub size_hint_bytes: Option<u32>,
@@ -1137,6 +1192,7 @@ pub struct LegalizedSection {
     pub id: SectionId,
     pub role: SectionRole,
     pub name: SymbolName,
+    pub interrupt_vector: Option<InterruptVector>,
     pub privilege: SectionPrivilege,
     pub align: NonZeroU16,
     pub size_hint_bytes: Option<u32>,
@@ -1201,6 +1257,7 @@ fn role_exhaustive() {
     assert_eq!(
         SectionRole::ALL,
         [
+            SectionRole::InterruptVector,
             SectionRole::Bank0Nucleus,
             SectionRole::Bank0Data,
             SectionRole::CommonBank,
@@ -1219,6 +1276,7 @@ fn role_exhaustive() {
     assert_eq!(
         SectionRole::ALL.map(SectionRole::canonical_name),
         [
+            "interrupt_vector",
             "bank0_nucleus",
             "bank0_data",
             "common_bank",
@@ -1475,6 +1533,7 @@ fn legalized_section_drops_unencoded_arrays_at_the_type_level() {
         id: SectionId::new(1),
         role: SectionRole::Bank0Nucleus,
         name: SymbolName::runtime("boot", "entry").expect("name"),
+        interrupt_vector: None,
         privilege: SectionPrivilege::normal(),
         align: NonZeroU16::new(1).expect("align"),
         size_hint_bytes: None,

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+use gbf_codegen::stages::validate::target_profile_content_hash;
 use gbf_foundation::{Hash256, PackerVersion};
 use gbf_hw::target::dmg_mbc5_8mib_128kib;
 use gbf_policy::calibration::{
@@ -135,12 +136,11 @@ pub fn bootstrap_dmg_mbc5_calibration_fixture() -> CalibrationBundleSet {
 pub fn bootstrap_dmg_mbc5_target_profile_hash() -> Hash256 {
     let pinned = Hash256::from_str(BOOTSTRAP_DMG_MBC5_TARGET_PROFILE_HASH)
         .expect("bootstrap DMG/MBC5 target profile hash is valid");
-    let derived = dmg_mbc5_8mib_128kib()
-        .content_hash()
+    let derived = target_profile_content_hash(&dmg_mbc5_8mib_128kib())
         .expect("canonical DMG/MBC5 target profile hash computes");
     assert_eq!(
         derived, pinned,
-        "bootstrap DMG/MBC5 target profile hash must match gbf_hw::target::TargetProfile::content_hash",
+        "bootstrap DMG/MBC5 target profile hash must match gbf_codegen::stages::validate::target_profile_content_hash",
     );
     derived
 }

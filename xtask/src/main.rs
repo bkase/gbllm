@@ -54,7 +54,7 @@ fn regen_f_a8() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write(
         &out.join("scope.md"),
-        "# Scope\n\nF-A8 ships `gbf-debug`: session files, the rquickjs host, the `gb` object, JSON success/error envelopes, stateless `init`/`exec`/`inspect` CLI commands, the `gbf-debug-usage` skill, and this review packet.\n\nT-A8.8b (`bd-2j4m`) is deliberately left open as a follow-up PR per RFC §11.9 because it depends on committed F-A4/F-A5 runtime ROM fixtures.\n",
+        "# Scope\n\nF-A8 ships `gbf-debug`: session files, the rquickjs host, the `gb` object, JSON success/error envelopes, stateless `init`/`exec`/`inspect` CLI commands, the `gbf-debug-usage` skill, and this review packet.\n\nT-A8.8b (`bd-2j4m`) has since landed: the runtime-ASM conformance smoke suite now lives in `gbf-test/tests/runtime_asm_conformance.rs`, with its review packet under `docs/review/t-a8.8b/`.\n",
     )?;
     write(
         &out.join("architecture.md"),
@@ -117,7 +117,7 @@ fn regen_f_a8() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write(
         &out.join("known-debt.md"),
-        "# Known Debt And Out Of Scope\n\n| Item | Owner / removal condition |\n|---|---|\n| Build identity decode | Follow-up once F-A5 emits a `BuildIdentityBlock`. |\n| `gb.harness.send(op)` | F-D2 harness control-plane bead. |\n| `inspect --full` | Optional ergonomics bead after M0. |\n| `gb.disable_breakpoint(addr)` | Optional non-breaking API addition; schema already has `enabled`. |\n| T-A8.8b runtime-ASM conformance smoke suite | `bd-2j4m`, follow-up PR after F-A4/F-A5 fixtures exist. |\n",
+        "# Known Debt And Out Of Scope\n\n| Item | Owner / removal condition |\n|---|---|\n| Build identity decode | Follow-up once F-A5 emits a `BuildIdentityBlock`. |\n| `gb.harness.send(op)` | F-D2 harness control-plane bead. |\n| `inspect --full` | Optional ergonomics bead after M0. |\n| `gb.disable_breakpoint(addr)` | Optional non-breaking API addition; schema already has `enabled`. |\n",
     )?;
     write(
         &out.join("out-of-scope.md"),

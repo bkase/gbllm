@@ -2262,6 +2262,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "static_assertions",
 ]
 
 [[package]]
@@ -2479,7 +2480,6 @@ dependencies = [
  "gbf-foundation",
  "serde",
  "serde_json",
- "sha2",
 ]
 
 [[package]]

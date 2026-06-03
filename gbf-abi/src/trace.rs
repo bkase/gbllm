@@ -1,8 +1,6 @@
 //! Trace event layout, probe metadata, and trace budget types.
 
 use core::fmt;
-#[cfg(test)]
-use core::mem::{align_of, size_of};
 
 #[cfg(test)]
 use memoffset::offset_of;
@@ -51,6 +49,10 @@ pub struct TraceEvent {
     pub checkpoint: CompactCheckpointId,
     pub data: [u8; 16],
 }
+
+static_assertions::const_assert_eq!(core::mem::size_of::<TraceEvent>(), 32);
+static_assertions::const_assert_eq!(core::mem::align_of::<TraceEvent>(), 4);
+static_assertions::assert_not_impl_all!(TraceEvent: Drop);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceBudget {
@@ -201,8 +203,6 @@ mod tests {
 
     #[test]
     fn event_layout() {
-        assert_eq!(size_of::<TraceEvent>(), 32);
-        assert_eq!(align_of::<TraceEvent>(), 4);
         assert_eq!(offset_of!(TraceEvent, seq), 0);
         assert_eq!(offset_of!(TraceEvent, timestamp_m_cycles), 4);
         assert_eq!(offset_of!(TraceEvent, slice), 8);

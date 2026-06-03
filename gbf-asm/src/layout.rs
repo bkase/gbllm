@@ -7,9 +7,11 @@ use std::str::FromStr;
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::interrupt::InterruptVectorSlot;
 use crate::section::{
     BranchKind, DataBlock, ItemOrder, LegalizationOp, LoweredSection, SectionId, SectionRole,
 };
+use crate::symbols::SymbolName;
 
 pub const ROM_BANK_SIZE: u32 = 16 * 1024;
 pub const ROM0_START: u16 = 0x0000;
@@ -275,6 +277,35 @@ pub enum LayoutError {
     UserHeaderSectionRejected {
         section_id: SectionId,
     },
+    InterruptVectorMissingSlot {
+        section_id: SectionId,
+    },
+    InterruptVectorRoleMismatch {
+        section_id: SectionId,
+        role: SectionRole,
+    },
+    DuplicateInterruptVectorSlot {
+        slot: InterruptVectorSlot,
+        first_section_id: SectionId,
+        duplicate_section_id: SectionId,
+    },
+    DuplicateInterruptVectorOwner {
+        owner: SymbolName,
+        first_section_id: SectionId,
+        duplicate_section_id: SectionId,
+    },
+    InterruptVectorPinnedMismatch {
+        section_id: SectionId,
+        slot: InterruptVectorSlot,
+        cpu_start: u16,
+        bank: BankIndex,
+    },
+    InterruptVectorStubTooLarge {
+        section_id: SectionId,
+        slot: InterruptVectorSlot,
+        size: u32,
+        capacity: u16,
+    },
     PlacementCollision {
         section_id: SectionId,
         bank: BankIndex,
@@ -329,6 +360,56 @@ impl fmt::Display for LayoutError {
                 "user section {} uses internal HeaderCartridge role",
                 section_id.get()
             ),
+            Self::InterruptVectorMissingSlot { section_id } => write!(
+                f,
+                "interrupt-vector section {} is missing a typed vector slot",
+                section_id.get()
+            ),
+            Self::InterruptVectorRoleMismatch { section_id, role } => write!(
+                f,
+                "section {} has interrupt-vector metadata but role {role:?}",
+                section_id.get()
+            ),
+            Self::DuplicateInterruptVectorSlot {
+                slot,
+                first_section_id,
+                duplicate_section_id,
+            } => write!(
+                f,
+                "interrupt vector {slot} is owned by both section {} and section {}",
+                first_section_id.get(),
+                duplicate_section_id.get()
+            ),
+            Self::DuplicateInterruptVectorOwner {
+                owner,
+                first_section_id,
+                duplicate_section_id,
+            } => write!(
+                f,
+                "interrupt vector owner {owner} is used by both section {} and section {}",
+                first_section_id.get(),
+                duplicate_section_id.get()
+            ),
+            Self::InterruptVectorPinnedMismatch {
+                section_id,
+                slot,
+                cpu_start,
+                bank,
+            } => write!(
+                f,
+                "interrupt-vector section {} for {slot} was pinned at {bank}:${cpu_start:04X}",
+                section_id.get()
+            ),
+            Self::InterruptVectorStubTooLarge {
+                section_id,
+                slot,
+                size,
+                capacity,
+            } => write!(
+                f,
+                "interrupt-vector section {} for {slot} is {size} bytes, exceeding {capacity}-byte slot",
+                section_id.get()
+            ),
             Self::PlacementCollision {
                 section_id,
                 bank,
@@ -369,28 +450,10 @@ pub fn layout_into_banks(
     pinned: &[PinnedPlacement],
 ) -> Result<LayoutPlan, LayoutError> {
     let pinned_by_section = pinned_map(pinned)?;
+    let vector_sections = interrupt_vector_sections(sections)?;
     let mut sections_out = Vec::with_capacity(sections.len());
     let mut free_bytes_per_bank = BTreeMap::new();
-    let mut reserved_ranges = vec![
-        ReservedRange {
-            bank: BankIndex::Rom(0),
-            start: 0x0000,
-            end_inclusive: 0x00FF,
-            reason: ReservedRangeReason::ResetVector,
-        },
-        ReservedRange {
-            bank: BankIndex::Rom(0),
-            start: 0x0100,
-            end_inclusive: 0x014F,
-            reason: ReservedRangeReason::CartridgeHeader,
-        },
-        ReservedRange {
-            bank: BankIndex::Rom(0),
-            start: ROM0_THUNK_POOL_START,
-            end_inclusive: ROM0_END_EXCLUSIVE - 1,
-            reason: ReservedRangeReason::ThunkPool,
-        },
-    ];
+    let mut reserved_ranges = base_reserved_ranges(sections, &vector_sections)?;
     for pin in pinned {
         reserved_ranges.push(ReservedRange {
             bank: pin.bank,
@@ -405,6 +468,17 @@ pub fn layout_into_banks(
         let Some(section) = sections.iter().find(|section| section.id == pin.section_id) else {
             continue;
         };
+        if let Some(vector) = &section.interrupt_vector {
+            if pin.bank != BankIndex::Rom(0) || pin.cpu_start != vector.slot.address() {
+                return Err(LayoutError::InterruptVectorPinnedMismatch {
+                    section_id: section.id,
+                    slot: vector.slot,
+                    cpu_start: pin.cpu_start,
+                    bank: pin.bank,
+                });
+            }
+            continue;
+        }
         if section.role == SectionRole::HeaderCartridge {
             return Err(LayoutError::UserHeaderSectionRejected {
                 section_id: section.id,
@@ -436,6 +510,12 @@ pub fn layout_into_banks(
             return Err(LayoutError::UserHeaderSectionRejected {
                 section_id: section.id,
             });
+        }
+        if section.role == SectionRole::InterruptVector {
+            let placed = place_interrupt_vector(section)?;
+            insert_occupied(&mut occupied, &placed)?;
+            sections_out.push(placed);
+            continue;
         }
 
         let (space, bank, cursor) = if let Some(pin) = pinned_by_section.get(&section.id).copied() {
@@ -484,6 +564,7 @@ pub fn layout_into_banks(
                 SectionRole::SramPersistent => (AddressSpace::Sram, BankIndex::Sram(0), 0xA000),
                 SectionRole::VramOwnedByUi => (AddressSpace::Vram, BankIndex::Vram, 0x8000),
                 SectionRole::OamOwnedByUi => (AddressSpace::Oam, BankIndex::Oam, 0xFE00),
+                SectionRole::InterruptVector => unreachable!("placed above"),
                 SectionRole::HeaderCartridge => unreachable!("rejected above"),
             }
         };
@@ -558,6 +639,105 @@ fn pinned_map(
         }
     }
     Ok(out)
+}
+
+fn interrupt_vector_sections(
+    sections: &[LoweredSection],
+) -> Result<BTreeMap<InterruptVectorSlot, SectionId>, LayoutError> {
+    let mut by_slot = BTreeMap::new();
+    let mut by_owner = BTreeMap::new();
+    for section in sections {
+        match (&section.interrupt_vector, section.role) {
+            (None, SectionRole::InterruptVector) => {
+                return Err(LayoutError::InterruptVectorMissingSlot {
+                    section_id: section.id,
+                });
+            }
+            (Some(vector), SectionRole::InterruptVector) => {
+                if let Some(first_section_id) = by_slot.insert(vector.slot, section.id) {
+                    return Err(LayoutError::DuplicateInterruptVectorSlot {
+                        slot: vector.slot,
+                        first_section_id,
+                        duplicate_section_id: section.id,
+                    });
+                }
+                if let Some(first_section_id) = by_owner.insert(section.name.clone(), section.id) {
+                    return Err(LayoutError::DuplicateInterruptVectorOwner {
+                        owner: section.name.clone(),
+                        first_section_id,
+                        duplicate_section_id: section.id,
+                    });
+                }
+            }
+            (None, _) => {}
+            (Some(_), role) => {
+                return Err(LayoutError::InterruptVectorRoleMismatch {
+                    section_id: section.id,
+                    role,
+                });
+            }
+        }
+    }
+    Ok(by_slot)
+}
+
+fn base_reserved_ranges(
+    sections: &[LoweredSection],
+    vector_sections: &BTreeMap<InterruptVectorSlot, SectionId>,
+) -> Result<Vec<ReservedRange>, LayoutError> {
+    let mut ranges = vec![ReservedRange {
+        bank: BankIndex::Rom(0),
+        start: 0x0000,
+        end_inclusive: InterruptVectorSlot::VBlank.address() - 1,
+        reason: ReservedRangeReason::ResetVector,
+    }];
+
+    for slot in InterruptVectorSlot::ALL {
+        if let Some(section_id) = vector_sections.get(&slot).copied() {
+            let section = sections
+                .iter()
+                .find(|section| section.id == section_id)
+                .expect("vector_sections contains known section");
+            let placed = place_interrupt_vector(section)?;
+            if placed.final_size < InterruptVectorSlot::SLOT_BYTES {
+                ranges.push(ReservedRange {
+                    bank: BankIndex::Rom(0),
+                    start: placed.cpu_start + placed.final_size,
+                    end_inclusive: slot.end_exclusive() - 1,
+                    reason: ReservedRangeReason::InterruptVector,
+                });
+            }
+        } else {
+            ranges.push(ReservedRange {
+                bank: BankIndex::Rom(0),
+                start: slot.address(),
+                end_inclusive: slot.end_exclusive() - 1,
+                reason: ReservedRangeReason::InterruptVector,
+            });
+        }
+    }
+
+    ranges.extend([
+        ReservedRange {
+            bank: BankIndex::Rom(0),
+            start: InterruptVectorSlot::Joypad.end_exclusive(),
+            end_inclusive: 0x00FF,
+            reason: ReservedRangeReason::ResetVector,
+        },
+        ReservedRange {
+            bank: BankIndex::Rom(0),
+            start: 0x0100,
+            end_inclusive: 0x014F,
+            reason: ReservedRangeReason::CartridgeHeader,
+        },
+        ReservedRange {
+            bank: BankIndex::Rom(0),
+            start: ROM0_THUNK_POOL_START,
+            end_inclusive: ROM0_END_EXCLUSIVE - 1,
+            reason: ReservedRangeReason::ThunkPool,
+        },
+    ]);
+    Ok(ranges)
 }
 
 fn first_fit_bank(
@@ -661,6 +841,40 @@ fn place_at(
     })
 }
 
+fn place_interrupt_vector(section: &LoweredSection) -> Result<PlacedSection, LayoutError> {
+    let vector =
+        section
+            .interrupt_vector
+            .as_ref()
+            .ok_or(LayoutError::InterruptVectorMissingSlot {
+                section_id: section.id,
+            })?;
+    let placed = place_at(
+        section,
+        AddressSpace::Rom0,
+        BankIndex::Rom(0),
+        vector.slot.address(),
+    )?;
+    if placed.cpu_start != vector.slot.address() {
+        return Err(LayoutError::InterruptVectorPinnedMismatch {
+            section_id: section.id,
+            slot: vector.slot,
+            cpu_start: placed.cpu_start,
+            bank: placed.bank,
+        });
+    }
+    if placed.final_size > InterruptVectorSlot::SLOT_BYTES {
+        return Err(LayoutError::InterruptVectorStubTooLarge {
+            section_id: section.id,
+            slot: vector.slot,
+            size: u32::from(placed.final_size),
+            capacity: InterruptVectorSlot::SLOT_BYTES,
+        });
+    }
+    validate_placed(&placed)?;
+    Ok(placed)
+}
+
 fn place_next(
     section: &LoweredSection,
     space: AddressSpace,
@@ -744,6 +958,7 @@ fn section_size_from(
         (
             item.order(),
             SizeItem::Fixed(match item.data.kind {
+                BranchKind::AbsoluteJump => 3,
                 BranchKind::Jump => 3,
                 BranchKind::Call => 3,
             }),
@@ -972,6 +1187,7 @@ mod tests {
             id: SectionId::new(id),
             role,
             name: SymbolName::section(role, SectionId::new(id)).expect("name"),
+            interrupt_vector: None,
             privilege: SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
