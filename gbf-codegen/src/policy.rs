@@ -29,6 +29,9 @@ use sha2::{Digest, Sha256};
 
 use crate::validate::{ValidatedInputHashes, ValidationProduct};
 
+#[cfg(test)]
+use crate::validate::target_profile_content_hash;
+
 pub type CompileKnobPreferences = CompileKnobPartialValues;
 
 pub fn recompute_purity_facts_from_infer_ir(
@@ -3198,9 +3201,8 @@ pub(crate) mod tests {
     impl Fixture {
         pub(crate) fn new(profile: &str) -> Self {
             let target_profile = dmg_mbc5_8mib_128kib();
-            let target_profile_hash = target_profile
-                .content_hash()
-                .expect("target profile content hash computes");
+            let target_profile_hash =
+                target_profile_content_hash(&target_profile).expect("target profile hash computes");
             let mut artifact = ImportedArtifactView::new(
                 artifact_core(),
                 artifact_manifest(),

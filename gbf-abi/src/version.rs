@@ -1,8 +1,6 @@
 //! ABI versioning and ROM-resident build identity.
 
 use core::fmt;
-#[cfg(test)]
-use core::mem::{align_of, size_of};
 
 use memoffset::offset_of;
 use serde::{Deserialize, Serialize};
@@ -22,6 +20,10 @@ pub struct AbiVersion {
     pub minor: u8,
     pub patch: u8,
 }
+
+static_assertions::const_assert_eq!(core::mem::size_of::<AbiVersion>(), 3);
+static_assertions::const_assert_eq!(core::mem::align_of::<AbiVersion>(), 1);
+static_assertions::assert_not_impl_all!(AbiVersion: Drop);
 
 impl AbiVersion {
     #[must_use]
@@ -244,6 +246,13 @@ pub struct BuildIdentityBlock {
     pub semantic_schema_version: u16,
     pub _reserved1: [u8; 2],
 }
+
+static_assertions::const_assert_eq!(
+    core::mem::size_of::<BuildIdentityBlock>(),
+    BuildIdentityBlock::SIZE
+);
+static_assertions::const_assert_eq!(core::mem::align_of::<BuildIdentityBlock>(), 8);
+static_assertions::assert_not_impl_all!(BuildIdentityBlock: Drop);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildIdentityArgs {
@@ -539,8 +548,10 @@ mod tests {
 
     #[test]
     fn build_identity_layout() {
-        assert_eq!(size_of::<BuildIdentityBlock>(), BuildIdentityBlock::SIZE);
-        assert_eq!(align_of::<BuildIdentityBlock>(), 8);
+        assert_eq!(
+            core::mem::size_of::<BuildIdentityBlock>(),
+            BuildIdentityBlock::SIZE
+        );
     }
 
     #[test]

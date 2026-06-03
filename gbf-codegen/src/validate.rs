@@ -63,7 +63,7 @@ use gbf_artifact::{
     TargetDataLoweringArtifact,
 };
 use gbf_foundation::{BlobCodec, BlobRef, Hash256, LayerId, PackerVersion, SemVer};
-use gbf_hw::target::{TargetProfile, target_profile_content_hash};
+use gbf_hw::target::{TARGET_PROFILE_CONTENT_HASH_DOMAIN, TargetProfile};
 use gbf_policy::{
     CalibrationBundle, CalibrationBundleSet, CalibrationConfidenceRequirement, CalibrationLayer,
     CompatibilityAdapterId, CompileProfileSpec, CompileRequest, CompilerFeature,
@@ -91,6 +91,38 @@ pub type ValidationDiagnostic = PolicyValidationDiagnostic;
 
 pub const CURRENT_ARTIFACT_SCHEMA_VERSION: ArtifactSchemaVersion =
     ArtifactSchemaVersion { epoch: 1, minor: 1 };
+
+#[derive(Debug)]
+pub enum TargetProfileContentHashError {
+    Serialize(serde_json::Error),
+    Canonicalize(gbf_report::canonical_json::CanonicalJsonError),
+}
+
+impl fmt::Display for TargetProfileContentHashError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialize(error) => write!(f, "target profile serialization failed: {error}"),
+            Self::Canonicalize(error) => {
+                write!(f, "target profile canonical JSON failed: {error}")
+            }
+        }
+    }
+}
+
+impl Error for TargetProfileContentHashError {}
+
+pub fn target_profile_content_hash(
+    profile: &TargetProfile,
+) -> Result<Hash256, TargetProfileContentHashError> {
+    let value = serde_json::to_value(profile).map_err(TargetProfileContentHashError::Serialize)?;
+    let canonical =
+        canonicalize_value(&value).map_err(TargetProfileContentHashError::Canonicalize)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(TARGET_PROFILE_CONTENT_HASH_DOMAIN);
+    hasher.update(canonical);
+    Ok(Hash256::from_bytes(hasher.finalize().into()))
+}
 
 pub struct ValidateInputs<'a> {
     pub artifact: &'a ImportedArtifactView,
@@ -3555,7 +3587,7 @@ mod tests {
         CapabilitySet, CartridgeProfile, ConsoleModel, TARGET_PROFILE_CONTENT_HASH_DOMAIN,
         canonical_target_profile_id, dmg_mbc5_8mib_128kib,
     };
-    use gbf_hw::timing::dmg_timing;
+    use gbf_hw::timing::{TimingProfile, dmg_timing};
     use gbf_policy::{
         BRINGUP_COMPILE_PROFILE_ID, BootstrapCalibrationBundle, CalibrationConfidenceClass,
         CalibrationConfidenceRequirement, CompileKnobId, CompileObjective, CompilerFeature,
@@ -3652,8 +3684,19 @@ mod tests {
     #[test]
     fn f_b2_validate_target_profile_hash_matches_report_canonical_json() {
         let profile = dmg_mbc5_8mib_128kib();
+        assert_eq!(
+            TARGET_PROFILE_CONTENT_HASH_DOMAIN,
+            b"gbf:gbf-hw:TargetProfile:content_hash:1.0.0\0"
+        );
+
         let value = serde_json::to_value(&profile).expect("target profile serializes");
         let canonical = canonicalize_value(&value).expect("report canonical JSON emits");
+        let canonical_json = std::str::from_utf8(&canonical).expect("canonical JSON is UTF-8");
+        assert!(
+            canonical_json.starts_with(r#"{"capabilities":{"double_speed_mode":false"#),
+            "top-level and nested object keys must be lexicographically ordered"
+        );
+
         let mut hasher = Sha256::new();
         hasher.update(TARGET_PROFILE_CONTENT_HASH_DOMAIN);
         hasher.update(&canonical);
@@ -3666,6 +3709,46 @@ mod tests {
         assert_eq!(
             canonical_target_profile_hash(&profile),
             report_canonical_hash
+        );
+        assert_eq!(
+            report_canonical_hash.to_string(),
+            "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7"
+        );
+
+        let no_domain_digest = Sha256::digest(canonical);
+        assert_ne!(
+            report_canonical_hash,
+            Hash256::from_bytes(no_domain_digest.into()),
+            "content hash must include the explicit TargetProfile domain separator"
+        );
+        assert_ne!(
+            target_profile_content_hash(
+                &TargetProfile::try_new(
+                    TargetProfileId::from(canonical_target_profile_id(
+                        ConsoleModel::Cgb,
+                        profile.cartridge(),
+                        TimingProfile::try_new(4_194_304, 2, 70_224, 4_560).unwrap(),
+                        CapabilitySet {
+                            double_speed_mode: true,
+                            vram_dma: true,
+                            rtc_present: false,
+                        },
+                    )),
+                    TargetFamilyId::from("cgb"),
+                    ConsoleModel::Cgb,
+                    *profile.cartridge(),
+                    TimingProfile::try_new(4_194_304, 2, 70_224, 4_560).unwrap(),
+                    CapabilitySet {
+                        double_speed_mode: true,
+                        vram_dma: true,
+                        rtc_present: false,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            report_canonical_hash,
+            "target-relevant content changes must change the content hash"
         );
     }
 

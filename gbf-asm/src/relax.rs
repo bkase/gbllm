@@ -408,6 +408,7 @@ fn legalize_section(
         id: section.id,
         role: section.role,
         name: section.name.clone(),
+        interrupt_vector: section.interrupt_vector.clone(),
         privilege: section.privilege.clone(),
         align: section.align,
         size_hint_bytes: section.size_hint_bytes,
@@ -436,6 +437,10 @@ fn legalize_branch(
     let target = resolve_target(ctx.symbols, ctx.layout, &branch.target, ctx.used_in)?;
     ensure_directly_reachable(ctx.used_in, ctx.placed, &target, &branch.target)?;
     match branch.kind {
+        BranchKind::AbsoluteJump => Ok(Instr::JpAbs {
+            cond: branch.cond,
+            addr: target.cpu_addr,
+        }),
         BranchKind::Jump => {
             if ctx
                 .wide_jumps
@@ -621,6 +626,7 @@ fn section_offsets(
     );
     items.extend(section.branches.iter().map(|item| {
         let size = match item.data.kind {
+            BranchKind::AbsoluteJump => 3,
             BranchKind::Jump => {
                 if wide_jumps
                     .get(&(section.id, item.order()))
@@ -693,6 +699,7 @@ fn materialize_stub_thunk(
         id,
         role: SectionRole::Bank0Nucleus,
         name: request.thunk_symbol.clone(),
+        interrupt_vector: None,
         privilege: crate::section::SectionPrivilege::normal(),
         align: NonZeroU16::new(1).expect("nonzero"),
         size_hint_bytes: Some(10),
@@ -759,6 +766,7 @@ mod tests {
             id: SectionId::new(id),
             role,
             name,
+            interrupt_vector: None,
             privilege: crate::section::SectionPrivilege::normal(),
             align: NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,

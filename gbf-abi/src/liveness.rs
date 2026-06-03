@@ -1,9 +1,6 @@
 //! Liveness counters embedded in the inference-state header.
 
 #[cfg(test)]
-use core::mem::{align_of, size_of};
-
-#[cfg(test)]
 use memoffset::offset_of;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +16,10 @@ pub struct LivenessCounters {
     pub livelock_threshold_frames: u16,
     pub _reserved: [u8; 2],
 }
+
+static_assertions::const_assert_eq!(core::mem::size_of::<LivenessCounters>(), 12);
+static_assertions::const_assert_eq!(core::mem::align_of::<LivenessCounters>(), 4);
+static_assertions::assert_not_impl_all!(LivenessCounters: Drop);
 
 impl LivenessCounters {
     pub const SIZE: usize = 12;
@@ -87,8 +88,6 @@ mod tests {
 
     #[test]
     fn layout() {
-        assert_eq!(size_of::<LivenessCounters>(), 12);
-        assert_eq!(align_of::<LivenessCounters>(), 4);
         assert_eq!(offset_of!(LivenessCounters, last_checkpoint), 4);
         assert_eq!(offset_of!(LivenessCounters, _reserved), 10);
     }

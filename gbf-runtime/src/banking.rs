@@ -60,9 +60,10 @@ impl SectionResidency {
     #[must_use]
     pub const fn from_section_role(role: SectionRole) -> Self {
         match role {
-            SectionRole::Bank0Nucleus | SectionRole::Bank0Data | SectionRole::HeaderCartridge => {
-                Self::FixedRom0
-            }
+            SectionRole::InterruptVector
+            | SectionRole::Bank0Nucleus
+            | SectionRole::Bank0Data
+            | SectionRole::HeaderCartridge => Self::FixedRom0,
             SectionRole::HramFastFlags => Self::Hram,
             SectionRole::CommonBank | SectionRole::ExpertBank => Self::SwitchableRom,
             SectionRole::WramHotArena | SectionRole::WramOverlay => Self::Wram,
@@ -2514,6 +2515,7 @@ mod tests {
             id: SectionId::new(1),
             role: SectionRole::Bank0Nucleus,
             name: SymbolName::runtime("banking", "bad").expect("name"),
+            interrupt_vector: None,
             privilege: SectionPrivilege::privileged(),
             align: std::num::NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
@@ -2549,6 +2551,7 @@ mod tests {
             id: SectionId::new(1),
             role: SectionRole::Bank0Nucleus,
             name: SymbolName::runtime("banking", "forged").expect("name"),
+            interrupt_vector: None,
             privilege: SectionPrivilege::privileged(),
             align: std::num::NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,
@@ -2584,6 +2587,7 @@ mod tests {
             id: SectionId::new(1),
             role: SectionRole::Bank0Nucleus,
             name: SymbolName::runtime("banking", "forged_note").expect("name"),
+            interrupt_vector: None,
             privilege: SectionPrivilege::privileged(),
             align: std::num::NonZeroU16::new(1).expect("nonzero"),
             size_hint_bytes: None,

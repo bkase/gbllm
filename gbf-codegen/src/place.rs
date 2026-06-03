@@ -563,6 +563,7 @@ mod tests {
                 roots: vec![ReachabilityRoot {
                     symbol: entry,
                     root_kind: ReachabilityRootKind::HarnessEntry,
+                    root_name: None,
                     classes: vec![ReachabilityClass::HarnessEntryReachable],
                 }],
                 ..ReachabilityValidationInput::default()

@@ -15,6 +15,7 @@ alloc = ["serde/alloc"]
 gbf-foundation = { path = "../gbf-foundation", optional = true }
 memoffset = "0.9"
 serde = { version = "=1.0.228", default-features = false, features = ["derive"] }
+static_assertions.workspace = true
 
 [dev-dependencies]
 proptest = "1"

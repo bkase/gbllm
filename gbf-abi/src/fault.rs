@@ -1,8 +1,6 @@
 //! Fault taxonomy, fault snapshots, and host recovery policy types.
 
 use core::fmt;
-#[cfg(test)]
-use core::mem::{align_of, size_of};
 use core::ops::RangeInclusive;
 
 #[cfg(feature = "host")]
@@ -205,6 +203,10 @@ pub struct RegisterSnapshot {
     pub sp: u16,
 }
 
+static_assertions::const_assert_eq!(core::mem::size_of::<RegisterSnapshot>(), 10);
+static_assertions::const_assert_eq!(core::mem::align_of::<RegisterSnapshot>(), 2);
+static_assertions::assert_not_impl_all!(RegisterSnapshot: Drop);
+
 /// SRAM-resident record written on fault.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +221,10 @@ pub struct FaultSnapshot {
     pub _resv1: [u8; 2],
     pub liveness: LivenessCounters,
 }
+
+static_assertions::const_assert_eq!(core::mem::size_of::<FaultSnapshot>(), 36);
+static_assertions::const_assert_eq!(core::mem::align_of::<FaultSnapshot>(), 4);
+static_assertions::assert_not_impl_all!(FaultSnapshot: Drop);
 
 impl FaultSnapshot {
     pub const SIZE: usize = 36;
@@ -538,8 +544,6 @@ mod tests {
 
     #[test]
     fn register_snapshot_layout() {
-        assert_eq!(size_of::<RegisterSnapshot>(), 10);
-        assert_eq!(align_of::<RegisterSnapshot>(), 2);
         assert_eq!(offset_of!(RegisterSnapshot, a), 0);
         assert_eq!(offset_of!(RegisterSnapshot, f), 1);
         assert_eq!(offset_of!(RegisterSnapshot, b), 2);
@@ -553,8 +557,6 @@ mod tests {
 
     #[test]
     fn snapshot_layout() {
-        assert_eq!(size_of::<FaultSnapshot>(), 36);
-        assert_eq!(align_of::<FaultSnapshot>(), 4);
         assert_eq!(offset_of!(FaultSnapshot, liveness), 24);
     }
 

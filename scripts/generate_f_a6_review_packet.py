@@ -154,7 +154,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_files() -> dict[Path, str]:
-    tree = run(["cargo", "tree", "-p", "gbf-store", "--depth", "1"])
+    tree = normalize_workspace_paths(
+        run(["cargo", "tree", "-p", "gbf-store", "--depth", "1"])
+    )
     files: dict[Path, str] = {}
     files[PACKET / "README.md"] = readme()
     files[PACKET / "claim-to-gate.md"] = claim_to_gate()
@@ -339,11 +341,11 @@ def claim_to_gate() -> str:
         ("put_expect rejects mismatched claimed hashes before commit", "blob::put_expect_hash_mismatch + archive::extract_rejects_record_exceeding_declared_total_before_commit"),
         ("Canonical existing files are rehashed before idempotent reuse", "blob::idempotent_verifies_existing"),
         ("BlobRef length is validated on read", "blob::get_ref_validates_len"),
-        ("Integrity check detects missing and corrupt blobs", "integrity::verify_missing_blob + integrity::verify_corrupt_blob"),
+        ("Integrity check detects missing and corrupt blobs", "integrity::detects_missing + integrity::detects_corruption"),
         ("StageCache compose_key is deterministic across construction order", "stage_cache::deterministic_keys"),
         ("StageCache key encoding is boundary-safe and SemVer checked", "stage_cache::compose_key_length_prefix_safe + pass_version_component_overflow_rejected"),
         ("StageCache stale payloads are cache misses", "stage_cache::stale_index_treated_as_miss"),
-        ("Pinset names reject path-shaped names", "pinset::name_validation_rejects_bad_forms + name_validation_rejects_leading_dot"),
+        ("Pinset names reject path-shaped names", "pinset::name_validation_rejects_path_separator + name_validation_rejects_parent_segment + name_validation_rejects_leading_dot"),
         ("GC protects pinsets and walks transitive references", "gc::pinset_protection + gc::transitive_refs_via_registry"),
         ("GC default unknown-reference policy aborts", "gc::unknown_reference_policy_abort"),
         ("GC dry-run and removal limits are deterministic", "gc::dry_run_populates_candidates + gc::max_remove_per_run_honored + removal_order_is_hash_ascending"),
@@ -503,6 +505,10 @@ def clean(text: str) -> str:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def normalize_workspace_paths(text: str) -> str:
+    return text.replace(str(ROOT), ".")
 
 
 def write_files(files: dict[Path, str]) -> None:

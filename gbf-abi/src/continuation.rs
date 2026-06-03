@@ -1,8 +1,6 @@
 //! Fixed continuation header plus helpers for opaque per-build tails.
 
 use core::fmt;
-#[cfg(test)]
-use core::mem::align_of;
 use core::mem::size_of;
 
 use memoffset::offset_of;
@@ -17,6 +15,8 @@ use crate::version::{AbiVersion, CURRENT_ABI};
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaultCodeOptional(pub u16);
+
+static_assertions::assert_not_impl_all!(FaultCodeOptional: Drop);
 
 impl FaultCodeOptional {
     pub const NONE: Self = Self(0);
@@ -77,6 +77,10 @@ pub struct InferenceStateHeader {
     pub slice_id: SliceId,
     pub liveness: LivenessCounters,
 }
+
+static_assertions::const_assert_eq!(size_of::<InferenceStateHeader>(), 32);
+static_assertions::const_assert_eq!(core::mem::align_of::<InferenceStateHeader>(), 4);
+static_assertions::assert_not_impl_all!(InferenceStateHeader: Drop);
 
 impl InferenceStateHeader {
     #[must_use]
@@ -303,8 +307,6 @@ mod tests {
 
     #[test]
     fn header_layout() {
-        assert_eq!(header_size_bytes(), 32);
-        assert_eq!(align_of::<InferenceStateHeader>(), 4);
         assert_eq!(offset_of!(InferenceStateHeader, abi), 0);
         assert_eq!(offset_of!(InferenceStateHeader, schema), 4);
         assert_eq!(offset_of!(InferenceStateHeader, last_fault), 6);

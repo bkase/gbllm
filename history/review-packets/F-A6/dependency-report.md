@@ -3,8 +3,8 @@
 Resolved dependency graph:
 
 ```text
-gbf-store v0.1.0 (/Users/bkase/.codex/worktrees/d5a4/gbllm/gbf-store)
-├── gbf-foundation v0.1.0 (/Users/bkase/.codex/worktrees/d5a4/gbllm/gbf-foundation)
+gbf-store v0.1.0 (./gbf-store)
+├── gbf-foundation v0.1.0 (./gbf-foundation)
 ├── serde v1.0.228
 ├── sha2 v0.10.9
 └── tempfile v3.27.0

@@ -1,8 +1,6 @@
 //! Harness command/result control-plane blocks.
 
 use core::fmt;
-#[cfg(test)]
-use core::mem::{align_of, size_of};
 
 #[cfg(test)]
 use memoffset::offset_of;
@@ -102,6 +100,13 @@ pub struct HarnessResultBlock {
     pub _resv: u8,
     pub data: [u8; 32],
 }
+
+static_assertions::const_assert_eq!(core::mem::size_of::<HarnessCommandBlock>(), 44);
+static_assertions::const_assert_eq!(core::mem::align_of::<HarnessCommandBlock>(), 4);
+static_assertions::assert_not_impl_all!(HarnessCommandBlock: Drop);
+static_assertions::const_assert_eq!(core::mem::size_of::<HarnessResultBlock>(), 44);
+static_assertions::const_assert_eq!(core::mem::align_of::<HarnessResultBlock>(), 4);
+static_assertions::assert_not_impl_all!(HarnessResultBlock: Drop);
 
 impl HarnessCommandBlock {
     pub const SIZE: usize = 44;
@@ -326,9 +331,6 @@ mod tests {
 
     #[test]
     fn layout() {
-        assert_eq!(size_of::<HarnessCommandBlock>(), 44);
-        assert_eq!(size_of::<HarnessResultBlock>(), 44);
-        assert_eq!(align_of::<HarnessCommandBlock>(), 4);
         assert_eq!(offset_of!(HarnessCommandBlock, doorbell), 10);
         assert_eq!(offset_of!(HarnessCommandBlock, args), 12);
         assert_eq!(offset_of!(HarnessResultBlock, ready), 10);
