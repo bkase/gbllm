@@ -104,6 +104,7 @@ fn s7_help_lists_dispatch_verbs() {
             .and(predicate::str::contains("materialize-run"))
             .and(predicate::str::contains("derive-comparison"))
             .and(predicate::str::contains("materialize-support-artifact"))
+            .and(predicate::str::contains("emulator-one-token"))
             .and(predicate::str::contains("emit-report"))
             .and(predicate::str::contains("validate-closure")),
     );
@@ -923,6 +924,145 @@ fn s7_materialize_support_artifact_requires_emulator_topology() {
     assert!(output_result.stdout.is_empty());
     assert!(
         command_output(&output_result).contains("requires --topology"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_emulator_one_token_writes_h10_report() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "emulator-one-token",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--encoded-rom-sha",
+        &test_hash(200).to_string(),
+        "--prompt-sha",
+        &test_hash(201).to_string(),
+        "--artifact-oracle-logits-sha",
+        &test_hash(202).to_string(),
+        "--emulator-logits-sha",
+        &test_hash(203).to_string(),
+        "--pairwise-max-abs-diff",
+        "0",
+        "--s5-tolerance",
+        "0.125",
+        "--observed-bank-switches-per-token",
+        "0.25",
+        "--oracle-recorded-bank-switches",
+        "0.75",
+    ]);
+
+    let output_result = command.output().expect("s7 emulator-one-token runs");
+    assert!(
+        output_result.status.success(),
+        "s7 emulator-one-token failed:\n{}",
+        command_output(&output_result)
+    );
+    let emulator_self_hash = single_stdout_hash(&output_result);
+    let out_emulator = packet.join("experiments/S7/emulator-one-token/seed-0/MoeTiny/result.json");
+    let emulator: Value =
+        serde_json::from_slice(&std::fs::read(&out_emulator).expect("emulator report reads"))
+            .expect("emulator report parses");
+
+    assert_eq!(emulator["schema"], "s7_emulator_one_token.v1");
+    assert_eq!(emulator["seed"], 0);
+    assert_eq!(emulator["topology"], "MoeTiny");
+    assert_eq!(emulator["bank_switch_diff"], 0.5);
+    assert_eq!(emulator["bank_switch_within_one"], true);
+    assert_eq!(
+        emulator["emulator_self_hash"]
+            .as_str()
+            .expect("emulator hash string"),
+        emulator_self_hash
+    );
+    assert_eq!(
+        emulator,
+        with_domain_self_hash(
+            emulator.clone(),
+            "emulator_self_hash",
+            S7_EMULATOR_ONE_TOKEN_DOMAIN
+        )
+    );
+
+    let landed = temp.path().join("landed");
+    let mut materialize = gbf();
+    materialize.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        landed.to_str().expect("utf8 landed root"),
+        "--kind",
+        "emulator-one-token",
+        "--topology",
+        "MoeTiny",
+        "--input",
+        out_emulator.to_str().expect("utf8 emulator input"),
+    ]);
+    let materialize_result = materialize
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        materialize_result.status.success(),
+        "generated emulator report failed materialization:\n{}",
+        command_output(&materialize_result)
+    );
+    assert_eq!(single_stdout_hash(&materialize_result), emulator_self_hash);
+}
+
+#[test]
+fn s7_emulator_one_token_rejects_over_tolerance_logits() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "emulator-one-token",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--encoded-rom-sha",
+        &test_hash(210).to_string(),
+        "--prompt-sha",
+        &test_hash(211).to_string(),
+        "--artifact-oracle-logits-sha",
+        &test_hash(212).to_string(),
+        "--emulator-logits-sha",
+        &test_hash(213).to_string(),
+        "--pairwise-max-abs-diff",
+        "0.25",
+        "--s5-tolerance",
+        "0.125",
+        "--observed-bank-switches-per-token",
+        "0.25",
+        "--oracle-recorded-bank-switches",
+        "0.75",
+    ]);
+
+    let output_result = command.output().expect("s7 emulator-one-token runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 emulator-one-token unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("pairwise_max_abs_diff"),
         "{}",
         command_output(&output_result)
     );

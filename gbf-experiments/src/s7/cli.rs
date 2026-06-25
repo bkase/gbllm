@@ -24,13 +24,19 @@ use crate::s7::closure_packet::{
 use crate::s7::comparison::{
     S7ComparisonArtifactInputs, S7ComparisonMaterializeError, materialize_dense_vs_moe_comparison,
 };
+use crate::s7::emulator_one_token::{
+    ArtifactOracleOneTokenTrace, EmulatorOneTokenComparison, EmulatorOneTokenObservation,
+    compare_with_artifact_oracle_trace,
+};
 use crate::s7::replay::{
     S7_DETERMINISM_FIXTURE_SCOPE, S7_FULL_CLI_REPLAY_OWNER, S7_FULL_CLOSURE_OWNER, S7ReplayError,
     fixture_replay_product,
 };
 use crate::s7::run::{
     S7CompletedRunArtifactInputs, S7RunMaterializeError, materialize_completed_run_artifacts,
+    topology_path_segment,
 };
+use crate::s7::schema::EmulatorOneTokenReportError;
 use crate::s7::support_artifacts::{
     S7SupportArtifactInputs, S7SupportArtifactKind, S7SupportArtifactMaterializeError,
     materialize_support_artifact,
@@ -48,6 +54,7 @@ const DEFAULT_REPORT_EMITTER: &str = "scripts/review/f-s7/emit-report.py";
 const DEFAULT_REPORT_OUTPUT: &str = "docs/experiments/S7-report.md";
 #[cfg(feature = "s7-burn-grad-smoke")]
 const DEFAULT_BURN_GRAD_SMOKE_OUTPUT: &str = "experiments/S7/burn-grad-smoke/expert_block_qat.json";
+const DEFAULT_EMULATOR_ONE_TOKEN_BLOCKS: u32 = 4;
 const S7_CLI_REPLAY_DOMAIN: DomainHash<'static> =
     DomainHash::new("gbf-experiments", "S7CliReplay", "s7_replay_cli.v1", "1");
 
@@ -70,6 +77,8 @@ pub enum S7Command {
     DeriveComparison(S7DeriveComparisonArgs),
     /// Validate and materialize a closure support artifact.
     MaterializeSupportArtifact(S7MaterializeSupportArtifactArgs),
+    /// Build an H10 one-token emulator/oracle comparison artifact from measured outputs.
+    EmulatorOneToken(S7EmulatorOneTokenArgs),
     /// Produce the H8 Burn ExpertBlockQat gradient smoke artifact.
     #[cfg(feature = "s7-burn-grad-smoke")]
     BurnGradSmoke(S7BurnGradSmokeArgs),
@@ -195,6 +204,54 @@ pub struct S7MaterializeSupportArtifactArgs {
     pub output: Option<PathBuf>,
 }
 
+/// Arguments for `gbf s7 emulator-one-token`.
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 emulator-one-token --topology MoeTiny --encoded-rom-sha sha256:... --prompt-sha sha256:... --artifact-oracle-logits-sha sha256:... --emulator-logits-sha sha256:... --pairwise-max-abs-diff 0 --s5-tolerance 0.125 --observed-bank-switches-per-token 0.5 --oracle-recorded-bank-switches 0.5"
+)]
+pub struct S7EmulatorOneTokenArgs {
+    /// Packet/repository root where the H10 report should be written.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Experiment seed; the closure packet currently admits only seed 0.
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
+    /// S7 topology under emulator/oracle comparison.
+    #[arg(long, value_parser = parse_topology)]
+    pub topology: S7Topology,
+    /// Encoded ROM hash loaded by the emulator.
+    #[arg(long)]
+    pub encoded_rom_sha: Hash256,
+    /// Fixed H10 prompt hash.
+    #[arg(long)]
+    pub prompt_sha: Hash256,
+    /// Artifact-oracle logits hash for the same prompt.
+    #[arg(long)]
+    pub artifact_oracle_logits_sha: Hash256,
+    /// Emulator logits hash for the same prompt.
+    #[arg(long)]
+    pub emulator_logits_sha: Hash256,
+    /// Pairwise max absolute logit difference.
+    #[arg(long)]
+    pub pairwise_max_abs_diff: f64,
+    /// S5 pinned one-token tolerance.
+    #[arg(long)]
+    pub s5_tolerance: f64,
+    /// Bank switches per token observed in the emulator.
+    #[arg(long)]
+    pub observed_bank_switches_per_token: f32,
+    /// Bank switches per token recorded by the artifact-oracle route tracer.
+    #[arg(long)]
+    pub oracle_recorded_bank_switches: f32,
+    /// Number of deployable blocks used for bank-switch upper-bound validation.
+    #[arg(long, default_value_t = DEFAULT_EMULATOR_ONE_TOKEN_BLOCKS)]
+    pub n_blocks: u32,
+    /// Output `s7_emulator_one_token.v1` path, relative to --root unless absolute.
+    /// Defaults to the canonical packet path for the selected topology.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
 /// Arguments for `gbf s7 burn-grad-smoke`.
 #[cfg(feature = "s7-burn-grad-smoke")]
 #[derive(Debug, Clone, Args)]
@@ -273,6 +330,7 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
         S7Command::MaterializeRun(args) => materialize_run(args),
         S7Command::DeriveComparison(args) => derive_comparison(args),
         S7Command::MaterializeSupportArtifact(args) => materialize_support(args),
+        S7Command::EmulatorOneToken(args) => emulator_one_token(args),
         #[cfg(feature = "s7-burn-grad-smoke")]
         S7Command::BurnGradSmoke(args) => burn_grad_smoke(args),
         S7Command::EmitReport(args) => emit_report(args),
@@ -386,6 +444,56 @@ fn materialize_support(args: S7MaterializeSupportArtifactArgs) -> Result<(), S7C
         output: args.output,
     })?;
     println!("{}", materialized.self_hash);
+    Ok(())
+}
+
+fn emulator_one_token(args: S7EmulatorOneTokenArgs) -> Result<(), S7CliError> {
+    if args.seed != 0 {
+        return Err(S7CliError::InvalidEmulatorOneTokenSeed { seed: args.seed });
+    }
+    let output = args.output.clone().unwrap_or_else(|| {
+        PathBuf::from("experiments/S7/emulator-one-token/seed-0")
+            .join(topology_path_segment(&args.topology))
+            .join("result.json")
+    });
+    let report = compare_with_artifact_oracle_trace(EmulatorOneTokenComparison {
+        seed: args.seed,
+        topology: args.topology,
+        encoded_rom_sha: args.encoded_rom_sha,
+        prompt_sha: args.prompt_sha,
+        artifact_oracle_trace: ArtifactOracleOneTokenTrace {
+            logits_sha: args.artifact_oracle_logits_sha,
+            bank_switches_per_token: args.oracle_recorded_bank_switches,
+        },
+        emulator_observation: EmulatorOneTokenObservation {
+            logits_sha: args.emulator_logits_sha,
+            bank_switches_per_token: args.observed_bank_switches_per_token,
+        },
+        pairwise_max_abs_diff: args.pairwise_max_abs_diff,
+        s5_tolerance: args.s5_tolerance,
+        n_blocks: args.n_blocks,
+    })?;
+    let output_path = if output.is_absolute() {
+        output
+    } else {
+        args.root.join(output)
+    };
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|source| S7CliError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    std::fs::write(&output_path, report.canonical_json_bytes()?).map_err(|source| {
+        S7CliError::Io {
+            path: output_path.display().to_string(),
+            source,
+        }
+    })?;
+    println!("{}", report.emulator_self_hash);
     Ok(())
 }
 
@@ -571,6 +679,8 @@ pub enum S7CliError {
     /// Burn gradient smoke producer failed.
     #[cfg(feature = "s7-burn-grad-smoke")]
     BurnGradSmoke(S7BurnGradSmokeError),
+    /// H10 one-token emulator report construction failed.
+    EmulatorOneToken(EmulatorOneTokenReportError),
     /// Canonical JSON encoding failed.
     CanonicalJson(CanonicalJsonError),
     /// Filesystem operation failed.
@@ -584,6 +694,11 @@ pub enum S7CliError {
     InvalidSeedList {
         /// Original seed-list string.
         value: String,
+    },
+    /// The closure packet currently expects H10 seed 0.
+    InvalidEmulatorOneTokenSeed {
+        /// Observed seed.
+        seed: u64,
     },
     /// The selected topology does not match the active split feature gate.
     FeatureTopologyMismatch {
@@ -621,6 +736,7 @@ impl fmt::Display for S7CliError {
             Self::MaterializeSupportArtifact(error) => write!(f, "{error}"),
             #[cfg(feature = "s7-burn-grad-smoke")]
             Self::BurnGradSmoke(error) => write!(f, "{error}"),
+            Self::EmulatorOneToken(error) => write!(f, "{error}"),
             Self::CanonicalJson(error) => write!(f, "{error}"),
             Self::Io { path, source } => write!(f, "{path}: {source}"),
             Self::InvalidSeedList { value } => {
@@ -628,6 +744,9 @@ impl fmt::Display for S7CliError {
                     f,
                     "invalid S7 seed list {value:?}; expected comma-separated u64 values"
                 )
+            }
+            Self::InvalidEmulatorOneTokenSeed { seed } => {
+                write!(f, "gbf s7 emulator-one-token requires --seed 0, got {seed}")
             }
             Self::FeatureTopologyMismatch { feature, topology } => write!(
                 f,
@@ -661,9 +780,11 @@ impl std::error::Error for S7CliError {
             Self::MaterializeSupportArtifact(error) => Some(error),
             #[cfg(feature = "s7-burn-grad-smoke")]
             Self::BurnGradSmoke(error) => Some(error),
+            Self::EmulatorOneToken(error) => Some(error),
             Self::CanonicalJson(error) => Some(error),
             Self::Io { source, .. } => Some(source),
             Self::InvalidSeedList { .. }
+            | Self::InvalidEmulatorOneTokenSeed { .. }
             | Self::FeatureTopologyMismatch { .. }
             | Self::ReportEmitterFailed { .. }
             | Self::InvalidReportSelfHash { .. }
@@ -707,6 +828,12 @@ impl From<S7BurnGradSmokeError> for S7CliError {
 impl From<CanonicalJsonError> for S7CliError {
     fn from(error: CanonicalJsonError) -> Self {
         Self::CanonicalJson(error)
+    }
+}
+
+impl From<EmulatorOneTokenReportError> for S7CliError {
+    fn from(error: EmulatorOneTokenReportError) -> Self {
+        Self::EmulatorOneToken(error)
     }
 }
 
