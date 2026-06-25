@@ -69,6 +69,35 @@ def main() -> int:
     parser.add_argument("--verify-mode", choices=["full", "skip-gates"], default="full")
     parser.add_argument("--dry-run", action="store_true", help="print commands without executing")
     parser.add_argument(
+        "--run-reviews",
+        action="store_true",
+        help="run required Gemini/Claude ACPX reviews after report emission and before final verify",
+    )
+    parser.add_argument(
+        "--review-cwd",
+        help="ACPX --cwd value used when --run-reviews is set; defaults to --root",
+    )
+    parser.add_argument("--acpx", default="acpx", help="acpx executable used with --run-reviews")
+    parser.add_argument(
+        "--review-timeout",
+        default="1800",
+        help="ACPX timeout in seconds used with --run-reviews",
+    )
+    parser.add_argument(
+        "--reviewer",
+        choices=["gemini", "claude", "all"],
+        default="all",
+        help="reviewer selection passed to run-acpx-reviews.py with --run-reviews",
+    )
+    parser.add_argument(
+        "--gemini-agent",
+        help="optional raw Gemini ACP agent command passed to run-acpx-reviews.py",
+    )
+    parser.add_argument(
+        "--claude-agent",
+        help="optional raw Claude ACP agent command passed to run-acpx-reviews.py",
+    )
+    parser.add_argument(
         "--check-inputs",
         action="store_true",
         help="preflight every referenced bundle input path before executing; useful with --dry-run",
@@ -89,7 +118,14 @@ def main() -> int:
     manifest_path = Path(args.manifest).resolve()
     try:
         manifest = load_manifest(manifest_path)
-        commands = build_commands(manifest, manifest_path.parent, root, args.cargo, args.verify_mode)
+        commands = build_commands(
+            manifest,
+            manifest_path.parent,
+            root,
+            args.cargo,
+            args.verify_mode,
+            review_options=review_options_from_args(args, root),
+        )
     except AssembleError as error:
         print("S7 packet assembly: NEEDS_CHANGES")
         print(f" - {error}")
@@ -136,6 +172,7 @@ def build_commands(
     root: Path,
     cargo: str,
     verify_mode: str,
+    review_options: ReviewOptions | None = None,
 ) -> list[list[str]]:
     validate_known_fields(manifest)
     commands: list[list[str]] = []
@@ -246,12 +283,72 @@ def build_commands(
 
     report = require_object(manifest, ["report"])
     commands.append(report_command(cargo, root, report))
+    if review_options is not None:
+        commands.append(review_command(root, review_options))
 
     verify = [str(root / "scripts/review/f-s7/verify-packet.sh")]
     if verify_mode == "skip-gates":
         verify.append("--skip-gates")
     commands.append(verify)
     return commands
+
+
+class ReviewOptions:
+    def __init__(
+        self,
+        *,
+        acpx: str,
+        review_cwd: str,
+        timeout: str,
+        reviewer: str,
+        gemini_agent: str | None,
+        claude_agent: str | None,
+    ) -> None:
+        self.acpx = acpx
+        self.review_cwd = review_cwd
+        self.timeout = timeout
+        self.reviewer = reviewer
+        self.gemini_agent = gemini_agent
+        self.claude_agent = claude_agent
+
+
+def review_options_from_args(args: argparse.Namespace, root: Path) -> ReviewOptions | None:
+    if not args.run_reviews:
+        return None
+    review_cwd = args.review_cwd or str(root)
+    return ReviewOptions(
+        acpx=args.acpx,
+        review_cwd=review_cwd,
+        timeout=args.review_timeout,
+        reviewer=args.reviewer,
+        gemini_agent=args.gemini_agent,
+        claude_agent=args.claude_agent,
+    )
+
+
+def review_command(root: Path, options: ReviewOptions) -> list[str]:
+    command = [
+        str(root / "scripts/review/f-s7/run-acpx-reviews.py"),
+        "--root",
+        str(root),
+        "--review-cwd",
+        options.review_cwd,
+        "--acpx",
+        options.acpx,
+        "--timeout",
+        options.timeout,
+        "--reviewer",
+        options.reviewer,
+    ]
+    if options.gemini_agent is not None:
+        if not options.gemini_agent.strip():
+            raise AssembleError("--gemini-agent must be a non-empty string")
+        command.extend(["--gemini-agent", options.gemini_agent])
+    if options.claude_agent is not None:
+        if not options.claude_agent.strip():
+            raise AssembleError("--claude-agent must be a non-empty string")
+        command.extend(["--claude-agent", options.claude_agent])
+    return command
 
 
 def write_template(path: Path) -> None:

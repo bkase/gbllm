@@ -32,6 +32,37 @@ rg -n -- "--topology MoeTinyDenseMatched" "$tmp/dry-run.out" >/dev/null
 rg -n -- "$tmp/bundle/runs/MoeTiny/seed-0/run-log\\.json" "$tmp/dry-run.out" >/dev/null
 rg -n "S7 packet assembly: dry-run ok" "$tmp/dry-run.out" >/dev/null
 
+scripts/review/f-s7/assemble-packet.py \
+  --manifest "$manifest" \
+  --root "$ROOT" \
+  --cargo cargo \
+  --verify-mode skip-gates \
+  --run-reviews \
+  --review-cwd "$ROOT" \
+  --acpx custom-acpx \
+  --review-timeout 77 \
+  --gemini-agent "custom-gemini --acp" \
+  --claude-agent "custom-claude --acp" \
+  --dry-run >"$tmp/dry-run-reviews.out"
+
+rg -n "run-acpx-reviews\\.py" "$tmp/dry-run-reviews.out" >/dev/null
+rg -n -- "--acpx custom-acpx" "$tmp/dry-run-reviews.out" >/dev/null
+rg -n -- "--timeout 77" "$tmp/dry-run-reviews.out" >/dev/null
+rg -n -- "--reviewer all" "$tmp/dry-run-reviews.out" >/dev/null
+rg -n -- "--gemini-agent 'custom-gemini --acp'" "$tmp/dry-run-reviews.out" >/dev/null
+rg -n -- "--claude-agent 'custom-claude --acp'" "$tmp/dry-run-reviews.out" >/dev/null
+python3 - "$tmp/dry-run-reviews.out" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+report_index = text.index(" emit-report ")
+review_index = text.index("run-acpx-reviews.py")
+verify_index = text.index("verify-packet.sh --skip-gates")
+if not (report_index < review_index < verify_index):
+    raise SystemExit("run-acpx-reviews.py must run after emit-report and before verify-packet")
+PY
+
 if scripts/review/f-s7/assemble-packet.py \
   --manifest "$manifest" \
   --root "$ROOT" \
