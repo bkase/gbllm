@@ -296,11 +296,15 @@ run_artifact_validator() {
 }
 
 run_review_validator() {
-  local expected_head
-  expected_head="${S7_EXPECTED_REVIEW_HEAD:-$(git -C "$CHECK_ROOT" rev-parse HEAD 2>/dev/null || true)}"
+  local expected_head current_head
+  expected_head="${S7_EXPECTED_REVIEW_HEAD:-}"
+  current_head="$(git -C "$CHECK_ROOT" rev-parse HEAD 2>/dev/null || true)"
   local args=(--root "$CHECK_ROOT")
   if [[ -n "$expected_head" ]]; then
     args+=(--expected-head "$expected_head")
+  elif [[ -n "$current_head" ]]; then
+    args+=(--allow-reviewed-head-ancestor-of "$current_head")
+    args+=(--require-reviewed-diff-admin-only)
   fi
   if ! "$ROOT/$REVIEW_VALIDATOR" "${args[@]}" >/tmp/s7-review-validate.stdout 2>/tmp/s7-review-validate.stderr; then
     local detail

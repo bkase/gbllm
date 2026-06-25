@@ -77,6 +77,78 @@ if scripts/review/f-s7/validate-reviews.py --root "$tmp" --expected-head bbbbbbb
 fi
 rg -n "reviewed_head must match expected_head" /tmp/s7-validate-reviews-bad.out >/dev/null
 
+ancestor_repo="$tmp/ancestor-repo"
+ancestor_review_dir="$ancestor_repo/docs/review/f-s7/reviews"
+mkdir -p "$ancestor_review_dir" "$ancestor_repo/.beads"
+git -C "$ancestor_repo" init -q
+git -C "$ancestor_repo" config user.name "S7 Review Test"
+git -C "$ancestor_repo" config user.email "s7-review-test@example.invalid"
+printf 'artifact\n' >"$ancestor_repo/artifact.txt"
+git -C "$ancestor_repo" add artifact.txt
+git -C "$ancestor_repo" commit -qm base
+ancestor_head="$(git -C "$ancestor_repo" rev-parse HEAD)"
+
+python3 - "$ancestor_review_dir" "$ancestor_head" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+review_dir = Path(sys.argv[1])
+head = sys.argv[2]
+
+payloads = {
+    "gemini": ["P3", "P4", "P5", "P6", "P7", "P8"],
+    "claude": ["P3", "P5", "P6", "P8"],
+}
+for reviewer, personas in payloads.items():
+    payload = {
+        "schema": "s7_acpx_review.v1",
+        "bead": "bd-2v9r",
+        "reviewer": reviewer,
+        "transport": "acpx",
+        "verdict": "PASS",
+        "personas": personas,
+        "command": f"acpx {reviewer} exec review",
+        "reviewed_head": head,
+        "summary": f"{reviewer} passed ancestor review evidence.",
+        "findings": [],
+    }
+    (review_dir / f"bd-2v9r-{reviewer}.json").write_text(
+        json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+PY
+
+git -C "$ancestor_repo" add docs/review/f-s7/reviews
+git -C "$ancestor_repo" commit -qm reviews
+ancestor_current="$(git -C "$ancestor_repo" rev-parse HEAD)"
+scripts/review/f-s7/validate-reviews.py \
+  --root "$ancestor_repo" \
+  --allow-reviewed-head-ancestor-of "$ancestor_current" \
+  --require-reviewed-diff-admin-only >/tmp/s7-validate-reviews-ancestor-ok.out
+
+printf '{}\n' >"$ancestor_repo/.beads/issues.jsonl"
+git -C "$ancestor_repo" add .beads/issues.jsonl
+git -C "$ancestor_repo" commit -qm bead-admin
+ancestor_admin_head="$(git -C "$ancestor_repo" rev-parse HEAD)"
+scripts/review/f-s7/validate-reviews.py \
+  --root "$ancestor_repo" \
+  --allow-reviewed-head-ancestor-of "$ancestor_admin_head" \
+  --require-reviewed-diff-admin-only >/tmp/s7-validate-reviews-ancestor-admin-ok.out
+
+printf 'changed after review\n' >"$ancestor_repo/src.txt"
+git -C "$ancestor_repo" add src.txt
+git -C "$ancestor_repo" commit -qm stale-production-change
+ancestor_stale_head="$(git -C "$ancestor_repo" rev-parse HEAD)"
+if scripts/review/f-s7/validate-reviews.py \
+  --root "$ancestor_repo" \
+  --allow-reviewed-head-ancestor-of "$ancestor_stale_head" \
+  --require-reviewed-diff-admin-only >/tmp/s7-validate-reviews-bad.out 2>&1; then
+  echo "expected stale post-review production change to fail" >&2
+  exit 1
+fi
+rg -n "reviewed_head is stale: commits after it changed non-review files" /tmp/s7-validate-reviews-bad.out >/dev/null
+
 python3 - "$review_dir/bd-2v9r-gemini.json" "$review_dir/bd-2v9r-claude.json" <<'PY'
 from pathlib import Path
 import json
