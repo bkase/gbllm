@@ -42,6 +42,9 @@ use crate::s7::run::{
 use crate::s7::schema::{
     EmulatorOneTokenReportError, OracleRouteCoverage, OracleRoutedReport, OracleRoutedReportError,
 };
+use crate::s7::summaries::{
+    S7SummaryArtifactInputs, S7SummaryMaterializeError, materialize_s7_summaries,
+};
 use crate::s7::support_artifacts::{
     S7SupportArtifactInputs, S7SupportArtifactKind, S7SupportArtifactMaterializeError,
     materialize_support_artifact,
@@ -80,6 +83,8 @@ pub enum S7Command {
     Replay(S7ReplayArgs),
     /// Validate externally produced completed-run artifacts and write packet paths.
     MaterializeRun(S7MaterializeRunArgs),
+    /// Derive comparison summary inputs from landed production artifacts.
+    DeriveSummaries(S7DeriveSummariesArgs),
     /// Derive the dense-vs-MoE comparison from materialized score artifacts.
     DeriveComparison(S7DeriveComparisonArgs),
     /// Derive the S7 Pareto frontier from materialized comparison evidence.
@@ -187,6 +192,21 @@ pub struct S7DeriveComparisonArgs {
     /// Output `s7_dense_vs_moe.v1` path, relative to --root unless absolute.
     #[arg(long, default_value = DEFAULT_COMPARISON_OUTPUT)]
     pub output: PathBuf,
+}
+
+/// Arguments for `gbf s7 derive-summaries`.
+#[derive(Debug, Clone, Args)]
+#[command(after_help = "Examples:\n  gbf s7 derive-summaries --root .")]
+pub struct S7DeriveSummariesArgs {
+    /// Packet/repository root containing materialized S7 support artifacts and telemetry.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Switch-stat summary JSON path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_SWITCH_STATS_SUMMARY)]
+    pub switch_stats_output: PathBuf,
+    /// Router-collapse sweep summary JSON path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_SWEEP_SUMMARY)]
+    pub sweep_output: PathBuf,
 }
 
 /// Arguments for `gbf s7 derive-frontier`.
@@ -431,6 +451,7 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
     match cli.command {
         S7Command::Replay(args) => replay(args),
         S7Command::MaterializeRun(args) => materialize_run(args),
+        S7Command::DeriveSummaries(args) => derive_summaries(args),
         S7Command::DeriveComparison(args) => derive_comparison(args),
         S7Command::DeriveFrontier(args) => derive_frontier(args),
         S7Command::MaterializeSupportArtifact(args) => materialize_support(args),
@@ -522,6 +543,16 @@ fn materialize_run(args: S7MaterializeRunArgs) -> Result<(), S7CliError> {
         router_step_telemetry: args.router_step_telemetry,
     })?;
     println!("{}", materialized.run_log_self_hash);
+    Ok(())
+}
+
+fn derive_summaries(args: S7DeriveSummariesArgs) -> Result<(), S7CliError> {
+    let materialized = materialize_s7_summaries(&S7SummaryArtifactInputs {
+        root: args.root,
+        switch_stats_output: args.switch_stats_output,
+        sweep_output: args.sweep_output,
+    })?;
+    println!("{}", materialized.summary_bundle_hash);
     Ok(())
 }
 
@@ -836,6 +867,8 @@ pub enum S7CliError {
     Replay(S7ReplayError),
     /// Completed-run artifact materialization failed.
     MaterializeRun(S7RunMaterializeError),
+    /// Comparison-summary derivation failed.
+    DeriveSummaries(S7SummaryMaterializeError),
     /// Dense-vs-MoE comparison derivation failed.
     DeriveComparison(S7ComparisonMaterializeError),
     /// Frontier derivation failed.
@@ -900,6 +933,7 @@ impl fmt::Display for S7CliError {
         match self {
             Self::Replay(error) => write!(f, "{error}"),
             Self::MaterializeRun(error) => write!(f, "{error}"),
+            Self::DeriveSummaries(error) => write!(f, "{error}"),
             Self::DeriveComparison(error) => write!(f, "{error}"),
             Self::DeriveFrontier(error) => write!(f, "{error}"),
             Self::MaterializeSupportArtifact(error) => write!(f, "{error}"),
@@ -946,6 +980,7 @@ impl std::error::Error for S7CliError {
         match self {
             Self::Replay(error) => Some(error),
             Self::MaterializeRun(error) => Some(error),
+            Self::DeriveSummaries(error) => Some(error),
             Self::DeriveComparison(error) => Some(error),
             Self::DeriveFrontier(error) => Some(error),
             Self::MaterializeSupportArtifact(error) => Some(error),
@@ -975,6 +1010,12 @@ impl From<S7ReplayError> for S7CliError {
 impl From<S7RunMaterializeError> for S7CliError {
     fn from(error: S7RunMaterializeError) -> Self {
         Self::MaterializeRun(error)
+    }
+}
+
+impl From<S7SummaryMaterializeError> for S7CliError {
+    fn from(error: S7SummaryMaterializeError) -> Self {
+        Self::DeriveSummaries(error)
     }
 }
 

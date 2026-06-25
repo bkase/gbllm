@@ -102,6 +102,7 @@ fn s7_help_lists_dispatch_verbs() {
     command.assert().success().stdout(
         predicate::str::contains("replay")
             .and(predicate::str::contains("materialize-run"))
+            .and(predicate::str::contains("derive-summaries"))
             .and(predicate::str::contains("derive-comparison"))
             .and(predicate::str::contains("derive-frontier"))
             .and(predicate::str::contains("materialize-support-artifact"))
@@ -326,6 +327,119 @@ fn s7_materialize_run_rejects_incomplete_fixture_shaped_run_log() {
     assert!(output_result.stdout.is_empty());
     assert!(
         command_output(&output_result).contains("requires completed run-log"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_derive_summaries_writes_comparison_summary_inputs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+    write_summary_source_inputs(&packet);
+    write_comparison_score_inputs(&packet, true);
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "derive-summaries",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+    ]);
+
+    let output_result = command.output().expect("s7 derive-summaries runs");
+    assert!(
+        output_result.status.success(),
+        "s7 derive-summaries failed:\n{}",
+        command_output(&output_result)
+    );
+    let _summary_bundle_hash = single_stdout_hash(&output_result);
+
+    let switch_summary_path = packet.join("experiments/S7/summaries/switch-stats-summary.json");
+    let switch_summary: Value =
+        serde_json::from_slice(&std::fs::read(&switch_summary_path).expect("switch summary reads"))
+            .expect("switch summary parses");
+    assert_eq!(
+        switch_summary["same_expert_rate_per_layer_q8_8"],
+        serde_json::json!([128, 128, 128, 128])
+    );
+    assert_eq!(
+        switch_summary["expert_usage_entropy_bits_mean"]
+            .as_f64()
+            .expect("entropy number"),
+        2.0
+    );
+    assert_eq!(
+        switch_summary["bank_switches_per_token_mean"]
+            .as_f64()
+            .expect("bank switches number"),
+        1.0
+    );
+
+    let sweep_summary_path =
+        packet.join("experiments/S7/summaries/router-collapse-sweep-summary.json");
+    let sweep_summary: Value =
+        serde_json::from_slice(&std::fs::read(&sweep_summary_path).expect("sweep summary reads"))
+            .expect("sweep summary parses");
+    assert_eq!(
+        sweep_summary["bpc_at_lambda"]["0.05"]
+            .as_f64()
+            .expect("bpc number"),
+        1.01
+    );
+    assert!(
+        (sweep_summary["entropy_at_lambda"]["5.0"]
+            .as_f64()
+            .expect("entropy number")
+            - 1.4)
+            .abs()
+            < 1.0e-6
+    );
+    assert_eq!(sweep_summary["guardrail_verdict"]["kind"], "pass");
+
+    let comparison_hash = derive_comparison_for_test(&packet);
+    let comparison_path = packet.join("experiments/S7/dense-vs-moe/comparison.json");
+    let comparison: Value =
+        serde_json::from_slice(&std::fs::read(&comparison_path).expect("comparison reads"))
+            .expect("comparison parses");
+    assert_eq!(
+        comparison["comparison_self_hash"]
+            .as_str()
+            .expect("comparison hash string"),
+        comparison_hash
+    );
+}
+
+#[test]
+fn s7_derive_summaries_rejects_missing_switch_stats_seed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+    write_summary_source_inputs(&packet);
+    std::fs::remove_file(packet.join("experiments/S7/switch-stats/seed-4/switch-stats.json"))
+        .expect("remove seed-4 switch stats");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "derive-summaries",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+    ]);
+
+    let output_result = command.output().expect("s7 derive-summaries runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 derive-summaries unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("experiments/S7/switch-stats/seed-4/switch-stats.json"),
         "{}",
         command_output(&output_result)
     );
@@ -2756,6 +2870,30 @@ fn materialize_router_step_telemetry_jsonl(topology: S7Topology, seed: u64) -> V
 }
 
 fn write_comparison_inputs(root: &Path, include_dense_seed_four: bool) {
+    write_comparison_score_inputs(root, include_dense_seed_four);
+
+    let switch_stats =
+        SwitchStatsSummary::new(vec![128, 128, 128, 128], 1.0, 0.5).expect("switch stats summary");
+    write_bytes(
+        &root.join("experiments/S7/summaries/switch-stats-summary.json"),
+        &with_trailing_newline(CanonicalJson::to_vec(&switch_stats).unwrap()),
+    );
+
+    let mut bpc_at_lambda = std::collections::BTreeMap::new();
+    bpc_at_lambda.insert(LambdaSwitch::new("0.0").expect("lambda"), 1.0);
+    bpc_at_lambda.insert(LambdaSwitch::new("0.05").expect("lambda"), 1.0);
+    let mut entropy_at_lambda = std::collections::BTreeMap::new();
+    entropy_at_lambda.insert(LambdaSwitch::new("0.0").expect("lambda"), 1.0);
+    entropy_at_lambda.insert(LambdaSwitch::new("0.05").expect("lambda"), 1.0);
+    let sweep = SweepSummary::new(bpc_at_lambda, entropy_at_lambda, GuardrailVerdict::Pass)
+        .expect("sweep summary");
+    write_bytes(
+        &root.join("experiments/S7/summaries/router-collapse-sweep-summary.json"),
+        &with_trailing_newline(CanonicalJson::to_vec(&sweep).unwrap()),
+    );
+}
+
+fn write_comparison_score_inputs(root: &Path, include_dense_seed_four: bool) {
     let matched_bytes = canonical_s7_matched_bytes_pin()
         .expect("matched bytes pin")
         .canonical_json_bytes()
@@ -2776,25 +2914,26 @@ fn write_comparison_inputs(root: &Path, include_dense_seed_four: bool) {
             );
         }
     }
+}
 
-    let switch_stats =
-        SwitchStatsSummary::new(vec![128, 128, 128, 128], 1.0, 0.5).expect("switch stats summary");
-    write_bytes(
-        &root.join("experiments/S7/summaries/switch-stats-summary.json"),
-        &with_trailing_newline(CanonicalJson::to_vec(&switch_stats).unwrap()),
-    );
-
-    let mut bpc_at_lambda = std::collections::BTreeMap::new();
-    bpc_at_lambda.insert(LambdaSwitch::new("0.0").expect("lambda"), 1.0);
-    bpc_at_lambda.insert(LambdaSwitch::new("0.05").expect("lambda"), 1.0);
-    let mut entropy_at_lambda = std::collections::BTreeMap::new();
-    entropy_at_lambda.insert(LambdaSwitch::new("0.0").expect("lambda"), 1.0);
-    entropy_at_lambda.insert(LambdaSwitch::new("0.05").expect("lambda"), 1.0);
-    let sweep = SweepSummary::new(bpc_at_lambda, entropy_at_lambda, GuardrailVerdict::Pass)
-        .expect("sweep summary");
-    write_bytes(
-        &root.join("experiments/S7/summaries/router-collapse-sweep-summary.json"),
-        &with_trailing_newline(CanonicalJson::to_vec(&sweep).unwrap()),
+fn write_summary_source_inputs(root: &Path) {
+    for seed in 0..5 {
+        write_json(
+            root,
+            &format!("experiments/S7/switch-stats/seed-{seed}/switch-stats.json"),
+            &switch_stats_support_artifact(seed),
+        );
+        write_bytes(
+            &root.join(format!(
+                "experiments/S7/runs/MoeTiny/seed-{seed}/router-step-telemetry.jsonl"
+            )),
+            &materialize_router_step_telemetry_jsonl(S7Topology::MoeTiny, seed),
+        );
+    }
+    write_json(
+        root,
+        "experiments/S7/router-collapse/seed-0/sweep.json",
+        &router_collapse_sweep_support_artifact(),
     );
 }
 
