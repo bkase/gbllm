@@ -40,11 +40,18 @@ s5-falsify-12 = ["s5-default"]
 s5-falsify-13 = ["s5-default"]
 s5-falsify-14 = ["s5-default"]
 s5-falsify-15 = ["s5-default"]
+s7 = []
+s7-moe = ["s7"]
+s7-dense-matched = ["s7"]
+s7-router-collapse-sweep = ["s7"]
 falsify = [
     "s2-full",
     "s3",
     "s3-oracle-adversarial",
     "s4-falsify",
+    "s7",
+    "qat",
+    "burn-adapter",
     "gbf-policy/falsify",
 ]
 

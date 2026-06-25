@@ -276,9 +276,11 @@ fn qat_tests_router_top1_and_aux_losses_match_manual_logits() {
     let z = (1.0_f32.exp() + 2.0_f32.exp() + 1.0_f32.exp()).ln();
 
     assert_eq!(output.expert_index(), 1);
-    assert_f32_slice_close(output.logits(), &[1.0, 2.0, 1.0], TOL, TOL);
+    assert_eq!(output.dispatch_indicator(), &[0.0, 1.0, 0.0]);
+    assert_f32_slice_close(output.raw_router_logits(), &[1.0, 2.0, 1.0], TOL, TOL);
+    assert_f32_slice_close(output.effective_logits(), &[1.0, 2.0, 1.0], TOL, TOL);
     assert_eq!(output.routing_weights(), &[0.0, 1.0, 0.0]);
-    assert_f32_slice_close(output.soft_probs(), &soft, TOL, TOL);
+    assert_f32_slice_close(output.routing_probs(), &soft, TOL, TOL);
     assert!((output.aux_losses().z_loss() - z * z).abs() <= TOL);
     assert!((output.aux_losses().token_balance_proxy_loss() - soft[1] * 3.0).abs() <= TOL);
 }
@@ -307,8 +309,9 @@ fn qat_tests_router_low_rank_projection_matches_manual_factorization() {
         .forward_stateless(&input, None, &RouterForwardOptions::soft_top1(2))
         .unwrap();
 
-    assert_f32_slice_close(output.logits(), &expected_logits, TOL, TOL);
-    assert_f32_slice_close(output.soft_probs(), &softmax(&expected_logits), TOL, TOL);
+    assert_f32_slice_close(output.raw_router_logits(), &expected_logits, TOL, TOL);
+    assert_f32_slice_close(output.effective_logits(), &expected_logits, TOL, TOL);
+    assert_f32_slice_close(output.routing_probs(), &softmax(&expected_logits), TOL, TOL);
 }
 
 #[test]
@@ -322,13 +325,16 @@ fn qat_tests_router_soft_mode_dropout_and_jitter_are_explicit_inputs() {
     let output = router.forward_stateless(&input, None, &options).unwrap();
 
     assert_eq!(output.expert_index(), 2);
-    assert_eq!(output.routing_weights(), output.soft_probs());
-    assert_eq!(output.soft_probs()[0], 0.0);
-    assert!(output.soft_probs()[2] > output.soft_probs()[1]);
+    assert_eq!(output.dispatch_indicator(), &[0.0, 0.0, 1.0]);
+    assert_eq!(output.routing_weights(), output.routing_probs());
+    assert_eq!(output.routing_probs()[0], 0.0);
+    assert!(output.routing_probs()[2] > output.routing_probs()[1]);
+    assert_f32_slice_close(output.raw_router_logits(), &[2.0, 1.0, 0.0], TOL, TOL);
+    assert_f32_slice_close(output.effective_logits(), &[2.0, 1.0, 3.0], TOL, TOL);
 }
 
 #[test]
-fn qat_tests_router_temporal_buffer_stores_soft_probs_and_resets() {
+fn qat_tests_router_temporal_buffer_stores_routing_probs_and_resets() {
     let mut router = Top1RouterQat::new_with_aux_loss_weights(
         RouterShape::new(2, 3, 2).unwrap(),
         vec![1.0, 0.0, 0.0, 1.0],
@@ -341,13 +347,13 @@ fn qat_tests_router_temporal_buffer_stores_soft_probs_and_resets() {
     let options = RouterForwardOptions::hard_top1(3);
 
     let first = router.forward_with_options(&[1.0, 2.0], &options).unwrap();
-    assert_eq!(router.previous_distribution(), Some(first.soft_probs()));
+    assert_eq!(router.previous_distribution(), Some(first.routing_probs()));
     let second = router.forward_with_options(&[2.0, 1.0], &options).unwrap();
     let expected_temporal = 1.0
         - second
-            .soft_probs()
+            .routing_probs()
             .iter()
-            .zip(first.soft_probs())
+            .zip(first.routing_probs())
             .map(|(&current, &previous)| current * previous)
             .sum::<f32>();
 
@@ -361,7 +367,7 @@ fn qat_tests_router_failed_forward_does_not_advance_temporal_state() {
     let mut router = router_for_logits([1.0, 2.0, 0.0]);
     let options = RouterForwardOptions::hard_top1(3);
     let first = router.forward_with_options(&[1.0, 2.0], &options).unwrap();
-    let previous = first.soft_probs().to_vec();
+    let previous = first.routing_probs().to_vec();
     let invalid_options =
         RouterForwardOptions::hard_top1(3).with_dropped_experts(vec![true, true, true]);
 

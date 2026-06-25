@@ -1,10 +1,11 @@
 #![cfg(feature = "s4")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod common;
 
 use common::tracing_capture::{TraceCapture, TracingEvent, captured_events, with_trace_capture};
+use gbf_experiments::s1::rng::{BatchRng as S1BatchRng, Pcg64Mcg, S1Rng};
 use gbf_experiments::s4::rng::{
     S4_BATCH_RNG_DOMAIN, S4_INIT_RNG_DOMAIN, S4_SHUFFLE_RNG_DOMAIN, S4RngStreams, s4_seed128,
 };
@@ -287,7 +288,7 @@ fn per_seed_contracts_are_independent_of_requested_order() {
 }
 
 #[test]
-fn d9_continuation_initialization_loads_cts_weights_and_zeroes_optimizer_state() {
+fn d9_continuation_initialization_binds_cts_payloads_and_zeroes_optimizer_state() {
     let inputs = continuation_inputs(2);
     let init = initialize_gutenberg_continuation(&inputs).expect("D9 init");
 
@@ -462,6 +463,30 @@ fn d9_continuation_initialization_emits_declared_events_with_subscriber_capture(
 }
 
 #[test]
+fn d9_continuation_initialization_rejects_inherited_optimizer_state() {
+    for (field, inputs) in [
+        {
+            let mut inputs = continuation_inputs(0);
+            inputs.inherited_adamw_first_moment_payload_sha = Some(hash(0x55));
+            ("inherited_adamw_first_moment_payload_sha", inputs)
+        },
+        {
+            let mut inputs = continuation_inputs(0);
+            inputs.inherited_adamw_second_moment_payload_sha = Some(hash(0x66));
+            ("inherited_adamw_second_moment_payload_sha", inputs)
+        },
+    ] {
+        let error = initialize_gutenberg_continuation(&inputs)
+            .expect_err("inherited optimizer moment must be rejected");
+        assert_eq!(
+            error,
+            S4RunScheduleError::InheritedOptimizerStateRejected { field }
+        );
+        assert_eq!(error.name(), "S4InheritedOptimizerStateRejected");
+    }
+}
+
+#[test]
 fn d9_continuation_two_cold_initialization_contracts_are_equal() {
     let inputs = continuation_inputs(3);
 
@@ -548,6 +573,26 @@ fn s4_rng_streams_pin_d9_domains_and_zero_initial_draw_counts() {
     assert_eq!(json["init"]["draw_count"], json!(0));
     assert_eq!(json["batch"]["domain"], json!("s4-init-batch"));
     assert_eq!(json["shuffle"]["draw_count"], json!(0));
+}
+
+#[test]
+fn s4_batch_rng_is_disjoint_from_inherited_s1_s3_batch_rng_stream() {
+    let seed = 4;
+    let mut inherited_batch = S1BatchRng::new(seed);
+    let mut s4_batch = Pcg64Mcg::new(s4_seed128(S4_BATCH_RNG_DOMAIN, seed));
+    assert_ne!(inherited_batch.state(), s4_batch.state());
+
+    let inherited_draws = (0..1024)
+        .map(|_| inherited_batch.next_u64())
+        .collect::<BTreeSet<_>>();
+    let s4_draws = (0..1024)
+        .map(|_| s4_batch.next_u64())
+        .collect::<BTreeSet<_>>();
+
+    assert!(
+        inherited_draws.is_disjoint(&s4_draws),
+        "S4 BatchRng first 1024 draws overlapped the inherited S1/S3 BatchRng stream"
+    );
 }
 
 #[test]
@@ -666,6 +711,8 @@ fn continuation_inputs(seed: u64) -> S4ContinuationInitInputs {
         c_ts_checkpoint_self_hash: hash(0x11),
         deployed_tensor_payload_sha: hash(0x22),
         fp_shadow_tensor_payload_sha: hash(0x33),
+        inherited_adamw_first_moment_payload_sha: None,
+        inherited_adamw_second_moment_payload_sha: None,
         promotion_gate_self_hash: hash(0x44),
     }
 }

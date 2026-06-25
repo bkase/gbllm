@@ -1,0 +1,12 @@
+[moe_tiny]
+d_model = 8
+d_ff = 16
+n_blocks = 2
+n_experts = 2
+router_top_k = 1
+
+[dense_matched]
+name = "MoeTinyDenseMatched"
+d_model = 8
+d_ff = 572
+n_blocks = 2

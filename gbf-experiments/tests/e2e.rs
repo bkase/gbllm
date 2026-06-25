@@ -1,3 +1,12 @@
+#![cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+
 //! F-S1.36 tiny-fixture end-to-end composition harness.
 //!
 //! This target is intentionally fixture-only. It verifies that the S1 outcome

@@ -1,0 +1,1514 @@
+#![cfg(feature = "s7")]
+
+use assert_cmd::Command;
+use gbf_foundation::{CanonicalJson, DomainHash};
+use predicates::prelude::*;
+use serde_json::Value;
+use std::path::Path;
+use std::process::{Command as ProcessCommand, Output};
+
+const S7_SWITCH_STATS_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "S7SwitchStatsReport",
+    "s7_switch_stats.v1",
+    "1",
+);
+const S7_RUN_LOG_DOMAIN: DomainHash<'static> =
+    DomainHash::new("gbf-artifact", "S7RunLog", "s7_run_log.v1", "1");
+const S7_SCORE_DOMAIN: DomainHash<'static> =
+    DomainHash::new("gbf-artifact", "S7ScoreReport", "s7_score.v1", "1");
+const S7_DENSE_VS_MOE_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "S7DenseVsMoeComparisonReport",
+    "s7_dense_vs_moe.v1",
+    "1",
+);
+const S7_ROUTER_COLLAPSE_SWEEP_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "RouterCollapseSweepReport",
+    "s7_router_collapse_sweep.v1",
+    "1",
+);
+const S7_FRONTIER_DOMAIN: DomainHash<'static> =
+    DomainHash::new("gbf-experiments", "S7FrontierReport", "s7_frontier.v1", "1");
+const S7_BURN_GRAD_SMOKE_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "S7BurnGradSmokeReport",
+    "s7_burn_grad_smoke.v1",
+    "1",
+);
+const S7_ORACLE_ROUTED_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "S7OracleRoutedReport",
+    "s7_oracle_routed.v1",
+    "1",
+);
+const S7_EMULATOR_ONE_TOKEN_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "EmulatorOneTokenReport",
+    "s7_emulator_one_token.v1",
+    "1",
+);
+const S7_REPORT_MARKDOWN_DOMAIN: DomainHash<'static> =
+    DomainHash::new("gbf-experiments", "S7ReportMarkdown", "s7_report.v1", "1");
+
+fn gbf() -> Command {
+    Command::cargo_bin("gbf-cli").expect("gbf-cli binary")
+}
+
+#[test]
+fn s7_help_lists_dispatch_verbs() {
+    let mut command = gbf();
+    command.args(["s7", "--help"]);
+
+    command.assert().success().stdout(
+        predicate::str::contains("replay")
+            .and(predicate::str::contains("emit-report"))
+            .and(predicate::str::contains("validate-closure")),
+    );
+}
+
+#[test]
+fn s7_replay_fixture_writes_split_feature_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = temp.path().join("s7-replay.json");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "replay",
+        "--pass-version",
+        "fixture-pass",
+        "--topology",
+        expected_topology(),
+        "--seed-list",
+        "0,1",
+        "--output",
+        output.to_str().expect("utf8 output path"),
+    ]);
+
+    let output_result = command.output().expect("s7 replay runs");
+    assert!(
+        output_result.status.success(),
+        "s7 replay failed:\n{}",
+        command_output(&output_result)
+    );
+    let artifact_self_hash = single_stdout_hash(&output_result);
+    let evidence: Value =
+        serde_json::from_slice(&std::fs::read(&output).expect("s7 replay evidence reads"))
+            .expect("s7 replay evidence parses");
+
+    assert_eq!(evidence["schema"], "s7_replay_cli.v1");
+    assert_eq!(evidence["artifact_self_hash"], artifact_self_hash);
+    assert_eq!(evidence["status"], "fixture_replayed");
+    assert_eq!(
+        evidence["support_scope"],
+        "s7_fixture_contract_no_full_cli_replay"
+    );
+    assert_eq!(evidence["moved_full_cli_replay_to"], "bd-1ryn");
+    assert_eq!(evidence["moved_full_closure_to"], "bd-2v9r");
+    assert_eq!(evidence["feature_gate"], expected_feature_gate());
+    assert_eq!(evidence["topology"], expected_topology());
+    assert_eq!(evidence["runs"].as_array().expect("runs array").len(), 2);
+    assert_sha256(&evidence["runs"][0]["checkpoint_sha"]);
+    assert_sha256(&evidence["runs"][0]["run_log_self_hash"]);
+    assert_sha256(&evidence["runs"][0]["score_self_hash"]);
+}
+
+#[test]
+fn s7_replay_rejects_wrong_topology_for_split_feature() {
+    let wrong_topology = if cfg!(feature = "s7-moe") {
+        Some("MoeTinyDenseMatched")
+    } else if cfg!(feature = "s7-dense-matched") {
+        Some("MoeTiny")
+    } else {
+        None
+    };
+    let Some(wrong_topology) = wrong_topology else {
+        return;
+    };
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "replay",
+        "--pass-version",
+        "fixture-pass",
+        "--topology",
+        wrong_topology,
+    ]);
+
+    command
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("S7 feature/topology mismatch"));
+}
+
+#[test]
+fn s7_emit_report_wraps_fail_closed_report_emitter() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    let report_path = temp.path().join("docs/experiments/S7-report.md");
+    let rfc_revision = "a".repeat(40);
+    let predictions_section_hash = format!("sha256:{}", "2".repeat(64));
+    let predictions_commit = "b".repeat(40);
+    let first_result_commit = "c".repeat(40);
+
+    let mut command = gbf();
+    command.current_dir(workspace_root()).args([
+        "--log-level",
+        "off",
+        "s7",
+        "emit-report",
+        "--root",
+        temp.path().to_str().expect("utf8 temp path"),
+        "--s7-outcome",
+        "PassClean",
+        "--rfc-revision",
+        rfc_revision.as_str(),
+        "--predictions-section-hash",
+        predictions_section_hash.as_str(),
+        "--predictions-commit",
+        predictions_commit.as_str(),
+        "--first-result-commit",
+        first_result_commit.as_str(),
+        "--generated-at",
+        "2026-06-25T00:00:00Z",
+    ]);
+
+    let output_result = command.output().expect("s7 emit-report runs");
+    assert!(
+        output_result.status.success(),
+        "s7 emit-report failed:\n{}",
+        command_output(&output_result)
+    );
+    let report_self_hash = single_stdout_hash(&output_result);
+    let report = std::fs::read_to_string(&report_path).expect("report emitted");
+
+    assert!(report.contains(&format!("report_self_hash: \"{report_self_hash}\"")));
+    assert!(report.contains("schema: \"s7_report.v1\""));
+    assert!(report.contains("s7_outcome: PassClean"));
+    assert!(report.contains("decision: ProceedToS8"));
+    assert!(report.contains("generated_at: \"2026-06-25T00:00:00Z\""));
+    assert!(report.contains("H10 Confirmed"));
+}
+
+#[test]
+fn s7_validate_closure_invokes_rust_closure_contract_on_emitted_report() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    let emitted_hash = emit_report_for_test(temp.path());
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        output_result.status.success(),
+        "s7 validate-closure failed:\n{}",
+        command_output(&output_result)
+    );
+    assert_eq!(single_stdout_hash(&output_result), emitted_hash);
+}
+
+#[test]
+fn s7_validate_closure_rejects_unverified_preregistration() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+
+    let mut command = gbf();
+    command.current_dir(workspace_root()).args([
+        "--log-level",
+        "off",
+        "s7",
+        "validate-closure",
+        "--root",
+        temp.path().to_str().expect("utf8 temp path"),
+    ]);
+
+    let output_result = command.output().expect("s7 validate-closure runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("S7 pre-registration was not verified"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_switch_stats_manifest_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let mutated = with_domain_self_hash(
+        serde_json::json!({
+            "schema": "s7_switch_stats.v1",
+            "seed": 3,
+            "artifact_path": "seed-3-mutated",
+            "aggregation_rule": "SUM",
+            "bundle_self_hash": format!("sha256:{}", "4".repeat(64)),
+        }),
+        "bundle_self_hash",
+        S7_SWITCH_STATS_DOMAIN,
+    );
+    write_json(
+        temp.path(),
+        "experiments/S7/switch-stats/seed-3/switch-stats.json",
+        &mutated,
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_switch_stats self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_switch_stats_bundle_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/switch-stats/seed-2/switch-stats.json",
+        &serde_json::json!({
+            "schema": "s7_switch_stats.v1",
+            "seed": 2,
+            "artifact_path": "seed-2",
+            "aggregation_rule": "SUM",
+            "bundle_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_switch_stats_bundle self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_matched_bytes_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    let mismatched_hash = format!("sha256:{}", "5".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/dense-vs-moe/comparison.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_dense_vs_moe.v1",
+                "matched_bytes_pin": {"matched_bytes_self_hash": mismatched_hash.as_str()},
+                "comparison_self_hash": hash.as_str(),
+                "bytes_within_tolerance": true,
+                "aggregate_parity_verdict": "Pass-clean",
+                "per_seed": [
+                    {"seed": 0, "parity_verdict": "Pass"},
+                    {"seed": 1, "parity_verdict": "Pass"},
+                    {"seed": 2, "parity_verdict": "Pass"},
+                    {"seed": 3, "parity_verdict": "Pass"},
+                    {"seed": 4, "parity_verdict": "Pass"}
+                ],
+            }),
+            "comparison_self_hash",
+            S7_DENSE_VS_MOE_DOMAIN,
+        ),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid matched_bytes_self_hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_dense_vs_moe_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/dense-vs-moe/comparison.json",
+        &serde_json::json!({
+            "schema": "s7_dense_vs_moe.v1",
+            "matched_bytes_pin": {"matched_bytes_self_hash": hash.as_str()},
+            "comparison_self_hash": hash.as_str(),
+            "bytes_within_tolerance": true,
+            "aggregate_parity_verdict": "Pass-clean",
+            "per_seed": [
+                {"seed": 0, "parity_verdict": "Pass"},
+                {"seed": 1, "parity_verdict": "Pass"},
+                {"seed": 2, "parity_verdict": "Pass"},
+                {"seed": 3, "parity_verdict": "Pass"},
+                {"seed": 4, "parity_verdict": "Pass"}
+            ],
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_dense_vs_moe self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_mutated_run_log_completion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/runs/MoeTiny/seed-2/run-log.json",
+        &serde_json::json!({
+            "schema": "s7_run_log.v1",
+            "seed": 2,
+            "topology": "MoeTiny",
+            "completion": {"kind": "collapsed_at", "step": 9000},
+            "run_log_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("actual run-log completion is not completed"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_score_identity_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/scores/MoeTiny/seed-1/score.json",
+        &serde_json::json!({
+            "schema": "s7_score.v1",
+            "seed": 1,
+            "topology": "MoeTinyDenseMatched",
+            "checkpoint_sha": hash.as_str(),
+            "corpus_val_sha": hash.as_str(),
+            "chunk_size": 256,
+            "token_count": 100,
+            "log2_sum": 101.0,
+            "bpc": 1.01,
+            "score_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("score topology mismatch"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_self_consistent_wrong_schema() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/scores/MoeTiny/seed-0/score.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_score_future.v9",
+                "seed": 0,
+                "topology": "MoeTiny",
+                "checkpoint_sha": hash.as_str(),
+                "corpus_val_sha": hash.as_str(),
+                "chunk_size": 256,
+                "token_count": 100,
+                "log2_sum": 100.0,
+                "bpc": 1.0,
+                "score_self_hash": hash.as_str(),
+            }),
+            "score_self_hash",
+            S7_SCORE_DOMAIN,
+        ),
+    );
+    emit_report_for_test(temp.path());
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("s7_score schema must be s7_score.v1"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_noncanonical_artifact_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let score_path = temp
+        .path()
+        .join("experiments/S7/scores/MoeTiny/seed-0/score.json");
+    let score: Value = serde_json::from_slice(&std::fs::read(&score_path).expect("score reads"))
+        .expect("score parses");
+    std::fs::write(
+        &score_path,
+        serde_json::to_string_pretty(&score).expect("pretty score JSON"),
+    )
+    .expect("pretty score writes");
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("must use canonical JSON bytes"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_duplicate_artifact_json_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let score_path = temp
+        .path()
+        .join("experiments/S7/scores/MoeTiny/seed-0/score.json");
+    let score = std::fs::read_to_string(&score_path).expect("score reads");
+    let duplicate_schema = score.replacen(
+        "\"schema\":\"s7_score.v1\"",
+        "\"schema\":\"s7_score.v1\",\"schema\":\"s7_score.v1\"",
+        1,
+    );
+    assert_ne!(
+        score, duplicate_schema,
+        "score fixture must contain schema field"
+    );
+    std::fs::write(&score_path, duplicate_schema).expect("duplicate-key score writes");
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("duplicate JSON key"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_score_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/scores/MoeTiny/seed-4/score.json",
+        &serde_json::json!({
+            "schema": "s7_score.v1",
+            "seed": 4,
+            "topology": "MoeTiny",
+            "checkpoint_sha": hash.as_str(),
+            "corpus_val_sha": hash.as_str(),
+            "chunk_size": 256,
+            "token_count": 100,
+            "log2_sum": 104.0,
+            "bpc": 1.04,
+            "score_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_score self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_run_log_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/runs/MoeTinyDenseMatched/seed-0/run-log.json",
+        &serde_json::json!({
+            "schema": "s7_run_log.v1",
+            "seed": 0,
+            "topology": "MoeTinyDenseMatched",
+            "completion": {"kind": "completed"},
+            "run_log_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_run_log self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_sweep_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/router-collapse/seed-0/sweep.json",
+        &serde_json::json!({
+            "schema": "s7_router_collapse_sweep.v1",
+            "seed": 0,
+            "sweep_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_router_collapse_sweep self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_emulator_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/emulator-one-token/seed-0/MoeTiny/result.json",
+        &serde_json::json!({
+            "schema": "s7_emulator_one_token.v1",
+            "seed": 0,
+            "topology": "MoeTiny",
+            "emulator_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_emulator_one_token self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_optional_dense_emulator_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    write_dense_emulator_result(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/emulator-one-token/seed-0/MoeTinyDenseMatched/result.json",
+        &serde_json::json!({
+            "schema": "s7_emulator_one_token.v1",
+            "seed": 0,
+            "topology": "MoeTinyDenseMatched",
+            "emulator_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("invalid s7_emulator_one_token self-hash"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_validate_closure_rejects_frontier_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/frontier/frontier.json",
+        &serde_json::json!({
+            "schema": "s7_frontier.v1",
+            "pareto_verdict": "MoE-dominates",
+            "frontier_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_frontier self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_burn_grad_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/burn-grad-smoke/expert_block_qat.json",
+        &serde_json::json!({
+            "schema": "s7_burn_grad_smoke.v1",
+            "fixture_input_sha": hash.as_str(),
+            "smoke_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_burn_grad_smoke self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_oracle_routed_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/oracle-routed/seed-0/oracle.json",
+        &serde_json::json!({
+            "schema": "s7_oracle_routed.v1",
+            "seed": 0,
+            "topology": "MoeTiny",
+            "oracle_self_hash": hash.as_str(),
+        }),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_oracle_routed self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_passclean_parity_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        temp.path(),
+        "experiments/S7/dense-vs-moe/comparison.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_dense_vs_moe.v1",
+                "matched_bytes_pin": {"matched_bytes_self_hash": hash.as_str()},
+                "comparison_self_hash": hash.as_str(),
+                "bytes_within_tolerance": true,
+                "aggregate_parity_verdict": "Fail-parity",
+                "per_seed": [
+                    {"seed": 0, "parity_verdict": "Pass"},
+                    {"seed": 1, "parity_verdict": "Pass"},
+                    {"seed": 2, "parity_verdict": "Fail"},
+                    {"seed": 3, "parity_verdict": "Pass"},
+                    {"seed": 4, "parity_verdict": "Pass"}
+                ],
+            }),
+            "comparison_self_hash",
+            S7_DENSE_VS_MOE_DOMAIN,
+        ),
+    );
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("PassClean outcome conflicts with dense-vs-MoE parity verdict")
+    );
+}
+
+#[test]
+fn s7_validate_closure_allows_generated_at_hash_exclusion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    let emitted_hash = emit_report_for_test(temp.path());
+    rewrite_report(temp.path(), |text| {
+        text.replace("2026-06-25T00:00:00Z", "2099-01-01T00:00:00Z")
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        output_result.status.success(),
+        "s7 validate-closure failed after generated_at mutation:\n{}",
+        command_output(&output_result)
+    );
+    assert_eq!(single_stdout_hash(&output_result), emitted_hash);
+}
+
+#[test]
+fn s7_validate_closure_rejects_report_body_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report(temp.path(), |text| {
+        text.replace("No falsification rule fired", "A falsification rule fired")
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("invalid s7_report self-hash"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_report_yaml_anchor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report(temp.path(), |text| {
+        text.replace("decision: ProceedToS8", "decision: &decision ProceedToS8")
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("unsupported YAML anchor/alias"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_report_flow_collection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report(temp.path(), |text| {
+        text.replace("decision: ProceedToS8", "decision: [ProceedToS8]")
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(command_output(&output_result).contains("unsupported YAML flow collection"));
+}
+
+#[test]
+fn s7_validate_closure_rejects_missing_report_body_heading() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report_and_refresh_hash(temp.path(), |text| {
+        text.replace("## Reproducibility statement", "## Reproducibility notes")
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("missing body heading: ## Reproducibility statement")
+    );
+}
+
+#[test]
+fn s7_validate_closure_rejects_missing_explicit_hypothesis_verdict() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report_and_refresh_hash(temp.path(), |text| {
+        text.replace("H10 Confirmed", "Emulator route Confirmed")
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("missing explicit H10 hypothesis verdict"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_validate_closure_rejects_prior_gate_placeholder() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report_and_refresh_hash(temp.path(), |text| {
+        text.replace("H6 Confirmed", "H6 NotEvaluatedDueToPriorGate")
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("closure-candidate reports must not use NotEvaluatedDueToPriorGate"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_validate_closure_rejects_extra_per_seed_report_row() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report_and_refresh_hash(temp.path(), duplicate_first_report_row);
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("per_seed_artifacts must contain 10 rows, observed 11"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_validate_closure_rejects_wrong_report_schema() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    rewrite_report_and_refresh_hash(temp.path(), |text| {
+        text.replace(
+            "schema: \"s7_report.v1\"",
+            "schema: \"s7_report_future.v9\"",
+        )
+    });
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("schema must be \"s7_report.v1\""),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_validate_closure_rejects_uppercase_prediction_commit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let old = format!("predictions_commit: \"{}\"", "b".repeat(40));
+    let new = format!("predictions_commit: \"{}\"", "B".repeat(40));
+    rewrite_report_and_refresh_hash(temp.path(), |text| text.replace(&old, &new));
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("predictions_commit must be a 40-hex git commit id"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_validate_closure_rejects_uppercase_prediction_section_hash() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    emit_report_for_test(temp.path());
+    let old = format!("predictions_section_hash: \"sha256:{}\"", "2".repeat(64));
+    let new = format!("predictions_section_hash: \"sha256:{}\"", "A".repeat(64));
+    rewrite_report_and_refresh_hash(temp.path(), |text| text.replace(&old, &new));
+
+    let output_result = validate_closure_for_test(temp.path());
+    assert!(
+        !output_result.status.success(),
+        "s7 validate-closure unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("predictions_section_hash must be a non-null sha256 hash"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_emit_report_fails_closed_when_required_artifact_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_report_packet(temp.path());
+    std::fs::remove_file(temp.path().join("experiments/S7/frontier/frontier.json"))
+        .expect("frontier artifact removed");
+    let rfc_revision = "a".repeat(40);
+    let predictions_section_hash = format!("sha256:{}", "2".repeat(64));
+    let predictions_commit = "b".repeat(40);
+    let first_result_commit = "c".repeat(40);
+
+    let mut command = gbf();
+    command.current_dir(workspace_root()).args([
+        "--log-level",
+        "off",
+        "s7",
+        "emit-report",
+        "--root",
+        temp.path().to_str().expect("utf8 temp path"),
+        "--s7-outcome",
+        "PassClean",
+        "--rfc-revision",
+        rfc_revision.as_str(),
+        "--predictions-section-hash",
+        predictions_section_hash.as_str(),
+        "--predictions-commit",
+        predictions_commit.as_str(),
+        "--first-result-commit",
+        first_result_commit.as_str(),
+    ]);
+
+    let output_result = command.output().expect("s7 emit-report runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 emit-report unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(
+        output_result.stdout.is_empty(),
+        "failed emit-report must not print a hash:\n{}",
+        command_output(&output_result)
+    );
+    let combined = command_output(&output_result);
+    assert!(combined.contains("S7 report emitter failed"));
+    assert!(combined.contains("missing artifact:"));
+    assert!(combined.contains("experiments/S7/frontier/frontier.json"));
+}
+
+#[test]
+fn s7_cli_feature_forwarding_is_registered() {
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("gbf-cli Cargo.toml reads");
+
+    assert!(
+        manifest.contains("s7 = [\"gbf-experiments/s7\"]"),
+        "gbf-cli must forward the base s7 feature"
+    );
+    assert!(
+        manifest.contains("s7-moe = [\"s7\", \"gbf-experiments/s7-moe\"]"),
+        "gbf-cli must forward s7-moe through gbf-experiments"
+    );
+    assert!(
+        manifest.contains("s7-dense-matched = [\"s7\", \"gbf-experiments/s7-dense-matched\"]"),
+        "gbf-cli must forward s7-dense-matched through gbf-experiments"
+    );
+}
+
+#[test]
+fn s7_split_features_are_mutually_exclusive() {
+    let output = ProcessCommand::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args([
+            "check",
+            "-p",
+            "gbf-cli",
+            "--no-default-features",
+            "--features",
+            "s7-moe,s7-dense-matched",
+        ])
+        .env("CARGO_TARGET_DIR", cargo_target_dir())
+        .output()
+        .expect("cargo check must run");
+
+    assert!(
+        !output.status.success(),
+        "gbf-cli s7-moe+s7-dense-matched unexpectedly compiled"
+    );
+    let combined = command_output(&output);
+    assert!(
+        combined.contains(
+            "S7 feature mutex violated: s7-moe and s7-dense-matched must build in separate replay passes"
+        ),
+        "S7 mutex probe failed without stable diagnostic:\n{combined}"
+    );
+}
+
+fn expected_feature_gate() -> &'static str {
+    if cfg!(feature = "s7-moe") {
+        "s7-moe"
+    } else if cfg!(feature = "s7-dense-matched") {
+        "s7-dense-matched"
+    } else {
+        "s7"
+    }
+}
+
+fn expected_topology() -> &'static str {
+    if cfg!(feature = "s7-dense-matched") {
+        "MoeTinyDenseMatched"
+    } else {
+        "MoeTiny"
+    }
+}
+
+fn assert_sha256(value: &Value) {
+    let text = value.as_str().expect("sha string");
+    assert!(
+        text.strip_prefix("sha256:")
+            .is_some_and(|hex| hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())),
+        "expected sha256 hash, got {text:?}"
+    );
+}
+
+fn with_domain_self_hash(
+    mut payload: Value,
+    field: &'static str,
+    domain: DomainHash<'static>,
+) -> Value {
+    {
+        let object = payload.as_object_mut().expect("payload object");
+        object.remove(field);
+    }
+    let canonical = CanonicalJson::value_to_vec(&payload).expect("canonical JSON");
+    let hash = domain
+        .hash_canonical_bytes(&canonical)
+        .expect("domain self-hash");
+    payload
+        .as_object_mut()
+        .expect("payload object")
+        .insert(field.to_owned(), Value::String(hash.to_string()));
+    payload
+}
+
+fn emit_report_for_test(root: &Path) -> String {
+    let rfc_revision = "a".repeat(40);
+    let predictions_section_hash = format!("sha256:{}", "2".repeat(64));
+    let predictions_commit = "b".repeat(40);
+    let first_result_commit = "c".repeat(40);
+
+    let mut command = gbf();
+    command.current_dir(workspace_root()).args([
+        "--log-level",
+        "off",
+        "s7",
+        "emit-report",
+        "--root",
+        root.to_str().expect("utf8 root path"),
+        "--s7-outcome",
+        "PassClean",
+        "--rfc-revision",
+        rfc_revision.as_str(),
+        "--predictions-section-hash",
+        predictions_section_hash.as_str(),
+        "--predictions-commit",
+        predictions_commit.as_str(),
+        "--first-result-commit",
+        first_result_commit.as_str(),
+        "--generated-at",
+        "2026-06-25T00:00:00Z",
+    ]);
+    let output_result = command.output().expect("s7 emit-report runs");
+    assert!(
+        output_result.status.success(),
+        "s7 emit-report failed:\n{}",
+        command_output(&output_result)
+    );
+    single_stdout_hash(&output_result)
+}
+
+fn validate_closure_for_test(root: &Path) -> Output {
+    let mut command = gbf();
+    command.current_dir(workspace_root()).args([
+        "--log-level",
+        "off",
+        "s7",
+        "validate-closure",
+        "--root",
+        root.to_str().expect("utf8 root path"),
+        "--predictions-verified",
+    ]);
+    command.output().expect("s7 validate-closure runs")
+}
+
+fn rewrite_report(root: &Path, rewrite: impl FnOnce(String) -> String) {
+    let path = root.join("docs/experiments/S7-report.md");
+    let text = std::fs::read_to_string(&path).expect("report reads");
+    std::fs::write(&path, rewrite(text)).expect("report writes");
+}
+
+fn rewrite_report_and_refresh_hash(root: &Path, rewrite: impl FnOnce(String) -> String) {
+    let path = root.join("docs/experiments/S7-report.md");
+    let text = std::fs::read_to_string(&path).expect("report reads");
+    let rewritten = rewrite(text);
+    let normalized = normalize_report_for_test_hash(&rewritten);
+    let hash = S7_REPORT_MARKDOWN_DOMAIN
+        .hash_canonical_bytes(normalized.as_bytes())
+        .expect("domain report self-hash");
+    let mut refreshed = String::with_capacity(rewritten.len());
+    let mut report_hash_seen = false;
+    for line in rewritten.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        if !report_hash_seen && body.starts_with("report_self_hash:") {
+            refreshed.push_str(&format!("report_self_hash: \"{hash}\""));
+            refreshed.push_str(newline);
+            report_hash_seen = true;
+        } else {
+            refreshed.push_str(body);
+            refreshed.push_str(newline);
+        }
+    }
+    assert!(report_hash_seen, "report_self_hash line missing");
+    std::fs::write(&path, refreshed).expect("report writes");
+}
+
+fn normalize_report_for_test_hash(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut report_hash_seen = false;
+    let mut generated_at_seen = false;
+    for line in text.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        if !report_hash_seen && body.starts_with("report_self_hash:") {
+            normalized.push_str("report_self_hash: null");
+            normalized.push_str(newline);
+            report_hash_seen = true;
+        } else if !generated_at_seen && body.starts_with("generated_at:") {
+            normalized.push_str("generated_at: null");
+            normalized.push_str(newline);
+            generated_at_seen = true;
+        } else {
+            normalized.push_str(body);
+            normalized.push_str(newline);
+        }
+    }
+    assert!(report_hash_seen, "report_self_hash line missing");
+    normalized
+}
+
+fn duplicate_first_report_row(text: String) -> String {
+    let row_start = text
+        .find("  - seed: 0\n    topology: \"MoeTiny\"\n")
+        .expect("first report row");
+    let next_row = text[row_start..]
+        .find("  - seed: 1\n")
+        .expect("second report row");
+    let insert_at = row_start + next_row;
+    let row = &text[row_start..insert_at];
+    let mut duplicated = String::with_capacity(text.len() + row.len());
+    duplicated.push_str(&text[..insert_at]);
+    duplicated.push_str(row);
+    duplicated.push_str(&text[insert_at..]);
+    duplicated
+}
+
+fn write_dense_emulator_result(root: &Path) {
+    let hash = format!("sha256:{}", "1".repeat(64));
+    write_json(
+        root,
+        "experiments/S7/emulator-one-token/seed-0/MoeTinyDenseMatched/result.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_emulator_one_token.v1",
+                "seed": 0,
+                "topology": "MoeTinyDenseMatched",
+                "emulator_self_hash": hash.as_str(),
+            }),
+            "emulator_self_hash",
+            S7_EMULATOR_ONE_TOKEN_DOMAIN,
+        ),
+    );
+}
+
+fn write_minimal_report_packet(root: &Path) {
+    let hash = format!("sha256:{}", "1".repeat(64));
+    for topology in ["MoeTiny", "MoeTinyDenseMatched"] {
+        for seed in 0..5 {
+            write_json(
+                root,
+                &format!("experiments/S7/runs/{topology}/seed-{seed}/run-log.json"),
+                &with_domain_self_hash(
+                    serde_json::json!({
+                        "schema": "s7_run_log.v1",
+                        "seed": seed,
+                        "topology": topology,
+                        "completion": {"kind": "completed"},
+                        "run_log_self_hash": hash.as_str(),
+                    }),
+                    "run_log_self_hash",
+                    S7_RUN_LOG_DOMAIN,
+                ),
+            );
+            let bpc = 1.0 + f64::from(seed) / 100.0;
+            write_json(
+                root,
+                &format!("experiments/S7/scores/{topology}/seed-{seed}/score.json"),
+                &with_domain_self_hash(
+                    serde_json::json!({
+                        "schema": "s7_score.v1",
+                        "seed": seed,
+                        "topology": topology,
+                        "checkpoint_sha": hash.as_str(),
+                        "corpus_val_sha": hash.as_str(),
+                        "chunk_size": 256,
+                        "token_count": 100,
+                        "log2_sum": bpc * 100.0,
+                        "bpc": bpc,
+                        "score_self_hash": hash.as_str(),
+                    }),
+                    "score_self_hash",
+                    S7_SCORE_DOMAIN,
+                ),
+            );
+        }
+    }
+    for seed in 0..5 {
+        write_json(
+            root,
+            &format!("experiments/S7/switch-stats/seed-{seed}/switch-stats.json"),
+            &with_domain_self_hash(
+                serde_json::json!({
+                    "schema": "s7_switch_stats.v1",
+                    "seed": seed,
+                    "artifact_path": format!("seed-{seed}"),
+                    "aggregation_rule": "SUM",
+                    "bundle_self_hash": hash.as_str(),
+                }),
+                "bundle_self_hash",
+                S7_SWITCH_STATS_DOMAIN,
+            ),
+        );
+    }
+    write_json(
+        root,
+        "experiments/S7/dense-vs-moe/comparison.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_dense_vs_moe.v1",
+                "matched_bytes_pin": {"matched_bytes_self_hash": hash.as_str()},
+                "comparison_self_hash": hash.as_str(),
+                "bytes_within_tolerance": true,
+                "aggregate_parity_verdict": "Pass-clean",
+                "per_seed": [
+                    {"seed": 0, "parity_verdict": "Pass"},
+                    {"seed": 1, "parity_verdict": "Pass"},
+                    {"seed": 2, "parity_verdict": "Pass"},
+                    {"seed": 3, "parity_verdict": "Pass"},
+                    {"seed": 4, "parity_verdict": "Pass"}
+                ],
+            }),
+            "comparison_self_hash",
+            S7_DENSE_VS_MOE_DOMAIN,
+        ),
+    );
+    write_json(
+        root,
+        "experiments/S7/router-collapse/seed-0/sweep.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_router_collapse_sweep.v1",
+                "seed": 0,
+                "sweep_self_hash": hash.as_str(),
+            }),
+            "sweep_self_hash",
+            S7_ROUTER_COLLAPSE_SWEEP_DOMAIN,
+        ),
+    );
+    write_json(
+        root,
+        "experiments/S7/frontier/frontier.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_frontier.v1",
+                "frontier_self_hash": hash.as_str(),
+            }),
+            "frontier_self_hash",
+            S7_FRONTIER_DOMAIN,
+        ),
+    );
+    write_json(
+        root,
+        "experiments/S7/burn-grad-smoke/expert_block_qat.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_burn_grad_smoke.v1",
+                "smoke_self_hash": hash.as_str(),
+            }),
+            "smoke_self_hash",
+            S7_BURN_GRAD_SMOKE_DOMAIN,
+        ),
+    );
+    write_json(
+        root,
+        "experiments/S7/oracle-routed/seed-0/oracle.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_oracle_routed.v1",
+                "seed": 0,
+                "topology": "MoeTiny",
+                "oracle_self_hash": hash.as_str(),
+            }),
+            "oracle_self_hash",
+            S7_ORACLE_ROUTED_DOMAIN,
+        ),
+    );
+    write_json(
+        root,
+        "experiments/S7/emulator-one-token/seed-0/MoeTiny/result.json",
+        &with_domain_self_hash(
+            serde_json::json!({
+                "schema": "s7_emulator_one_token.v1",
+                "seed": 0,
+                "topology": "MoeTiny",
+                "emulator_self_hash": hash.as_str(),
+            }),
+            "emulator_self_hash",
+            S7_EMULATOR_ONE_TOKEN_DOMAIN,
+        ),
+    );
+}
+
+fn write_json(root: &Path, rel_path: &str, payload: &Value) {
+    let path = root.join(rel_path);
+    std::fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact dir");
+    let mut canonical = CanonicalJson::value_to_vec(payload).expect("canonical json payload");
+    canonical.push(b'\n');
+    std::fs::write(&path, canonical).expect("artifact writes");
+}
+
+fn single_stdout_hash(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must be one pipeable line:\n{stdout}"
+    );
+    let line = lines[0];
+    assert!(
+        line.strip_prefix("sha256:")
+            .is_some_and(|hex| hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())),
+        "stdout must be a sha256 self-hash line, got {line:?}"
+    );
+    line.to_owned()
+}
+
+fn cargo_target_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target"))
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("gbf-cli must live under workspace root")
+        .to_path_buf()
+}
+
+fn command_output(output: &Output) -> String {
+    format!(
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}

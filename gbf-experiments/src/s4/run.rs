@@ -58,6 +58,12 @@ pub struct S4ContinuationInitInputs {
     pub deployed_tensor_payload_sha: Hash256,
     /// Canonical tensor payload SHA for FP/QAT shadow weights loaded from c_TS.
     pub fp_shadow_tensor_payload_sha: Hash256,
+    /// AdamW first-moment payload from an earlier corpus, if a caller tries to
+    /// supply one. D9 rejects inherited optimizer state at the boundary.
+    pub inherited_adamw_first_moment_payload_sha: Option<Hash256>,
+    /// AdamW second-moment payload from an earlier corpus, if a caller tries to
+    /// supply one. D9 rejects inherited optimizer state at the boundary.
+    pub inherited_adamw_second_moment_payload_sha: Option<Hash256>,
     /// Self-hash of the promotion gate that accepted c_TS.
     pub promotion_gate_self_hash: Hash256,
 }
@@ -129,6 +135,14 @@ pub fn initialize_gutenberg_continuation(
     validate_nonzero_initial_hash(
         "fp_shadow_tensor_payload_sha",
         inputs.fp_shadow_tensor_payload_sha,
+    )?;
+    validate_absent_inherited_optimizer_state(
+        "inherited_adamw_first_moment_payload_sha",
+        inputs.inherited_adamw_first_moment_payload_sha,
+    )?;
+    validate_absent_inherited_optimizer_state(
+        "inherited_adamw_second_moment_payload_sha",
+        inputs.inherited_adamw_second_moment_payload_sha,
     )?;
     validate_nonzero_initial_hash("promotion_gate_self_hash", inputs.promotion_gate_self_hash)?;
 
@@ -223,6 +237,17 @@ fn validate_nonzero_initial_hash(
 ) -> Result<(), S4RunScheduleError> {
     if hash == Hash256::ZERO {
         Err(S4RunScheduleError::MissingInitialHash { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_absent_inherited_optimizer_state(
+    field: &'static str,
+    hash: Option<Hash256>,
+) -> Result<(), S4RunScheduleError> {
+    if hash.is_some() {
+        Err(S4RunScheduleError::InheritedOptimizerStateRejected { field })
     } else {
         Ok(())
     }
@@ -541,6 +566,12 @@ pub enum S4RunScheduleError {
         /// Missing or zero hash field.
         field: &'static str,
     },
+    /// D9 warm-weight/cold-optimizer initialization rejects inherited AdamW
+    /// moment payloads instead of silently warm-starting optimizer state.
+    InheritedOptimizerStateRejected {
+        /// Rejected inherited optimizer-state field.
+        field: &'static str,
+    },
 }
 
 impl S4RunScheduleError {
@@ -557,6 +588,7 @@ impl S4RunScheduleError {
             Self::DuplicateSeed { .. } => "S4DuplicateSeed",
             Self::OptimizerStepBudgetExceeded { .. } => "S4OptimizerStepBudgetExceeded",
             Self::MissingInitialHash { .. } => "S4MissingInitialHash",
+            Self::InheritedOptimizerStateRejected { .. } => "S4InheritedOptimizerStateRejected",
         }
     }
 }
@@ -590,6 +622,10 @@ impl fmt::Display for S4RunScheduleError {
             Self::MissingInitialHash { field } => {
                 write!(f, "S4 D9 initialization field {field} must be non-zero")
             }
+            Self::InheritedOptimizerStateRejected { field } => write!(
+                f,
+                "S4 D9 warm-weight cold-optimizer initialization rejects inherited optimizer field {field}"
+            ),
         }
     }
 }

@@ -3,7 +3,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use gbf_runtime::{
-    compute_runtime_nucleus_hash, demo_bank0_artifacts, runtime_nucleus_section_sizes,
+    compute_runtime_nucleus_hash, demo_bank0_artifacts,
+    runtime_chrome_budget_emission_from_bank0_and_layout, runtime_nucleus_section_sizes,
+    write_runtime_chrome_budget_json,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -15,8 +17,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let artifacts = demo_bank0_artifacts()?;
     let hash = compute_runtime_nucleus_hash(&artifacts.bank0);
+    let budget_emission =
+        runtime_chrome_budget_emission_from_bank0_and_layout(&artifacts.bank0, &artifacts.layout)?;
     fs::write(out_dir.join("demo_bank0_rom.gb"), &artifacts.rom)?;
     fs::write(out_dir.join("demo_bank0_rom.sym"), &artifacts.sym)?;
+    write_runtime_chrome_budget_json(&out_dir, &budget_emission.budget)?;
     fs::write(
         out_dir.join("runtime_nucleus_hash.txt"),
         format!("{hash}\n"),

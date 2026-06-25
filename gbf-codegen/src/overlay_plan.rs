@@ -7,6 +7,8 @@ use gbf_foundation::{
     CanonicalJsonError, DomainHash, EvidenceRef, Hash256, KernelSpecId, SemVer, TargetProfileId,
     canonical_json_bytes_omitting_fields, self_hash_omitting_fields,
 };
+#[cfg(test)]
+use gbf_policy::WramReserved;
 use gbf_policy::{
     DiagnosticSeverity, OverlayPlanDiagnosticCode, OverlayPlanDiagnosticProvenance,
     RuntimeChromeBudget, RuntimeMode, ValidationCode, ValidationDetail, ValidationDiagnostic,
@@ -433,7 +435,7 @@ pub fn build_overlay_plan(input: &OverlayPlanInputs) -> OverlayPlanOutput {
 
     if members.is_empty() {
         if input.policy.require_explicit_zero_reservation
-            && input.runtime_chrome_budget.wram_reserved > 0
+            && input.runtime_chrome_budget.wram_reserved.overlay > 0
         {
             return failed_output(
                 input.input_identity.clone(),
@@ -442,7 +444,7 @@ pub fn build_overlay_plan(input: &OverlayPlanInputs) -> OverlayPlanOutput {
                     OverlayPlanDiagnosticCode::OverlayNoCandidatesButReservationDeclared,
                     OverlayPlanDiagnosticProvenance::Reservation {
                         total_bytes: 0,
-                        cap_bytes: u32::from(input.runtime_chrome_budget.wram_reserved),
+                        cap_bytes: u32::from(input.runtime_chrome_budget.wram_reserved.overlay),
                     },
                 )],
             );
@@ -482,7 +484,7 @@ pub fn build_overlay_plan(input: &OverlayPlanInputs) -> OverlayPlanOutput {
             )],
         );
     }
-    if max_payload > u32::from(input.runtime_chrome_budget.wram_reserved) {
+    if max_payload > u32::from(input.runtime_chrome_budget.wram_reserved.overlay) {
         return failed_output(
             input.input_identity.clone(),
             input.audit_parents,
@@ -490,7 +492,7 @@ pub fn build_overlay_plan(input: &OverlayPlanInputs) -> OverlayPlanOutput {
                 OverlayPlanDiagnosticCode::OverlayWramOverlayCapExceeded,
                 OverlayPlanDiagnosticProvenance::Reservation {
                     total_bytes: max_payload,
-                    cap_bytes: u32::from(input.runtime_chrome_budget.wram_reserved),
+                    cap_bytes: u32::from(input.runtime_chrome_budget.wram_reserved.overlay),
                 },
             )],
         );
@@ -944,7 +946,7 @@ fn succeeded_output(
 
     let reservation = compute_reservation(
         &regions,
-        input.runtime_chrome_budget.wram_reserved,
+        input.runtime_chrome_budget.wram_reserved.overlay,
         input.target_profile.wram_overlay_region_max_bytes,
     );
     let summary = OverlayPlanSummary {
@@ -1217,14 +1219,14 @@ pub fn validate_overlay_plan_product_invariants(
             total.saturating_add(u32::from(entry.bytes))
         });
     if u32::from(plan.reservation.total_bytes) != reservation_total
-        || reservation_total > u32::from(input.runtime_chrome_budget.wram_reserved)
-        || plan.reservation.cap_bytes != input.runtime_chrome_budget.wram_reserved
+        || reservation_total > u32::from(input.runtime_chrome_budget.wram_reserved.overlay)
+        || plan.reservation.cap_bytes != input.runtime_chrome_budget.wram_reserved.overlay
     {
         diagnostics.push(diagnostic(
             OverlayPlanDiagnosticCode::OverlayWramOverlayCapExceeded,
             OverlayPlanDiagnosticProvenance::Reservation {
                 total_bytes: reservation_total,
-                cap_bytes: u32::from(input.runtime_chrome_budget.wram_reserved),
+                cap_bytes: u32::from(input.runtime_chrome_budget.wram_reserved.overlay),
             },
         ));
     }
@@ -1444,7 +1446,8 @@ mod tests {
 
         let mut wram_cap = fixture_inputs(vec![resident_kernel("matvec", 1025)]);
         wram_cap.target_profile.wram_overlay_region_max_bytes = 2048;
-        wram_cap.runtime_chrome_budget.wram_reserved = 1024;
+        wram_cap.runtime_chrome_budget.wram_reserved =
+            WramReserved::new(1024, 4096, 1024).expect("valid WRAM reservation");
         assert_has_code(
             &build_overlay_plan(&wram_cap),
             OverlayPlanDiagnosticCode::OverlayWramOverlayCapExceeded,
@@ -1678,7 +1681,8 @@ mod tests {
 
         let mut wram_cap = fixture_inputs(vec![resident_kernel("matvec", 1025)]);
         wram_cap.target_profile.wram_overlay_region_max_bytes = 2048;
-        wram_cap.runtime_chrome_budget.wram_reserved = 1024;
+        wram_cap.runtime_chrome_budget.wram_reserved =
+            WramReserved::new(1024, 4096, 1024).expect("valid WRAM reservation");
         collect_output_codes(&mut codes, &build_overlay_plan(&wram_cap));
 
         let mut region_overflow = fixture_inputs(vec![resident_kernel("matvec", 513)]);
@@ -1961,7 +1965,8 @@ mod tests {
             OverlayRejectScenario::WramOverlayCapExceeded => {
                 let mut input = fixture_inputs(vec![resident_kernel("matvec", 1025)]);
                 input.target_profile.wram_overlay_region_max_bytes = 2048;
-                input.runtime_chrome_budget.wram_reserved = 1024;
+                input.runtime_chrome_budget.wram_reserved =
+                    WramReserved::new(1024, 4096, 1024).expect("valid WRAM reservation");
                 build_overlay_plan(&input).diagnostics
             }
             OverlayRejectScenario::RegionPayloadExceedsRegionCap => {
@@ -2161,14 +2166,21 @@ mod tests {
                 target: TargetProfileId::from("dmg-mbc5"),
                 profile: CompileProfileId::from("Bringup"),
                 runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(10)),
-                rom_slots: Vec::<RomBudgetSlot>::new(),
+                reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
+                rom_slots: vec![RomBudgetSlot {
+                    id: gbf_foundation::BudgetSlotId::new(0),
+                    class: gbf_policy::BudgetSlotClass::CommonBank,
+                    usable_bytes: 16 * 1024,
+                    reserved_slack: 128,
+                    placement_caps: BTreeSet::from([gbf_policy::PlacementProfile::Budgeted]),
+                }],
                 memory_caps: RuntimeMemoryCapSection {
                     wram_usable_bytes: 8 * 1024,
                     sram_usable_bytes: 32 * 1024,
                     hram_usable_bytes: 127,
                     source_target_profile_hash: hash(11),
                 },
-                wram_reserved: 1024,
+                wram_reserved: WramReserved::new(1024, 4096, 1024).expect("valid WRAM reservation"),
                 sram_reserved: 512,
             },
             target_profile: OverlayTargetProfileSummary {

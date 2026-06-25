@@ -3,11 +3,13 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
+use gbf_abi::RuntimeShellModule;
 use gbf_foundation::{
     BudgetSlotId, CompileProfileId, ExpertId, FieldPath, Hash256, KernelSpecId, LayerId,
     TargetProfileId,
 };
 pub use gbf_policy::StaticFitInterpretation;
+use gbf_policy::WramReserved;
 use gbf_policy::{
     BudgetFailure, BudgetSlotClass, DiagnosticSeverity, EvidenceRef, PlacementProfile,
     ReductionSiteId, RomBudgetSlot, RuntimeChromeBudget, RuntimeNucleusHash,
@@ -106,9 +108,10 @@ pub struct RuntimeChromeBudgetSection {
     pub target: TargetProfileId,
     pub profile: CompileProfileId,
     pub runtime_nucleus_hash: RuntimeNucleusHash,
+    pub reference_shell_modules: BTreeSet<RuntimeShellModule>,
     pub rom_slots: Vec<RomBudgetSlotEntry>,
     pub memory_caps: RuntimeMemoryCapSection,
-    pub wram_reserved: u16,
+    pub wram_reserved: WramReserved,
     pub sram_reserved: u32,
 }
 
@@ -124,6 +127,7 @@ impl From<&RuntimeChromeBudget> for RuntimeChromeBudgetSection {
             target: value.target.clone(),
             profile: value.profile.clone(),
             runtime_nucleus_hash: value.runtime_nucleus_hash,
+            reference_shell_modules: value.reference_shell_modules.clone(),
             rom_slots,
             memory_caps: RuntimeMemoryCapSection::from(&value.memory_caps),
             wram_reserved: value.wram_reserved,
@@ -1252,6 +1256,7 @@ mod tests {
             target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
             profile: CompileProfileId::from("Bringup"),
             runtime_nucleus_hash: RuntimeNucleusHash::real(hash(5)),
+            reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
             rom_slots: vec![
                 RomBudgetSlotEntry {
                     id: BudgetSlotId::new(1),
@@ -1274,7 +1279,7 @@ mod tests {
                 hram_usable_bytes: 127,
                 source_target_profile_hash: hash(4),
             },
-            wram_reserved: 0,
+            wram_reserved: WramReserved::new(0, 4096, 0).expect("valid WRAM reservation"),
             sram_reserved: 0,
         }
     }

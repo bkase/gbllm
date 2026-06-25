@@ -176,6 +176,14 @@ impl ModelSizeProfile {
     }
 
     #[must_use]
+    pub const fn s7_router_rank(self) -> Option<u8> {
+        match self {
+            Self::MoeTiny { n_experts } => Some(n_experts.get()),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn expert_byte_cost(self) -> ByteCost {
         let d_model = u32::from(self.d_model());
         let d_ff = u32::from(self.d_ff());
@@ -409,6 +417,16 @@ mod tests {
         let profile = ModelSizeProfile::moe_tiny(4).expect("four experts is supported");
 
         assert_eq!(profile.n_experts(), 4);
+    }
+
+    #[test]
+    fn moe_tiny_pins_s7_router_rank_to_expert_count() {
+        let production = ModelSizeProfile::moe_tiny(4).expect("production MoeTiny is supported");
+        let ablation = ModelSizeProfile::moe_tiny(2).expect("ablation MoeTiny is supported");
+
+        assert_eq!(production.s7_router_rank(), Some(4));
+        assert_eq!(ablation.s7_router_rank(), Some(2));
+        assert_eq!(ModelSizeProfile::toy0().s7_router_rank(), None);
     }
 
     #[test]

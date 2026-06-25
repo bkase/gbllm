@@ -1,0 +1,87 @@
+name: S7 PR Gates
+
+on:
+  pull_request:
+    paths:
+      - "gbf-experiments/**"
+      - "gbf-train/**"
+      - "gbf-policy/**"
+      - "gbf-artifact/**"
+      - "gbf-foundation/**"
+      - "gbf-model/**"
+      - "gbf-test/**"
+      - "gbf-cli/**"
+      - "fixtures/preregistration/s7.toml"
+      - "history/rfcs/F-S7-moe-beats-dense.md"
+      - "experiments/S7/**"
+      - "docs/experiments/S7-report.md"
+      - "docs/review/f-s7/**"
+      - "scripts/s7_*.sh"
+      - "scripts/review/f-s7/**"
+      - "scripts/tests/s7_*.sh"
+      - ".github/workflows/s7-*.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: s7-pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  s7-pr:
+    name: S7 closure substrate gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: s7-pr-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            s7-pr-cargo-${{ runner.os }}-
+
+      - name: Run S7 closure substrate and validator fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/s7-pr
+
+          run_capture_log() {
+            local name="$1"
+            shift
+            "$@" \
+              > >(tee "artifacts/s7-pr/${name}.stdout") \
+              2> >(tee "artifacts/s7-pr/${name}.stderr.log" >&2)
+          }
+
+          run_capture_log s7-verify-packet-substrate scripts/review/f-s7/verify-packet.sh --substrate-only
+          run_capture_log s7-verify-packet-self-test scripts/tests/s7_verify_packet_test.sh
+          run_capture_log s7-preregistration scripts/tests/s7_preregistration_check_test.sh
+          run_capture_log s7-preregistration-pin scripts/tests/s7_preregistration_pin_test.sh
+          run_capture_log s7-validate-artifacts scripts/tests/s7_validate_artifacts_test.sh
+          run_capture_log s7-validate-report scripts/tests/s7_validate_report_test.sh
+          run_capture_log s7-validate-reviews scripts/tests/s7_validate_reviews_test.sh
+
+      - name: Upload S7 PR artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s7-pr-artifacts
+          path: |
+            artifacts/s7-pr/**/*.stdout
+            artifacts/s7-pr/**/*.stderr.log
+            /tmp/s7-*.out
+          if-no-files-found: warn
+          retention-days: 14

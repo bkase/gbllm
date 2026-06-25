@@ -199,6 +199,14 @@ run_gate() {
     instrumented_json="$(json_number_array "${instrumented_samples[@]}")"
     governor="$(cpu_governor_control)"
 
+    local gate_output="" gate_status=0
+    if ((median_instrumented_ns >= median_baseline_ns)); then
+        gate_output="$("$tmpdir/instrumented" \
+            --gate \
+            --baseline-ns "$median_baseline_ns" \
+            --instrumented-ns "$median_instrumented_ns")" || gate_status=$?
+    fi
+
     python3 - \
         "$median_baseline_ns" \
         "$median_instrumented_ns" \
@@ -209,7 +217,9 @@ run_gate() {
         "$MEASURED_ITERATIONS" \
         "$governor" \
         "$baseline_json" \
-        "$instrumented_json" <<'PY'
+        "$instrumented_json" \
+        "$gate_output" \
+        "$gate_status" <<'PY'
 import json
 import sys
 
@@ -223,10 +233,13 @@ measured_iterations = int(sys.argv[7])
 governor = sys.argv[8]
 baseline_samples = json.loads(sys.argv[9])
 instrumented_samples = json.loads(sys.argv[10])
+gate_report = json.loads(sys.argv[11]) if sys.argv[11] else None
+gate_status = int(sys.argv[12])
 
 if median_baseline_ns <= 0:
     raise SystemExit("median baseline must be nonzero")
 overhead = (median_instrumented_ns - median_baseline_ns) / median_baseline_ns
+threshold = gate_report["threshold"] if gate_report is not None else float(sys.argv[3])
 refusal_reason = None
 if overhead < 0:
     refusal_reason = (
@@ -242,8 +255,12 @@ report = {
     "median_instrumented_ns": median_instrumented_ns,
     "overhead": overhead,
     "threshold": threshold,
-    "pass": refusal_reason is None and overhead < threshold,
+    "pass": refusal_reason is None
+        and gate_report is not None
+        and gate_status == 0
+        and gate_report["pass"],
     "constitution_section": "II.1",
+    "gate": gate_report,
     "baseline_kind": {
         "command": f'cargo build --release -p gbf-train --bin s5_logging_overhead_workload --no-default-features --features "{baseline_features}"',
         "features": baseline_features,
@@ -293,6 +310,10 @@ run_self_test() {
     }
     grep -F 'target/release/$BIN_NAME' "$0" >/dev/null || {
         echo "self-test failed: release binary source missing" >&2
+        exit 1
+    }
+    grep -F -- '--gate \' "$0" >/dev/null || {
+        echo "self-test failed: Rust LoggingOverheadGate invocation missing" >&2
         exit 1
     }
 

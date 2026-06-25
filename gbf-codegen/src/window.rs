@@ -7,6 +7,8 @@ use gbf_foundation::{
     CanonicalJsonError, DomainHash, EvidenceRef, Hash256, KernelSpecId, SemVer, TargetProfileId,
     canonical_json_bytes_omitting_fields, self_hash_omitting_fields,
 };
+#[cfg(test)]
+use gbf_policy::WramReserved;
 use gbf_policy::{
     BudgetSlotClass, DiagnosticSeverity, PlacementProfile, ReductionSiteId, RomWindowKnob,
     RomWindowPlanDiagnosticCode, RomWindowPlanDiagnosticProvenance, RuntimeChromeBudget,
@@ -1237,7 +1239,7 @@ pub fn build_rom_window_plan(input: &RomWindowPlanInputs) -> RomWindowPlanOutput
         total_overlay_bytes: overlay_total,
         total_install_count_per_token_upper_bound: saturating_u16(overlay_count),
     };
-    let overlay_cap = u32::from(input.runtime_chrome_budget.wram_reserved);
+    let overlay_cap = u32::from(input.runtime_chrome_budget.wram_reserved.overlay);
     if overlay_demand.total_overlay_bytes > overlay_cap {
         return failed_output(
             input.input_identity.clone(),
@@ -4402,6 +4404,7 @@ mod tests {
                 target: TargetProfileId::from("dmg-mbc5"),
                 profile: CompileProfileId::from("Bringup"),
                 runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(8)),
+                reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
                 rom_slots: vec![
                     RomBudgetSlot {
                         id: BudgetSlotId::new(0),
@@ -4431,7 +4434,7 @@ mod tests {
                     hram_usable_bytes: 127,
                     source_target_profile_hash: hash(9),
                 },
-                wram_reserved: 128,
+                wram_reserved: WramReserved::new(128, 4096, 128).expect("valid WRAM reservation"),
                 sram_reserved: 512,
             },
             policy: RomWindowPlanPolicyProjection {

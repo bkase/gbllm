@@ -413,8 +413,9 @@ fn fake_quant_q8_8_nonnegative<B: BurnBackend>(
 
 #[cfg(test)]
 mod tests {
-    use gbf_artifact::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
+    use gbf_artifact::sequence::SequenceExportFacts;
     use gbf_artifact::weight_plan::{ScaleFormat, ScaleGranularity, ThresholdPlan, WeightEncoding};
+    use gbf_model::config::SharedSequenceConfig;
     use gbf_model::qat::{
         ExportVisitor, MatrixShape, QatModuleRef, TernaryThreshold, TernaryValue,
     };
@@ -519,7 +520,9 @@ mod tests {
         );
 
         let mut visitor = ExportVisitor::new(SequenceExportFacts::for_spec(
-            SequenceSemanticsSpec::bounded_kv(16, 8).unwrap(),
+            SharedSequenceConfig::bounded_kv(8, 16, 8)
+                .unwrap()
+                .sequence_semantics(),
         ));
         visitor
             .visit_module("projection", QatModuleRef::TernaryLinear(&trained_core))

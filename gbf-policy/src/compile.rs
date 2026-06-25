@@ -703,22 +703,23 @@ pub fn s5_pf3_preflight_profile_surface(
 impl BringUpWramFitReport {
     #[must_use]
     pub const fn bringup_defaults() -> Self {
+        let layout = crate::wram::WramLayoutPolicy::bringup_defaults();
         Self {
-            overlay_bytes: 4096,
-            continuation_bytes: 256,
-            stack_bytes: 256,
-            hot_arena_bytes_min: 2048,
-            reserve_bytes: 1536,
+            overlay_bytes: layout.overlay_bytes as u32,
+            continuation_bytes: layout.continuation_bytes as u32,
+            stack_bytes: layout.stack_bytes as u32,
+            hot_arena_bytes_min: layout.hot_arena_bytes_min as u32,
+            reserve_bytes: crate::wram::DMG_WRAM_SIZE_BYTES - layout.required_wram_bytes(),
         }
     }
 }
 
 fn pf3_budget_failures(in_budget: &RuntimeChromeBudget) -> Vec<String> {
     let mut failures = Vec::new();
-    if u32::from(in_budget.wram_reserved) >= in_budget.memory_caps.wram_usable_bytes {
+    if u32::from(in_budget.wram_reserved.total) > in_budget.memory_caps.wram_usable_bytes {
         failures.push(format!(
-            "wram_reserved {} must be below wram_usable_bytes {}",
-            in_budget.wram_reserved, in_budget.memory_caps.wram_usable_bytes
+            "wram_reserved.total {} must be at or below wram_usable_bytes {}",
+            in_budget.wram_reserved.total, in_budget.memory_caps.wram_usable_bytes
         ));
     }
     if in_budget.rom_slots.is_empty() {
@@ -1337,7 +1338,7 @@ fn wram_hot_hard_bytes(budget: &RuntimeChromeBudget) -> u64 {
         budget
             .memory_caps
             .wram_usable_bytes
-            .saturating_sub(u32::from(budget.wram_reserved)),
+            .saturating_sub(u32::from(budget.wram_reserved.total)),
     )
 }
 
@@ -5712,6 +5713,7 @@ mod tests {
                 target: TargetProfileId::from("dmg-mbc5"),
                 profile: CompileProfileId::from("Default"),
                 runtime_nucleus_hash: RuntimeNucleusHash::real(Hash256::from_bytes([0x44; 32])),
+                reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
                 rom_slots: vec![
                     crate::budget::RomBudgetSlot {
                         id: gbf_foundation::BudgetSlotId::new(1),
@@ -5734,7 +5736,8 @@ mod tests {
                     hram_usable_bytes: 127,
                     source_target_profile_hash: Hash256::from_bytes([0x45; 32]),
                 },
-                wram_reserved: 512,
+                wram_reserved: crate::wram::WramReserved::new(512, 4096, 512)
+                    .expect("valid WRAM reservation"),
                 sram_reserved: 1024,
             };
 

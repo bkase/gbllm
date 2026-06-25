@@ -9,22 +9,30 @@ use crate::qat::{
     TernaryLinearQatError,
 };
 use crate::sequence::{
-    SequenceActivation, SequenceActivationError, SequenceBlock, SequenceExportFacts,
+    DecayPolicy, SequenceActivation, SequenceActivationError, SequenceBlock, SequenceExportFacts,
     SequenceSemanticsSpec, SequenceState, SequenceStateSize,
 };
 
 const STATE_SLOT_BYTES: usize = core::mem::size_of::<f32>();
-const STATE_DECAY: f32 = 0.5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinearStateBlockConfig {
     d_model: usize,
     state_bytes_per_layer: u16,
     state_slots: usize,
+    decay_policy: DecayPolicy,
 }
 
 impl LinearStateBlockConfig {
     pub fn new(d_model: usize, state_bytes_per_layer: u16) -> Result<Self, LinearStateBlockError> {
+        Self::with_decay_policy(d_model, state_bytes_per_layer, DecayPolicy::default())
+    }
+
+    pub fn with_decay_policy(
+        d_model: usize,
+        state_bytes_per_layer: u16,
+        decay_policy: DecayPolicy,
+    ) -> Result<Self, LinearStateBlockError> {
         if d_model == 0 {
             return Err(LinearStateBlockError::ZeroDim { field: "d_model" });
         }
@@ -39,11 +47,15 @@ impl LinearStateBlockConfig {
                 slot_bytes: STATE_SLOT_BYTES,
             });
         }
+        decay_policy
+            .validate_for_state_bytes(state_bytes_per_layer)
+            .map_err(LinearStateBlockError::SequenceSemantics)?;
 
         Ok(Self {
             d_model,
             state_bytes_per_layer,
             state_slots: usize::from(state_bytes_per_layer) / STATE_SLOT_BYTES,
+            decay_policy,
         })
     }
 
@@ -59,9 +71,16 @@ impl LinearStateBlockConfig {
         self.state_slots
     }
 
+    pub fn decay_policy(&self) -> &DecayPolicy {
+        &self.decay_policy
+    }
+
     fn spec(&self) -> SequenceSemanticsSpec {
-        SequenceSemanticsSpec::linear_state(self.state_bytes_per_layer)
-            .expect("validated linear-state byte size must construct sequence semantics")
+        SequenceSemanticsSpec::linear_state_with_decay(
+            self.state_bytes_per_layer,
+            self.decay_policy.clone(),
+        )
+        .expect("validated linear-state byte size must construct sequence semantics")
     }
 }
 
@@ -201,7 +220,7 @@ impl LinearStateBlock {
                 .input_to_state
                 .inference_forward(&activated)
                 .map_err(LinearStateBlockError::InputToState)?;
-            apply_state_update(&mut state_values, &delta)?;
+            apply_state_update(&mut state_values, &delta, self.config.decay_policy())?;
 
             let projected = self
                 .state_to_output
@@ -334,6 +353,7 @@ pub enum LinearStateBlockError {
     StateToOutput(TernaryLinearQatError),
     OutputActivation(ActFakeQuantError),
     OutputActivationShape(SequenceActivationError),
+    SequenceSemantics(crate::sequence::SequenceSemanticsError),
 }
 
 impl fmt::Display for LinearStateBlockError {
@@ -416,6 +436,7 @@ impl fmt::Display for LinearStateBlockError {
             Self::OutputActivationShape(err) => {
                 write!(f, "linear-state output activation shape failed: {err:?}")
             }
+            Self::SequenceSemantics(err) => write!(f, "linear-state semantics failed: {err}"),
         }
     }
 }
@@ -428,6 +449,7 @@ impl Error for LinearStateBlockError {
             Self::InputToState(err) => Some(err),
             Self::StateToOutput(err) => Some(err),
             Self::OutputActivation(err) => Some(err),
+            Self::SequenceSemantics(err) => Some(err),
             _ => None,
         }
     }
@@ -495,11 +517,13 @@ fn write_state_values(values: &[f32], bytes: &mut [u8]) {
 fn apply_state_update(
     state_values: &mut [f32],
     delta: &[f32],
+    decay_policy: &DecayPolicy,
 ) -> Result<(), LinearStateBlockError> {
     debug_assert_eq!(state_values.len(), delta.len());
+    let state_slots = state_values.len();
 
     for (slot, (state_value, update)) in state_values.iter_mut().zip(delta.iter()).enumerate() {
-        let next = *state_value * STATE_DECAY + *update;
+        let next = *state_value * decay_policy.decay_for_slot(slot, state_slots) + *update;
         if !next.is_finite() {
             return Err(LinearStateBlockError::ComputedNonFiniteState { slot });
         }
@@ -590,6 +614,42 @@ mod tests {
 
         assert_eq!(output.values(), &[1.0, 0.0, 0.5, 1.0]);
         assert_eq!(test_state_values(&state, 2), vec![0.5, 1.0]);
+    }
+
+    #[test]
+    fn linear_state_forward_honors_multi_timescale_decay_policy() {
+        let block = multi_timescale_oracle_block();
+        let mut state = block.state_init();
+        let input = SequenceActivation::new(1, 2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+
+        let output = block
+            .forward_with_options(input, &mut state, LinearStateForwardOptions::eval())
+            .unwrap();
+
+        assert_eq!(output.values(), &[1.0, 0.0, 0.25, 1.0]);
+        assert_eq!(test_state_values(&state, 2), vec![0.25, 1.0]);
+        assert_eq!(
+            block.spec(),
+            SequenceSemanticsSpec::linear_state_with_decay(
+                8,
+                DecayPolicy::multi_timescale(vec![0.25, 0.75]).unwrap(),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn linear_state_learned_decay_uses_initial_scalar_in_core_path() {
+        let block = learned_decay_oracle_block();
+        let mut state = block.state_init();
+        let input = SequenceActivation::new(1, 2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+
+        let output = block
+            .forward_with_options(input, &mut state, LinearStateForwardOptions::eval())
+            .unwrap();
+
+        assert_eq!(output.values(), &[1.0, 0.0, 0.25, 1.0]);
+        assert_eq!(test_state_values(&state, 2), vec![0.25, 1.0]);
     }
 
     #[test]
@@ -773,6 +833,36 @@ mod tests {
     fn oracle_block() -> LinearStateBlock {
         LinearStateBlock::new(
             LinearStateBlockConfig::new(2, 8).unwrap(),
+            identity_lut_norm(),
+            test_activation(true),
+            ternary(2, 2, vec![1.0, 0.0, 0.0, 1.0]),
+            ternary(2, 2, vec![1.0, 0.0, 0.0, 1.0]),
+            test_activation(true),
+        )
+        .unwrap()
+    }
+
+    fn multi_timescale_oracle_block() -> LinearStateBlock {
+        LinearStateBlock::new(
+            LinearStateBlockConfig::with_decay_policy(
+                2,
+                8,
+                DecayPolicy::multi_timescale(vec![0.25, 0.75]).unwrap(),
+            )
+            .unwrap(),
+            identity_lut_norm(),
+            test_activation(true),
+            ternary(2, 2, vec![1.0, 0.0, 0.0, 1.0]),
+            ternary(2, 2, vec![1.0, 0.0, 0.0, 1.0]),
+            test_activation(true),
+        )
+        .unwrap()
+    }
+
+    fn learned_decay_oracle_block() -> LinearStateBlock {
+        LinearStateBlock::new(
+            LinearStateBlockConfig::with_decay_policy(2, 8, DecayPolicy::learned(0.25).unwrap())
+                .unwrap(),
             identity_lut_norm(),
             test_activation(true),
             ternary(2, 2, vec![1.0, 0.0, 0.0, 1.0]),

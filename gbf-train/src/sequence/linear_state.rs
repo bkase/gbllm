@@ -4,11 +4,11 @@ use std::error::Error;
 use std::fmt;
 
 use gbf_model::qat::{QatHardnessControl, QuantHardness};
-use gbf_model::sequence::{LinearStateBlock, LinearStateForwardOptions};
+use gbf_model::sequence::{DecayPolicy, LinearStateBlock, LinearStateForwardOptions};
 
 use crate::adapter::burn::{
-    BurnAdapterError, BurnBackend, BurnDevice, BurnFloatTensor, BurnModule, float_tensor_into_vec,
-    float_tensor_shape,
+    BurnAdapterError, BurnBackend, BurnDevice, BurnFloatTensor, BurnModule, BurnParam,
+    burn_sigmoid, float_tensor_from_vec, float_tensor_into_vec, float_tensor_shape,
 };
 use crate::qat::{
     ActFakeQuantBurnQat, ActFakeQuantBurnQatError, NormApproxBurnQat, NormApproxBurnQatError,
@@ -16,16 +16,15 @@ use crate::qat::{
 };
 use crate::scheduler::{PhaseControlledModel, PhaseControls};
 
-// Mirrors gbf_model::sequence::LinearStateBlock's fixed recurrence law until a
-// future decay-policy owner introduces configurable or learned state decay.
-const STATE_DECAY: f32 = 0.5;
-
 #[derive(BurnModule, Debug)]
 pub struct LinearStateBurnQat<B: BurnBackend> {
     #[module(skip)]
     d_model: usize,
     #[module(skip)]
     state_slots: usize,
+    #[module(skip)]
+    decay_policy: DecayPolicy,
+    learned_decay_logit: Option<BurnParam<BurnFloatTensor<B, 1>>>,
     input_norm: NormApproxBurnQat<B>,
     #[module(skip)]
     input_activation: ActFakeQuantBurnQat,
@@ -40,9 +39,13 @@ impl<B: BurnBackend> LinearStateBurnQat<B> {
         core: LinearStateBlock,
         device: &BurnDevice<B>,
     ) -> Result<Self, LinearStateBurnQatError> {
+        let decay_policy = core.config().decay_policy().clone();
+        let learned_decay_logit = learned_decay_logit(&decay_policy, device)?;
         Ok(Self {
             d_model: core.config().d_model(),
             state_slots: core.config().state_slots(),
+            decay_policy,
+            learned_decay_logit,
             input_norm: NormApproxBurnQat::from_core(core.input_norm().clone(), device)?,
             input_activation: ActFakeQuantBurnQat::from_core(core.input_activation().clone())?,
             input_to_state: TernaryLinearBurnQat::from_core(core.input_to_state().clone(), device)?,
@@ -62,6 +65,18 @@ impl<B: BurnBackend> LinearStateBurnQat<B> {
     #[must_use]
     pub const fn state_slots(&self) -> usize {
         self.state_slots
+    }
+
+    #[must_use]
+    pub fn decay_policy(&self) -> &DecayPolicy {
+        &self.decay_policy
+    }
+
+    #[must_use]
+    pub fn learned_decay(&self) -> Option<BurnFloatTensor<B, 1>> {
+        self.learned_decay_logit
+            .as_ref()
+            .map(|logit| burn_sigmoid(logit.val()))
     }
 
     #[must_use]
@@ -148,6 +163,7 @@ impl<B: BurnBackend> LinearStateBurnQat<B> {
             });
         }
 
+        let decay = self.decay_tensor(&initial_state)?;
         let mut state = initial_state;
         let mut rows = Vec::with_capacity(input_shape[0]);
         for token_index in 0..input_shape[0] {
@@ -162,7 +178,7 @@ impl<B: BurnBackend> LinearStateBurnQat<B> {
             let delta = self
                 .input_to_state
                 .fake_quant_forward_validated_input(activated)?;
-            state = state * STATE_DECAY + delta;
+            state = state * decay.clone() + delta;
 
             let projected = self
                 .state_to_output
@@ -193,6 +209,28 @@ impl<B: BurnBackend> LinearStateBurnQat<B> {
         initial_state: BurnFloatTensor<B, 1>,
     ) -> Result<LinearStateBurnRun<B>, LinearStateBurnQatError> {
         self.forward(input, initial_state, LinearStateForwardOptions::eval())
+    }
+
+    fn decay_tensor(
+        &self,
+        state: &BurnFloatTensor<B, 1>,
+    ) -> Result<BurnFloatTensor<B, 1>, LinearStateBurnQatError> {
+        let shape = state.shape();
+        let device = state.device();
+        match &self.decay_policy {
+            DecayPolicy::Fixed(rate) => {
+                Ok(float_tensor_from_vec(vec![rate.value()], [1], &device)?.expand(shape))
+            }
+            DecayPolicy::MultiTimescale(_) => Ok(float_tensor_from_vec(
+                decay_values_for_slots(&self.decay_policy, self.state_slots),
+                [self.state_slots],
+                &device,
+            )?),
+            DecayPolicy::Learned(_) => Ok(self
+                .learned_decay()
+                .expect("learned decay policy must carry a learnable logit")
+                .expand(shape)),
+        }
     }
 }
 
@@ -330,6 +368,30 @@ impl From<BurnAdapterError> for LinearStateBurnQatError {
     }
 }
 
+fn learned_decay_logit<B: BurnBackend>(
+    policy: &DecayPolicy,
+    device: &BurnDevice<B>,
+) -> Result<Option<BurnParam<BurnFloatTensor<B, 1>>>, LinearStateBurnQatError> {
+    match policy {
+        DecayPolicy::Learned(rate) => Ok(Some(BurnParam::from_tensor(float_tensor_from_vec(
+            vec![logit(rate.value())],
+            [1],
+            device,
+        )?))),
+        DecayPolicy::Fixed(_) | DecayPolicy::MultiTimescale(_) => Ok(None),
+    }
+}
+
+fn logit(value: f32) -> f32 {
+    (value / (1.0 - value)).ln()
+}
+
+fn decay_values_for_slots(policy: &DecayPolicy, state_slots: usize) -> Vec<f32> {
+    (0..state_slots)
+        .map(|slot| policy.decay_for_slot(slot, state_slots))
+        .collect()
+}
+
 fn validate_finite_input<B: BurnBackend>(
     input: &BurnFloatTensor<B, 2>,
 ) -> Result<(), LinearStateBurnQatError> {
@@ -361,7 +423,9 @@ mod gradient {
         MatrixShape, NormApproxPlan, NormApproxQat, NormClip, Q8_8Scale, TernaryLinearQat,
         TernaryThreshold,
     };
-    use gbf_model::sequence::{LinearStateBlockConfig, SequenceActivation, SequenceState};
+    use gbf_model::sequence::{
+        DecayPolicy, LinearStateBlockConfig, SequenceActivation, SequenceState,
+    };
 
     use super::*;
     use crate::adapter::burn::{
@@ -494,6 +558,31 @@ mod gradient {
     }
 
     #[test]
+    fn linear_state_burn_forward_matches_multi_timescale_scalar_oracle() {
+        assert_burn_matches_scalar(
+            DecayPolicy::multi_timescale(vec![0.25, 0.75]).unwrap(),
+            &[0.25, -0.5],
+            1.0e-6,
+        );
+    }
+
+    #[test]
+    fn linear_state_burn_forward_matches_learned_decay_scalar_oracle() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let block = block_with_decay(DecayPolicy::learned(0.25).unwrap());
+        let layer = LinearStateBurnQat::<B>::from_core(block.clone(), &device).unwrap();
+
+        assert_close_slice(
+            &float_tensor_into_vec(layer.learned_decay().unwrap().detach()).unwrap(),
+            &[0.25],
+            1.0e-6,
+        );
+        assert_burn_matches_scalar_with_backend::<B>(block, &[0.25, -0.5], 1.0e-6);
+    }
+
+    #[test]
     fn linear_state_eval_forward_honors_fixed_range_eval_passthrough() {
         type B = BurnNdArrayBackend;
 
@@ -520,8 +609,12 @@ mod gradient {
     }
 
     pub(super) fn gradient_block() -> LinearStateBlock {
+        block_with_decay(DecayPolicy::default())
+    }
+
+    fn block_with_decay(decay_policy: DecayPolicy) -> LinearStateBlock {
         let mut block = LinearStateBlock::new(
-            LinearStateBlockConfig::new(2, 8).unwrap(),
+            LinearStateBlockConfig::with_decay_policy(2, 8, decay_policy).unwrap(),
             identity_norm(),
             activation(),
             ternary(2, 2, vec![1.0, 0.0, 0.0, 1.0]),
@@ -531,6 +624,54 @@ mod gradient {
         .unwrap();
         block.set_hardness(QuantHardness::Off, QuantHardness::Off, QuantHardness::Off);
         block
+    }
+
+    fn assert_burn_matches_scalar(decay_policy: DecayPolicy, initial_state: &[f32], epsilon: f32) {
+        assert_burn_matches_scalar_with_backend::<BurnNdArrayBackend>(
+            block_with_decay(decay_policy),
+            initial_state,
+            epsilon,
+        );
+    }
+
+    fn assert_burn_matches_scalar_with_backend<B: BurnBackend>(
+        block: LinearStateBlock,
+        initial_state_values: &[f32],
+        epsilon: f32,
+    ) {
+        let device = BurnDevice::<B>::default();
+        let layer = LinearStateBurnQat::<B>::from_core(block.clone(), &device).unwrap();
+        let input_values = vec![
+            1.0, 0.0, //
+            0.0, 1.0,
+        ];
+        let burn_input =
+            float_tensor_from_vec::<B, 2>(input_values.clone(), [2, 2], &device).unwrap();
+        let burn_state =
+            float_tensor_from_vec::<B, 1>(initial_state_values.to_vec(), [2], &device).unwrap();
+        let mut scalar_state = SequenceState::zeroed(block.spec());
+        write_state_values(&mut scalar_state, initial_state_values);
+        let scalar_input = SequenceActivation::new(1, 2, 2, input_values).unwrap();
+
+        let burn = layer.eval_forward(burn_input, burn_state).unwrap();
+        let scalar = block
+            .forward_with_options(
+                scalar_input,
+                &mut scalar_state,
+                LinearStateForwardOptions::eval(),
+            )
+            .unwrap();
+
+        assert_close_slice(
+            &float_tensor_into_vec(burn.activations()).unwrap(),
+            scalar.values(),
+            epsilon,
+        );
+        assert_close_slice(
+            &float_tensor_into_vec(burn.final_state()).unwrap(),
+            &read_state_values(&scalar_state, 2),
+            epsilon,
+        );
     }
 
     pub(super) fn activation() -> ActFakeQuant {

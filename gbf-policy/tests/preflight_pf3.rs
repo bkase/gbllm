@@ -7,7 +7,9 @@ use gbf_policy::compile::{
     DEFAULT_COMPILE_PROFILE_TOML, PF3_BRINGUP_WRAM_FIT_REPORT_FIELDS, load_compile_profile_spec,
     s5_pf3_preflight_profile_surface,
 };
-use gbf_policy::{BudgetSlotClass, PlacementProfile, RuntimeChromeBudget, RuntimeNucleusHash};
+use gbf_policy::{
+    BudgetSlotClass, PlacementProfile, RuntimeChromeBudget, RuntimeNucleusHash, WramReserved,
+};
 
 #[test]
 fn pf3_default_and_bringup_preflight_reports_differ_only_by_profile_wram_fields() {
@@ -49,11 +51,11 @@ fn pf3_default_and_bringup_preflight_reports_differ_only_by_profile_wram_fields(
         .collect::<HashSet<_>>();
     assert_eq!(observed_fields, expected_fields);
 
-    assert_eq!(bringup_wram["overlay_bytes"], 4096);
+    assert_eq!(bringup_wram["overlay_bytes"], 512);
     assert_eq!(bringup_wram["continuation_bytes"], 256);
     assert_eq!(bringup_wram["stack_bytes"], 256);
-    assert_eq!(bringup_wram["hot_arena_bytes_min"], 2048);
-    assert_eq!(bringup_wram["reserve_bytes"], 1536);
+    assert_eq!(bringup_wram["hot_arena_bytes_min"], 4096);
+    assert_eq!(bringup_wram["reserve_bytes"], 3072);
 }
 
 fn in_budget_fixture() -> RuntimeChromeBudget {
@@ -61,6 +63,7 @@ fn in_budget_fixture() -> RuntimeChromeBudget {
         target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
         profile: CompileProfileId::from(BRINGUP_COMPILE_PROFILE_ID),
         runtime_nucleus_hash: RuntimeNucleusHash::real(Hash256::from_bytes([0x51; 32])),
+        reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
         rom_slots: vec![
             RomBudgetSlot {
                 id: BudgetSlotId::new(0),
@@ -86,7 +89,7 @@ fn in_budget_fixture() -> RuntimeChromeBudget {
             hram_usable_bytes: 127,
             source_target_profile_hash: Hash256::from_bytes([0x09; 32]),
         },
-        wram_reserved: 128,
+        wram_reserved: WramReserved::new(128, 4096, 128).expect("valid WRAM reservation"),
         sram_reserved: 512,
     }
 }

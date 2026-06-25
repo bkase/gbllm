@@ -1,0 +1,58 @@
+name: Runtime Nucleus Drift
+
+on:
+  pull_request:
+    paths:
+      - "gbf-runtime/**"
+      - "gbf-asm/**"
+      - "gbf-abi/**"
+      - "gbf-foundation/**"
+      - "gbf-hw/**"
+      - "gbf-policy/src/**"
+      - "gbf-train/src/preflight.rs"
+      - "Cargo.lock"
+      - "artifacts/calibration/PINNED_HASH_HISTORY.md"
+      - "artifacts/calibration/pinned_runtime_chrome_budget.json"
+      - "scripts/check-nucleus-drift.sh"
+      - "scripts/tests/s5_rfc_gate_wrappers_test.sh"
+      - ".github/workflows/runtime-nucleus-drift.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "gbf-runtime/**"
+      - "gbf-asm/**"
+      - "gbf-abi/**"
+      - "gbf-foundation/**"
+      - "gbf-hw/**"
+      - "gbf-policy/src/**"
+      - "gbf-train/src/preflight.rs"
+      - "Cargo.lock"
+      - "artifacts/calibration/PINNED_HASH_HISTORY.md"
+      - "artifacts/calibration/pinned_runtime_chrome_budget.json"
+      - "scripts/check-nucleus-drift.sh"
+      - "scripts/tests/s5_rfc_gate_wrappers_test.sh"
+      - ".github/workflows/runtime-nucleus-drift.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: runtime-nucleus-drift-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Runtime nucleus drift gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify runtime nucleus drift gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/check-nucleus-drift.sh --self-test
+          scripts/check-nucleus-drift.sh

@@ -38,6 +38,7 @@ fn validate_experiment_build_selection() {
     let s4_falsify = env::var_os("CARGO_FEATURE_S4_FALSIFY").is_some();
     let s5_default = env::var_os("CARGO_FEATURE_S5_DEFAULT").is_some();
     let s5_no_log = env::var_os("CARGO_FEATURE_S5_NO_LOG").is_some();
+    let s7 = env::var_os("CARGO_FEATURE_S7").is_some();
     let s3_oracle_real = env::var_os("CARGO_FEATURE_S3_ORACLE_REAL").is_some();
     let s3_oracle_fallback = env::var_os("CARGO_FEATURE_S3_ORACLE_FALLBACK").is_some();
     let s5_falsifier_count = (1..=15)
@@ -66,9 +67,9 @@ fn validate_experiment_build_selection() {
             panic!("gbf-experiments features phase-a and ablation are mutually exclusive");
         }
         (false, false) => {
-            if !s2_full && !s2_ablation && !s3 && !s4 && !s5_default && !s5_no_log {
+            if !s2_full && !s2_ablation && !s3 && !s4 && !s5_default && !s5_no_log && !s7 {
                 panic!(
-                    "gbf-experiments requires at least one S1, S2, S3, S4, or S5 experiment feature"
+                    "gbf-experiments requires at least one S1, S2, S3, S4, S5, or S7 experiment feature"
                 );
             }
         }

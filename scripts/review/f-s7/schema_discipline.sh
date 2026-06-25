@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "$ROOT"
+
+RFC="history/rfcs/F-S7-moe-beats-dense.md"
+ARTIFACT_SCHEMA="gbf-artifact/src/s7_schema.rs"
+DISTILL_HELPER="gbf-train/src/loss/distillation.rs"
+SCHEMA_TEST="gbf-experiments/tests/s7_schema_discipline.rs"
+S7_CLOSURE_PACKET="gbf-experiments/src/s7/closure_packet.rs"
+ISOLATION_SCRIPT="scripts/s7_isolation_check.sh"
+PREREG_SCRIPT="scripts/s7_preregistration_check.sh"
+PREREG_PIN_SCRIPT="scripts/s7_preregistration_pin.sh"
+VERIFY_PACKET_SCRIPT="scripts/review/f-s7/verify-packet.sh"
+S7_PR_WORKFLOW=".github/workflows/s7-pr.yml"
+REPORT_VALIDATOR="scripts/review/f-s7/validate-report.py"
+REPORT_EMITTER="scripts/review/f-s7/emit-report.py"
+ARTIFACT_VALIDATOR="scripts/review/f-s7/validate-artifacts.py"
+REVIEW_VALIDATOR="scripts/review/f-s7/validate-reviews.py"
+
+require_present() {
+  local pattern="$1"
+  shift
+  if ! rg -n -- "$pattern" "$@" >/dev/null; then
+    echo "schema discipline failed: missing pattern '$pattern' in $*" >&2
+    exit 1
+  fi
+}
+
+require_absent() {
+  local pattern="$1"
+  shift
+  if rg -n -- "$pattern" "$@" >/dev/null; then
+    echo "schema discipline failed: stale pattern '$pattern' found in $*" >&2
+    rg -n -- "$pattern" "$@" >&2
+    exit 1
+  fi
+}
+
+require_absent 's7_moe_vs_dense\.v1' "$RFC" "$ARTIFACT_SCHEMA" gbf-experiments scripts
+require_absent '--topology MoeTiny,MoeTinyDenseMatched' "$RFC" "$ISOLATION_SCRIPT"
+require_absent 's6_tolerance' "$RFC"
+require_absent 'byte_length\(val_bytes\)' "$RFC"
+require_absent 'distill_loss_raw:[[:space:]]+LossNatsPerByte' "$RFC"
+
+require_present '## 13\.6 s7_dense_vs_moe\.v1' "$RFC"
+require_present 'schema:[[:space:]]+"s7_dense_vs_moe\.v1"' "$RFC"
+require_present 'cargo run --release -p gbf-cli --features s7-moe -- s7 replay' "$RFC"
+require_present 'cargo run --release -p gbf-cli --features s7-dense-matched -- s7 replay' "$RFC"
+require_present 'scripts/s7_isolation_check\.sh --self-test' "$RFC"
+
+require_present 'distill_loss_raw:[[:space:]]+DistillRawDiagnostic' "$RFC"
+require_present 'DistillRawDiagnostic :=' "$RFC"
+require_present 'NotAvailable \{ reason: "no_frozen_teacher", phase: TrainPhase \}' "$RFC"
+require_present 'represented as DistillRawDiagnostic::NotAvailable, never as 0\.0\.' "$RFC"
+
+require_present 'input:[[:space:]]+raw_router_logits: Tensor\[batch, seq, n_experts\]' "$RFC"
+require_present 'effective_logits:[[:space:]]+Tensor\[batch, seq, n_experts\]' "$RFC"
+require_present 'router_z_loss\(raw_router_logits\)' "$RFC"
+require_present '∂ z_loss / ∂ raw_router_logits z' "$RFC"
+
+require_present 'TransitionEntry :=' "$RFC"
+require_present 'from_expert: ExpertId' "$RFC"
+require_present 'to_expert:[[:space:]]+ExpertId' "$RFC"
+require_present '\(from_expert, to_expert\) pair' "$RFC"
+require_present 'TSD-5[[:space:]]+from_expert and to_expert are directional' "$RFC"
+require_present 'LayerId[[:space:]]+:= u8[[:space:]]+; 0\.\.n_blocks-1' "$RFC"
+require_present 'EPD-4[[:space:]]+expert_id values exhaust 0\.\.n_experts-1' "$RFC"
+
+require_present 'grad_norms:[[:space:]]+List\[\(TrainStep, GradNormSummary\)\]' "$RFC"
+require_present 'RL-Length[[:space:]]+If completion = Completed:' "$RFC"
+require_present 'RL-Eval[[:space:]]+If completion = Completed:' "$RFC"
+require_present 'S-Tokens[[:space:]]+token_count = length\(charset_v1_encode\(normalize\(val_bytes\)\)\)' "$RFC"
+
+require_present 'pub enum DistillRawDiagnostic' "$ARTIFACT_SCHEMA" "$DISTILL_HELPER"
+require_present 'DistillRawDiagnostic::NotAvailable' "$DISTILL_HELPER" "$ARTIFACT_SCHEMA"
+require_present 'DistillRawDiagnostic::Value' "$DISTILL_HELPER"
+require_present 'pub struct TransitionEntry' "$ARTIFACT_SCHEMA"
+require_present 'pub from_expert: ExpertId' "$ARTIFACT_SCHEMA"
+require_present 'pub to_expert: ExpertId' "$ARTIFACT_SCHEMA"
+require_present 'DuplicateTransitionEntry' "$ARTIFACT_SCHEMA"
+require_present 'pub grad_norms: Vec<\(u64, GradNormSummary\)>' "$ARTIFACT_SCHEMA"
+require_present 'score_report_token_count_uses_charset_v1_normalized_length' "$SCHEMA_TEST"
+require_present 's7_isolation_script_pins_split_replay_order' "$SCHEMA_TEST"
+require_present 's7_artifact_validator_python_canonical_hash_matches_rust_foundation' "$SCHEMA_TEST"
+require_present 'validate_s7_closure' "$S7_CLOSURE_PACKET"
+require_present 'S7ClosureValidationInput' "$S7_CLOSURE_PACKET"
+require_present 'S7SwitchStatsBundleManifest' "$S7_CLOSURE_PACKET"
+require_present 'S7SwitchStatsReport' "$S7_CLOSURE_PACKET"
+require_present 'seed_bundle_self_hashes' "$S7_CLOSURE_PACKET"
+require_present 'S7ReportMarkdown' "$S7_CLOSURE_PACKET"
+require_present 'normalize_report_for_hash' "$S7_CLOSURE_PACKET"
+require_present 'validate_matched_bytes_hash' "$S7_CLOSURE_PACKET"
+require_present 'matched_bytes_self_hash' "$S7_CLOSURE_PACKET"
+require_present 'validate_actual_run_completed' "$S7_CLOSURE_PACKET"
+require_present 'actual run-log completion is not completed' "$S7_CLOSURE_PACKET"
+require_present 'validate_actual_artifact_identity' "$S7_CLOSURE_PACKET"
+require_present 'topology mismatch' "$S7_CLOSURE_PACKET"
+require_present 'seed mismatch' "$S7_CLOSURE_PACKET"
+require_present 'validate_outcome_comparison_alignment' "$S7_CLOSURE_PACKET"
+require_present 'PassClean outcome conflicts' "$S7_CLOSURE_PACKET"
+require_present 'FailParity outcome requires' "$S7_CLOSURE_PACKET"
+require_present 'verified_self_hash' "$S7_CLOSURE_PACKET"
+require_present 'expected_schema' "$S7_CLOSURE_PACKET"
+require_present 'schema must be' "$S7_CLOSURE_PACKET"
+require_present 'must use canonical JSON bytes' "$S7_CLOSURE_PACKET"
+require_present 'duplicate JSON key' "$S7_CLOSURE_PACKET"
+require_present 'unsupported YAML anchor/alias' "$S7_CLOSURE_PACKET"
+require_present 'unsupported YAML block scalar' "$S7_CLOSURE_PACKET"
+require_present 'unsupported YAML flow collection' "$S7_CLOSURE_PACKET"
+require_present 'S7RunLog' "$S7_CLOSURE_PACKET"
+require_present 'S7ScoreReport' "$S7_CLOSURE_PACKET"
+require_present 'S7DenseVsMoeComparisonReport' "$S7_CLOSURE_PACKET"
+require_present 'RouterCollapseSweepReport' "$S7_CLOSURE_PACKET"
+require_present 'S7FrontierReport' "$S7_CLOSURE_PACKET"
+require_present 'S7BurnGradSmokeReport' "$S7_CLOSURE_PACKET"
+require_present 'S7OracleRoutedReport' "$S7_CLOSURE_PACKET"
+require_present 'EmulatorOneTokenReport' "$S7_CLOSURE_PACKET"
+require_present 'invalid \{label\} self-hash' "$S7_CLOSURE_PACKET"
+require_present '"s7_run_log"' "$S7_CLOSURE_PACKET"
+require_present '"s7_score"' "$S7_CLOSURE_PACKET"
+require_present '"s7_switch_stats_bundle"' "$S7_CLOSURE_PACKET"
+require_present '"s7_dense_vs_moe"' "$S7_CLOSURE_PACKET"
+require_present '"s7_router_collapse_sweep"' "$S7_CLOSURE_PACKET"
+require_present '"s7_frontier"' "$S7_CLOSURE_PACKET"
+require_present '"s7_burn_grad_smoke"' "$S7_CLOSURE_PACKET"
+require_present '"s7_oracle_routed"' "$S7_CLOSURE_PACKET"
+require_present '"s7_emulator_one_token"' "$S7_CLOSURE_PACKET"
+require_present 'S7_REQUIRED_REPORT_HASH_FIELDS' "$S7_CLOSURE_PACKET"
+require_present 'validate_report_scalars' "$S7_CLOSURE_PACKET"
+require_present 'schema must be \\"s7_report\.v1\\"' "$S7_CLOSURE_PACKET"
+require_present 'decision must be ProceedToS8 or ProceedToS8DenseOnly' "$S7_CLOSURE_PACKET"
+require_present 'rfc_revision must be a git commit id or sha256 hash' "$S7_CLOSURE_PACKET"
+require_present '\.scalar\("emulator_one_token_dense_self_hash"\)' "$S7_CLOSURE_PACKET"
+require_present 'S7_REQUIRED_REPORT_BODY_HEADINGS' "$S7_CLOSURE_PACKET"
+require_present 'S7_REQUIRED_HYPOTHESIS_VERDICTS' "$S7_CLOSURE_PACKET"
+require_present 'missing body heading' "$S7_CLOSURE_PACKET"
+require_present 'missing explicit \{hypothesis\} hypothesis verdict' "$S7_CLOSURE_PACKET"
+require_present 'closure-candidate reports must not use NotEvaluatedDueToPriorGate' "$S7_CLOSURE_PACKET"
+require_present 'validate_report_rows' "$S7_CLOSURE_PACKET"
+require_present 'per_seed_artifacts must contain 10 rows' "$S7_CLOSURE_PACKET"
+require_present 'duplicate per_seed_artifacts row' "$S7_CLOSURE_PACKET"
+require_present '## Reproducibility statement' "$S7_CLOSURE_PACKET"
+require_present 's7_preregistration_check' "$PREREG_SCRIPT"
+require_present 'validate_pass_version' "$PREREG_SCRIPT"
+require_present 'pass_version_S7 must be finalized' "$PREREG_SCRIPT"
+require_present 'pass_version_S7 must be semver or an s7-\* final pin id' "$PREREG_SCRIPT"
+require_present 'matched_bytes_self_hash' "$PREREG_SCRIPT"
+require_present 'experiments/S7/smoke' "$PREREG_SCRIPT"
+require_present 'predictions_commit must be an ancestor of HEAD/current checkout' "$PREREG_SCRIPT"
+require_present 'rfc_revision must be an ancestor of HEAD/current checkout' "$PREREG_SCRIPT"
+require_present 'first_result_commit is unset but S7 result evidence exists' "$PREREG_SCRIPT"
+require_present 'first_result_commit is not the earliest S7 result artifact commit' "$PREREG_SCRIPT"
+require_present 'Emit fixtures/preregistration/s7\.toml' "$PREREG_PIN_SCRIPT"
+require_present 'current RFC predictions section differs from predictions_commit' "$PREREG_PIN_SCRIPT"
+require_present 'current RFC prediction heading line range differs from predictions_commit' "$PREREG_PIN_SCRIPT"
+require_present '--check-ready' "$PREREG_PIN_SCRIPT" "$VERIFY_PACKET_SCRIPT"
+require_present 'predictions_commit must be an ancestor of HEAD/current checkout' "$PREREG_PIN_SCRIPT"
+require_present 'S7 verify-packet: NEEDS_CHANGES' "$VERIFY_PACKET_SCRIPT"
+require_present 'S7 preregistration pin readiness failed' "$VERIFY_PACKET_SCRIPT"
+require_absent 'missing required section/pattern' "$VERIFY_PACKET_SCRIPT"
+require_absent 'dense emulator one-token result required by DenseOnly decision' "$VERIFY_PACKET_SCRIPT"
+require_present 'verify-packet\.sh --substrate-only' "$S7_PR_WORKFLOW"
+require_present 's7_verify_packet_test\.sh' "$S7_PR_WORKFLOW"
+require_present 's7_preregistration_check_test\.sh' "$S7_PR_WORKFLOW"
+require_present 's7_preregistration_pin_test\.sh' "$S7_PR_WORKFLOW"
+require_present 's7_validate_artifacts_test\.sh' "$S7_PR_WORKFLOW"
+require_present 's7_validate_report_test\.sh' "$S7_PR_WORKFLOW"
+require_present 's7_validate_reviews_test\.sh' "$S7_PR_WORKFLOW"
+require_present 'actions/upload-artifact@v4' "$S7_PR_WORKFLOW"
+require_present 's7 validate-closure' "$VERIFY_PACKET_SCRIPT"
+require_present 'S7 Rust closure validation failed' "$VERIFY_PACKET_SCRIPT"
+require_present 'synthetic S7 CLI feature preflight self-test' "$VERIFY_PACKET_SCRIPT"
+require_present 'synthetic Rust closure gate self-test' "$VERIFY_PACKET_SCRIPT"
+require_present 'experiments/S7/dense-vs-moe/comparison\.json' "$VERIFY_PACKET_SCRIPT"
+require_present 'docs/experiments/S7-report\.md' "$VERIFY_PACKET_SCRIPT"
+require_present 'Build a fail-closed F-S7 s7_report\.v1 from production artifacts' "$REPORT_EMITTER"
+require_present 'generated_at and report_self_hash nulled' "$REPORT_VALIDATOR"
+require_present 'S7 report closure shape: NEEDS_CHANGES' "$REPORT_VALIDATOR"
+require_present 'per_seed_artifacts must contain 10 rows' "$REPORT_VALIDATOR"
+require_present 'ProceedToS8DenseOnly is permitted only when s7_outcome is FailParity' "$REPORT_VALIDATOR"
+require_present 'Decision body must match front matter decision' "$REPORT_VALIDATOR"
+require_present 'body_section' "$REPORT_VALIDATOR"
+require_present 'unsupported YAML flow collection' "$REPORT_VALIDATOR"
+require_present 'duplicate front matter field' "$REPORT_VALIDATOR"
+require_present 'report artifact reference has duplicate JSON key' "$REPORT_VALIDATOR"
+require_present 'report artifact reference must use canonical JSON bytes' "$REPORT_VALIDATOR"
+require_present 'report artifact reference has non-canonical JSON value' "$REPORT_VALIDATOR"
+require_present 'must match artifact self-hash' "$REPORT_VALIDATOR"
+require_present 'checkpoint_self_hash' "$REPORT_VALIDATOR"
+require_present 'switch_stats_self_hash' "$REPORT_VALIDATOR"
+require_present 'report_self_hash must match report bytes' "$REPORT_VALIDATOR"
+require_present 'S7 artifact closure shape: NEEDS_CHANGES' "$ARTIFACT_VALIDATOR"
+require_present 'must use canonical JSON bytes' "$ARTIFACT_VALIDATOR"
+require_present 'duplicate JSON key' "$ARTIFACT_VALIDATOR"
+require_present 'has non-canonical JSON value' "$ARTIFACT_VALIDATOR"
+require_present 'self-hash mismatch' "$ARTIFACT_VALIDATOR"
+require_present 'records length must equal D11 grid length' "$ARTIFACT_VALIDATOR"
+require_present 'route_coverage must prove all routed fixture axes' "$ARTIFACT_VALIDATOR"
+require_present 'bpc must equal log2_sum / token_count' "$ARTIFACT_VALIDATOR"
+require_present 'aggregate_parity_verdict must match derived' "$ARTIFACT_VALIDATOR"
+require_present 'pareto_verdict must match derived' "$ARTIFACT_VALIDATOR"
+require_present 'temporal_switch_digest.*transition_mass must be non-empty' "$ARTIFACT_VALIDATOR"
+require_present 'frontier point.*quality.per_seed_val_bpc must contain 5 finite values' "$ARTIFACT_VALIDATOR"
+require_present 'grad log record' "$ARTIFACT_VALIDATOR"
+require_present 'grad log must contain.*completed-run JSONL records' "$ARTIFACT_VALIDATOR"
+require_present 'schema must be s7_grad_log\.v1' "$ARTIFACT_VALIDATOR"
+require_present 'grad_norms must match run-log grad_norms' "$ARTIFACT_VALIDATOR"
+require_present 'GradNormSummary fields must be global_l2, max_l2, mean_l2' "$ARTIFACT_VALIDATOR"
+require_present 'router-step telemetry must cover layers 0\.\.3' "$ARTIFACT_VALIDATOR"
+require_present 'dense router-step telemetry must be empty' "$ARTIFACT_VALIDATOR"
+require_present 'telemetry_self_hash' "$ARTIFACT_VALIDATOR"
+require_present 'SWITCH_STATS_DOMAIN' "$ARTIFACT_VALIDATOR"
+require_present 'FRONTIER_DOMAIN' "$ARTIFACT_VALIDATOR"
+require_present 'BURN_GRAD_SMOKE_DOMAIN' "$ARTIFACT_VALIDATOR"
+require_present 'ORACLE_ROUTED_DOMAIN' "$ARTIFACT_VALIDATOR"
+require_present 'frontier_self_hash' "$ARTIFACT_VALIDATOR"
+require_present 'smoke_self_hash' "$ARTIFACT_VALIDATOR"
+require_present 'oracle_self_hash' "$ARTIFACT_VALIDATOR"
+require_present 'completion must be Rust tagged S7Completion' "$ARTIFACT_VALIDATOR"
+require_present 'losses length must be.*for completed run' "$ARTIFACT_VALIDATOR"
+require_present 'RawLossDiagnostics fields must be lm_loss_raw' "$ARTIFACT_VALIDATOR"
+require_present 'diagnostics_self_hash' "$ARTIFACT_VALIDATOR"
+require_present 'train_step must match loss step' "$ARTIFACT_VALIDATOR"
+require_present 'S7 ACPX review evidence: NEEDS_CHANGES' "$REVIEW_VALIDATOR"
+require_present 'ALWAYS_ON_PERSONAS' "$REVIEW_VALIDATOR"
+require_present 'missing required personas for' "$REVIEW_VALIDATOR"
+require_present 'reviewed_head must match expected_head' "$REVIEW_VALIDATOR"
+require_present 'PASS review has unresolved blocking finding' "$REVIEW_VALIDATOR"
+require_present 'allowed_severities' "$REVIEW_VALIDATOR"
+require_present 'severity must be one of' "$REVIEW_VALIDATOR"
+require_present 'status must be one of' "$REVIEW_VALIDATOR"
+require_present 'must be an object' "$REVIEW_VALIDATOR"
+require_present 'transport.*acpx' "$REVIEW_VALIDATOR"
+require_present 'command must record an ACPX invocation prefix' "$REVIEW_VALIDATOR"
+
+"$ISOLATION_SCRIPT" --self-test >/dev/null
+[[ -x "$PREREG_SCRIPT" ]] || {
+  echo "schema discipline failed: $PREREG_SCRIPT must be executable" >&2
+  exit 1
+}
+[[ -x "$VERIFY_PACKET_SCRIPT" ]] || {
+  echo "schema discipline failed: $VERIFY_PACKET_SCRIPT must be executable" >&2
+  exit 1
+}
+[[ -x "$REPORT_VALIDATOR" ]] || {
+  echo "schema discipline failed: $REPORT_VALIDATOR must be executable" >&2
+  exit 1
+}
+[[ -x "$REPORT_EMITTER" ]] || {
+  echo "schema discipline failed: $REPORT_EMITTER must be executable" >&2
+  exit 1
+}
+[[ -x "$ARTIFACT_VALIDATOR" ]] || {
+  echo "schema discipline failed: $ARTIFACT_VALIDATOR must be executable" >&2
+  exit 1
+}
+[[ -x "$REVIEW_VALIDATOR" ]] || {
+  echo "schema discipline failed: $REVIEW_VALIDATOR must be executable" >&2
+  exit 1
+}
+
+echo "S7 schema discipline: ok"

@@ -2974,14 +2974,22 @@ mod tests {
             target: TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Bringup"),
             runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(0x21)),
-            rom_slots: Vec::new(),
+            reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
+            rom_slots: vec![gbf_policy::RomBudgetSlot {
+                id: gbf_foundation::BudgetSlotId::new(0),
+                class: gbf_policy::BudgetSlotClass::CommonBank,
+                usable_bytes: 16 * 1024,
+                reserved_slack: 128,
+                placement_caps: BTreeSet::from([gbf_policy::PlacementProfile::Budgeted]),
+            }],
             memory_caps: gbf_policy::RuntimeMemoryCapSection {
                 wram_usable_bytes: 8 * 1024,
                 sram_usable_bytes: 32 * 1024,
                 hram_usable_bytes: 127,
                 source_target_profile_hash: hash(0x40),
             },
-            wram_reserved: 128,
+            wram_reserved: gbf_policy::WramReserved::new(128, 4096, 128)
+                .expect("valid WRAM reservation"),
             sram_reserved: 512,
         }
     }

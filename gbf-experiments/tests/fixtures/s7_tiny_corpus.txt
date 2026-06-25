@@ -1,0 +1,4 @@
+The S7 tiny smoke corpus is intentionally small.
+It exists only to exercise matched bytes, parity, Pareto, guardrail, outcome,
+closure, and structured logging composition without Gutenberg training.
+0123456789 abcdefghijklmnopqrstuvwxyz

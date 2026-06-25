@@ -1,0 +1,1 @@
+{"b_dense_ffn_total":83792,"b_deployed_total_dense":83792,"b_deployed_total_moe":83776,"b_experts_total":79424,"b_router_overhead_total":4352,"bias_policy":"q8_8_per_output","d_ff_dense_resolved":572,"formula_version":{"major":0,"minor":2,"patch":0},"matched_bytes_self_hash":"sha256:5996f3e6bab2e290baa45e131db4fc317f01c96a318cac896510ec8a678919e5","tolerance_bytes":65536}

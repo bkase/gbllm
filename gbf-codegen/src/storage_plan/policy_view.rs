@@ -3,6 +3,8 @@
 use std::collections::BTreeSet;
 use std::{error::Error, fmt};
 
+#[cfg(test)]
+use gbf_policy::WramReserved;
 use gbf_policy::{
     ObservabilityMode, ResolvedCompilePolicy, StorageMaterialization, StoragePlanDiagnosticCode,
 };
@@ -45,7 +47,7 @@ impl StoragePolicyView {
             .map(|budget| budget.memory_caps.hram_usable_bytes)
             .unwrap_or_default();
         let wram_reserved_bytes = budget
-            .map(|budget| u32::from(budget.wram_reserved))
+            .map(|budget| u32::from(budget.wram_reserved.total))
             .unwrap_or_default();
         // v1 RuntimeChromeBudget has no HRAM-reserved field. Keep Stage 6's
         // normalized view explicit so a future policy owner has one bridge to
@@ -363,14 +365,21 @@ mod tests {
             target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
             profile: CompileProfileId::from("Bringup"),
             runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(0x40)),
-            rom_slots: vec![],
+            reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
+            rom_slots: vec![gbf_policy::RomBudgetSlot {
+                id: gbf_foundation::BudgetSlotId::new(0),
+                class: gbf_policy::BudgetSlotClass::CommonBank,
+                usable_bytes: 16 * 1024,
+                reserved_slack: 128,
+                placement_caps: BTreeSet::from([gbf_policy::PlacementProfile::Budgeted]),
+            }],
             memory_caps: RuntimeMemoryCapSection {
                 wram_usable_bytes: 8192,
                 sram_usable_bytes: 32768,
                 hram_usable_bytes: 127,
                 source_target_profile_hash: hash(0x41),
             },
-            wram_reserved: 512,
+            wram_reserved: WramReserved::new(512, 4096, 512).expect("valid WRAM reservation"),
             sram_reserved: 0,
         }
     }

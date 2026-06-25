@@ -200,6 +200,14 @@ where
     Ok(outcome.frozen)
 }
 
+/// Clone, detach, and verify a student snapshot without emitting the S3 event.
+pub fn freeze_student_snapshot<M>(model: &M) -> Result<FrozenStudent<M>, StudentFreezeError>
+where
+    M: HardTernaryStudentModel,
+{
+    Ok(freeze_student_core(model)?.frozen)
+}
+
 #[derive(Debug)]
 struct StudentFreezeOutcome<M: HardTernaryStudentModel> {
     frozen: FrozenStudent<M>,

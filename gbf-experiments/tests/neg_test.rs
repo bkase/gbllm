@@ -1,3 +1,12 @@
+#![cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+
 use gbf_experiments::s1::logging::{event, field, span};
 use gbf_experiments::s1::neg_test::{
     NEGATIVE_TEST_SHUFFLE_SEED, NegativeTestError, fisher_yates, negative_test_report_from_bpcs,

@@ -1,7 +1,8 @@
 //! Model-facing sequence-state semantic contracts.
 
 pub use gbf_artifact::sequence::{
-    SequenceExportFacts, SequenceSemanticsError, SequenceSemanticsSpec, SequenceStateSize,
+    DecayPolicy, DecayRate, SequenceExportFacts, SequenceSemanticsError, SequenceSemanticsKind,
+    SequenceSemanticsSpec, SequenceStateSize,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,14 +80,15 @@ pub struct SequenceState {
 
 impl SequenceState {
     pub fn zeroed(spec: SequenceSemanticsSpec) -> Self {
+        let len = spec.state_size().bytes_per_layer as usize;
         Self {
             spec,
-            bytes: vec![0; spec.state_size().bytes_per_layer as usize],
+            bytes: vec![0; len],
         }
     }
 
     pub fn spec(&self) -> SequenceSemanticsSpec {
-        self.spec
+        self.spec.clone()
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -123,7 +125,7 @@ pub trait SequenceBlock {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     struct IdentitySequenceBlock {
         spec: SequenceSemanticsSpec,
     }
@@ -141,7 +143,7 @@ mod tests {
         }
 
         fn state_init(&self) -> SequenceState {
-            SequenceState::zeroed(self.spec)
+            SequenceState::zeroed(self.spec.clone())
         }
 
         fn state_size(&self) -> SequenceStateSize {
@@ -149,7 +151,7 @@ mod tests {
         }
 
         fn export_facts(&self) -> SequenceExportFacts {
-            SequenceExportFacts::for_spec(self.spec)
+            SequenceExportFacts::for_spec(self.spec.clone())
         }
     }
 
@@ -165,7 +167,7 @@ mod tests {
         let facts = block.export_facts();
 
         assert_eq!(output, input);
-        assert_eq!(state.spec(), block.spec);
+        assert_eq!(state.spec(), block.spec.clone());
         assert_eq!(state.bytes()[0], 1);
         assert_eq!(
             block.state_size(),

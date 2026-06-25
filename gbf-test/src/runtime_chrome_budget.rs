@@ -9,7 +9,7 @@ pub const BRINGUP_DMG_MBC5_CHROME_BUDGET_JSON: &str =
 pub const BRINGUP_DMG_MBC5_CHROME_BUDGET_SHA256_SIDECAR: &str =
     include_str!("../../fixtures/runtime-chrome-budget/bringup-dmg-mbc5.chrome_budget.sha256");
 pub const BRINGUP_DMG_MBC5_CHROME_BUDGET_SHA256: &str =
-    "62e7d74b87e12f1532c37a3517894075e83cf0f8de7fae284bedf3bcc93376d5";
+    "ba52d4ccaf7627f01da33986ea11f078f851cab2e51b4d264e7359ceffe0cb0c";
 pub const BRINGUP_DMG_MBC5_RUNTIME_NUCLEUS_HASH: &str =
     "SYNTHETIC_REFERENCE:sha256:2a1fc3405e389733a0006c5b1e6a314a7d81fbc671466a3bc02cdbb876cd1ec5";
 
@@ -36,7 +36,8 @@ mod tests {
     use std::str::FromStr;
 
     use crate::calibration::bootstrap_dmg_mbc5_target_profile_hash;
-    use gbf_policy::{BudgetSlotClass, PlacementProfile, RuntimeNucleusHash};
+    use gbf_abi::RuntimeShellModule;
+    use gbf_policy::{BudgetSlotClass, PlacementProfile, RuntimeNucleusHash, WramReserved};
 
     use super::*;
 
@@ -50,6 +51,15 @@ mod tests {
             budget.runtime_nucleus_hash,
             RuntimeNucleusHash::from_str(BRINGUP_DMG_MBC5_RUNTIME_NUCLEUS_HASH)
                 .expect("pinned runtime nucleus hash is valid"),
+        );
+        assert_eq!(
+            budget.reference_shell_modules,
+            RuntimeChromeBudget::pinned_reference_shell_modules()
+        );
+        assert!(
+            budget
+                .reference_shell_modules
+                .contains(&RuntimeShellModule::VideoCommit)
         );
         assert_eq!(budget.rom_slots.len(), 2);
         assert_eq!(budget.rom_slots[0].class, BudgetSlotClass::Bank0Free);
@@ -71,7 +81,10 @@ mod tests {
             budget.memory_caps.source_target_profile_hash,
             bootstrap_dmg_mbc5_target_profile_hash(),
         );
-        assert_eq!(budget.wram_reserved, 128);
+        assert_eq!(
+            budget.wram_reserved,
+            WramReserved::new(128, 4096, 128).expect("valid WRAM reservation")
+        );
         assert_eq!(budget.sram_reserved, 512);
     }
 }

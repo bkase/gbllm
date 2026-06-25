@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use gbf_foundation::{BudgetSlotId, CompileProfileId, Hash256, TargetProfileId};
 use gbf_policy::{
     BudgetSlotClass, PlacementProfile, ReValidationOutcome, RomBudgetSlot, RuntimeChromeBudget,
-    RuntimeMemoryCapSection, RuntimeNucleusHash, revalidate_runtime_chrome_budget,
+    RuntimeMemoryCapSection, RuntimeNucleusHash, WramReserved, revalidate_runtime_chrome_budget,
 };
 
 fn hash(byte: u8) -> Hash256 {
@@ -19,6 +19,7 @@ fn budget(runtime_nucleus_hash: RuntimeNucleusHash, usable_bytes: u32) -> Runtim
         target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
         profile: CompileProfileId::from("Bringup"),
         runtime_nucleus_hash,
+        reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
         rom_slots: vec![RomBudgetSlot {
             id: BudgetSlotId::new(7),
             class: BudgetSlotClass::ExpertBank,
@@ -32,7 +33,7 @@ fn budget(runtime_nucleus_hash: RuntimeNucleusHash, usable_bytes: u32) -> Runtim
             hram_usable_bytes: 127,
             source_target_profile_hash: hash(0x09),
         },
-        wram_reserved: 128,
+        wram_reserved: WramReserved::new(128, 4096, 128).expect("valid WRAM reservation"),
         sram_reserved: 512,
     }
 }

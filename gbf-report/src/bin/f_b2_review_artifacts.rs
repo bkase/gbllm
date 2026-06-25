@@ -22,7 +22,7 @@ use gbf_policy::{
     ScheduleSliceCoarsening, ScheduleTileSearch, ServiceLevelObjective, SramKnob,
     SramPageAggression, StorageKnob, StorageMaterialization, SwitchProjectionSource, TraceBudget,
     TraceDropPolicy, ValidationCode, ValidationDetail, ValidationDiagnostic, ValidationOrigin,
-    budget_failure_diagnostic, canonical_default_bounds_fixture,
+    WramReserved, budget_failure_diagnostic, canonical_default_bounds_fixture,
 };
 use gbf_report::report_schemas::artifact_validation_v1::{
     ArtifactCompatibilityDecision, ArtifactCompatibilityFailure, ArtifactCompatibilitySection,
@@ -377,6 +377,7 @@ fn static_runtime_budget_section() -> RuntimeChromeBudgetSection {
         target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
         profile: CompileProfileId::from("Bringup"),
         runtime_nucleus_hash: RuntimeNucleusHash::real(hash(0x40)),
+        reference_shell_modules: gbf_policy::RuntimeChromeBudget::pinned_reference_shell_modules(),
         rom_slots: vec![
             RomBudgetSlotEntry {
                 id: BudgetSlotId::new(1),
@@ -399,7 +400,7 @@ fn static_runtime_budget_section() -> RuntimeChromeBudgetSection {
             hram_usable_bytes: 127,
             source_target_profile_hash: hash(0x09),
         },
-        wram_reserved: 0,
+        wram_reserved: WramReserved::new(0, 4096, 0).expect("valid WRAM reservation"),
         sram_reserved: 0,
     }
 }
