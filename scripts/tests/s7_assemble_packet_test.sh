@@ -32,6 +32,22 @@ rg -n -- "--topology MoeTinyDenseMatched" "$tmp/dry-run.out" >/dev/null
 rg -n -- "$tmp/bundle/runs/MoeTiny/seed-0/run-log\\.json" "$tmp/dry-run.out" >/dev/null
 rg -n "S7 packet assembly: dry-run ok" "$tmp/dry-run.out" >/dev/null
 
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$manifest" \
+  --root "$ROOT" \
+  --cargo cargo \
+  --verify-mode skip-gates \
+  --dry-run \
+  --check-inputs >"$tmp/check-inputs.out" 2>&1; then
+  echo "expected check-inputs dry-run to fail for missing bundle files" >&2
+  exit 1
+fi
+rg -n "missing input file: .*/bundle/runs/MoeTiny/seed-0/run-log\\.json" "$tmp/check-inputs.out" >/dev/null
+if rg -n " materialize-run " "$tmp/check-inputs.out" >/dev/null; then
+  echo "check-inputs should preflight before printing executable commands" >&2
+  exit 1
+fi
+
 python3 - "$manifest" "$tmp/bad-manifest.json" <<'PY'
 from pathlib import Path
 import json

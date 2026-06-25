@@ -69,6 +69,11 @@ def main() -> int:
     parser.add_argument("--verify-mode", choices=["full", "skip-gates"], default="full")
     parser.add_argument("--dry-run", action="store_true", help="print commands without executing")
     parser.add_argument(
+        "--check-inputs",
+        action="store_true",
+        help="preflight every referenced bundle input path before executing; useful with --dry-run",
+    )
+    parser.add_argument(
         "--write-template",
         help="write a canonical s7_production_bundle_manifest.v1 skeleton and exit",
     )
@@ -90,15 +95,17 @@ def main() -> int:
         print(f" - {error}")
         return 1
 
+    if args.check_inputs or not args.dry_run:
+        missing = missing_input_paths(commands)
+        if missing:
+            print("S7 packet assembly: NEEDS_CHANGES")
+            for path in missing:
+                print(f" - missing input file: {path}")
+            return 1
+
     for command in commands:
         print("+ " + shlex.join(command))
         if not args.dry_run:
-            missing = [item for item in input_paths_for_command(command) if not item.is_file()]
-            if missing:
-                print("S7 packet assembly: NEEDS_CHANGES")
-                for path in missing:
-                    print(f" - missing input file: {path}")
-                return 1
             completed = subprocess.run(command, check=False)
             if completed.returncode != 0:
                 print("S7 packet assembly: NEEDS_CHANGES")
@@ -461,6 +468,19 @@ def input_paths_for_command(command: list[str]) -> list[Path]:
             if item == flag:
                 paths.append(Path(command[index + 1]))
     return paths
+
+
+def missing_input_paths(commands: list[list[str]]) -> list[Path]:
+    seen: set[Path] = set()
+    missing: list[Path] = []
+    for command in commands:
+        for path in input_paths_for_command(command):
+            if path in seen:
+                continue
+            seen.add(path)
+            if not path.is_file():
+                missing.append(path)
+    return missing
 
 
 def bundle_path(manifest_dir: Path, value: str) -> Path:
