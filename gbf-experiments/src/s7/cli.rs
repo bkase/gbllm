@@ -36,7 +36,9 @@ use crate::s7::run::{
     S7CompletedRunArtifactInputs, S7RunMaterializeError, materialize_completed_run_artifacts,
     topology_path_segment,
 };
-use crate::s7::schema::EmulatorOneTokenReportError;
+use crate::s7::schema::{
+    EmulatorOneTokenReportError, OracleRouteCoverage, OracleRoutedReport, OracleRoutedReportError,
+};
 use crate::s7::support_artifacts::{
     S7SupportArtifactInputs, S7SupportArtifactKind, S7SupportArtifactMaterializeError,
     materialize_support_artifact,
@@ -54,6 +56,7 @@ const DEFAULT_REPORT_EMITTER: &str = "scripts/review/f-s7/emit-report.py";
 const DEFAULT_REPORT_OUTPUT: &str = "docs/experiments/S7-report.md";
 #[cfg(feature = "s7-burn-grad-smoke")]
 const DEFAULT_BURN_GRAD_SMOKE_OUTPUT: &str = "experiments/S7/burn-grad-smoke/expert_block_qat.json";
+const DEFAULT_ORACLE_ROUTED_OUTPUT: &str = "experiments/S7/oracle-routed/seed-0/oracle.json";
 const DEFAULT_EMULATOR_ONE_TOKEN_BLOCKS: u32 = 4;
 const S7_CLI_REPLAY_DOMAIN: DomainHash<'static> =
     DomainHash::new("gbf-experiments", "S7CliReplay", "s7_replay_cli.v1", "1");
@@ -77,6 +80,8 @@ pub enum S7Command {
     DeriveComparison(S7DeriveComparisonArgs),
     /// Validate and materialize a closure support artifact.
     MaterializeSupportArtifact(S7MaterializeSupportArtifactArgs),
+    /// Build an H9 routed artifact-oracle report from measured logits.
+    OracleRouted(S7OracleRoutedArgs),
     /// Build an H10 one-token emulator/oracle comparison artifact from measured outputs.
     EmulatorOneToken(S7EmulatorOneTokenArgs),
     /// Produce the H8 Burn ExpertBlockQat gradient smoke artifact.
@@ -202,6 +207,63 @@ pub struct S7MaterializeSupportArtifactArgs {
     /// Output path, relative to --root unless absolute. Defaults to the canonical packet path.
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+/// Arguments for `gbf s7 oracle-routed`.
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 oracle-routed --topology MoeTiny --fixture-prompt-sha sha256:... --train-logits-sha sha256:... --bundle-logits-sha sha256:... --artifact-logits-sha sha256:... --frozen-teacher-checkpoint-sha sha256:... --pairwise-max-abs-diff-train-bundle 0 --pairwise-max-abs-diff-bundle-artifact 0 --pairwise-max-abs-diff-train-artifact 0 --s3-tolerance 0.125 --cross-layer-route-difference --consecutive-token-route-change --consecutive-token-route-same"
+)]
+pub struct S7OracleRoutedArgs {
+    /// Packet/repository root where the H9 report should be written.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Experiment seed; the closure packet currently admits only seed 0.
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
+    /// S7 topology under routed oracle comparison.
+    #[arg(long, value_parser = parse_topology)]
+    pub topology: S7Topology,
+    /// Fixed routed fixture prompt hash.
+    #[arg(long)]
+    pub fixture_prompt_sha: Hash256,
+    /// Training logits hash for the routed fixture.
+    #[arg(long)]
+    pub train_logits_sha: Hash256,
+    /// Bundle logits hash for the routed fixture.
+    #[arg(long)]
+    pub bundle_logits_sha: Hash256,
+    /// Deployable artifact logits hash for the routed fixture.
+    #[arg(long)]
+    pub artifact_logits_sha: Hash256,
+    /// Frozen teacher checkpoint hash for this topology and seed.
+    #[arg(long)]
+    pub frozen_teacher_checkpoint_sha: Hash256,
+    /// Pairwise max absolute difference between training and bundle logits.
+    #[arg(long)]
+    pub pairwise_max_abs_diff_train_bundle: f64,
+    /// Pairwise max absolute difference between bundle and artifact logits.
+    #[arg(long)]
+    pub pairwise_max_abs_diff_bundle_artifact: f64,
+    /// Pairwise max absolute difference between training and artifact logits.
+    #[arg(long)]
+    pub pairwise_max_abs_diff_train_artifact: f64,
+    /// S3 pinned routed-oracle tolerance.
+    #[arg(long)]
+    pub s3_tolerance: f64,
+    /// Prove at least one prompt route differs across layers.
+    #[arg(long)]
+    pub cross_layer_route_difference: bool,
+    /// Prove at least one consecutive token route changes expert.
+    #[arg(long)]
+    pub consecutive_token_route_change: bool,
+    /// Prove at least one consecutive token route stays on the same expert.
+    #[arg(long)]
+    pub consecutive_token_route_same: bool,
+    /// Output `s7_oracle_routed.v1` path, relative to --root unless absolute.
+    /// Defaults to the canonical packet path.
+    #[arg(long, default_value = DEFAULT_ORACLE_ROUTED_OUTPUT)]
+    pub output: PathBuf,
 }
 
 /// Arguments for `gbf s7 emulator-one-token`.
@@ -330,6 +392,7 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
         S7Command::MaterializeRun(args) => materialize_run(args),
         S7Command::DeriveComparison(args) => derive_comparison(args),
         S7Command::MaterializeSupportArtifact(args) => materialize_support(args),
+        S7Command::OracleRouted(args) => oracle_routed(args),
         S7Command::EmulatorOneToken(args) => emulator_one_token(args),
         #[cfg(feature = "s7-burn-grad-smoke")]
         S7Command::BurnGradSmoke(args) => burn_grad_smoke(args),
@@ -444,6 +507,49 @@ fn materialize_support(args: S7MaterializeSupportArtifactArgs) -> Result<(), S7C
         output: args.output,
     })?;
     println!("{}", materialized.self_hash);
+    Ok(())
+}
+
+fn oracle_routed(args: S7OracleRoutedArgs) -> Result<(), S7CliError> {
+    let report = OracleRoutedReport::new(
+        args.seed,
+        args.topology,
+        args.fixture_prompt_sha,
+        args.train_logits_sha,
+        args.bundle_logits_sha,
+        args.artifact_logits_sha,
+        args.frozen_teacher_checkpoint_sha,
+        args.pairwise_max_abs_diff_train_bundle,
+        args.pairwise_max_abs_diff_bundle_artifact,
+        args.pairwise_max_abs_diff_train_artifact,
+        args.s3_tolerance,
+        OracleRouteCoverage::new(
+            args.cross_layer_route_difference,
+            args.consecutive_token_route_change,
+            args.consecutive_token_route_same,
+        ),
+    )?;
+    let output_path = if args.output.is_absolute() {
+        args.output
+    } else {
+        args.root.join(args.output)
+    };
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|source| S7CliError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    std::fs::write(&output_path, report.canonical_json_bytes()?).map_err(|source| {
+        S7CliError::Io {
+            path: output_path.display().to_string(),
+            source,
+        }
+    })?;
+    println!("{}", report.oracle_self_hash);
     Ok(())
 }
 
@@ -681,6 +787,8 @@ pub enum S7CliError {
     BurnGradSmoke(S7BurnGradSmokeError),
     /// H10 one-token emulator report construction failed.
     EmulatorOneToken(EmulatorOneTokenReportError),
+    /// H9 routed oracle report construction failed.
+    OracleRouted(OracleRoutedReportError),
     /// Canonical JSON encoding failed.
     CanonicalJson(CanonicalJsonError),
     /// Filesystem operation failed.
@@ -737,6 +845,7 @@ impl fmt::Display for S7CliError {
             #[cfg(feature = "s7-burn-grad-smoke")]
             Self::BurnGradSmoke(error) => write!(f, "{error}"),
             Self::EmulatorOneToken(error) => write!(f, "{error}"),
+            Self::OracleRouted(error) => write!(f, "{error}"),
             Self::CanonicalJson(error) => write!(f, "{error}"),
             Self::Io { path, source } => write!(f, "{path}: {source}"),
             Self::InvalidSeedList { value } => {
@@ -781,6 +890,7 @@ impl std::error::Error for S7CliError {
             #[cfg(feature = "s7-burn-grad-smoke")]
             Self::BurnGradSmoke(error) => Some(error),
             Self::EmulatorOneToken(error) => Some(error),
+            Self::OracleRouted(error) => Some(error),
             Self::CanonicalJson(error) => Some(error),
             Self::Io { source, .. } => Some(source),
             Self::InvalidSeedList { .. }
@@ -834,6 +944,12 @@ impl From<CanonicalJsonError> for S7CliError {
 impl From<EmulatorOneTokenReportError> for S7CliError {
     fn from(error: EmulatorOneTokenReportError) -> Self {
         Self::EmulatorOneToken(error)
+    }
+}
+
+impl From<OracleRoutedReportError> for S7CliError {
+    fn from(error: OracleRoutedReportError) -> Self {
+        Self::OracleRouted(error)
     }
 }
 

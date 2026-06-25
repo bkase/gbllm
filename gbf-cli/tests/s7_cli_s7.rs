@@ -104,6 +104,7 @@ fn s7_help_lists_dispatch_verbs() {
             .and(predicate::str::contains("materialize-run"))
             .and(predicate::str::contains("derive-comparison"))
             .and(predicate::str::contains("materialize-support-artifact"))
+            .and(predicate::str::contains("oracle-routed"))
             .and(predicate::str::contains("emulator-one-token"))
             .and(predicate::str::contains("emit-report"))
             .and(predicate::str::contains("validate-closure")),
@@ -924,6 +925,211 @@ fn s7_materialize_support_artifact_requires_emulator_topology() {
     assert!(output_result.stdout.is_empty());
     assert!(
         command_output(&output_result).contains("requires --topology"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_oracle_routed_writes_h9_report() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "oracle-routed",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--fixture-prompt-sha",
+        &test_hash(220).to_string(),
+        "--train-logits-sha",
+        &test_hash(221).to_string(),
+        "--bundle-logits-sha",
+        &test_hash(222).to_string(),
+        "--artifact-logits-sha",
+        &test_hash(223).to_string(),
+        "--frozen-teacher-checkpoint-sha",
+        &test_hash(224).to_string(),
+        "--pairwise-max-abs-diff-train-bundle",
+        "0",
+        "--pairwise-max-abs-diff-bundle-artifact",
+        "0.0625",
+        "--pairwise-max-abs-diff-train-artifact",
+        "0.125",
+        "--s3-tolerance",
+        "0.125",
+        "--cross-layer-route-difference",
+        "--consecutive-token-route-change",
+        "--consecutive-token-route-same",
+    ]);
+
+    let output_result = command.output().expect("s7 oracle-routed runs");
+    assert!(
+        output_result.status.success(),
+        "s7 oracle-routed failed:\n{}",
+        command_output(&output_result)
+    );
+    let oracle_self_hash = single_stdout_hash(&output_result);
+    let out_oracle = packet.join("experiments/S7/oracle-routed/seed-0/oracle.json");
+    let oracle: Value =
+        serde_json::from_slice(&std::fs::read(&out_oracle).expect("oracle report reads"))
+            .expect("oracle report parses");
+
+    assert_eq!(oracle["schema"], "s7_oracle_routed.v1");
+    assert_eq!(oracle["seed"], 0);
+    assert_eq!(oracle["topology"], "MoeTiny");
+    assert_eq!(oracle["weight_quant_resolution"], "QuantSpec::weight_quant");
+    assert_eq!(
+        oracle["route_coverage"]["cross_layer_route_difference"],
+        true
+    );
+    assert_eq!(
+        oracle["route_coverage"]["consecutive_token_route_change"],
+        true
+    );
+    assert_eq!(
+        oracle["route_coverage"]["consecutive_token_route_same"],
+        true
+    );
+    assert_eq!(
+        oracle["oracle_self_hash"]
+            .as_str()
+            .expect("oracle hash string"),
+        oracle_self_hash
+    );
+    assert_eq!(
+        oracle,
+        with_domain_self_hash(oracle.clone(), "oracle_self_hash", S7_ORACLE_ROUTED_DOMAIN)
+    );
+
+    let landed = temp.path().join("landed");
+    let mut materialize = gbf();
+    materialize.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        landed.to_str().expect("utf8 landed root"),
+        "--kind",
+        "oracle-routed",
+        "--input",
+        out_oracle.to_str().expect("utf8 oracle input"),
+    ]);
+    let materialize_result = materialize
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        materialize_result.status.success(),
+        "generated oracle report failed materialization:\n{}",
+        command_output(&materialize_result)
+    );
+    assert_eq!(single_stdout_hash(&materialize_result), oracle_self_hash);
+}
+
+#[test]
+fn s7_oracle_routed_rejects_over_tolerance_logits() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "oracle-routed",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--fixture-prompt-sha",
+        &test_hash(225).to_string(),
+        "--train-logits-sha",
+        &test_hash(226).to_string(),
+        "--bundle-logits-sha",
+        &test_hash(227).to_string(),
+        "--artifact-logits-sha",
+        &test_hash(228).to_string(),
+        "--frozen-teacher-checkpoint-sha",
+        &test_hash(229).to_string(),
+        "--pairwise-max-abs-diff-train-bundle",
+        "0.25",
+        "--pairwise-max-abs-diff-bundle-artifact",
+        "0",
+        "--pairwise-max-abs-diff-train-artifact",
+        "0",
+        "--s3-tolerance",
+        "0.125",
+        "--cross-layer-route-difference",
+        "--consecutive-token-route-change",
+        "--consecutive-token-route-same",
+    ]);
+
+    let output_result = command.output().expect("s7 oracle-routed runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 oracle-routed unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("pairwise_max_abs_diff_train_bundle"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_oracle_routed_rejects_missing_route_coverage_axis() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "oracle-routed",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--fixture-prompt-sha",
+        &test_hash(230).to_string(),
+        "--train-logits-sha",
+        &test_hash(231).to_string(),
+        "--bundle-logits-sha",
+        &test_hash(232).to_string(),
+        "--artifact-logits-sha",
+        &test_hash(233).to_string(),
+        "--frozen-teacher-checkpoint-sha",
+        &test_hash(234).to_string(),
+        "--pairwise-max-abs-diff-train-bundle",
+        "0",
+        "--pairwise-max-abs-diff-bundle-artifact",
+        "0",
+        "--pairwise-max-abs-diff-train-artifact",
+        "0",
+        "--s3-tolerance",
+        "0.125",
+        "--consecutive-token-route-change",
+        "--consecutive-token-route-same",
+    ]);
+
+    let output_result = command.output().expect("s7 oracle-routed runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 oracle-routed unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("route_coverage.cross_layer_route_difference"),
         "{}",
         command_output(&output_result)
     );

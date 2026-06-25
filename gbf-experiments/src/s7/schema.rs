@@ -19,6 +19,12 @@ pub const ROUTER_STEP_TELEMETRY_EVENT: &str = "s7.router.step";
 /// Public schema id for per-step S7 router telemetry.
 pub const ROUTER_STEP_TELEMETRY_SCHEMA: &str = "s7_router_step_telemetry.v1";
 
+/// Public schema id for the S7 routed artifact-oracle report.
+pub const ORACLE_ROUTED_SCHEMA: &str = "s7_oracle_routed.v1";
+
+/// Public weight-resolution provenance required by the routed oracle report.
+pub const ORACLE_ROUTED_WEIGHT_QUANT_RESOLUTION: &str = "QuantSpec::weight_quant";
+
 /// Public schema id for the S7 one-token emulator/oracle comparison report.
 pub const EMULATOR_ONE_TOKEN_SCHEMA: &str = "s7_emulator_one_token.v1";
 
@@ -30,6 +36,8 @@ pub const ROUTER_STEP_TELEMETRY_EPSILON: f32 = 1.0e-6;
 
 const ROUTER_STEP_TELEMETRY_SELF_HASH_FIELD: &str = "telemetry_self_hash";
 const ROUTER_STEP_TELEMETRY_SCHEMA_VERSION_ID: &str = "1";
+const ORACLE_ROUTED_SELF_HASH_FIELD: &str = "oracle_self_hash";
+const ORACLE_ROUTED_SCHEMA_VERSION_ID: &str = "1";
 const EMULATOR_ONE_TOKEN_SELF_HASH_FIELD: &str = "emulator_self_hash";
 const EMULATOR_ONE_TOKEN_SCHEMA_VERSION_ID: &str = "1";
 const EMULATOR_ONE_TOKEN_EPSILON: f32 = 1.0e-6;
@@ -59,6 +67,254 @@ pub fn s7_score_report_from_val_bytes(
         log2_sum,
     )?
     .with_computed_self_hash()?)
+}
+
+/// Route-coverage proof bits required by the S7 H9 routed oracle fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OracleRouteCoverage {
+    /// At least one prompt route differs across layers.
+    pub cross_layer_route_difference: bool,
+    /// At least one consecutive token route changes expert.
+    pub consecutive_token_route_change: bool,
+    /// At least one consecutive token route stays on the same expert.
+    pub consecutive_token_route_same: bool,
+}
+
+impl OracleRouteCoverage {
+    /// Construct the all-axes-covered H9 coverage proof.
+    #[must_use]
+    pub const fn covered() -> Self {
+        Self {
+            cross_layer_route_difference: true,
+            consecutive_token_route_change: true,
+            consecutive_token_route_same: true,
+        }
+    }
+
+    /// Construct explicit coverage proof bits.
+    #[must_use]
+    pub const fn new(
+        cross_layer_route_difference: bool,
+        consecutive_token_route_change: bool,
+        consecutive_token_route_same: bool,
+    ) -> Self {
+        Self {
+            cross_layer_route_difference,
+            consecutive_token_route_change,
+            consecutive_token_route_same,
+        }
+    }
+
+    /// Validate that every routed-fixture axis is covered.
+    pub fn validate(&self) -> Result<(), OracleRoutedReportError> {
+        if !self.cross_layer_route_difference {
+            return Err(OracleRoutedReportError::MissingRouteCoverageAxis {
+                field: "cross_layer_route_difference",
+            });
+        }
+        if !self.consecutive_token_route_change {
+            return Err(OracleRoutedReportError::MissingRouteCoverageAxis {
+                field: "consecutive_token_route_change",
+            });
+        }
+        if !self.consecutive_token_route_same {
+            return Err(OracleRoutedReportError::MissingRouteCoverageAxis {
+                field: "consecutive_token_route_same",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// S7 H9 routed artifact-oracle report comparing training, bundle, and
+/// deployable artifact logits for the fixed routed fixture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OracleRoutedReport {
+    /// Schema literal.
+    pub schema: String,
+    /// Experiment seed. H9 is fixed to seed 0.
+    pub seed: u64,
+    /// S7 topology under oracle comparison. H9 is fixed to `MoeTiny`.
+    pub topology: S7Topology,
+    /// Fixed routed fixture prompt hash.
+    pub fixture_prompt_sha: Hash256,
+    /// Training logits hash for the routed fixture.
+    pub train_logits_sha: Hash256,
+    /// Bundle logits hash for the routed fixture.
+    pub bundle_logits_sha: Hash256,
+    /// Deployable artifact logits hash for the routed fixture.
+    pub artifact_logits_sha: Hash256,
+    /// Frozen teacher checkpoint hash for this topology and seed.
+    pub frozen_teacher_checkpoint_sha: Hash256,
+    /// Pairwise max absolute difference between training and bundle logits.
+    pub pairwise_max_abs_diff_train_bundle: f64,
+    /// Pairwise max absolute difference between bundle and artifact logits.
+    pub pairwise_max_abs_diff_bundle_artifact: f64,
+    /// Pairwise max absolute difference between training and artifact logits.
+    pub pairwise_max_abs_diff_train_artifact: f64,
+    /// S3 pinned tolerance for routed oracle agreement.
+    pub s3_tolerance: f64,
+    /// Routed fixture coverage proof.
+    pub route_coverage: OracleRouteCoverage,
+    /// Artifact evaluator weight-resolution provenance.
+    pub weight_quant_resolution: String,
+    /// Self-hash over canonical report bytes with this field omitted.
+    pub oracle_self_hash: Hash256,
+}
+
+impl OracleRoutedReport {
+    /// Domain used for canonical self-hashing.
+    #[must_use]
+    pub const fn domain() -> DomainHash<'static> {
+        DomainHash::new(
+            "gbf-experiments",
+            "S7OracleRoutedReport",
+            ORACLE_ROUTED_SCHEMA,
+            ORACLE_ROUTED_SCHEMA_VERSION_ID,
+        )
+    }
+
+    /// Construct an H9 routed oracle report from already measured logits and
+    /// route-coverage evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        seed: u64,
+        topology: S7Topology,
+        fixture_prompt_sha: Hash256,
+        train_logits_sha: Hash256,
+        bundle_logits_sha: Hash256,
+        artifact_logits_sha: Hash256,
+        frozen_teacher_checkpoint_sha: Hash256,
+        pairwise_max_abs_diff_train_bundle: f64,
+        pairwise_max_abs_diff_bundle_artifact: f64,
+        pairwise_max_abs_diff_train_artifact: f64,
+        s3_tolerance: f64,
+        route_coverage: OracleRouteCoverage,
+    ) -> Result<Self, OracleRoutedReportError> {
+        let report = Self {
+            schema: ORACLE_ROUTED_SCHEMA.to_owned(),
+            seed,
+            topology,
+            fixture_prompt_sha,
+            train_logits_sha,
+            bundle_logits_sha,
+            artifact_logits_sha,
+            frozen_teacher_checkpoint_sha,
+            pairwise_max_abs_diff_train_bundle,
+            pairwise_max_abs_diff_bundle_artifact,
+            pairwise_max_abs_diff_train_artifact,
+            s3_tolerance,
+            route_coverage,
+            weight_quant_resolution: ORACLE_ROUTED_WEIGHT_QUANT_RESOLUTION.to_owned(),
+            oracle_self_hash: Hash256::ZERO,
+        };
+        report.validate()?;
+        report.with_computed_self_hash()
+    }
+
+    /// Validate schema-level invariants that do not require re-running the
+    /// oracle.
+    pub fn validate(&self) -> Result<(), OracleRoutedReportError> {
+        if self.schema != ORACLE_ROUTED_SCHEMA {
+            return Err(OracleRoutedReportError::UnexpectedSchema {
+                expected: ORACLE_ROUTED_SCHEMA,
+                observed: self.schema.clone(),
+            });
+        }
+        if self.seed != 0 {
+            return Err(OracleRoutedReportError::UnsupportedSeed {
+                observed: self.seed,
+            });
+        }
+        if self.topology != S7Topology::MoeTiny {
+            return Err(OracleRoutedReportError::UnsupportedTopology {
+                observed: self.topology.clone(),
+            });
+        }
+        for (field, hash) in [
+            ("fixture_prompt_sha", self.fixture_prompt_sha),
+            ("train_logits_sha", self.train_logits_sha),
+            ("bundle_logits_sha", self.bundle_logits_sha),
+            ("artifact_logits_sha", self.artifact_logits_sha),
+            (
+                "frozen_teacher_checkpoint_sha",
+                self.frozen_teacher_checkpoint_sha,
+            ),
+        ] {
+            validate_oracle_routed_nonzero_hash(field, hash)?;
+        }
+        if self.weight_quant_resolution != ORACLE_ROUTED_WEIGHT_QUANT_RESOLUTION {
+            return Err(OracleRoutedReportError::UnexpectedWeightQuantResolution {
+                expected: ORACLE_ROUTED_WEIGHT_QUANT_RESOLUTION,
+                observed: self.weight_quant_resolution.clone(),
+            });
+        }
+        validate_oracle_routed_finite_nonnegative_f64("s3_tolerance", self.s3_tolerance)?;
+        self.validate_pairwise_diff(
+            "pairwise_max_abs_diff_train_bundle",
+            self.pairwise_max_abs_diff_train_bundle,
+        )?;
+        self.validate_pairwise_diff(
+            "pairwise_max_abs_diff_bundle_artifact",
+            self.pairwise_max_abs_diff_bundle_artifact,
+        )?;
+        self.validate_pairwise_diff(
+            "pairwise_max_abs_diff_train_artifact",
+            self.pairwise_max_abs_diff_train_artifact,
+        )?;
+        self.route_coverage.validate()
+    }
+
+    /// Compute the canonical self-hash.
+    pub fn computed_self_hash(&self) -> Result<Hash256, OracleRoutedReportError> {
+        Ok(gbf_foundation::self_hash_omitting_fields(
+            Self::domain(),
+            self,
+            ORACLE_ROUTED_SELF_HASH_FIELD,
+            &[],
+        )?)
+    }
+
+    /// Return a copy with `oracle_self_hash` recomputed.
+    pub fn with_computed_self_hash(mut self) -> Result<Self, OracleRoutedReportError> {
+        self.oracle_self_hash = self.computed_self_hash()?;
+        Ok(self)
+    }
+
+    /// Verify that the stored self-hash matches the report payload.
+    pub fn verify_self_hash(&self) -> Result<(), OracleRoutedReportError> {
+        let expected = self.computed_self_hash()?;
+        if self.oracle_self_hash != expected {
+            return Err(OracleRoutedReportError::SelfHashMismatch {
+                expected,
+                observed: self.oracle_self_hash,
+            });
+        }
+        Ok(())
+    }
+
+    /// Canonical JSON bytes for this report.
+    pub fn canonical_json_bytes(&self) -> Result<Vec<u8>, OracleRoutedReportError> {
+        Ok(CanonicalJson::to_vec(self)?)
+    }
+
+    fn validate_pairwise_diff(
+        &self,
+        field: &'static str,
+        value: f64,
+    ) -> Result<(), OracleRoutedReportError> {
+        validate_oracle_routed_finite_nonnegative_f64(field, value)?;
+        if value > self.s3_tolerance {
+            return Err(OracleRoutedReportError::PairwiseDiffExceedsS3Tolerance {
+                field,
+                diff: value,
+                s3_tolerance: self.s3_tolerance,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// S7 H10 one-token emulator report compared against the artifact-oracle route
@@ -574,6 +830,128 @@ pub fn entropy_bits_from_counts(tokens_per_expert: &[u32]) -> Result<f32, Router
     Ok(entropy_bits)
 }
 
+/// Errors raised by S7 H9 routed oracle report helpers.
+#[derive(Debug)]
+pub enum OracleRoutedReportError {
+    /// Canonical JSON serialization or hashing failed.
+    CanonicalJson(CanonicalJsonError),
+    /// The schema literal did not match the pinned H9 report schema.
+    UnexpectedSchema {
+        /// Expected schema literal.
+        expected: &'static str,
+        /// Observed schema literal.
+        observed: String,
+    },
+    /// The report used a seed outside the fixed H9 fixture contract.
+    UnsupportedSeed {
+        /// Observed seed.
+        observed: u64,
+    },
+    /// The report used a topology outside the fixed H9 fixture contract.
+    UnsupportedTopology {
+        /// Observed topology.
+        observed: S7Topology,
+    },
+    /// A required hash field was all zeroes.
+    ZeroHash {
+        /// Field name.
+        field: &'static str,
+    },
+    /// A numeric field was not finite.
+    NonFiniteValue {
+        /// Field name.
+        field: &'static str,
+        /// Observed value.
+        value: f64,
+    },
+    /// A numeric field was negative.
+    NegativeValue {
+        /// Field name.
+        field: &'static str,
+        /// Observed value.
+        value: f64,
+    },
+    /// A routed-oracle pairwise difference exceeded the S3 tolerance.
+    PairwiseDiffExceedsS3Tolerance {
+        /// Field name.
+        field: &'static str,
+        /// Observed pairwise max absolute difference.
+        diff: f64,
+        /// S3 pinned tolerance.
+        s3_tolerance: f64,
+    },
+    /// The weight-resolution provenance did not match the routed oracle rule.
+    UnexpectedWeightQuantResolution {
+        /// Expected provenance literal.
+        expected: &'static str,
+        /// Observed provenance literal.
+        observed: String,
+    },
+    /// A required routed-coverage axis was not proven.
+    MissingRouteCoverageAxis {
+        /// Field name inside `route_coverage`.
+        field: &'static str,
+    },
+    /// The stored self-hash did not match the payload.
+    SelfHashMismatch {
+        /// Expected self-hash.
+        expected: Hash256,
+        /// Observed self-hash.
+        observed: Hash256,
+    },
+}
+
+impl fmt::Display for OracleRoutedReportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CanonicalJson(error) => write!(f, "{error}"),
+            Self::UnexpectedSchema { expected, observed } => write!(
+                f,
+                "unexpected oracle-routed schema: expected {expected}, observed {observed}"
+            ),
+            Self::UnsupportedSeed { observed } => {
+                write!(f, "s7_oracle_routed requires seed 0, observed {observed}")
+            }
+            Self::UnsupportedTopology { observed } => write!(
+                f,
+                "s7_oracle_routed requires topology MoeTiny, observed {}",
+                s7_topology_name(observed)
+            ),
+            Self::ZeroHash { field } => write!(f, "{field} must be a nonzero hash"),
+            Self::NonFiniteValue { field, value } => {
+                write!(f, "{field} must be finite, observed {value}")
+            }
+            Self::NegativeValue { field, value } => {
+                write!(f, "{field} must be non-negative, observed {value}")
+            }
+            Self::PairwiseDiffExceedsS3Tolerance {
+                field,
+                diff,
+                s3_tolerance,
+            } => write!(f, "{field} {diff} exceeds s3_tolerance {s3_tolerance}"),
+            Self::UnexpectedWeightQuantResolution { expected, observed } => write!(
+                f,
+                "weight_quant_resolution must be {expected}, observed {observed}"
+            ),
+            Self::MissingRouteCoverageAxis { field } => {
+                write!(f, "route_coverage.{field} must be true")
+            }
+            Self::SelfHashMismatch { expected, observed } => write!(
+                f,
+                "oracle_self_hash mismatch: expected {expected}, observed {observed}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OracleRoutedReportError {}
+
+impl From<CanonicalJsonError> for OracleRoutedReportError {
+    fn from(error: CanonicalJsonError) -> Self {
+        Self::CanonicalJson(error)
+    }
+}
+
 /// Errors raised by S7 H10 emulator one-token report helpers.
 #[derive(Debug)]
 pub enum EmulatorOneTokenReportError {
@@ -942,6 +1320,29 @@ fn validate_bank_switches_with_n_blocks(
     Ok(())
 }
 
+fn validate_oracle_routed_nonzero_hash(
+    field: &'static str,
+    value: Hash256,
+) -> Result<(), OracleRoutedReportError> {
+    if value == Hash256::ZERO {
+        return Err(OracleRoutedReportError::ZeroHash { field });
+    }
+    Ok(())
+}
+
+fn validate_oracle_routed_finite_nonnegative_f64(
+    field: &'static str,
+    value: f64,
+) -> Result<(), OracleRoutedReportError> {
+    if !value.is_finite() {
+        return Err(OracleRoutedReportError::NonFiniteValue { field, value });
+    }
+    if value < 0.0 {
+        return Err(OracleRoutedReportError::NegativeValue { field, value });
+    }
+    Ok(())
+}
+
 fn validate_report_finite_nonnegative_f64(
     field: &'static str,
     value: f64,
@@ -953,6 +1354,13 @@ fn validate_report_finite_nonnegative_f64(
         return Err(EmulatorOneTokenReportError::NegativeValue { field, value });
     }
     Ok(())
+}
+
+const fn s7_topology_name(topology: &S7Topology) -> &'static str {
+    match topology {
+        S7Topology::MoeTiny => "MoeTiny",
+        S7Topology::MoeTinyDenseMatched => "MoeTinyDenseMatched",
+    }
 }
 
 fn validate_report_bank_switch_lower_bound(
