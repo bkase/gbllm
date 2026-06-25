@@ -11,6 +11,9 @@ pub mod cli;
 /// S7 lambda-switch collapse-sweep helpers.
 pub mod collapse_sweep;
 
+/// S7 derived dense-vs-MoE comparison artifact helpers.
+pub mod comparison;
+
 /// S7 closure-packet adapter for the Rust closure validator.
 pub mod closure_packet;
 

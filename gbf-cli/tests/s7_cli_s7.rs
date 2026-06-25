@@ -2,9 +2,11 @@
 
 use assert_cmd::Command;
 use gbf_artifact::{
-    DistillRawDiagnostic, GradNormSummary, RawLossDiagnostics, S7_EVAL_EVERY_STEPS, S7_N_BLOCKS,
-    S7_OPTIMIZER_STEPS, S7Completion, S7RunLog, S7ScoreReport, S7Topology,
+    DistillRawDiagnostic, GradNormSummary, GuardrailVerdict, LambdaSwitch, RawLossDiagnostics,
+    S7_EVAL_EVERY_STEPS, S7_N_BLOCKS, S7_OPTIMIZER_STEPS, S7Completion, S7RunLog, S7ScoreReport,
+    S7Topology, SweepSummary, SwitchStatsSummary,
 };
+use gbf_experiments::s7::baseline_match::canonical_s7_matched_bytes_pin;
 use gbf_experiments::s7::schema::{ConfidenceDist, RouterStepTelemetry};
 use gbf_foundation::Hash256;
 use gbf_foundation::{CanonicalJson, DomainHash};
@@ -70,6 +72,7 @@ fn s7_help_lists_dispatch_verbs() {
     command.assert().success().stdout(
         predicate::str::contains("replay")
             .and(predicate::str::contains("materialize-run"))
+            .and(predicate::str::contains("derive-comparison"))
             .and(predicate::str::contains("emit-report"))
             .and(predicate::str::contains("validate-closure")),
     );
@@ -277,6 +280,90 @@ fn s7_materialize_run_rejects_incomplete_fixture_shaped_run_log() {
     assert!(output_result.stdout.is_empty());
     assert!(
         command_output(&output_result).contains("requires completed run-log"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_derive_comparison_writes_dense_vs_moe_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+    write_comparison_inputs(&packet, true);
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "derive-comparison",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--moe-topology-hash",
+        &test_hash(91).to_string(),
+        "--dense-matched-topology-hash",
+        &test_hash(92).to_string(),
+    ]);
+
+    let output_result = command.output().expect("s7 derive-comparison runs");
+    assert!(
+        output_result.status.success(),
+        "s7 derive-comparison failed:\n{}",
+        command_output(&output_result)
+    );
+    let comparison_self_hash = single_stdout_hash(&output_result);
+    let out_comparison = packet.join("experiments/S7/dense-vs-moe/comparison.json");
+    let comparison: Value =
+        serde_json::from_slice(&std::fs::read(&out_comparison).expect("comparison reads"))
+            .expect("comparison parses");
+
+    assert_eq!(comparison["schema"], "s7_dense_vs_moe.v1");
+    assert_eq!(
+        comparison["comparison_self_hash"]
+            .as_str()
+            .expect("comparison hash string"),
+        comparison_self_hash
+    );
+    assert_eq!(
+        comparison["per_seed"].as_array().expect("per seed").len(),
+        5
+    );
+    assert_eq!(comparison["median_val_bpc_moe"], 1.25);
+    assert_eq!(comparison["median_val_bpc_dense"], 1.75);
+    assert_eq!(comparison["aggregate_parity_verdict"], "Pass-clean");
+    assert_eq!(comparison["pareto_verdict"], "MoE-dominates");
+}
+
+#[test]
+fn s7_derive_comparison_rejects_missing_materialized_score() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+    write_comparison_inputs(&packet, false);
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "derive-comparison",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--moe-topology-hash",
+        &test_hash(91).to_string(),
+        "--dense-matched-topology-hash",
+        &test_hash(92).to_string(),
+    ]);
+
+    let output_result = command.output().expect("s7 derive-comparison runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 derive-comparison unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result)
+            .contains("experiments/S7/scores/MoeTinyDenseMatched/seed-4/score.json"),
         "{}",
         command_output(&output_result)
     );
@@ -1613,6 +1700,75 @@ fn materialize_router_step_telemetry_jsonl(topology: S7Topology, seed: u64) -> V
         bytes.push(b'\n');
     }
     bytes
+}
+
+fn write_comparison_inputs(root: &Path, include_dense_seed_four: bool) {
+    let matched_bytes = canonical_s7_matched_bytes_pin()
+        .expect("matched bytes pin")
+        .canonical_json_bytes()
+        .expect("matched bytes canonicalizes");
+    write_bytes(
+        &root.join("experiments/S7/profile/matched_bytes.json"),
+        &with_trailing_newline(matched_bytes),
+    );
+
+    for seed in 0..5 {
+        write_score_packet(root, S7Topology::MoeTiny, seed, 1.0 + seed as f64 * 0.125);
+        if include_dense_seed_four || seed != 4 {
+            write_score_packet(
+                root,
+                S7Topology::MoeTinyDenseMatched,
+                seed,
+                1.5 + seed as f64 * 0.125,
+            );
+        }
+    }
+
+    let switch_stats =
+        SwitchStatsSummary::new(vec![128, 128, 128, 128], 1.0, 0.5).expect("switch stats summary");
+    write_bytes(
+        &root.join("experiments/S7/summaries/switch-stats-summary.json"),
+        &with_trailing_newline(CanonicalJson::to_vec(&switch_stats).unwrap()),
+    );
+
+    let mut bpc_at_lambda = std::collections::BTreeMap::new();
+    bpc_at_lambda.insert(LambdaSwitch::new("0.0").expect("lambda"), 1.0);
+    bpc_at_lambda.insert(LambdaSwitch::new("0.05").expect("lambda"), 1.0);
+    let mut entropy_at_lambda = std::collections::BTreeMap::new();
+    entropy_at_lambda.insert(LambdaSwitch::new("0.0").expect("lambda"), 1.0);
+    entropy_at_lambda.insert(LambdaSwitch::new("0.05").expect("lambda"), 1.0);
+    let sweep = SweepSummary::new(bpc_at_lambda, entropy_at_lambda, GuardrailVerdict::Pass)
+        .expect("sweep summary");
+    write_bytes(
+        &root.join("experiments/S7/summaries/router-collapse-sweep-summary.json"),
+        &with_trailing_newline(CanonicalJson::to_vec(&sweep).unwrap()),
+    );
+}
+
+fn write_score_packet(root: &Path, topology: S7Topology, seed: u64, bpc: f64) {
+    let topology_path = match topology {
+        S7Topology::MoeTiny => "MoeTiny",
+        S7Topology::MoeTinyDenseMatched => "MoeTinyDenseMatched",
+    };
+    let score = S7ScoreReport::new(
+        seed,
+        topology,
+        test_hash(40 + u8::try_from(seed).expect("seed fits")),
+        test_hash(55),
+        4096,
+        4096.0 * bpc,
+    )
+    .expect("score constructs")
+    .with_computed_self_hash()
+    .expect("score hashes");
+    write_bytes(
+        &root
+            .join("experiments/S7/scores")
+            .join(topology_path)
+            .join(format!("seed-{seed}"))
+            .join("score.json"),
+        &with_trailing_newline(score.canonical_json_bytes().unwrap()),
+    );
 }
 
 fn with_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {

@@ -17,6 +17,9 @@ use serde_json::{Value, json};
 use crate::s7::closure_packet::{
     S7ClosurePacketError, ValidateClosurePacketArgs, validate_closure_packet,
 };
+use crate::s7::comparison::{
+    S7ComparisonArtifactInputs, S7ComparisonMaterializeError, materialize_dense_vs_moe_comparison,
+};
 use crate::s7::replay::{
     S7_DETERMINISM_FIXTURE_SCOPE, S7_FULL_CLI_REPLAY_OWNER, S7_FULL_CLOSURE_OWNER, S7ReplayError,
     fixture_replay_product,
@@ -28,6 +31,9 @@ use crate::s7::run::{
 const DEFAULT_GUTENBERG_MANIFEST: &str = "fixtures/corpora/gutenberg.toml";
 const DEFAULT_CHARSET: &str = "fixtures/charsets/charset_v1.toml";
 const DEFAULT_MATCHED_BYTES: &str = "experiments/S7/profile/matched_bytes.json";
+const DEFAULT_SWITCH_STATS_SUMMARY: &str = "experiments/S7/summaries/switch-stats-summary.json";
+const DEFAULT_SWEEP_SUMMARY: &str = "experiments/S7/summaries/router-collapse-sweep-summary.json";
+const DEFAULT_COMPARISON_OUTPUT: &str = "experiments/S7/dense-vs-moe/comparison.json";
 const DEFAULT_DEVICE_PROFILE: &str = "S7CpuDeterministic";
 const DEFAULT_SEED_LIST: &str = "0,1,2,3,4";
 const DEFAULT_REPORT_EMITTER: &str = "scripts/review/f-s7/emit-report.py";
@@ -50,6 +56,8 @@ pub enum S7Command {
     Replay(S7ReplayArgs),
     /// Validate externally produced completed-run artifacts and write packet paths.
     MaterializeRun(S7MaterializeRunArgs),
+    /// Derive the dense-vs-MoE comparison from materialized score artifacts.
+    DeriveComparison(S7DeriveComparisonArgs),
     /// Emit the final S7 report from already-produced production artifact JSON.
     EmitReport(S7EmitReportArgs),
     /// Validate the final S7 report against the Rust closure contract.
@@ -117,6 +125,35 @@ pub struct S7MaterializeRunArgs {
     pub router_step_telemetry: PathBuf,
 }
 
+/// Arguments for `gbf s7 derive-comparison`.
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 derive-comparison --root . --moe-topology-hash sha256:... --dense-matched-topology-hash sha256:..."
+)]
+pub struct S7DeriveComparisonArgs {
+    /// Packet/repository root containing materialized S7 score artifacts.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Matched-bytes pin path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_MATCHED_BYTES)]
+    pub matched_bytes: PathBuf,
+    /// Production MoE topology hash recorded in `s7_dense_vs_moe.v1`.
+    #[arg(long)]
+    pub moe_topology_hash: Hash256,
+    /// Production dense matched topology hash recorded in `s7_dense_vs_moe.v1`.
+    #[arg(long)]
+    pub dense_matched_topology_hash: Hash256,
+    /// Switch-stat summary JSON path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_SWITCH_STATS_SUMMARY)]
+    pub switch_stats_summary: PathBuf,
+    /// Router-collapse sweep summary JSON path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_SWEEP_SUMMARY)]
+    pub sweep_summary: PathBuf,
+    /// Output `s7_dense_vs_moe.v1` path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_COMPARISON_OUTPUT)]
+    pub output: PathBuf,
+}
+
 /// Arguments for `gbf s7 emit-report`.
 #[derive(Debug, Clone, Args)]
 #[command(
@@ -178,6 +215,7 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
     match cli.command {
         S7Command::Replay(args) => replay(args),
         S7Command::MaterializeRun(args) => materialize_run(args),
+        S7Command::DeriveComparison(args) => derive_comparison(args),
         S7Command::EmitReport(args) => emit_report(args),
         S7Command::ValidateClosure(args) => validate_closure(args),
     }
@@ -262,6 +300,20 @@ fn materialize_run(args: S7MaterializeRunArgs) -> Result<(), S7CliError> {
         router_step_telemetry: args.router_step_telemetry,
     })?;
     println!("{}", materialized.run_log_self_hash);
+    Ok(())
+}
+
+fn derive_comparison(args: S7DeriveComparisonArgs) -> Result<(), S7CliError> {
+    let materialized = materialize_dense_vs_moe_comparison(&S7ComparisonArtifactInputs {
+        root: args.root,
+        matched_bytes: args.matched_bytes,
+        moe_topology_hash: args.moe_topology_hash,
+        dense_matched_topology_hash: args.dense_matched_topology_hash,
+        switch_stats_summary: args.switch_stats_summary,
+        sweep_summary: args.sweep_summary,
+        output: args.output,
+    })?;
+    println!("{}", materialized.comparison_self_hash);
     Ok(())
 }
 
@@ -426,6 +478,8 @@ pub enum S7CliError {
     Replay(S7ReplayError),
     /// Completed-run artifact materialization failed.
     MaterializeRun(S7RunMaterializeError),
+    /// Dense-vs-MoE comparison derivation failed.
+    DeriveComparison(S7ComparisonMaterializeError),
     /// Canonical JSON encoding failed.
     CanonicalJson(CanonicalJsonError),
     /// Filesystem operation failed.
@@ -472,6 +526,7 @@ impl fmt::Display for S7CliError {
         match self {
             Self::Replay(error) => write!(f, "{error}"),
             Self::MaterializeRun(error) => write!(f, "{error}"),
+            Self::DeriveComparison(error) => write!(f, "{error}"),
             Self::CanonicalJson(error) => write!(f, "{error}"),
             Self::Io { path, source } => write!(f, "{path}: {source}"),
             Self::InvalidSeedList { value } => {
@@ -508,6 +563,7 @@ impl std::error::Error for S7CliError {
         match self {
             Self::Replay(error) => Some(error),
             Self::MaterializeRun(error) => Some(error),
+            Self::DeriveComparison(error) => Some(error),
             Self::CanonicalJson(error) => Some(error),
             Self::Io { source, .. } => Some(source),
             Self::InvalidSeedList { .. }
@@ -529,6 +585,12 @@ impl From<S7ReplayError> for S7CliError {
 impl From<S7RunMaterializeError> for S7CliError {
     fn from(error: S7RunMaterializeError) -> Self {
         Self::MaterializeRun(error)
+    }
+}
+
+impl From<S7ComparisonMaterializeError> for S7CliError {
+    fn from(error: S7ComparisonMaterializeError) -> Self {
+        Self::DeriveComparison(error)
     }
 }
 
