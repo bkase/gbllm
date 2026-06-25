@@ -14,8 +14,16 @@ const LINEARSTATE_SNAPSHOT_FILE: &str = "s1_linearstate_public_api.txt";
 const QAT_MODULE: &str = "gbf-model::qat";
 const LINEARSTATE_MODULE: &str = "gbf-model::sequence::LinearStateBlock";
 
-/// Empty O11 v1 API drift allow-list.
-pub const S2_ALLOWED_API_DRIFT_V1: &[&str] = &[];
+/// O11 v1 API drift allow-list for reviewed post-S1 QAT surface additions.
+///
+/// The snapshot remains the S1 baseline. Entries here document intentional
+/// public API expansion needed by later slice closure work.
+pub const S2_ALLOWED_API_DRIFT_V1: &[&str] = &[
+    "gbf-model::qat::RouterExecutionMode",
+    "gbf-model::qat::RouterStochasticConfig",
+    "gbf-model::qat::RouterStochasticContext",
+    "gbf-model::qat::RouterStochasticPhase",
+];
 
 /// Current public symbols for the two O11 API surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]

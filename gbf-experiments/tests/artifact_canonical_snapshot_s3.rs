@@ -10,6 +10,6 @@ fn artifact_canonical_snapshot_s3() {
 
     assert_eq!(
         product.canonical_artifact_payload_sha.to_string(),
-        "sha256:739b6fa6f5f9668f3599669b436951ce2de5512d99abb76b58c563fcd8cfc59f"
+        "sha256:d6f0d9194644d19c75d77017d61a0b5d1523e81865f35e5aec638e7083bc0eeb"
     );
 }

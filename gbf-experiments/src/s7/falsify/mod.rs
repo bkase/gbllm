@@ -483,7 +483,6 @@ pub fn run_s7_falsification_case(case: S7FalsificationCase) -> S7FalsificationOb
     run_s7_falsification_evidence(broken_substitute_for_case(case))
 }
 
-/// F1 broken substitute runner.
 pub mod f1_router_top_k_ge_2 {
     //! F1: top-2 routing silently constructs.
 
@@ -507,7 +506,6 @@ pub mod f1_router_top_k_ge_2 {
     }
 }
 
-/// F2 broken substitute runner.
 pub mod f2_bytes_unscaled {
     //! F2: dense matched-bytes uses MoE's FFN width.
 
@@ -544,7 +542,6 @@ pub mod f2_bytes_unscaled {
     }
 }
 
-/// F3 broken substitute runner.
 pub mod f3_pareto_unequal_bytes {
     //! F3: Pareto verdict compares unequal byte budgets.
 
@@ -568,7 +565,6 @@ pub mod f3_pareto_unequal_bytes {
     }
 }
 
-/// F4 broken substitute runner.
 pub mod f4_switch_grad_router_only {
     //! F4: L_switch gradient path stops before router parameters.
 
@@ -591,7 +587,6 @@ pub mod f4_switch_grad_router_only {
     }
 }
 
-/// F5 broken substitute runner.
 pub mod f5_z_uncentered {
     //! F5: z-loss uses an uncentered baseline.
 
@@ -614,7 +609,6 @@ pub mod f5_z_uncentered {
     }
 }
 
-/// F6 broken substitute runner.
 pub mod f6_balance_no_stop_grad {
     //! F6: load-balance dispatch provenance is differentiable.
 
@@ -637,7 +631,6 @@ pub mod f6_balance_no_stop_grad {
     }
 }
 
-/// F7 broken substitute runner.
 pub mod f7_window_one {
     //! F7: smoothness window one silently constructs.
 
@@ -660,7 +653,6 @@ pub mod f7_window_one {
     }
 }
 
-/// F8 broken substitute runner.
 pub mod f8_sweep_constant_lambda {
     //! F8: lambda-switch sweep contains only the production value.
 
@@ -684,7 +676,6 @@ pub mod f8_sweep_constant_lambda {
     }
 }
 
-/// F9 broken substitute runner.
 pub mod f9_expert_block_qat_grad_dead {
     //! F9: ExpertBlockQat Burn gradients are dead at up.weight.
 
