@@ -764,6 +764,8 @@ frontier_report = with_self_hash({
 write_json("experiments/S7/frontier/frontier.json", frontier_report)
 burn_grad_report = with_self_hash({
         "schema": "s7_burn_grad_smoke.v1",
+        "fixture_seed": 0xFEED,
+        "burn_adapter_version": "synthetic-validator-fixture",
         "fixture_input_sha": h,
         "grad_up_weight_sum_abs": 1.0,
         "grad_down_weight_sum_abs": 1.0,

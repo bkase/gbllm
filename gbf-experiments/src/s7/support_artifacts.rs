@@ -783,6 +783,13 @@ fn validate_frontier(path: &Path, value: &Value) -> Result<(), S7SupportArtifact
 }
 
 fn validate_burn_grad(path: &Path, value: &Value) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_u64_eq(value, &["fixture_seed"], "fixture_seed", 0xFEED, path)?;
+    require_non_empty_string(
+        value,
+        &["burn_adapter_version"],
+        "burn_adapter_version",
+        path,
+    )?;
     require_nonzero_hash(value, &["fixture_input_sha"], "fixture_input_sha", path)?;
     for field in ["grad_up_weight_sum_abs", "grad_down_weight_sum_abs"] {
         require_finite_positive(value, &[field], field, path)?;

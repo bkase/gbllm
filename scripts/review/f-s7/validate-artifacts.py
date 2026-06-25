@@ -1103,6 +1103,10 @@ def validate_burn_grad(errors: list[str], path: Path) -> None:
     data = load_json(errors, path, "s7_burn_grad_smoke.v1")
     if data is None:
         return
+    require_equal(errors, path, data, "fixture_seed", 0xFEED)
+    value = data.get("burn_adapter_version")
+    if not isinstance(value, str) or not value:
+        errors.append(f"{path} burn_adapter_version must be a non-empty string")
     for field in [
         "grad_up_weight_sum_abs",
         "grad_down_weight_sum_abs",

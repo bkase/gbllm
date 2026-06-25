@@ -14,6 +14,10 @@ use gbf_artifact::S7Topology;
 use gbf_foundation::{CanonicalJson, CanonicalJsonError, DomainHash, Hash256};
 use serde_json::{Value, json};
 
+#[cfg(feature = "s7-burn-grad-smoke")]
+use crate::s7::burn_grad_smoke::{
+    S7BurnGradSmokeError, S7BurnGradSmokeInputs, produce_burn_grad_smoke_artifact,
+};
 use crate::s7::closure_packet::{
     S7ClosurePacketError, ValidateClosurePacketArgs, validate_closure_packet,
 };
@@ -42,6 +46,8 @@ const DEFAULT_DEVICE_PROFILE: &str = "S7CpuDeterministic";
 const DEFAULT_SEED_LIST: &str = "0,1,2,3,4";
 const DEFAULT_REPORT_EMITTER: &str = "scripts/review/f-s7/emit-report.py";
 const DEFAULT_REPORT_OUTPUT: &str = "docs/experiments/S7-report.md";
+#[cfg(feature = "s7-burn-grad-smoke")]
+const DEFAULT_BURN_GRAD_SMOKE_OUTPUT: &str = "experiments/S7/burn-grad-smoke/expert_block_qat.json";
 const S7_CLI_REPLAY_DOMAIN: DomainHash<'static> =
     DomainHash::new("gbf-experiments", "S7CliReplay", "s7_replay_cli.v1", "1");
 
@@ -64,6 +70,9 @@ pub enum S7Command {
     DeriveComparison(S7DeriveComparisonArgs),
     /// Validate and materialize a closure support artifact.
     MaterializeSupportArtifact(S7MaterializeSupportArtifactArgs),
+    /// Produce the H8 Burn ExpertBlockQat gradient smoke artifact.
+    #[cfg(feature = "s7-burn-grad-smoke")]
+    BurnGradSmoke(S7BurnGradSmokeArgs),
     /// Emit the final S7 report from already-produced production artifact JSON.
     EmitReport(S7EmitReportArgs),
     /// Validate the final S7 report against the Rust closure contract.
@@ -186,6 +195,21 @@ pub struct S7MaterializeSupportArtifactArgs {
     pub output: Option<PathBuf>,
 }
 
+/// Arguments for `gbf s7 burn-grad-smoke`.
+#[cfg(feature = "s7-burn-grad-smoke")]
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 burn-grad-smoke --root . --output experiments/S7/burn-grad-smoke/expert_block_qat.json"
+)]
+pub struct S7BurnGradSmokeArgs {
+    /// Packet/repository root where the H8 smoke artifact should be written.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Output `s7_burn_grad_smoke.v1` path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_BURN_GRAD_SMOKE_OUTPUT)]
+    pub output: PathBuf,
+}
+
 /// Arguments for `gbf s7 emit-report`.
 #[derive(Debug, Clone, Args)]
 #[command(
@@ -249,6 +273,8 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
         S7Command::MaterializeRun(args) => materialize_run(args),
         S7Command::DeriveComparison(args) => derive_comparison(args),
         S7Command::MaterializeSupportArtifact(args) => materialize_support(args),
+        #[cfg(feature = "s7-burn-grad-smoke")]
+        S7Command::BurnGradSmoke(args) => burn_grad_smoke(args),
         S7Command::EmitReport(args) => emit_report(args),
         S7Command::ValidateClosure(args) => validate_closure(args),
     }
@@ -360,6 +386,16 @@ fn materialize_support(args: S7MaterializeSupportArtifactArgs) -> Result<(), S7C
         output: args.output,
     })?;
     println!("{}", materialized.self_hash);
+    Ok(())
+}
+
+#[cfg(feature = "s7-burn-grad-smoke")]
+fn burn_grad_smoke(args: S7BurnGradSmokeArgs) -> Result<(), S7CliError> {
+    let artifact = produce_burn_grad_smoke_artifact(&S7BurnGradSmokeInputs {
+        root: args.root,
+        output: args.output,
+    })?;
+    println!("{}", artifact.smoke_self_hash);
     Ok(())
 }
 
@@ -532,6 +568,9 @@ pub enum S7CliError {
     DeriveComparison(S7ComparisonMaterializeError),
     /// Support artifact materialization failed.
     MaterializeSupportArtifact(S7SupportArtifactMaterializeError),
+    /// Burn gradient smoke producer failed.
+    #[cfg(feature = "s7-burn-grad-smoke")]
+    BurnGradSmoke(S7BurnGradSmokeError),
     /// Canonical JSON encoding failed.
     CanonicalJson(CanonicalJsonError),
     /// Filesystem operation failed.
@@ -580,6 +619,8 @@ impl fmt::Display for S7CliError {
             Self::MaterializeRun(error) => write!(f, "{error}"),
             Self::DeriveComparison(error) => write!(f, "{error}"),
             Self::MaterializeSupportArtifact(error) => write!(f, "{error}"),
+            #[cfg(feature = "s7-burn-grad-smoke")]
+            Self::BurnGradSmoke(error) => write!(f, "{error}"),
             Self::CanonicalJson(error) => write!(f, "{error}"),
             Self::Io { path, source } => write!(f, "{path}: {source}"),
             Self::InvalidSeedList { value } => {
@@ -618,6 +659,8 @@ impl std::error::Error for S7CliError {
             Self::MaterializeRun(error) => Some(error),
             Self::DeriveComparison(error) => Some(error),
             Self::MaterializeSupportArtifact(error) => Some(error),
+            #[cfg(feature = "s7-burn-grad-smoke")]
+            Self::BurnGradSmoke(error) => Some(error),
             Self::CanonicalJson(error) => Some(error),
             Self::Io { source, .. } => Some(source),
             Self::InvalidSeedList { .. }
@@ -651,6 +694,13 @@ impl From<S7ComparisonMaterializeError> for S7CliError {
 impl From<S7SupportArtifactMaterializeError> for S7CliError {
     fn from(error: S7SupportArtifactMaterializeError) -> Self {
         Self::MaterializeSupportArtifact(error)
+    }
+}
+
+#[cfg(feature = "s7-burn-grad-smoke")]
+impl From<S7BurnGradSmokeError> for S7CliError {
+    fn from(error: S7BurnGradSmokeError) -> Self {
+        Self::BurnGradSmoke(error)
     }
 }
 

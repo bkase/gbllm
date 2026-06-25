@@ -109,6 +109,18 @@ fn s7_help_lists_dispatch_verbs() {
     );
 }
 
+#[cfg(feature = "s7-burn-grad-smoke")]
+#[test]
+fn s7_help_lists_burn_grad_smoke_when_feature_enabled() {
+    let mut command = gbf();
+    command.args(["s7", "--help"]);
+
+    command
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("burn-grad-smoke"));
+}
+
 #[test]
 fn s7_replay_fixture_writes_split_feature_evidence() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -538,6 +550,73 @@ fn s7_materialize_support_artifact_writes_burn_grad_packet_path() {
             .as_str()
             .expect("smoke hash string"),
         smoke_self_hash
+    );
+}
+
+#[cfg(feature = "s7-burn-grad-smoke")]
+#[test]
+fn s7_burn_grad_smoke_writes_h8_fixture_report() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "burn-grad-smoke",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+    ]);
+
+    let output_result = command.output().expect("s7 burn-grad-smoke runs");
+    assert!(
+        output_result.status.success(),
+        "s7 burn-grad-smoke failed:\n{}",
+        command_output(&output_result)
+    );
+    let smoke_self_hash = single_stdout_hash(&output_result);
+    let out_burn_grad = packet.join("experiments/S7/burn-grad-smoke/expert_block_qat.json");
+    let burn_grad: Value =
+        serde_json::from_slice(&std::fs::read(&out_burn_grad).expect("burn grad reads"))
+            .expect("burn grad parses");
+
+    assert_eq!(burn_grad["schema"], "s7_burn_grad_smoke.v1");
+    assert_eq!(burn_grad["fixture_seed"], 65261);
+    assert!(
+        burn_grad["burn_adapter_version"]
+            .as_str()
+            .expect("adapter version")
+            .contains("burn-adapter")
+    );
+    assert_sha256(&burn_grad["fixture_input_sha"]);
+    assert!(burn_grad["grad_up_weight_sum_abs"].as_f64().unwrap() > 0.0);
+    assert!(burn_grad["grad_down_weight_sum_abs"].as_f64().unwrap() > 0.0);
+    assert_eq!(burn_grad["supported_clipped_activation_count"], 3);
+    assert_eq!(burn_grad["learned_activation_range_unsupported"], true);
+    assert_eq!(burn_grad["projection_biases_unsupported"], true);
+    assert_eq!(burn_grad["glu_construction_rejected"], true);
+    assert_eq!(burn_grad["replay_byte_identical"], true);
+    assert!(burn_grad.get("grad_up_bias_sum_abs").is_none());
+    assert!(burn_grad.get("grad_down_bias_sum_abs").is_none());
+    assert!(
+        burn_grad
+            .get("grad_activation_clip_threshold_sum_abs")
+            .is_none()
+    );
+    assert_eq!(
+        burn_grad["smoke_self_hash"]
+            .as_str()
+            .expect("smoke hash string"),
+        smoke_self_hash
+    );
+    assert_eq!(
+        burn_grad,
+        with_domain_self_hash(
+            burn_grad.clone(),
+            "smoke_self_hash",
+            S7_BURN_GRAD_SMOKE_DOMAIN
+        )
     );
 }
 

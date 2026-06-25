@@ -44,6 +44,7 @@ s7 = []
 s7-moe = ["s7"]
 s7-dense-matched = ["s7"]
 s7-router-collapse-sweep = ["s7"]
+s7-burn-grad-smoke = ["s7", "qat", "burn-adapter"]
 falsify = [
     "s2-full",
     "s3",

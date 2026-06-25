@@ -5,6 +5,10 @@ pub use crate::S7_LOG_TARGET;
 /// Dense matched-bytes baseline and pin emission.
 pub mod baseline_match;
 
+/// H8 Burn ExpertBlockQat gradient smoke producer.
+#[cfg(feature = "s7-burn-grad-smoke")]
+pub mod burn_grad_smoke;
+
 /// Command-line integration surface for S7 replay gates.
 pub mod cli;
 
