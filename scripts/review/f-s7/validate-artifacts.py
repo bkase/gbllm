@@ -1106,13 +1106,22 @@ def validate_burn_grad(errors: list[str], path: Path) -> None:
     for field in [
         "grad_up_weight_sum_abs",
         "grad_down_weight_sum_abs",
-        "grad_up_bias_sum_abs",
-        "grad_down_bias_sum_abs",
-        "grad_activation_clip_threshold_sum_abs",
     ]:
         value = data.get(field)
         if not finite_number(value) or float(value) <= 0.0:
             errors.append(f"{path} {field} must be finite and > 0")
+    for field in [
+        "grad_up_bias_sum_abs",
+        "grad_down_bias_sum_abs",
+        "grad_activation_clip_threshold_sum_abs",
+    ]:
+        if field in data:
+            errors.append(
+                f"{path} {field} is unsupported because ExpertBlockQat bias and learned activation-range parameters are rejected"
+            )
+    require_equal(errors, path, data, "supported_clipped_activation_count", 3)
+    require_equal(errors, path, data, "learned_activation_range_unsupported", True)
+    require_equal(errors, path, data, "projection_biases_unsupported", True)
     require_equal(errors, path, data, "glu_construction_rejected", True)
     require_equal(errors, path, data, "replay_byte_identical", True)
     require_hash(errors, path, data, "fixture_input_sha")

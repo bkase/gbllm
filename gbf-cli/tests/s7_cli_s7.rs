@@ -494,6 +494,102 @@ fn s7_materialize_support_artifact_rejects_self_hash_mismatch() {
 }
 
 #[test]
+fn s7_materialize_support_artifact_writes_burn_grad_packet_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    write_json(&input_root, "burn-grad.json", &burn_grad_support_artifact());
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "burn-grad-smoke",
+        "--input",
+        input_root
+            .join("burn-grad.json")
+            .to_str()
+            .expect("utf8 burn-grad input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        output_result.status.success(),
+        "s7 materialize-support-artifact failed:\n{}",
+        command_output(&output_result)
+    );
+    let smoke_self_hash = single_stdout_hash(&output_result);
+    let out_burn_grad = packet.join("experiments/S7/burn-grad-smoke/expert_block_qat.json");
+    let burn_grad: Value =
+        serde_json::from_slice(&std::fs::read(&out_burn_grad).expect("burn grad reads"))
+            .expect("burn grad parses");
+
+    assert_eq!(burn_grad["schema"], "s7_burn_grad_smoke.v1");
+    assert_eq!(burn_grad["projection_biases_unsupported"], true);
+    assert_eq!(
+        burn_grad["smoke_self_hash"]
+            .as_str()
+            .expect("smoke hash string"),
+        smoke_self_hash
+    );
+}
+
+#[test]
+fn s7_materialize_support_artifact_rejects_burn_grad_bias_gradient_fields() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    let mut burn_grad = burn_grad_support_artifact();
+    burn_grad
+        .as_object_mut()
+        .expect("burn grad object")
+        .insert("grad_up_bias_sum_abs".to_owned(), serde_json::json!(1.0));
+    let burn_grad = with_domain_self_hash(burn_grad, "smoke_self_hash", S7_BURN_GRAD_SMOKE_DOMAIN);
+    write_json(&input_root, "burn-grad.json", &burn_grad);
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "burn-grad-smoke",
+        "--input",
+        input_root
+            .join("burn-grad.json")
+            .to_str()
+            .expect("utf8 burn-grad input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 materialize-support-artifact unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains(
+            "grad_up_bias_sum_abs is unsupported because ExpertBlockQat bias and learned activation-range parameters are rejected"
+        ),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
 fn s7_materialize_support_artifact_writes_switch_stats_packet_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let input_root = temp.path().join("input");
@@ -2341,6 +2437,27 @@ fn frontier_support_artifact() -> Value {
         }),
         "frontier_self_hash",
         S7_FRONTIER_DOMAIN,
+    )
+}
+
+fn burn_grad_support_artifact() -> Value {
+    with_domain_self_hash(
+        serde_json::json!({
+            "schema": "s7_burn_grad_smoke.v1",
+            "fixture_seed": 65261,
+            "burn_adapter_version": "test",
+        "fixture_input_sha": test_hash(104),
+        "grad_up_weight_sum_abs": 1.0,
+        "grad_down_weight_sum_abs": 1.25,
+        "supported_clipped_activation_count": 3,
+        "learned_activation_range_unsupported": true,
+        "projection_biases_unsupported": true,
+            "glu_construction_rejected": true,
+            "replay_byte_identical": true,
+            "smoke_self_hash": test_hash(105),
+        }),
+        "smoke_self_hash",
+        S7_BURN_GRAD_SMOKE_DOMAIN,
     )
 }
 

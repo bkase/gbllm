@@ -837,13 +837,16 @@ Statement:
 Predicted:
   Fixture: batch=2, seq=4, d_model=8, d_ff=16, n_experts=2, two-matrix
   expert with clipped activation (bd-x75 default).
-  After one backward pass under loss = sum(expert_output**2):
+  After one backward pass under loss = sum(expert_output**2), for each
+  supported clipped activation (relu, gelu_clip, silu_clip):
     grad(up.weight)         finite, sum(|grad|) > 0
-    grad(up.bias)           finite, sum(|grad|) > 0
     grad(down.weight)       finite, sum(|grad|) > 0
-    grad(down.bias)         finite, sum(|grad|) > 0
-    grad(activation_clip_threshold)  finite (parameter under Phase D);
-                                    sum(|grad|) > 0 in Phase D, else gated
+    activation range mode           fixed range only at the Burn boundary;
+                                      learned/EMA activation ranges remain
+                                      rejected until state ownership exists
+    expert projection biases         unsupported by the model contract;
+                                      construction with projection bias
+                                      remains rejected, not silently trained
     grad(GatedLinearUnit gate)       does not exist; bd-2c8z rejects GLU
                                        at construction time
   Determinism: replay with identical inputs ⇒ bit-identical gradients.
@@ -2593,9 +2596,9 @@ BurnGradSmokeReport (JSON) :=
     fixture_input_sha:            Hash256
     grad_up_weight_sum_abs:       f64
     grad_down_weight_sum_abs:     f64
-    grad_up_bias_sum_abs:         f64
-    grad_down_bias_sum_abs:       f64
-    grad_activation_clip_threshold_sum_abs: f64
+    supported_clipped_activation_count: u64   ; must be 3
+    learned_activation_range_unsupported: Bool
+    projection_biases_unsupported: Bool
     glu_construction_rejected:    Bool
     replay_byte_identical:        Bool
     smoke_self_hash:              Hash256
@@ -2605,6 +2608,9 @@ Invariants:
   BG-Finite           every grad_*_sum_abs is finite
   BG-Nonzero          every required grad_*_sum_abs > 0
                       (per H8 declared reach set)
+  BG-Activations      supported_clipped_activation_count = 3
+  BG-RangeContract    learned_activation_range_unsupported = true
+  BG-BiasContract     projection_biases_unsupported = true
   BG-Glu              glu_construction_rejected = true
   BG-Replay           replay_byte_identical = true
 

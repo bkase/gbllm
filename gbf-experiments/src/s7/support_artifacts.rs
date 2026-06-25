@@ -784,15 +784,44 @@ fn validate_frontier(path: &Path, value: &Value) -> Result<(), S7SupportArtifact
 
 fn validate_burn_grad(path: &Path, value: &Value) -> Result<(), S7SupportArtifactMaterializeError> {
     require_nonzero_hash(value, &["fixture_input_sha"], "fixture_input_sha", path)?;
+    for field in ["grad_up_weight_sum_abs", "grad_down_weight_sum_abs"] {
+        require_finite_positive(value, &[field], field, path)?;
+    }
     for field in [
-        "grad_up_weight_sum_abs",
-        "grad_down_weight_sum_abs",
         "grad_up_bias_sum_abs",
         "grad_down_bias_sum_abs",
         "grad_activation_clip_threshold_sum_abs",
     ] {
-        require_finite_positive(value, &[field], field, path)?;
+        if value.get(field).is_some() {
+            return Err(invalid(
+                path,
+                format!(
+                    "{field} is unsupported because ExpertBlockQat bias and learned activation-range parameters are rejected"
+                ),
+            ));
+        }
     }
+    require_u64_eq(
+        value,
+        &["supported_clipped_activation_count"],
+        "supported_clipped_activation_count",
+        3,
+        path,
+    )?;
+    require_bool(
+        value,
+        &["learned_activation_range_unsupported"],
+        "learned_activation_range_unsupported",
+        true,
+        path,
+    )?;
+    require_bool(
+        value,
+        &["projection_biases_unsupported"],
+        "projection_biases_unsupported",
+        true,
+        path,
+    )?;
     require_bool(
         value,
         &["glu_construction_rejected"],
