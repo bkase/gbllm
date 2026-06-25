@@ -19,6 +19,7 @@ DEFAULT_REVIEW_CWD = "/Users/bkase/Documents/gbllm"
 DEFAULT_REVIEW_DIR = "docs/review/f-s7/reviews"
 DEFAULT_RAW_DIR = "docs/review/f-s7/raw"
 DEFAULT_GEMINI_AGENT = "gemini --skip-trust -m gemini-3.1-pro-preview --acp"
+DEFAULT_CLAUDE_AGENT = ""
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REVIEWERS = ("gemini", "claude")
 REQUIRED_PERSONAS = {
@@ -48,6 +49,14 @@ def main() -> int:
             "S7_GEMINI_ACP_AGENT or the project-pinned Gemini CLI command"
         ),
     )
+    parser.add_argument(
+        "--claude-agent",
+        default=os.environ.get("S7_CLAUDE_ACP_AGENT", DEFAULT_CLAUDE_AGENT),
+        help=(
+            "optional raw ACPX --agent command for Claude review; defaults to "
+            "S7_CLAUDE_ACP_AGENT or the ACPX built-in `claude exec` route"
+        ),
+    )
     parser.add_argument("--review-dir", default=DEFAULT_REVIEW_DIR)
     parser.add_argument("--raw-dir", default=DEFAULT_RAW_DIR)
     parser.add_argument("--dry-run", action="store_true", help="print commands without running ACPX")
@@ -69,6 +78,7 @@ def main() -> int:
                 review_cwd=args.review_cwd,
                 timeout=args.timeout,
                 gemini_agent=args.gemini_agent,
+                claude_agent=args.claude_agent,
                 head=head,
             )
             for reviewer in reviewers
@@ -164,6 +174,7 @@ def review_plan(
     review_cwd: str,
     timeout: str,
     gemini_agent: str,
+    claude_agent: str,
     head: str,
 ) -> ReviewPlan:
     prompt = review_prompt(reviewer, head)
@@ -187,20 +198,37 @@ def review_plan(
         recorded[0] = "acpx"
         return ReviewPlan(reviewer, command, shlex.join(recorded))
     if reviewer == "claude":
-        command = [
-            acpx,
-            "--cwd",
-            review_cwd,
-            "--approve-all",
-            "--format",
-            "text",
-            "--suppress-reads",
-            "--timeout",
-            timeout,
-            "claude",
-            "exec",
-            prompt,
-        ]
+        if claude_agent.strip():
+            command = [
+                acpx,
+                "--agent",
+                claude_agent,
+                "--cwd",
+                review_cwd,
+                "--approve-all",
+                "--format",
+                "text",
+                "--suppress-reads",
+                "--timeout",
+                timeout,
+                "exec",
+                prompt,
+            ]
+        else:
+            command = [
+                acpx,
+                "--cwd",
+                review_cwd,
+                "--approve-all",
+                "--format",
+                "text",
+                "--suppress-reads",
+                "--timeout",
+                timeout,
+                "claude",
+                "exec",
+                prompt,
+            ]
         recorded = command.copy()
         recorded[0] = "acpx"
         return ReviewPlan(reviewer, command, shlex.join(recorded))

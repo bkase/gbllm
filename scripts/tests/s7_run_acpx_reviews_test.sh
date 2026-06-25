@@ -134,4 +134,27 @@ S7_GEMINI_ACP_AGENT="custom-gemini-acp --serve" scripts/review/f-s7/run-acpx-rev
 
 rg -n -- "--agent 'custom-gemini-acp --serve'" "$tmp/dry-gemini-env.out" >/dev/null
 
+scripts/review/f-s7/run-acpx-reviews.py \
+  --root "$dry_repo" \
+  --review-cwd /Users/bkase/Documents/gbllm \
+  --acpx acpx \
+  --timeout 1800 \
+  --claude-agent "custom-claude-acp --stdio" \
+  --reviewer claude \
+  --dry-run >"$tmp/dry-claude-override.out"
+
+rg -n -- "--agent 'custom-claude-acp --stdio'" "$tmp/dry-claude-override.out" >/dev/null
+rg -n "reviewer=claude personas=P3,P5,P6,P8" "$tmp/dry-claude-override.out" >/dev/null
+rg -n "S7 ACPX review runner: dry-run ok" "$tmp/dry-claude-override.out" >/dev/null
+
+S7_CLAUDE_ACP_AGENT="env-claude-acp --serve" scripts/review/f-s7/run-acpx-reviews.py \
+  --root "$dry_repo" \
+  --review-cwd /Users/bkase/Documents/gbllm \
+  --acpx acpx \
+  --timeout 1800 \
+  --reviewer claude \
+  --dry-run >"$tmp/dry-claude-env.out"
+
+rg -n -- "--agent 'env-claude-acp --serve'" "$tmp/dry-claude-env.out" >/dev/null
+
 echo "s7_run_acpx_reviews_test: ok"
