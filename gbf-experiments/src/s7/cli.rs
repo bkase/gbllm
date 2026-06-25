@@ -21,6 +21,9 @@ use crate::s7::replay::{
     S7_DETERMINISM_FIXTURE_SCOPE, S7_FULL_CLI_REPLAY_OWNER, S7_FULL_CLOSURE_OWNER, S7ReplayError,
     fixture_replay_product,
 };
+use crate::s7::run::{
+    S7CompletedRunArtifactInputs, S7RunMaterializeError, materialize_completed_run_artifacts,
+};
 
 const DEFAULT_GUTENBERG_MANIFEST: &str = "fixtures/corpora/gutenberg.toml";
 const DEFAULT_CHARSET: &str = "fixtures/charsets/charset_v1.toml";
@@ -45,6 +48,8 @@ pub struct S7Cli {
 pub enum S7Command {
     /// Replay the current deterministic S7 fixture for one split-feature topology.
     Replay(S7ReplayArgs),
+    /// Validate externally produced completed-run artifacts and write packet paths.
+    MaterializeRun(S7MaterializeRunArgs),
     /// Emit the final S7 report from already-produced production artifact JSON.
     EmitReport(S7EmitReportArgs),
     /// Validate the final S7 report against the Rust closure contract.
@@ -81,6 +86,35 @@ pub struct S7ReplayArgs {
     /// Output `s7_replay_cli.v1` fixture evidence path.
     #[arg(long, default_value = "/tmp/s7-replay-cli.json")]
     pub output: PathBuf,
+}
+
+/// Arguments for `gbf s7 materialize-run`.
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 materialize-run --topology MoeTiny --seed 0 --run-log /tmp/run-log.json --score /tmp/score.json --grad-log /tmp/grad-log.jsonl --router-step-telemetry /tmp/router-step-telemetry.jsonl"
+)]
+pub struct S7MaterializeRunArgs {
+    /// Packet/repository root where `experiments/S7/...` should be written.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Topology being materialized.
+    #[arg(long, value_parser = parse_topology)]
+    pub topology: S7Topology,
+    /// Seed being materialized.
+    #[arg(long)]
+    pub seed: u64,
+    /// Completed `s7_run_log.v1` input path.
+    #[arg(long)]
+    pub run_log: PathBuf,
+    /// `s7_score.v1` input path.
+    #[arg(long)]
+    pub score: PathBuf,
+    /// Per-step `s7_grad_log.v1` JSONL input path.
+    #[arg(long)]
+    pub grad_log: PathBuf,
+    /// Router telemetry JSONL input path, empty for dense matched topology.
+    #[arg(long)]
+    pub router_step_telemetry: PathBuf,
 }
 
 /// Arguments for `gbf s7 emit-report`.
@@ -143,6 +177,7 @@ pub struct S7ValidateClosureArgs {
 pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
     match cli.command {
         S7Command::Replay(args) => replay(args),
+        S7Command::MaterializeRun(args) => materialize_run(args),
         S7Command::EmitReport(args) => emit_report(args),
         S7Command::ValidateClosure(args) => validate_closure(args),
     }
@@ -213,6 +248,20 @@ fn replay(args: S7ReplayArgs) -> Result<(), S7CliError> {
         source,
     })?;
     println!("{artifact_self_hash}");
+    Ok(())
+}
+
+fn materialize_run(args: S7MaterializeRunArgs) -> Result<(), S7CliError> {
+    let materialized = materialize_completed_run_artifacts(&S7CompletedRunArtifactInputs {
+        root: args.root,
+        topology: args.topology,
+        seed: args.seed,
+        run_log: args.run_log,
+        score: args.score,
+        grad_log: args.grad_log,
+        router_step_telemetry: args.router_step_telemetry,
+    })?;
+    println!("{}", materialized.run_log_self_hash);
     Ok(())
 }
 
@@ -375,6 +424,8 @@ fn is_sha256_hash(value: &str) -> bool {
 pub enum S7CliError {
     /// Replay helper failed.
     Replay(S7ReplayError),
+    /// Completed-run artifact materialization failed.
+    MaterializeRun(S7RunMaterializeError),
     /// Canonical JSON encoding failed.
     CanonicalJson(CanonicalJsonError),
     /// Filesystem operation failed.
@@ -420,6 +471,7 @@ impl fmt::Display for S7CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Replay(error) => write!(f, "{error}"),
+            Self::MaterializeRun(error) => write!(f, "{error}"),
             Self::CanonicalJson(error) => write!(f, "{error}"),
             Self::Io { path, source } => write!(f, "{path}: {source}"),
             Self::InvalidSeedList { value } => {
@@ -455,6 +507,7 @@ impl std::error::Error for S7CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Replay(error) => Some(error),
+            Self::MaterializeRun(error) => Some(error),
             Self::CanonicalJson(error) => Some(error),
             Self::Io { source, .. } => Some(source),
             Self::InvalidSeedList { .. }
@@ -470,6 +523,12 @@ impl std::error::Error for S7CliError {
 impl From<S7ReplayError> for S7CliError {
     fn from(error: S7ReplayError) -> Self {
         Self::Replay(error)
+    }
+}
+
+impl From<S7RunMaterializeError> for S7CliError {
+    fn from(error: S7RunMaterializeError) -> Self {
+        Self::MaterializeRun(error)
     }
 }
 

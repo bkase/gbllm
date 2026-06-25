@@ -74,16 +74,19 @@ fn s7_isolation_script_pins_split_replay_order() {
 }
 
 #[test]
-fn s7_cli_surface_names_replay_and_report_emission() {
+fn s7_cli_surface_names_replay_materialization_and_report_emission() {
     let cli_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/s7/cli.rs");
     let cli = std::fs::read_to_string(cli_path).expect("S7 CLI source exists");
 
     for required in [
         "Replay(S7ReplayArgs)",
+        "MaterializeRun(S7MaterializeRunArgs)",
         "EmitReport(S7EmitReportArgs)",
         "ValidateClosure(S7ValidateClosureArgs)",
+        "gbf s7 materialize-run",
         "gbf s7 emit-report",
         "gbf s7 validate-closure",
+        "materialize_completed_run_artifacts",
         "scripts/review/f-s7/emit-report.py",
         "docs/experiments/S7-report.md",
         "validate_closure_packet",

@@ -230,12 +230,14 @@ fn required_artifacts(
             S7ClosureArtifactKind::RouterCollapseSweep => top_level_verified_status(
                 root,
                 parsed,
-                "router_collapse_sweep_self_hash",
-                "experiments/S7/router-collapse/seed-0/sweep.json",
-                "sweep_self_hash",
-                S7_ROUTER_COLLAPSE_SWEEP_DOMAIN,
-                "s7_router_collapse_sweep",
-                "s7_router_collapse_sweep.v1",
+                VerifiedArtifactSpec {
+                    report_field: "router_collapse_sweep_self_hash",
+                    rel_path: "experiments/S7/router-collapse/seed-0/sweep.json",
+                    self_hash_field: "sweep_self_hash",
+                    domain: S7_ROUTER_COLLAPSE_SWEEP_DOMAIN,
+                    label: "s7_router_collapse_sweep",
+                    expected_schema: "s7_router_collapse_sweep.v1",
+                },
             )?,
             S7ClosureArtifactKind::DenseVsMoe => top_level_status(
                 root,
@@ -247,42 +249,50 @@ fn required_artifacts(
             S7ClosureArtifactKind::Frontier => top_level_verified_status(
                 root,
                 parsed,
-                "frontier_self_hash",
-                "experiments/S7/frontier/frontier.json",
-                "frontier_self_hash",
-                S7_FRONTIER_DOMAIN,
-                "s7_frontier",
-                "s7_frontier.v1",
+                VerifiedArtifactSpec {
+                    report_field: "frontier_self_hash",
+                    rel_path: "experiments/S7/frontier/frontier.json",
+                    self_hash_field: "frontier_self_hash",
+                    domain: S7_FRONTIER_DOMAIN,
+                    label: "s7_frontier",
+                    expected_schema: "s7_frontier.v1",
+                },
             )?,
             S7ClosureArtifactKind::BurnGradSmoke => top_level_verified_status(
                 root,
                 parsed,
-                "burn_grad_smoke_self_hash",
-                "experiments/S7/burn-grad-smoke/expert_block_qat.json",
-                "smoke_self_hash",
-                S7_BURN_GRAD_SMOKE_DOMAIN,
-                "s7_burn_grad_smoke",
-                "s7_burn_grad_smoke.v1",
+                VerifiedArtifactSpec {
+                    report_field: "burn_grad_smoke_self_hash",
+                    rel_path: "experiments/S7/burn-grad-smoke/expert_block_qat.json",
+                    self_hash_field: "smoke_self_hash",
+                    domain: S7_BURN_GRAD_SMOKE_DOMAIN,
+                    label: "s7_burn_grad_smoke",
+                    expected_schema: "s7_burn_grad_smoke.v1",
+                },
             )?,
             S7ClosureArtifactKind::OracleRouted => top_level_verified_status(
                 root,
                 parsed,
-                "oracle_routed_self_hash",
-                "experiments/S7/oracle-routed/seed-0/oracle.json",
-                "oracle_self_hash",
-                S7_ORACLE_ROUTED_DOMAIN,
-                "s7_oracle_routed",
-                "s7_oracle_routed.v1",
+                VerifiedArtifactSpec {
+                    report_field: "oracle_routed_self_hash",
+                    rel_path: "experiments/S7/oracle-routed/seed-0/oracle.json",
+                    self_hash_field: "oracle_self_hash",
+                    domain: S7_ORACLE_ROUTED_DOMAIN,
+                    label: "s7_oracle_routed",
+                    expected_schema: "s7_oracle_routed.v1",
+                },
             )?,
             S7ClosureArtifactKind::EmulatorOneTokenMoe => top_level_verified_status(
                 root,
                 parsed,
-                "emulator_one_token_moe_self_hash",
-                "experiments/S7/emulator-one-token/seed-0/MoeTiny/result.json",
-                "emulator_self_hash",
-                S7_EMULATOR_ONE_TOKEN_DOMAIN,
-                "s7_emulator_one_token",
-                "s7_emulator_one_token.v1",
+                VerifiedArtifactSpec {
+                    report_field: "emulator_one_token_moe_self_hash",
+                    rel_path: "experiments/S7/emulator-one-token/seed-0/MoeTiny/result.json",
+                    self_hash_field: "emulator_self_hash",
+                    domain: S7_EMULATOR_ONE_TOKEN_DOMAIN,
+                    label: "s7_emulator_one_token",
+                    expected_schema: "s7_emulator_one_token.v1",
+                },
             )?,
             S7ClosureArtifactKind::Report => S7ArtifactHashStatus::present_valid(
                 report_self_hash_status(parsed, &parsed.raw_text)?,
@@ -302,12 +312,14 @@ fn required_artifacts(
             status: top_level_verified_status(
                 root,
                 parsed,
-                "emulator_one_token_dense_self_hash",
-                "experiments/S7/emulator-one-token/seed-0/MoeTinyDenseMatched/result.json",
-                "emulator_self_hash",
-                S7_EMULATOR_ONE_TOKEN_DOMAIN,
-                "s7_emulator_one_token",
-                "s7_emulator_one_token.v1",
+                VerifiedArtifactSpec {
+                    report_field: "emulator_one_token_dense_self_hash",
+                    rel_path: "experiments/S7/emulator-one-token/seed-0/MoeTinyDenseMatched/result.json",
+                    self_hash_field: "emulator_self_hash",
+                    domain: S7_EMULATOR_ONE_TOKEN_DOMAIN,
+                    label: "s7_emulator_one_token",
+                    expected_schema: "s7_emulator_one_token.v1",
+                },
             )?,
         });
     }
@@ -369,19 +381,33 @@ fn top_level_status(
     status_from_report_and_actual(parsed.scalar(report_field), Some(actual), report_field)
 }
 
-fn top_level_verified_status(
-    root: &Path,
-    parsed: &ParsedReport,
+struct VerifiedArtifactSpec {
     report_field: &'static str,
-    rel_path: &str,
+    rel_path: &'static str,
     self_hash_field: &'static str,
     domain: DomainHash<'static>,
     label: &'static str,
     expected_schema: &'static str,
+}
+
+fn top_level_verified_status(
+    root: &Path,
+    parsed: &ParsedReport,
+    spec: VerifiedArtifactSpec,
 ) -> Result<S7ArtifactHashStatus, S7ClosurePacketError> {
-    let value = read_json(root, rel_path)?;
-    let actual = verified_self_hash(&value, self_hash_field, domain, label, expected_schema)?;
-    status_from_report_and_actual(parsed.scalar(report_field), Some(actual), report_field)
+    let value = read_json(root, spec.rel_path)?;
+    let actual = verified_self_hash(
+        &value,
+        spec.self_hash_field,
+        spec.domain,
+        spec.label,
+        spec.expected_schema,
+    )?;
+    status_from_report_and_actual(
+        parsed.scalar(spec.report_field),
+        Some(actual),
+        spec.report_field,
+    )
 }
 
 fn verified_self_hash(
@@ -1086,15 +1112,11 @@ fn contains_body_token(body: &str, needle: &str) -> bool {
     })
 }
 
-fn parse_front_matter(
-    front_matter: &str,
-) -> Result<
-    (
-        BTreeMap<String, Option<String>>,
-        Vec<BTreeMap<String, Option<String>>>,
-    ),
-    S7ClosurePacketError,
-> {
+type FrontMatterScalars = BTreeMap<String, Option<String>>;
+type FrontMatterRows = Vec<FrontMatterScalars>;
+type FrontMatterParseResult = (FrontMatterScalars, FrontMatterRows);
+
+fn parse_front_matter(front_matter: &str) -> Result<FrontMatterParseResult, S7ClosurePacketError> {
     let mut scalars = BTreeMap::new();
     let mut rows = Vec::new();
     let mut current: Option<BTreeMap<String, Option<String>>> = None;
@@ -1213,12 +1235,13 @@ fn has_yaml_anchor_or_alias(line: &str) -> bool {
             Some(prev) => prev == ':' || prev.is_whitespace(),
             None => true,
         };
-        if (ch == '*' || ch == '&') && yaml_token_boundary {
-            if chars.peek().is_some_and(|(_, next)| {
+        if (ch == '*' || ch == '&')
+            && yaml_token_boundary
+            && chars.peek().is_some_and(|(_, next)| {
                 next.is_ascii_alphanumeric() || *next == '_' || *next == '-'
-            }) {
-                return true;
-            }
+            })
+        {
+            return true;
         }
         previous = Some(ch);
     }

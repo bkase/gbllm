@@ -152,7 +152,6 @@ impl Default for S7OutcomeDispatchInput {
 
 /// Compute §11.2 aggregate parity. A bytes mismatch is an invalid experiment,
 /// not a scientific parity falsification.
-#[must_use]
 pub fn aggregate_parity_verdict(
     per_seed_passes: &[bool],
     bytes_diff: u64,

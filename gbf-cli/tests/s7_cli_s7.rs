@@ -1,6 +1,12 @@
 #![cfg(feature = "s7")]
 
 use assert_cmd::Command;
+use gbf_artifact::{
+    DistillRawDiagnostic, GradNormSummary, RawLossDiagnostics, S7_EVAL_EVERY_STEPS, S7_N_BLOCKS,
+    S7_OPTIMIZER_STEPS, S7Completion, S7RunLog, S7ScoreReport, S7Topology,
+};
+use gbf_experiments::s7::schema::{ConfidenceDist, RouterStepTelemetry};
+use gbf_foundation::Hash256;
 use gbf_foundation::{CanonicalJson, DomainHash};
 use predicates::prelude::*;
 use serde_json::Value;
@@ -63,6 +69,7 @@ fn s7_help_lists_dispatch_verbs() {
 
     command.assert().success().stdout(
         predicate::str::contains("replay")
+            .and(predicate::str::contains("materialize-run"))
             .and(predicate::str::contains("emit-report"))
             .and(predicate::str::contains("validate-closure")),
     );
@@ -146,6 +153,133 @@ fn s7_replay_rejects_wrong_topology_for_split_feature() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("S7 feature/topology mismatch"));
+}
+
+#[test]
+fn s7_materialize_run_writes_completed_artifact_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    let paths =
+        write_materialize_run_inputs(&input, S7Topology::MoeTiny, 0, S7Completion::Completed);
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-run",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--seed",
+        "0",
+        "--run-log",
+        paths.run_log.to_str().expect("utf8 run log"),
+        "--score",
+        paths.score.to_str().expect("utf8 score"),
+        "--grad-log",
+        paths.grad_log.to_str().expect("utf8 grad log"),
+        "--router-step-telemetry",
+        paths
+            .router_step_telemetry
+            .to_str()
+            .expect("utf8 router telemetry"),
+    ]);
+
+    let output_result = command.output().expect("s7 materialize-run runs");
+    assert!(
+        output_result.status.success(),
+        "s7 materialize-run failed:\n{}",
+        command_output(&output_result)
+    );
+    let run_log_self_hash = single_stdout_hash(&output_result);
+    let out_run_log = packet.join("experiments/S7/runs/MoeTiny/seed-0/run-log.json");
+    let out_score = packet.join("experiments/S7/scores/MoeTiny/seed-0/score.json");
+    let out_grad_log = packet.join("experiments/S7/runs/MoeTiny/seed-0/grad-log.jsonl");
+    let out_telemetry =
+        packet.join("experiments/S7/runs/MoeTiny/seed-0/router-step-telemetry.jsonl");
+
+    let materialized_run: S7RunLog =
+        serde_json::from_slice(&std::fs::read(&out_run_log).expect("run-log reads"))
+            .expect("run-log parses");
+    assert_eq!(
+        materialized_run.run_log_self_hash.to_string(),
+        run_log_self_hash
+    );
+    assert_eq!(materialized_run.completion, S7Completion::Completed);
+    assert_eq!(materialized_run.losses.len(), S7_OPTIMIZER_STEPS as usize);
+    let materialized_score: S7ScoreReport =
+        serde_json::from_slice(&std::fs::read(&out_score).expect("score reads"))
+            .expect("score parses");
+    assert_eq!(materialized_score.seed, 0);
+    assert_eq!(materialized_score.topology, S7Topology::MoeTiny);
+    assert_eq!(
+        std::fs::read_to_string(&out_grad_log)
+            .expect("grad log reads")
+            .lines()
+            .count(),
+        S7_OPTIMIZER_STEPS as usize
+    );
+    assert_eq!(
+        std::fs::read_to_string(&out_telemetry)
+            .expect("telemetry reads")
+            .lines()
+            .count(),
+        S7_N_BLOCKS as usize
+    );
+}
+
+#[test]
+fn s7_materialize_run_rejects_incomplete_fixture_shaped_run_log() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    let paths = write_materialize_run_inputs(
+        &input,
+        S7Topology::MoeTiny,
+        0,
+        S7Completion::DivergedAt { step: 2 },
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-run",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--seed",
+        "0",
+        "--run-log",
+        paths.run_log.to_str().expect("utf8 run log"),
+        "--score",
+        paths.score.to_str().expect("utf8 score"),
+        "--grad-log",
+        paths.grad_log.to_str().expect("utf8 grad log"),
+        "--router-step-telemetry",
+        paths
+            .router_step_telemetry
+            .to_str()
+            .expect("utf8 router telemetry"),
+    ]);
+
+    let output_result = command.output().expect("s7 materialize-run runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 materialize-run unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("requires completed run-log"),
+        "{}",
+        command_output(&output_result)
+    );
 }
 
 #[test]
@@ -1316,6 +1450,183 @@ fn write_dense_emulator_result(root: &Path) {
             S7_EMULATOR_ONE_TOKEN_DOMAIN,
         ),
     );
+}
+
+struct MaterializeRunInputPaths {
+    run_log: std::path::PathBuf,
+    score: std::path::PathBuf,
+    grad_log: std::path::PathBuf,
+    router_step_telemetry: std::path::PathBuf,
+}
+
+fn write_materialize_run_inputs(
+    root: &Path,
+    topology: S7Topology,
+    seed: u64,
+    completion: S7Completion,
+) -> MaterializeRunInputPaths {
+    let run_log = materialize_run_log(topology.clone(), seed, completion);
+    let checkpoint_sha = test_hash(11);
+    let score = S7ScoreReport::new(
+        seed,
+        topology.clone(),
+        checkpoint_sha,
+        test_hash(12),
+        4096,
+        4096.0 * 1.25,
+    )
+    .expect("score constructs")
+    .with_computed_self_hash()
+    .expect("score hashes");
+
+    let run_log_path = root.join("run-log.json");
+    let score_path = root.join("score.json");
+    let grad_log_path = root.join("grad-log.jsonl");
+    let telemetry_path = root.join("router-step-telemetry.jsonl");
+    write_bytes(
+        &run_log_path,
+        &with_trailing_newline(run_log.canonical_json_bytes().unwrap()),
+    );
+    write_bytes(
+        &score_path,
+        &with_trailing_newline(score.canonical_json_bytes().unwrap()),
+    );
+    write_bytes(
+        &grad_log_path,
+        &materialize_grad_log_jsonl(seed, &run_log.grad_norms),
+    );
+    write_bytes(
+        &telemetry_path,
+        &materialize_router_step_telemetry_jsonl(topology, seed),
+    );
+
+    MaterializeRunInputPaths {
+        run_log: run_log_path,
+        score: score_path,
+        grad_log: grad_log_path,
+        router_step_telemetry: telemetry_path,
+    }
+}
+
+fn materialize_run_log(topology: S7Topology, seed: u64, completion: S7Completion) -> S7RunLog {
+    let last_step = match completion {
+        S7Completion::Completed => S7_OPTIMIZER_STEPS,
+        S7Completion::DivergedAt { step } | S7Completion::CollapsedAt { step } => step,
+    };
+    let eval_points = (0..=((last_step / S7_EVAL_EVERY_STEPS) as usize))
+        .map(|index| {
+            (
+                u64::try_from(index).unwrap() * S7_EVAL_EVERY_STEPS,
+                1.25 + f64::from(index as u32) * 0.001,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (router_config_hash, expert_block_config_hash) = match topology {
+        S7Topology::MoeTiny => (Some(test_hash(5)), Some(test_hash(6))),
+        S7Topology::MoeTinyDenseMatched => (None, None),
+    };
+
+    S7RunLog::new(
+        seed,
+        topology,
+        test_hash(1),
+        test_hash(2),
+        router_config_hash,
+        expert_block_config_hash,
+        test_hash(3),
+        test_hash(4),
+        Some(test_hash(7)),
+        (1..=last_step)
+            .map(|step| (step, materialize_loss(step)))
+            .collect(),
+        (1..=last_step)
+            .map(|step| (step, materialize_grad_norm(step)))
+            .collect(),
+        eval_points,
+        materialize_grad_norm(last_step.max(1)),
+        completion,
+    )
+    .expect("run log constructs")
+    .with_computed_self_hash()
+    .expect("run log hashes")
+}
+
+fn materialize_loss(step: u64) -> RawLossDiagnostics {
+    RawLossDiagnostics::new(
+        1.0 + step as f32 * 0.000001,
+        DistillRawDiagnostic::Value { loss: 0.25 },
+        0.125,
+        0.0625,
+        0.5,
+    )
+    .expect("loss constructs")
+    .with_computed_self_hash()
+    .expect("loss hashes")
+}
+
+fn materialize_grad_norm(step: u64) -> GradNormSummary {
+    GradNormSummary::new(
+        0.5 + step as f32 * 0.000001,
+        0.25 + step as f32 * 0.0000005,
+        0.125,
+    )
+    .expect("grad norm constructs")
+}
+
+fn materialize_grad_log_jsonl(seed: u64, grad_norms: &[(u64, GradNormSummary)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (step, grad_norms) in grad_norms {
+        let record = serde_json::json!({
+            "schema": "s7_grad_log.v1",
+            "seed": seed,
+            "train_step": step,
+            "grad_norms": grad_norms,
+        });
+        bytes.extend(CanonicalJson::value_to_vec(&record).expect("grad log canonicalizes"));
+        bytes.push(b'\n');
+    }
+    bytes
+}
+
+fn materialize_router_step_telemetry_jsonl(topology: S7Topology, seed: u64) -> Vec<u8> {
+    if topology == S7Topology::MoeTinyDenseMatched {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    for layer in 0..u32::from(S7_N_BLOCKS) {
+        let telemetry = RouterStepTelemetry::new(
+            seed,
+            1,
+            layer,
+            0.5,
+            ConfidenceDist::new(0.8, 0.7, 0.8, 0.9).expect("confidence dist"),
+            vec![2, 2, 2, 2],
+            1.0,
+            u32::from(S7_N_BLOCKS),
+        )
+        .expect("telemetry constructs");
+        bytes.extend(
+            telemetry
+                .canonical_json_bytes()
+                .expect("telemetry canonicalizes"),
+        );
+        bytes.push(b'\n');
+    }
+    bytes
+}
+
+fn with_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes.push(b'\n');
+    bytes
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().expect("path parent")).expect("input dir");
+    std::fs::write(path, bytes).expect("input bytes write");
+}
+
+fn test_hash(salt: u8) -> Hash256 {
+    Hash256::from_bytes([salt; 32])
 }
 
 fn write_minimal_report_packet(root: &Path) {
