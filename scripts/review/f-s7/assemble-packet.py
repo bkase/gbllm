@@ -25,6 +25,34 @@ REQUIRED_SUPPORT_ARTIFACTS = (
     "oracle_routed",
     "emulator_one_token_moe",
 )
+TOP_LEVEL_FIELDS = {
+    "schema",
+    "runs",
+    "switch_stats",
+    "support_artifacts",
+    "comparison",
+    "frontier",
+    "report",
+}
+SUPPORT_FIELDS = {*REQUIRED_SUPPORT_ARTIFACTS, "emulator_one_token_dense"}
+COMPARISON_FIELDS = {"moe_topology_hash", "dense_matched_topology_hash"}
+FRONTIER_FIELDS = {
+    "moe_conformance",
+    "dense_conformance",
+    "moe_deployed_bytes_per_block",
+    "dense_deployed_bytes_per_block",
+    "moe_schedule_cost",
+    "dense_schedule_cost",
+}
+REPORT_FIELDS = {
+    "s7_outcome",
+    "decision",
+    "rfc_revision",
+    "predictions_section_hash",
+    "predictions_commit",
+    "first_result_commit",
+    "generated_at",
+}
 
 
 def main() -> int:
@@ -35,15 +63,25 @@ def main() -> int:
             "and run the packet verifier."
         )
     )
-    parser.add_argument("--manifest", required=True, help="s7_production_bundle_manifest.v1 JSON")
+    parser.add_argument("--manifest", help="s7_production_bundle_manifest.v1 JSON")
     parser.add_argument("--root", default=".", help="repository/packet root to populate")
     parser.add_argument("--cargo", default="cargo", help="cargo executable")
     parser.add_argument("--verify-mode", choices=["full", "skip-gates"], default="full")
     parser.add_argument("--dry-run", action="store_true", help="print commands without executing")
+    parser.add_argument(
+        "--write-template",
+        help="write a canonical s7_production_bundle_manifest.v1 skeleton and exit",
+    )
     args = parser.parse_args()
 
-    manifest_path = Path(args.manifest).resolve()
     root = Path(args.root).resolve()
+    if args.write_template is not None:
+        write_template(Path(args.write_template))
+        return 0
+    if args.manifest is None:
+        parser.error("--manifest is required unless --write-template is used")
+
+    manifest_path = Path(args.manifest).resolve()
     try:
         manifest = load_manifest(manifest_path)
         commands = build_commands(manifest, manifest_path.parent, root, args.cargo, args.verify_mode)
@@ -92,6 +130,7 @@ def build_commands(
     cargo: str,
     verify_mode: str,
 ) -> list[list[str]]:
+    validate_known_fields(manifest)
     commands: list[list[str]] = []
     for topology in TOPOLOGIES:
         topology_runs = require_object(manifest, ["runs", topology])
@@ -206,6 +245,87 @@ def build_commands(
         verify.append("--skip-gates")
     commands.append(verify)
     return commands
+
+
+def write_template(path: Path) -> None:
+    runs: dict[str, dict[str, dict[str, str]]] = {}
+    for topology in TOPOLOGIES:
+        runs[topology] = {}
+        for seed in SEEDS:
+            base = f"runs/{topology}/seed-{seed}"
+            runs[topology][str(seed)] = {
+                "run_log": f"{base}/run-log.json",
+                "score": f"{base}/score.json",
+                "grad_log": f"{base}/grad-log.jsonl",
+                "router_step_telemetry": f"{base}/router-step-telemetry.jsonl",
+            }
+
+    payload = {
+        "schema": SCHEMA,
+        "runs": runs,
+        "switch_stats": {
+            str(seed): f"switch-stats/seed-{seed}/switch-stats.json" for seed in SEEDS
+        },
+        "support_artifacts": {
+            "router_collapse_sweep": "router-collapse/seed-0/sweep.json",
+            "burn_grad_smoke": "burn-grad-smoke/expert_block_qat.json",
+            "oracle_routed": "oracle-routed/seed-0/oracle.json",
+            "emulator_one_token_moe": "emulator-one-token/seed-0/MoeTiny/result.json",
+            "emulator_one_token_dense": "emulator-one-token/seed-0/MoeTinyDenseMatched/result.json",
+        },
+        "comparison": {
+            "moe_topology_hash": "sha256:" + "1" * 64,
+            "dense_matched_topology_hash": "sha256:" + "2" * 64,
+        },
+        "frontier": {
+            "moe_conformance": "frontier/moe-conformance.json",
+            "dense_conformance": "frontier/dense-conformance.json",
+            "moe_deployed_bytes_per_block": [20944, 20944, 20944, 20944],
+            "dense_deployed_bytes_per_block": [20948, 20948, 20948, 20948],
+            "moe_schedule_cost": "frontier/moe-schedule-cost.json",
+            "dense_schedule_cost": "frontier/dense-schedule-cost.json",
+        },
+        "report": {
+            "s7_outcome": "PassClean",
+            "predictions_section_hash": "sha256:" + "3" * 64,
+            "predictions_commit": "4" * 40,
+            "first_result_commit": "5" * 40,
+            "rfc_revision": "6" * 40,
+            "generated_at": "2026-06-25T00:00:00Z",
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    print(f"S7 packet assembly: wrote manifest template {path}")
+
+
+def validate_known_fields(manifest: dict[str, Any]) -> None:
+    reject_unknown("manifest", manifest, TOP_LEVEL_FIELDS)
+    runs = require_object(manifest, ["runs"])
+    reject_unknown("runs", runs, set(TOPOLOGIES))
+    for topology in TOPOLOGIES:
+        topology_runs = require_object(runs, [topology], f"runs.{topology}")
+        seed_keys = {str(seed) for seed in SEEDS}
+        reject_unknown(f"runs.{topology}", topology_runs, seed_keys)
+        for seed in SEEDS:
+            run = require_object(topology_runs, [str(seed)], f"runs.{topology}.{seed}")
+            reject_unknown(f"runs.{topology}.{seed}", run, set(REQUIRED_RUN_FIELDS))
+    switch_stats = require_object(manifest, ["switch_stats"])
+    reject_unknown("switch_stats", switch_stats, {str(seed) for seed in SEEDS})
+    support = require_object(manifest, ["support_artifacts"])
+    reject_unknown("support_artifacts", support, SUPPORT_FIELDS)
+    comparison = require_object(manifest, ["comparison"])
+    reject_unknown("comparison", comparison, COMPARISON_FIELDS)
+    frontier = require_object(manifest, ["frontier"])
+    reject_unknown("frontier", frontier, FRONTIER_FIELDS)
+    report = require_object(manifest, ["report"])
+    reject_unknown("report", report, REPORT_FIELDS)
+
+
+def reject_unknown(label: str, payload: dict[str, Any], allowed: set[str]) -> None:
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise AssembleError(f"{label} has unknown field(s): {', '.join(unknown)}")
 
 
 def gbf_command(cargo: str) -> list[str]:

@@ -10,61 +10,9 @@ trap 'rm -rf "$tmp"' EXIT
 manifest="$tmp/bundle/manifest.json"
 mkdir -p "$(dirname "$manifest")"
 
-python3 - "$manifest" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-manifest = Path(sys.argv[1])
-topologies = ["MoeTiny", "MoeTinyDenseMatched"]
-seeds = range(5)
-
-runs = {}
-for topology in topologies:
-    runs[topology] = {}
-    for seed in seeds:
-        base = f"runs/{topology}/seed-{seed}"
-        runs[topology][str(seed)] = {
-            "run_log": f"{base}/run-log.json",
-            "score": f"{base}/score.json",
-            "grad_log": f"{base}/grad-log.jsonl",
-            "router_step_telemetry": f"{base}/router-step-telemetry.jsonl",
-        }
-
-payload = {
-    "schema": "s7_production_bundle_manifest.v1",
-    "runs": runs,
-    "switch_stats": {str(seed): f"switch-stats/seed-{seed}.json" for seed in seeds},
-    "support_artifacts": {
-        "router_collapse_sweep": "router-collapse/seed-0/sweep.json",
-        "burn_grad_smoke": "burn-grad/expert_block_qat.json",
-        "oracle_routed": "oracle-routed/seed-0/oracle.json",
-        "emulator_one_token_moe": "emulator-one-token/seed-0/MoeTiny/result.json",
-        "emulator_one_token_dense": "emulator-one-token/seed-0/MoeTinyDenseMatched/result.json",
-    },
-    "comparison": {
-        "moe_topology_hash": "sha256:" + "1" * 64,
-        "dense_matched_topology_hash": "sha256:" + "2" * 64,
-    },
-    "frontier": {
-        "moe_conformance": "frontier/moe-conformance.json",
-        "dense_conformance": "frontier/dense-conformance.json",
-        "moe_deployed_bytes_per_block": [20944, 20944, 20944, 20944],
-        "dense_deployed_bytes_per_block": [20948, 20948, 20948, 20948],
-        "moe_schedule_cost": "frontier/moe-schedule-cost.json",
-        "dense_schedule_cost": "frontier/dense-schedule-cost.json",
-    },
-    "report": {
-        "s7_outcome": "PassClean",
-        "predictions_section_hash": "sha256:" + "3" * 64,
-        "predictions_commit": "4" * 40,
-        "first_result_commit": "5" * 40,
-        "rfc_revision": "6" * 40,
-        "generated_at": "2026-06-25T00:00:00Z",
-    },
-}
-manifest.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+scripts/review/f-s7/assemble-packet.py --write-template "$manifest" >"$tmp/template.out"
+rg -n "wrote manifest template" "$tmp/template.out" >/dev/null
+rg -n '"schema": "s7_production_bundle_manifest.v1"' "$manifest" >/dev/null
 
 scripts/review/f-s7/assemble-packet.py \
   --manifest "$manifest" \
@@ -102,5 +50,30 @@ if scripts/review/f-s7/assemble-packet.py \
   exit 1
 fi
 rg -n "comparison\\.moe_topology_hash must be a sha256 hash" "$tmp/bad.out" >/dev/null
+
+python3 - "$manifest" "$tmp/unknown-manifest.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload["runs"]["MoeTiny"]["0"]["runlog"] = payload["runs"]["MoeTiny"]["0"].pop("run_log")
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/unknown-manifest.json" \
+  --root "$ROOT" \
+  --dry-run >"$tmp/unknown.out" 2>&1; then
+  echo "expected unknown manifest field to fail" >&2
+  exit 1
+fi
+rg -n "runs\\.MoeTiny\\.0 has unknown field\\(s\\): runlog" "$tmp/unknown.out" >/dev/null
+
+if scripts/review/f-s7/assemble-packet.py --root "$ROOT" --dry-run >"$tmp/missing.out" 2>&1; then
+  echo "expected missing manifest argument to fail" >&2
+  exit 1
+fi
+rg -n -- "--manifest is required unless --write-template is used" "$tmp/missing.out" >/dev/null
 
 echo "s7_assemble_packet_test: ok"
