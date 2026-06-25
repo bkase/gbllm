@@ -74,6 +74,7 @@ jobs:
           run_capture_log s7-validate-report scripts/tests/s7_validate_report_test.sh
           run_capture_log s7-validate-reviews scripts/tests/s7_validate_reviews_test.sh
           run_capture_log s7-assemble-packet scripts/tests/s7_assemble_packet_test.sh
+          run_capture_log s7-run-acpx-reviews scripts/tests/s7_run_acpx_reviews_test.sh
 
       - name: Upload S7 PR artifacts
         if: always()
