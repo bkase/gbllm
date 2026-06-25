@@ -510,6 +510,8 @@ def report_command(cargo: str, root: Path, report: dict[str, Any]) -> list[str]:
     outcome = require_string(report, ["s7_outcome"], "report.s7_outcome")
     if outcome not in {"PassClean", "FailParity"}:
         raise AssembleError("report.s7_outcome must be PassClean or FailParity")
+    decision = optional_report_decision(report, outcome)
+    rfc_revision = optional_report_revision(report)
     predictions_section_hash = require_hash(
         report,
         ["predictions_section_hash"],
@@ -534,18 +536,45 @@ def report_command(cargo: str, root: Path, report: dict[str, Any]) -> list[str]:
         "--first-result-commit",
         first_result_commit,
     ]
-    optional_strings = [
-        ("decision", "--decision"),
-        ("rfc_revision", "--rfc-revision"),
-        ("generated_at", "--generated-at"),
-    ]
-    for key, flag in optional_strings:
+    if decision is not None:
+        command.extend(["--decision", decision])
+    if rfc_revision is not None:
+        command.extend(["--rfc-revision", rfc_revision])
+    for key, flag in [("generated_at", "--generated-at")]:
         value = report.get(key)
         if value is not None:
             if not isinstance(value, str) or not value.strip():
                 raise AssembleError(f"report.{key} must be a non-empty string")
             command.extend([flag, value])
     return command
+
+
+def optional_report_decision(report: dict[str, Any], outcome: str) -> str | None:
+    value = report.get("decision")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise AssembleError("report.decision must be a non-empty string")
+    if value not in {"ProceedToS8", "ProceedToS8DenseOnly"}:
+        raise AssembleError("report.decision must be ProceedToS8 or ProceedToS8DenseOnly")
+    if outcome == "PassClean" and value != "ProceedToS8":
+        raise AssembleError("report.decision must be ProceedToS8 when report.s7_outcome is PassClean")
+    if outcome == "FailParity" and value != "ProceedToS8DenseOnly":
+        raise AssembleError(
+            "report.decision must be ProceedToS8DenseOnly when report.s7_outcome is FailParity"
+        )
+    return value
+
+
+def optional_report_revision(report: dict[str, Any]) -> str | None:
+    value = report.get("rfc_revision")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise AssembleError("report.rfc_revision must be a non-empty string")
+    if not (COMMIT_RE.match(value) or HASH_RE.match(value)):
+        raise AssembleError("report.rfc_revision must be a 40-hex git commit id or sha256 hash")
+    return value
 
 
 def input_paths_for_command(command: list[str]) -> list[Path]:
