@@ -264,6 +264,7 @@ require_present 'experiments/S7/dense-vs-moe/comparison\.json' "$VERIFY_PACKET_S
 require_present 'docs/experiments/S7-report\.md' "$VERIFY_PACKET_SCRIPT"
 require_present 'scripts/review/f-s7/assemble-packet.py --manifest <production-bundle-manifest.json>' "$VERIFY_PACKET_SCRIPT"
 require_present 'scripts/review/f-s7/run-acpx-reviews.py' "$VERIFY_PACKET_SCRIPT"
+require_present 'sudo apt-get install -y ripgrep' "$S7_PR_WORKFLOW"
 require_present 'Build a fail-closed F-S7 s7_report\.v1 from production artifacts' "$REPORT_EMITTER"
 require_present 'generated_at and report_self_hash nulled' "$REPORT_VALIDATOR"
 require_present 'S7 report closure shape: NEEDS_CHANGES' "$REPORT_VALIDATOR"

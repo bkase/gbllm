@@ -41,6 +41,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install S7 script dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
