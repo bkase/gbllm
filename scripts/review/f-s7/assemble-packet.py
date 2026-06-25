@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Assemble the F-S7 closure packet from a real production bundle manifest."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA = "s7_production_bundle_manifest.v1"
+TOPOLOGIES = ("MoeTiny", "MoeTinyDenseMatched")
+SEEDS = range(5)
+HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+REQUIRED_RUN_FIELDS = ("run_log", "score", "grad_log", "router_step_telemetry")
+REQUIRED_SUPPORT_ARTIFACTS = (
+    "router_collapse_sweep",
+    "burn_grad_smoke",
+    "oracle_routed",
+    "emulator_one_token_moe",
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Materialize all F-S7 production artifacts from an external bundle "
+            "manifest, derive dependent packet artifacts, emit the final report, "
+            "and run the packet verifier."
+        )
+    )
+    parser.add_argument("--manifest", required=True, help="s7_production_bundle_manifest.v1 JSON")
+    parser.add_argument("--root", default=".", help="repository/packet root to populate")
+    parser.add_argument("--cargo", default="cargo", help="cargo executable")
+    parser.add_argument("--verify-mode", choices=["full", "skip-gates"], default="full")
+    parser.add_argument("--dry-run", action="store_true", help="print commands without executing")
+    args = parser.parse_args()
+
+    manifest_path = Path(args.manifest).resolve()
+    root = Path(args.root).resolve()
+    try:
+        manifest = load_manifest(manifest_path)
+        commands = build_commands(manifest, manifest_path.parent, root, args.cargo, args.verify_mode)
+    except AssembleError as error:
+        print("S7 packet assembly: NEEDS_CHANGES")
+        print(f" - {error}")
+        return 1
+
+    for command in commands:
+        print("+ " + shlex.join(command))
+        if not args.dry_run:
+            missing = [item for item in input_paths_for_command(command) if not item.is_file()]
+            if missing:
+                print("S7 packet assembly: NEEDS_CHANGES")
+                for path in missing:
+                    print(f" - missing input file: {path}")
+                return 1
+            completed = subprocess.run(command, check=False)
+            if completed.returncode != 0:
+                print("S7 packet assembly: NEEDS_CHANGES")
+                print(f" - command failed with exit {completed.returncode}: {shlex.join(command)}")
+                return completed.returncode
+
+    print("S7 packet assembly: dry-run ok" if args.dry_run else "S7 packet assembly: ok")
+    return 0
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise AssembleError(f"manifest missing: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise AssembleError(f"{path} is not valid JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise AssembleError(f"{path} must contain a JSON object")
+    if payload.get("schema") != SCHEMA:
+        raise AssembleError(f"manifest schema must be {SCHEMA!r}")
+    return payload
+
+
+def build_commands(
+    manifest: dict[str, Any],
+    manifest_dir: Path,
+    root: Path,
+    cargo: str,
+    verify_mode: str,
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for topology in TOPOLOGIES:
+        topology_runs = require_object(manifest, ["runs", topology])
+        for seed in SEEDS:
+            run = require_object(topology_runs, [str(seed)], f"runs.{topology}.{seed}")
+            for field in REQUIRED_RUN_FIELDS:
+                require_string(run, [field], f"runs.{topology}.{seed}.{field}")
+            commands.append(
+                gbf_command(cargo)
+                + [
+                    "materialize-run",
+                    "--root",
+                    str(root),
+                    "--topology",
+                    topology,
+                    "--seed",
+                    str(seed),
+                    "--run-log",
+                    str(bundle_path(manifest_dir, run["run_log"])),
+                    "--score",
+                    str(bundle_path(manifest_dir, run["score"])),
+                    "--grad-log",
+                    str(bundle_path(manifest_dir, run["grad_log"])),
+                    "--router-step-telemetry",
+                    str(bundle_path(manifest_dir, run["router_step_telemetry"])),
+                ]
+            )
+
+    switch_stats = require_object(manifest, ["switch_stats"])
+    for seed in SEEDS:
+        path = require_string(switch_stats, [str(seed)], f"switch_stats.{seed}")
+        commands.append(
+            support_command(cargo, root, "switch-stats", bundle_path(manifest_dir, path))
+            + ["--seed", str(seed)]
+        )
+
+    support = require_object(manifest, ["support_artifacts"])
+    for field in REQUIRED_SUPPORT_ARTIFACTS:
+        require_string(support, [field], f"support_artifacts.{field}")
+    commands.extend(
+        [
+            support_command(
+                cargo,
+                root,
+                "router-collapse-sweep",
+                bundle_path(manifest_dir, support["router_collapse_sweep"]),
+            ),
+            support_command(
+                cargo,
+                root,
+                "burn-grad-smoke",
+                bundle_path(manifest_dir, support["burn_grad_smoke"]),
+            ),
+            support_command(
+                cargo,
+                root,
+                "oracle-routed",
+                bundle_path(manifest_dir, support["oracle_routed"]),
+            ),
+            support_command(
+                cargo,
+                root,
+                "emulator-one-token",
+                bundle_path(manifest_dir, support["emulator_one_token_moe"]),
+            )
+            + ["--topology", "MoeTiny"],
+        ]
+    )
+    dense_emulator = support.get("emulator_one_token_dense")
+    if dense_emulator is not None:
+        if not isinstance(dense_emulator, str) or not dense_emulator.strip():
+            raise AssembleError("support_artifacts.emulator_one_token_dense must be a non-empty string")
+        commands.append(
+            support_command(
+                cargo,
+                root,
+                "emulator-one-token",
+                bundle_path(manifest_dir, dense_emulator),
+            )
+            + ["--topology", "MoeTinyDenseMatched"]
+        )
+
+    comparison = require_object(manifest, ["comparison"])
+    moe_topology_hash = require_hash(comparison, ["moe_topology_hash"], "comparison.moe_topology_hash")
+    dense_topology_hash = require_hash(
+        comparison,
+        ["dense_matched_topology_hash"],
+        "comparison.dense_matched_topology_hash",
+    )
+    commands.append(gbf_command(cargo) + ["derive-summaries", "--root", str(root)])
+    commands.append(
+        gbf_command(cargo)
+        + [
+            "derive-comparison",
+            "--root",
+            str(root),
+            "--moe-topology-hash",
+            moe_topology_hash,
+            "--dense-matched-topology-hash",
+            dense_topology_hash,
+        ]
+    )
+
+    frontier = require_object(manifest, ["frontier"])
+    commands.append(frontier_command(cargo, root, manifest_dir, frontier))
+
+    report = require_object(manifest, ["report"])
+    commands.append(report_command(cargo, root, report))
+
+    verify = [str(root / "scripts/review/f-s7/verify-packet.sh")]
+    if verify_mode == "skip-gates":
+        verify.append("--skip-gates")
+    commands.append(verify)
+    return commands
+
+
+def gbf_command(cargo: str) -> list[str]:
+    return [
+        cargo,
+        "run",
+        "-q",
+        "-p",
+        "gbf-cli",
+        "--no-default-features",
+        "--features",
+        "s7",
+        "--",
+        "--log-level",
+        "off",
+        "s7",
+    ]
+
+
+def support_command(cargo: str, root: Path, kind: str, path: Path) -> list[str]:
+    return gbf_command(cargo) + [
+        "materialize-support-artifact",
+        "--root",
+        str(root),
+        "--kind",
+        kind,
+        "--input",
+        str(path),
+    ]
+
+
+def frontier_command(
+    cargo: str, root: Path, manifest_dir: Path, frontier: dict[str, Any]
+) -> list[str]:
+    moe_conformance = bundle_path(
+        manifest_dir, require_string(frontier, ["moe_conformance"], "frontier.moe_conformance")
+    )
+    dense_conformance = bundle_path(
+        manifest_dir,
+        require_string(frontier, ["dense_conformance"], "frontier.dense_conformance"),
+    )
+    moe_bytes = require_u64_list(
+        frontier,
+        ["moe_deployed_bytes_per_block"],
+        "frontier.moe_deployed_bytes_per_block",
+    )
+    dense_bytes = require_u64_list(
+        frontier,
+        ["dense_deployed_bytes_per_block"],
+        "frontier.dense_deployed_bytes_per_block",
+    )
+    command = gbf_command(cargo) + [
+        "derive-frontier",
+        "--root",
+        str(root),
+        "--moe-conformance",
+        str(moe_conformance),
+        "--dense-conformance",
+        str(dense_conformance),
+        "--moe-deployed-bytes-per-block",
+        ",".join(str(item) for item in moe_bytes),
+        "--dense-deployed-bytes-per-block",
+        ",".join(str(item) for item in dense_bytes),
+    ]
+    for key, flag in [
+        ("moe_schedule_cost", "--moe-schedule-cost"),
+        ("dense_schedule_cost", "--dense-schedule-cost"),
+    ]:
+        value = frontier.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value.strip():
+                raise AssembleError(f"frontier.{key} must be a non-empty string")
+            command.extend([flag, str(bundle_path(manifest_dir, value))])
+    return command
+
+
+def report_command(cargo: str, root: Path, report: dict[str, Any]) -> list[str]:
+    outcome = require_string(report, ["s7_outcome"], "report.s7_outcome")
+    if outcome not in {"PassClean", "FailParity"}:
+        raise AssembleError("report.s7_outcome must be PassClean or FailParity")
+    predictions_section_hash = require_hash(
+        report,
+        ["predictions_section_hash"],
+        "report.predictions_section_hash",
+    )
+    predictions_commit = require_commit(report, ["predictions_commit"], "report.predictions_commit")
+    first_result_commit = require_commit(
+        report,
+        ["first_result_commit"],
+        "report.first_result_commit",
+    )
+    command = gbf_command(cargo) + [
+        "emit-report",
+        "--root",
+        str(root),
+        "--s7-outcome",
+        outcome,
+        "--predictions-section-hash",
+        predictions_section_hash,
+        "--predictions-commit",
+        predictions_commit,
+        "--first-result-commit",
+        first_result_commit,
+    ]
+    optional_strings = [
+        ("decision", "--decision"),
+        ("rfc_revision", "--rfc-revision"),
+        ("generated_at", "--generated-at"),
+    ]
+    for key, flag in optional_strings:
+        value = report.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value.strip():
+                raise AssembleError(f"report.{key} must be a non-empty string")
+            command.extend([flag, value])
+    return command
+
+
+def input_paths_for_command(command: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    for flag in [
+        "--run-log",
+        "--score",
+        "--grad-log",
+        "--router-step-telemetry",
+        "--input",
+        "--moe-conformance",
+        "--dense-conformance",
+        "--moe-schedule-cost",
+        "--dense-schedule-cost",
+    ]:
+        for index, item in enumerate(command[:-1]):
+            if item == flag:
+                paths.append(Path(command[index + 1]))
+    return paths
+
+
+def bundle_path(manifest_dir: Path, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return (manifest_dir / path).resolve()
+
+
+def require_object(
+    payload: dict[str, Any], keys: list[str], label: str | None = None
+) -> dict[str, Any]:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            raise AssembleError(f"{label or '.'.join(keys)} must be an object")
+        value = value.get(key)
+    if not isinstance(value, dict):
+        raise AssembleError(f"{label or '.'.join(keys)} must be an object")
+    return value
+
+
+def require_string(payload: dict[str, Any], keys: list[str], label: str) -> str:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            raise AssembleError(f"{label} must be a non-empty string")
+        value = value.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise AssembleError(f"{label} must be a non-empty string")
+    return value
+
+
+def require_hash(payload: dict[str, Any], keys: list[str], label: str) -> str:
+    value = require_string(payload, keys, label)
+    if not HASH_RE.match(value):
+        raise AssembleError(f"{label} must be a sha256 hash")
+    return value
+
+
+def require_commit(payload: dict[str, Any], keys: list[str], label: str) -> str:
+    value = require_string(payload, keys, label)
+    if not COMMIT_RE.match(value):
+        raise AssembleError(f"{label} must be a 40-hex git commit id")
+    return value
+
+
+def require_u64_list(payload: dict[str, Any], keys: list[str], label: str) -> list[int]:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            raise AssembleError(f"{label} must be a non-empty list of positive integers")
+        value = value.get(key)
+    if not isinstance(value, list) or not value:
+        raise AssembleError(f"{label} must be a non-empty list of positive integers")
+    values: list[int] = []
+    for item in value:
+        if not isinstance(item, int) or item <= 0:
+            raise AssembleError(f"{label} must be a non-empty list of positive integers")
+        values.append(item)
+    return values
+
+
+class AssembleError(RuntimeError):
+    pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

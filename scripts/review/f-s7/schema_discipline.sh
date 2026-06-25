@@ -27,6 +27,7 @@ REPORT_VALIDATOR="scripts/review/f-s7/validate-report.py"
 REPORT_EMITTER="scripts/review/f-s7/emit-report.py"
 ARTIFACT_VALIDATOR="scripts/review/f-s7/validate-artifacts.py"
 REVIEW_VALIDATOR="scripts/review/f-s7/validate-reviews.py"
+PACKET_ASSEMBLER="scripts/review/f-s7/assemble-packet.py"
 
 require_present() {
   local pattern="$1"
@@ -251,6 +252,7 @@ require_present 's7_preregistration_pin_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_validate_artifacts_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_validate_report_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_validate_reviews_test\.sh' "$S7_PR_WORKFLOW"
+require_present 's7_assemble_packet_test\.sh' "$S7_PR_WORKFLOW"
 require_present 'actions/upload-artifact@v4' "$S7_PR_WORKFLOW"
 require_present 's7 validate-closure' "$VERIFY_PACKET_SCRIPT"
 require_present 'S7 Rust closure validation failed' "$VERIFY_PACKET_SCRIPT"
@@ -258,6 +260,7 @@ require_present 'synthetic S7 CLI feature preflight self-test' "$VERIFY_PACKET_S
 require_present 'synthetic Rust closure gate self-test' "$VERIFY_PACKET_SCRIPT"
 require_present 'experiments/S7/dense-vs-moe/comparison\.json' "$VERIFY_PACKET_SCRIPT"
 require_present 'docs/experiments/S7-report\.md' "$VERIFY_PACKET_SCRIPT"
+require_present 'scripts/review/f-s7/assemble-packet.py --manifest <production-bundle-manifest.json>' "$VERIFY_PACKET_SCRIPT"
 require_present 'Build a fail-closed F-S7 s7_report\.v1 from production artifacts' "$REPORT_EMITTER"
 require_present 'generated_at and report_self_hash nulled' "$REPORT_VALIDATOR"
 require_present 'S7 report closure shape: NEEDS_CHANGES' "$REPORT_VALIDATOR"
@@ -320,6 +323,14 @@ require_present 'status must be one of' "$REVIEW_VALIDATOR"
 require_present 'must be an object' "$REVIEW_VALIDATOR"
 require_present 'transport.*acpx' "$REVIEW_VALIDATOR"
 require_present 'command must record an ACPX invocation prefix' "$REVIEW_VALIDATOR"
+require_present 's7_production_bundle_manifest\.v1' "$PACKET_ASSEMBLER"
+require_present 'materialize-run' "$PACKET_ASSEMBLER"
+require_present 'materialize-support-artifact' "$PACKET_ASSEMBLER"
+require_present 'derive-summaries' "$PACKET_ASSEMBLER"
+require_present 'derive-comparison' "$PACKET_ASSEMBLER"
+require_present 'derive-frontier' "$PACKET_ASSEMBLER"
+require_present 'emit-report' "$PACKET_ASSEMBLER"
+require_present 'verify-packet\.sh' "$PACKET_ASSEMBLER"
 
 "$ISOLATION_SCRIPT" --self-test >/dev/null
 [[ -x "$PREREG_SCRIPT" ]] || {
@@ -328,6 +339,10 @@ require_present 'command must record an ACPX invocation prefix' "$REVIEW_VALIDAT
 }
 [[ -x "$VERIFY_PACKET_SCRIPT" ]] || {
   echo "schema discipline failed: $VERIFY_PACKET_SCRIPT must be executable" >&2
+  exit 1
+}
+[[ -x "$PACKET_ASSEMBLER" ]] || {
+  echo "schema discipline failed: $PACKET_ASSEMBLER must be executable" >&2
   exit 1
 }
 [[ -x "$REPORT_VALIDATOR" ]] || {
