@@ -18,7 +18,38 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
 const S7_N_BLOCKS: usize = 4;
+const S7_N_EXPERTS: u64 = 4;
 const S7_SEED_COUNT: usize = 5;
+const S7_SWITCH_STATS_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "S7SwitchStatsReport",
+    "s7_switch_stats.v1",
+    "1",
+);
+const S7_TEMPORAL_SWITCH_DIGEST_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "TemporalSwitchDigest",
+    "s7_temporal_switch_digest.v1",
+    "1",
+);
+const S7_EXPERT_SLOT_AFFINITY_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "ExpertSlotAffinity",
+    "s7_expert_slot_affinity.v1",
+    "1",
+);
+const S7_CLIP_SATURATION_DIGEST_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "ClipSaturationDigest",
+    "s7_clip_saturation_digest.v1",
+    "1",
+);
+const S7_EXPERT_PAYLOAD_DIGEST_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "ExpertPayloadDigest",
+    "s7_expert_payload_digest.v1",
+    "1",
+);
 const S7_FRONTIER_DOMAIN: DomainHash<'static> =
     DomainHash::new("gbf-experiments", "S7FrontierReport", "s7_frontier.v1", "1");
 const S7_BURN_GRAD_SMOKE_DOMAIN: DomainHash<'static> = DomainHash::new(
@@ -51,6 +82,8 @@ const PARETO_VERDICTS: &[&str] = &[
 /// Leaf support artifact kinds that can be landed into an S7 closure packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum S7SupportArtifactKind {
+    /// `experiments/S7/switch-stats/seed-{seed}/switch-stats.json`.
+    SwitchStats,
     /// `experiments/S7/frontier/frontier.json`.
     Frontier,
     /// `experiments/S7/burn-grad-smoke/expert_block_qat.json`.
@@ -66,6 +99,7 @@ impl S7SupportArtifactKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::SwitchStats => "switch-stats",
             Self::Frontier => "frontier",
             Self::BurnGradSmoke => "burn-grad-smoke",
             Self::OracleRouted => "oracle-routed",
@@ -75,6 +109,11 @@ impl S7SupportArtifactKind {
 
     const fn spec(self) -> SupportArtifactSpec {
         match self {
+            Self::SwitchStats => SupportArtifactSpec {
+                schema: "s7_switch_stats.v1",
+                self_hash_field: "bundle_self_hash",
+                domain: S7_SWITCH_STATS_DOMAIN,
+            },
             Self::Frontier => SupportArtifactSpec {
                 schema: "s7_frontier.v1",
                 self_hash_field: "frontier_self_hash",
@@ -104,12 +143,13 @@ impl FromStr for S7SupportArtifactKind {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "switch-stats" => Ok(Self::SwitchStats),
             "frontier" => Ok(Self::Frontier),
             "burn-grad-smoke" => Ok(Self::BurnGradSmoke),
             "oracle-routed" => Ok(Self::OracleRouted),
             "emulator-one-token" => Ok(Self::EmulatorOneToken),
             _ => Err(
-                "expected frontier, burn-grad-smoke, oracle-routed, or emulator-one-token"
+                "expected switch-stats, frontier, burn-grad-smoke, oracle-routed, or emulator-one-token"
                     .to_owned(),
             ),
         }
@@ -127,6 +167,8 @@ pub struct S7SupportArtifactInputs {
     pub input: PathBuf,
     /// Topology for `emulator-one-token` artifacts; omitted for other kinds.
     pub topology: Option<S7Topology>,
+    /// Seed for per-seed artifacts such as `switch-stats`; omitted for other kinds.
+    pub seed: Option<u64>,
     /// Override output path, relative to `root` unless absolute.
     pub output: Option<PathBuf>,
 }
@@ -170,7 +212,12 @@ pub fn materialize_support_artifact(
     let output = if let Some(output) = &inputs.output {
         resolve_under_root(&inputs.root, output)
     } else {
-        default_output_path(&inputs.root, inputs.kind, inputs.topology.clone())?
+        default_output_path(
+            &inputs.root,
+            inputs.kind,
+            inputs.topology.clone(),
+            inputs.seed,
+        )?
     };
     write_canonical_json(&output, &value)?;
 
@@ -184,8 +231,15 @@ fn default_output_path(
     root: &Path,
     kind: S7SupportArtifactKind,
     topology: Option<S7Topology>,
+    seed: Option<u64>,
 ) -> Result<PathBuf, S7SupportArtifactMaterializeError> {
     let rel = match kind {
+        S7SupportArtifactKind::SwitchStats => {
+            let seed = require_seed(kind, seed)?;
+            PathBuf::from("experiments/S7/switch-stats")
+                .join(format!("seed-{seed}"))
+                .join("switch-stats.json")
+        }
         S7SupportArtifactKind::Frontier => PathBuf::from("experiments/S7/frontier/frontier.json"),
         S7SupportArtifactKind::BurnGradSmoke => {
             PathBuf::from("experiments/S7/burn-grad-smoke/expert_block_qat.json")
@@ -213,19 +267,28 @@ fn validate_kind_specific(
     inputs: &S7SupportArtifactInputs,
 ) -> Result<(), S7SupportArtifactMaterializeError> {
     match inputs.kind {
+        S7SupportArtifactKind::SwitchStats => {
+            reject_topology_for_non_emulator(inputs.kind, inputs.topology.clone())?;
+            let seed = require_seed(inputs.kind, inputs.seed)?;
+            validate_switch_stats(path, value, seed)
+        }
         S7SupportArtifactKind::Frontier => {
+            reject_seed_for_non_switch(inputs.kind, inputs.seed)?;
             reject_topology_for_non_emulator(inputs.kind, inputs.topology.clone())?;
             validate_frontier(path, value)
         }
         S7SupportArtifactKind::BurnGradSmoke => {
+            reject_seed_for_non_switch(inputs.kind, inputs.seed)?;
             reject_topology_for_non_emulator(inputs.kind, inputs.topology.clone())?;
             validate_burn_grad(path, value)
         }
         S7SupportArtifactKind::OracleRouted => {
+            reject_seed_for_non_switch(inputs.kind, inputs.seed)?;
             reject_topology_for_non_emulator(inputs.kind, inputs.topology.clone())?;
             validate_oracle(path, value)
         }
         S7SupportArtifactKind::EmulatorOneToken => {
+            reject_seed_for_non_switch(inputs.kind, inputs.seed)?;
             let Some(topology) = inputs.topology.clone() else {
                 return Err(S7SupportArtifactMaterializeError::MissingTopology {
                     kind: inputs.kind.as_str(),
@@ -236,6 +299,33 @@ fn validate_kind_specific(
     }
 }
 
+fn require_seed(
+    kind: S7SupportArtifactKind,
+    seed: Option<u64>,
+) -> Result<u64, S7SupportArtifactMaterializeError> {
+    let Some(seed) = seed else {
+        return Err(S7SupportArtifactMaterializeError::MissingSeed {
+            kind: kind.as_str(),
+        });
+    };
+    if seed >= S7_SEED_COUNT as u64 {
+        return Err(S7SupportArtifactMaterializeError::InvalidSeed { seed });
+    }
+    Ok(seed)
+}
+
+fn reject_seed_for_non_switch(
+    kind: S7SupportArtifactKind,
+    seed: Option<u64>,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    if seed.is_some() {
+        return Err(S7SupportArtifactMaterializeError::UnexpectedSeed {
+            kind: kind.as_str(),
+        });
+    }
+    Ok(())
+}
+
 fn reject_topology_for_non_emulator(
     kind: S7SupportArtifactKind,
     topology: Option<S7Topology>,
@@ -244,6 +334,173 @@ fn reject_topology_for_non_emulator(
         return Err(S7SupportArtifactMaterializeError::UnexpectedTopology {
             kind: kind.as_str(),
         });
+    }
+    Ok(())
+}
+
+fn validate_switch_stats(
+    path: &Path,
+    value: &Value,
+    seed: u64,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_u64_eq(value, &["seed"], "seed", seed, path)?;
+    require_non_empty_string(value, &["artifact_path"], "artifact_path", path)?;
+    require_string_eq(
+        value,
+        &["aggregation_rule"],
+        "aggregation_rule",
+        "SUM",
+        path,
+    )?;
+
+    for field in [
+        "temporal_switch_digest",
+        "clip_saturation_digest",
+        "expert_payload_digest",
+        "expert_slot_affinity",
+    ] {
+        let entries = require_array(value, &[field], field)?;
+        if entries.len() != S7_N_BLOCKS {
+            return Err(invalid(
+                path,
+                format!("{field} must contain {S7_N_BLOCKS} layer entries"),
+            ));
+        }
+        for (layer_id, entry) in entries.iter().enumerate() {
+            require_object(entry, &[], field)?;
+            require_u64_eq(entry, &["layer_id"], "layer_id", layer_id as u64, path)?;
+            match field {
+                "temporal_switch_digest" => validate_temporal_switch_digest(path, entry, layer_id)?,
+                "clip_saturation_digest" => validate_clip_saturation_digest(path, entry, layer_id)?,
+                "expert_payload_digest" => validate_expert_payload_digest(path, entry, layer_id)?,
+                "expert_slot_affinity" => validate_expert_slot_affinity(path, entry, layer_id)?,
+                _ => unreachable!("field list is exhaustive"),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_temporal_switch_digest(
+    path: &Path,
+    value: &Value,
+    layer_id: usize,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_u64_eq(value, &["n_experts"], "n_experts", S7_N_EXPERTS, path)?;
+    require_q8_8(
+        value,
+        &["same_expert_rate_q8_8"],
+        "same_expert_rate_q8_8",
+        path,
+    )?;
+    verified_self_hash(
+        path,
+        value,
+        SupportArtifactSpec {
+            schema: "s7_temporal_switch_digest.v1",
+            self_hash_field: "digest_self_hash",
+            domain: S7_TEMPORAL_SWITCH_DIGEST_DOMAIN,
+        },
+    )?;
+    let transitions = require_array(value, &["transition_mass"], "transition_mass")?;
+    if transitions.is_empty() {
+        return Err(invalid(
+            path,
+            format!("temporal_switch_digest[{layer_id}] transition_mass must be non-empty"),
+        ));
+    }
+    for transition in transitions {
+        require_expert_id(transition, &["from_expert"], "from_expert", path)?;
+        require_expert_id(transition, &["to_expert"], "to_expert", path)?;
+        require_q8_8(transition, &["mass_q8_8"], "mass_q8_8", path)?;
+    }
+    Ok(())
+}
+
+fn validate_clip_saturation_digest(
+    path: &Path,
+    value: &Value,
+    _layer_id: usize,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_q8_8(
+        value,
+        &["saturation_rate_q8_8"],
+        "saturation_rate_q8_8",
+        path,
+    )?;
+    require_finite_positive(value, &["clip_bound_observed"], "clip_bound_observed", path)?;
+    verified_self_hash(
+        path,
+        value,
+        SupportArtifactSpec {
+            schema: "s7_clip_saturation_digest.v1",
+            self_hash_field: "digest_self_hash",
+            domain: S7_CLIP_SATURATION_DIGEST_DOMAIN,
+        },
+    )?;
+    Ok(())
+}
+
+fn validate_expert_payload_digest(
+    path: &Path,
+    value: &Value,
+    layer_id: usize,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_non_empty_string(value, &["artifact_path"], "artifact_path", path)?;
+    verified_self_hash(
+        path,
+        value,
+        SupportArtifactSpec {
+            schema: "s7_expert_payload_digest.v1",
+            self_hash_field: "digest_self_hash",
+            domain: S7_EXPERT_PAYLOAD_DIGEST_DOMAIN,
+        },
+    )?;
+    let entries = require_array(value, &["entries"], "entries")?;
+    if entries.len() != S7_N_EXPERTS as usize {
+        return Err(invalid(
+            path,
+            format!("expert_payload_digest[{layer_id}] entries must cover {S7_N_EXPERTS} experts"),
+        ));
+    }
+    let mut observed = BTreeSet::new();
+    for entry in entries {
+        let expert_id = require_expert_id(entry, &["expert_id"], "expert_id", path)?;
+        observed.insert(expert_id);
+        require_positive_u64(entry, &["byte_count"], "byte_count", path)?;
+        require_value(entry, &["weight_quant"], "weight_quant")?;
+    }
+    let expected = (0..S7_N_EXPERTS).collect::<BTreeSet<_>>();
+    if observed != expected {
+        return Err(invalid(
+            path,
+            format!("expert_payload_digest[{layer_id}] entries must exhaust experts 0..3"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_expert_slot_affinity(
+    path: &Path,
+    value: &Value,
+    _layer_id: usize,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    verified_self_hash(
+        path,
+        value,
+        SupportArtifactSpec {
+            schema: "s7_expert_slot_affinity.v1",
+            self_hash_field: "affinity_self_hash",
+            domain: S7_EXPERT_SLOT_AFFINITY_DOMAIN,
+        },
+    )?;
+    let affinities = require_array(value, &["affinities"], "affinities")?;
+    for affinity in affinities {
+        let pair = require_value(affinity, &["pair"], "pair")?;
+        require_object(pair, &[], "pair")?;
+        require_expert_id(pair, &["lo"], "pair.lo", path)?;
+        require_expert_id(pair, &["hi"], "pair.hi", path)?;
+        require_q8_8(affinity, &["affinity_score"], "affinity_score", path)?;
     }
     Ok(())
 }
@@ -607,6 +864,22 @@ fn require_string<'a>(
         .ok_or_else(|| invalid_label(label, "must be a string"))
 }
 
+fn require_non_empty_string(
+    value: &Value,
+    path: &[&str],
+    label: &str,
+    artifact_path: &Path,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    let observed = require_string(value, path, label)?;
+    if observed.is_empty() {
+        return Err(invalid(
+            artifact_path,
+            format!("{label} must be a non-empty string"),
+        ));
+    }
+    Ok(())
+}
+
 fn require_value<'a>(
     value: &'a Value,
     path: &[&str],
@@ -688,6 +961,48 @@ fn require_u64_eq(
         ));
     }
     Ok(())
+}
+
+fn require_q8_8(
+    value: &Value,
+    path: &[&str],
+    label: &str,
+    artifact_path: &Path,
+) -> Result<u64, S7SupportArtifactMaterializeError> {
+    let Some(observed) = json_path(value, path).and_then(Value::as_u64) else {
+        return Err(invalid(
+            artifact_path,
+            format!("{label} must be an integer in 0..=256"),
+        ));
+    };
+    if observed > 256 {
+        return Err(invalid(
+            artifact_path,
+            format!("{label} must be in 0..=256, observed {observed}"),
+        ));
+    }
+    Ok(observed)
+}
+
+fn require_expert_id(
+    value: &Value,
+    path: &[&str],
+    label: &str,
+    artifact_path: &Path,
+) -> Result<u64, S7SupportArtifactMaterializeError> {
+    let Some(observed) = json_path(value, path).and_then(Value::as_u64) else {
+        return Err(invalid(
+            artifact_path,
+            format!("{label} must be an expert id in 0..3"),
+        ));
+    };
+    if observed >= S7_N_EXPERTS {
+        return Err(invalid(
+            artifact_path,
+            format!("{label} must be an expert id in 0..3, observed {observed}"),
+        ));
+    }
+    Ok(observed)
 }
 
 fn require_finite_nonnegative(
@@ -911,10 +1226,25 @@ pub enum S7SupportArtifactMaterializeError {
         /// Artifact kind.
         kind: &'static str,
     },
+    /// A non-switch-stats artifact was passed a seed.
+    UnexpectedSeed {
+        /// Artifact kind.
+        kind: &'static str,
+    },
     /// An emulator artifact did not specify topology.
     MissingTopology {
         /// Artifact kind.
         kind: &'static str,
+    },
+    /// A per-seed artifact did not specify seed.
+    MissingSeed {
+        /// Artifact kind.
+        kind: &'static str,
+    },
+    /// Seed is outside the S7 fixed seed set.
+    InvalidSeed {
+        /// Observed seed.
+        seed: u64,
     },
     /// The artifact violates the closure-critical shape.
     InvalidArtifact {
@@ -945,8 +1275,20 @@ impl fmt::Display for S7SupportArtifactMaterializeError {
             Self::UnexpectedTopology { kind } => {
                 write!(f, "S7 support artifact {kind} must not pass --topology")
             }
+            Self::UnexpectedSeed { kind } => {
+                write!(f, "S7 support artifact {kind} must not pass --seed")
+            }
             Self::MissingTopology { kind } => {
                 write!(f, "S7 support artifact {kind} requires --topology")
+            }
+            Self::MissingSeed { kind } => {
+                write!(f, "S7 support artifact {kind} requires --seed")
+            }
+            Self::InvalidSeed { seed } => {
+                write!(
+                    f,
+                    "S7 support artifact seed must be in 0..4, observed {seed}"
+                )
             }
             Self::InvalidArtifact { path, message } => write!(f, "{path}: {message}"),
             Self::SelfHashMismatch {
@@ -969,7 +1311,10 @@ impl std::error::Error for S7SupportArtifactMaterializeError {
             Self::Json { source, .. } => Some(source),
             Self::CanonicalJson(error) => Some(error),
             Self::UnexpectedTopology { .. }
+            | Self::UnexpectedSeed { .. }
             | Self::MissingTopology { .. }
+            | Self::MissingSeed { .. }
+            | Self::InvalidSeed { .. }
             | Self::InvalidArtifact { .. }
             | Self::SelfHashMismatch { .. } => None,
         }

@@ -178,6 +178,9 @@ pub struct S7MaterializeSupportArtifactArgs {
     /// Topology for `emulator-one-token` artifacts.
     #[arg(long, value_parser = parse_topology)]
     pub topology: Option<S7Topology>,
+    /// Seed for per-seed support artifacts such as `switch-stats`.
+    #[arg(long)]
+    pub seed: Option<u64>,
     /// Output path, relative to --root unless absolute. Defaults to the canonical packet path.
     #[arg(long)]
     pub output: Option<PathBuf>,
@@ -353,6 +356,7 @@ fn materialize_support(args: S7MaterializeSupportArtifactArgs) -> Result<(), S7C
         kind: args.kind,
         input: args.input,
         topology: args.topology,
+        seed: args.seed,
         output: args.output,
     })?;
     println!("{}", materialized.self_hash);

@@ -2,9 +2,9 @@
 
 use assert_cmd::Command;
 use gbf_artifact::{
-    DistillRawDiagnostic, GradNormSummary, GuardrailVerdict, LambdaSwitch, RawLossDiagnostics,
-    S7_EVAL_EVERY_STEPS, S7_N_BLOCKS, S7_OPTIMIZER_STEPS, S7Completion, S7RunLog, S7ScoreReport,
-    S7Topology, SweepSummary, SwitchStatsSummary,
+    DistillRawDiagnostic, GradNormSummary, GuardrailVerdict, LambdaSwitch, QuantSpec,
+    RawLossDiagnostics, S7_EVAL_EVERY_STEPS, S7_N_BLOCKS, S7_OPTIMIZER_STEPS, S7Completion,
+    S7RunLog, S7ScoreReport, S7Topology, SweepSummary, SwitchStatsSummary,
 };
 use gbf_experiments::s7::baseline_match::canonical_s7_matched_bytes_pin;
 use gbf_experiments::s7::schema::{ConfidenceDist, RouterStepTelemetry};
@@ -19,6 +19,30 @@ const S7_SWITCH_STATS_DOMAIN: DomainHash<'static> = DomainHash::new(
     "gbf-experiments",
     "S7SwitchStatsReport",
     "s7_switch_stats.v1",
+    "1",
+);
+const S7_TEMPORAL_SWITCH_DIGEST_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "TemporalSwitchDigest",
+    "s7_temporal_switch_digest.v1",
+    "1",
+);
+const S7_EXPERT_SLOT_AFFINITY_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "ExpertSlotAffinity",
+    "s7_expert_slot_affinity.v1",
+    "1",
+);
+const S7_CLIP_SATURATION_DIGEST_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "ClipSaturationDigest",
+    "s7_clip_saturation_digest.v1",
+    "1",
+);
+const S7_EXPERT_PAYLOAD_DIGEST_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-artifact",
+    "ExpertPayloadDigest",
+    "s7_expert_payload_digest.v1",
     "1",
 );
 const S7_RUN_LOG_DOMAIN: DomainHash<'static> =
@@ -458,6 +482,113 @@ fn s7_materialize_support_artifact_rejects_self_hash_mismatch() {
     assert!(output_result.stdout.is_empty());
     assert!(
         command_output(&output_result).contains("frontier_self_hash mismatch"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_materialize_support_artifact_writes_switch_stats_packet_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    write_json(
+        &input_root,
+        "switch-stats.json",
+        &switch_stats_support_artifact(3),
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "switch-stats",
+        "--seed",
+        "3",
+        "--input",
+        input_root
+            .join("switch-stats.json")
+            .to_str()
+            .expect("utf8 switch stats input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        output_result.status.success(),
+        "s7 materialize-support-artifact failed:\n{}",
+        command_output(&output_result)
+    );
+    let bundle_self_hash = single_stdout_hash(&output_result);
+    let out_stats = packet.join("experiments/S7/switch-stats/seed-3/switch-stats.json");
+    let stats: Value =
+        serde_json::from_slice(&std::fs::read(&out_stats).expect("switch stats reads"))
+            .expect("switch stats parses");
+
+    assert_eq!(stats["schema"], "s7_switch_stats.v1");
+    assert_eq!(stats["seed"], 3);
+    assert_eq!(
+        stats["bundle_self_hash"]
+            .as_str()
+            .expect("bundle hash string"),
+        bundle_self_hash
+    );
+    assert_eq!(
+        stats["temporal_switch_digest"]
+            .as_array()
+            .expect("temporal digest array")
+            .len(),
+        S7_N_BLOCKS as usize
+    );
+}
+
+#[test]
+fn s7_materialize_support_artifact_rejects_switch_stats_seed_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    write_json(
+        &input_root,
+        "switch-stats.json",
+        &switch_stats_support_artifact(2),
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "switch-stats",
+        "--seed",
+        "3",
+        "--input",
+        input_root
+            .join("switch-stats.json")
+            .to_str()
+            .expect("utf8 switch stats input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 materialize-support-artifact unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("seed must be 3"),
         "{}",
         command_output(&output_result)
     );
@@ -1921,6 +2052,102 @@ fn write_bytes(path: &Path, bytes: &[u8]) {
 
 fn test_hash(salt: u8) -> Hash256 {
     Hash256::from_bytes([salt; 32])
+}
+
+fn switch_stats_support_artifact(seed: u64) -> Value {
+    let temporal_switch_digest = (0..S7_N_BLOCKS)
+        .map(|layer| {
+            let salt = u8::try_from(120 + layer).expect("salt fits u8");
+            with_domain_self_hash(
+                serde_json::json!({
+                    "schema_version": {"major": 1, "minor": 0, "patch": 0},
+                    "layer_id": layer,
+                    "n_experts": 4,
+                    "same_expert_rate_q8_8": 128,
+                    "transition_mass": [
+                        {"from_expert": 0, "to_expert": 1, "mass_q8_8": 64},
+                        {"from_expert": 1, "to_expert": 0, "mass_q8_8": 32},
+                    ],
+                    "digest_self_hash": test_hash(salt),
+                }),
+                "digest_self_hash",
+                S7_TEMPORAL_SWITCH_DIGEST_DOMAIN,
+            )
+        })
+        .collect::<Vec<_>>();
+    let clip_saturation_digest = (0..S7_N_BLOCKS)
+        .map(|layer| {
+            let salt = u8::try_from(130 + layer).expect("salt fits u8");
+            with_domain_self_hash(
+                serde_json::json!({
+                    "schema_version": {"major": 1, "minor": 0, "patch": 0},
+                    "layer_id": layer,
+                    "saturation_rate_q8_8": 16,
+                    "clip_bound_observed": 6.0,
+                    "digest_self_hash": test_hash(salt),
+                }),
+                "digest_self_hash",
+                S7_CLIP_SATURATION_DIGEST_DOMAIN,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expert_payload_digest = (0..S7_N_BLOCKS)
+        .map(|layer| {
+            let salt = u8::try_from(140 + layer).expect("salt fits u8");
+            with_domain_self_hash(
+                serde_json::json!({
+                    "schema_version": {"major": 1, "minor": 0, "patch": 0},
+                    "layer_id": layer,
+                    "artifact_path": format!("model.layers.{layer}.experts"),
+                    "entries": [
+                        {"expert_id": 0, "byte_count": 128, "weight_quant": QuantSpec::default()},
+                        {"expert_id": 1, "byte_count": 128, "weight_quant": QuantSpec::default()},
+                        {"expert_id": 2, "byte_count": 128, "weight_quant": QuantSpec::default()},
+                        {"expert_id": 3, "byte_count": 128, "weight_quant": QuantSpec::default()},
+                    ],
+                    "digest_self_hash": test_hash(salt),
+                }),
+                "digest_self_hash",
+                S7_EXPERT_PAYLOAD_DIGEST_DOMAIN,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expert_slot_affinity = (0..S7_N_BLOCKS)
+        .map(|layer| {
+            let salt = u8::try_from(150 + layer).expect("salt fits u8");
+            with_domain_self_hash(
+                serde_json::json!({
+                    "schema_version": {"major": 1, "minor": 0, "patch": 0},
+                    "layer_id": layer,
+                    "affinities": [
+                        {
+                            "pair": {"lo": 0, "hi": 1},
+                            "affinity_score": 96,
+                        },
+                    ],
+                    "affinity_self_hash": test_hash(salt),
+                }),
+                "affinity_self_hash",
+                S7_EXPERT_SLOT_AFFINITY_DOMAIN,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    with_domain_self_hash(
+        serde_json::json!({
+            "schema": "s7_switch_stats.v1",
+            "seed": seed,
+            "artifact_path": format!("experiments/S7/switch-stats/seed-{seed}/switch-stats.json"),
+            "aggregation_rule": "SUM",
+            "temporal_switch_digest": temporal_switch_digest,
+            "clip_saturation_digest": clip_saturation_digest,
+            "expert_payload_digest": expert_payload_digest,
+            "expert_slot_affinity": expert_slot_affinity,
+            "bundle_self_hash": test_hash(160),
+        }),
+        "bundle_self_hash",
+        S7_SWITCH_STATS_DOMAIN,
+    )
 }
 
 fn frontier_support_artifact() -> Value {
