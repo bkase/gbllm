@@ -20,6 +20,8 @@ use serde_json::Value;
 const S7_N_BLOCKS: usize = 4;
 const S7_N_EXPERTS: u64 = 4;
 const S7_SEED_COUNT: usize = 5;
+const RCS_TRAINING_EXTRA_STEPS: u64 = 1_000;
+const D11_LAMBDA_SWITCH_GRID: [f64; 6] = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0];
 const S7_SWITCH_STATS_DOMAIN: DomainHash<'static> = DomainHash::new(
     "gbf-experiments",
     "S7SwitchStatsReport",
@@ -48,6 +50,18 @@ const S7_EXPERT_PAYLOAD_DIGEST_DOMAIN: DomainHash<'static> = DomainHash::new(
     "gbf-artifact",
     "ExpertPayloadDigest",
     "s7_expert_payload_digest.v1",
+    "1",
+);
+const S7_LAMBDA_SWITCH_RECORD_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "LambdaSwitchSweepRecord",
+    "s7_lambda_switch_sweep_step.v1",
+    "1",
+);
+const S7_ROUTER_COLLAPSE_SWEEP_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "RouterCollapseSweepReport",
+    "s7_router_collapse_sweep.v1",
     "1",
 );
 const S7_FRONTIER_DOMAIN: DomainHash<'static> =
@@ -84,6 +98,8 @@ const PARETO_VERDICTS: &[&str] = &[
 pub enum S7SupportArtifactKind {
     /// `experiments/S7/switch-stats/seed-{seed}/switch-stats.json`.
     SwitchStats,
+    /// `experiments/S7/router-collapse/seed-0/sweep.json`.
+    RouterCollapseSweep,
     /// `experiments/S7/frontier/frontier.json`.
     Frontier,
     /// `experiments/S7/burn-grad-smoke/expert_block_qat.json`.
@@ -100,6 +116,7 @@ impl S7SupportArtifactKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SwitchStats => "switch-stats",
+            Self::RouterCollapseSweep => "router-collapse-sweep",
             Self::Frontier => "frontier",
             Self::BurnGradSmoke => "burn-grad-smoke",
             Self::OracleRouted => "oracle-routed",
@@ -113,6 +130,11 @@ impl S7SupportArtifactKind {
                 schema: "s7_switch_stats.v1",
                 self_hash_field: "bundle_self_hash",
                 domain: S7_SWITCH_STATS_DOMAIN,
+            },
+            Self::RouterCollapseSweep => SupportArtifactSpec {
+                schema: "s7_router_collapse_sweep.v1",
+                self_hash_field: "sweep_self_hash",
+                domain: S7_ROUTER_COLLAPSE_SWEEP_DOMAIN,
             },
             Self::Frontier => SupportArtifactSpec {
                 schema: "s7_frontier.v1",
@@ -144,12 +166,13 @@ impl FromStr for S7SupportArtifactKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "switch-stats" => Ok(Self::SwitchStats),
+            "router-collapse-sweep" => Ok(Self::RouterCollapseSweep),
             "frontier" => Ok(Self::Frontier),
             "burn-grad-smoke" => Ok(Self::BurnGradSmoke),
             "oracle-routed" => Ok(Self::OracleRouted),
             "emulator-one-token" => Ok(Self::EmulatorOneToken),
             _ => Err(
-                "expected switch-stats, frontier, burn-grad-smoke, oracle-routed, or emulator-one-token"
+                "expected switch-stats, router-collapse-sweep, frontier, burn-grad-smoke, oracle-routed, or emulator-one-token"
                     .to_owned(),
             ),
         }
@@ -240,6 +263,9 @@ fn default_output_path(
                 .join(format!("seed-{seed}"))
                 .join("switch-stats.json")
         }
+        S7SupportArtifactKind::RouterCollapseSweep => {
+            PathBuf::from("experiments/S7/router-collapse/seed-0/sweep.json")
+        }
         S7SupportArtifactKind::Frontier => PathBuf::from("experiments/S7/frontier/frontier.json"),
         S7SupportArtifactKind::BurnGradSmoke => {
             PathBuf::from("experiments/S7/burn-grad-smoke/expert_block_qat.json")
@@ -271,6 +297,11 @@ fn validate_kind_specific(
             reject_topology_for_non_emulator(inputs.kind, inputs.topology.clone())?;
             let seed = require_seed(inputs.kind, inputs.seed)?;
             validate_switch_stats(path, value, seed)
+        }
+        S7SupportArtifactKind::RouterCollapseSweep => {
+            reject_seed_for_non_switch(inputs.kind, inputs.seed)?;
+            reject_topology_for_non_emulator(inputs.kind, inputs.topology.clone())?;
+            validate_router_collapse_sweep(path, value)
         }
         S7SupportArtifactKind::Frontier => {
             reject_seed_for_non_switch(inputs.kind, inputs.seed)?;
@@ -378,6 +409,157 @@ fn validate_switch_stats(
             }
         }
     }
+    Ok(())
+}
+
+fn validate_router_collapse_sweep(
+    path: &Path,
+    value: &Value,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_u64_eq(value, &["seed"], "seed", 0, path)?;
+    require_nonzero_hash(value, &["base_checkpoint_sha"], "base_checkpoint_sha", path)?;
+    let grid = require_array(value, &["grid"], "grid")?;
+    if grid.len() != D11_LAMBDA_SWITCH_GRID.len() {
+        return Err(invalid(
+            path,
+            format!(
+                "grid must contain {} lambda_switch values",
+                D11_LAMBDA_SWITCH_GRID.len()
+            ),
+        ));
+    }
+    for (index, expected) in D11_LAMBDA_SWITCH_GRID.iter().enumerate() {
+        let observed = finite_nonnegative_value(&grid[index], "grid", path)?;
+        if !f64_close(observed, *expected) {
+            return Err(invalid(
+                path,
+                format!("grid[{index}] must be {expected}, observed {observed}"),
+            ));
+        }
+    }
+    let production_lambda =
+        require_finite_nonnegative(value, &["production_lambda"], "production_lambda", path)?;
+    if !f64_close(production_lambda, 0.05) {
+        return Err(invalid(
+            path,
+            format!("production_lambda must be 0.05, observed {production_lambda}"),
+        ));
+    }
+    let collapse_threshold =
+        require_finite_nonnegative(value, &["collapse_threshold"], "collapse_threshold", path)?;
+    if !f64_close(collapse_threshold, 1.0) {
+        return Err(invalid(
+            path,
+            format!("collapse_threshold must be 1.0, observed {collapse_threshold}"),
+        ));
+    }
+    require_string_eq(
+        value,
+        &["guardrail_verdict"],
+        "guardrail_verdict",
+        "Pass",
+        path,
+    )?;
+    let records = require_array(value, &["records"], "records")?;
+    if records.len() != D11_LAMBDA_SWITCH_GRID.len() {
+        return Err(invalid(
+            path,
+            format!(
+                "records length must equal D11 grid length {}",
+                D11_LAMBDA_SWITCH_GRID.len()
+            ),
+        ));
+    }
+    for (index, record) in records.iter().enumerate() {
+        validate_sweep_record(path, record, index)?;
+    }
+    Ok(())
+}
+
+fn validate_sweep_record(
+    path: &Path,
+    value: &Value,
+    index: usize,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_object(value, &[], "records entry")?;
+    require_schema_version(value, path)?;
+    require_u64_eq(value, &["seed"], "seed", 0, path)?;
+    let lambda_switch =
+        require_finite_nonnegative(value, &["lambda_switch"], "lambda_switch", path)?;
+    let expected_lambda = D11_LAMBDA_SWITCH_GRID[index];
+    if !f64_close(lambda_switch, expected_lambda) {
+        return Err(invalid(
+            path,
+            format!(
+                "records[{index}] lambda_switch must be {expected_lambda}, observed {lambda_switch}"
+            ),
+        ));
+    }
+    let base_train_step = require_u64(value, &["base_train_step"], "base_train_step", path)?;
+    let train_step = require_u64(value, &["train_step"], "train_step", path)?;
+    let expected_train_step = base_train_step
+        .checked_add(RCS_TRAINING_EXTRA_STEPS)
+        .ok_or_else(|| invalid(path, "base_train_step + 1000 overflowed".to_owned()))?;
+    if train_step != expected_train_step {
+        return Err(invalid(
+            path,
+            format!("records[{index}] train_step must equal base_train_step + 1000"),
+        ));
+    }
+    let completion = require_value(value, &["completion"], "completion")?;
+    let completion_kind = require_string(completion, &["kind"], "completion.kind")?;
+    match completion_kind {
+        "completed" => {
+            let object = require_object(completion, &[], "completion")?;
+            if object.len() != 1 {
+                return Err(invalid(
+                    path,
+                    format!("records[{index}] completed completion must contain only kind"),
+                ));
+            }
+            require_finite_nonnegative(value, &["bpc_eval_subset"], "bpc_eval_subset", path)?;
+        }
+        "diverged_at" => {
+            require_positive_u64(completion, &["step"], "completion.step", path)?;
+            if !json_path(value, &["bpc_eval_subset"]).is_some_and(Value::is_null) {
+                return Err(invalid(
+                    path,
+                    format!("records[{index}] bpc_eval_subset must be null for divergent records"),
+                ));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                path,
+                format!("records[{index}] completion.kind must be completed or diverged_at"),
+            ));
+        }
+    }
+    require_finite_nonnegative(
+        value,
+        &["expert_usage_entropy_bits_mean"],
+        "expert_usage_entropy_bits_mean",
+        path,
+    )?;
+    if let Some(delta) = json_path(value, &["quality_delta_per_lambda_switch"]) {
+        if !delta.is_null() {
+            finite_value(delta, "quality_delta_per_lambda_switch", path)?;
+        }
+    } else {
+        return Err(invalid(
+            path,
+            format!("records[{index}] missing quality_delta_per_lambda_switch"),
+        ));
+    }
+    verified_self_hash(
+        path,
+        value,
+        SupportArtifactSpec {
+            schema: "s7_lambda_switch_sweep_step.v1",
+            self_hash_field: "sweep_self_hash",
+            domain: S7_LAMBDA_SWITCH_RECORD_DOMAIN,
+        },
+    )?;
     Ok(())
 }
 
@@ -888,6 +1070,33 @@ fn require_value<'a>(
     json_path(value, path).ok_or_else(|| invalid_label(label, "is missing"))
 }
 
+fn require_schema_version(
+    value: &Value,
+    artifact_path: &Path,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    require_u64_eq(
+        value,
+        &["schema_version", "major"],
+        "schema_version.major",
+        1,
+        artifact_path,
+    )?;
+    require_u64_eq(
+        value,
+        &["schema_version", "minor"],
+        "schema_version.minor",
+        0,
+        artifact_path,
+    )?;
+    require_u64_eq(
+        value,
+        &["schema_version", "patch"],
+        "schema_version.patch",
+        0,
+        artifact_path,
+    )
+}
+
 fn require_string_eq(
     value: &Value,
     path: &[&str],
@@ -961,6 +1170,17 @@ fn require_u64_eq(
         ));
     }
     Ok(())
+}
+
+fn require_u64(
+    value: &Value,
+    path: &[&str],
+    label: &str,
+    artifact_path: &Path,
+) -> Result<u64, S7SupportArtifactMaterializeError> {
+    json_path(value, path)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid(artifact_path, format!("{label} must be a u64")))
 }
 
 fn require_q8_8(
@@ -1047,6 +1267,26 @@ fn finite_nonnegative_value(
         return Err(invalid(
             artifact_path,
             format!("{label} must be finite and non-negative, observed {number}"),
+        ));
+    }
+    Ok(number)
+}
+
+fn finite_value(
+    value: &Value,
+    label: &str,
+    artifact_path: &Path,
+) -> Result<f64, S7SupportArtifactMaterializeError> {
+    let Some(number) = value.as_f64() else {
+        return Err(invalid(
+            artifact_path,
+            format!("{label} must be a finite number"),
+        ));
+    };
+    if !number.is_finite() {
+        return Err(invalid(
+            artifact_path,
+            format!("{label} must be finite, observed {number}"),
         ));
     }
     Ok(number)

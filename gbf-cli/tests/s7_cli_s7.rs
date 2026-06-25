@@ -61,6 +61,12 @@ const S7_ROUTER_COLLAPSE_SWEEP_DOMAIN: DomainHash<'static> = DomainHash::new(
     "s7_router_collapse_sweep.v1",
     "1",
 );
+const S7_LAMBDA_SWITCH_RECORD_DOMAIN: DomainHash<'static> = DomainHash::new(
+    "gbf-experiments",
+    "LambdaSwitchSweepRecord",
+    "s7_lambda_switch_sweep_step.v1",
+    "1",
+);
 const S7_FRONTIER_DOMAIN: DomainHash<'static> =
     DomainHash::new("gbf-experiments", "S7FrontierReport", "s7_frontier.v1", "1");
 const S7_BURN_GRAD_SMOKE_DOMAIN: DomainHash<'static> = DomainHash::new(
@@ -589,6 +595,107 @@ fn s7_materialize_support_artifact_rejects_switch_stats_seed_mismatch() {
     assert!(output_result.stdout.is_empty());
     assert!(
         command_output(&output_result).contains("seed must be 3"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_materialize_support_artifact_writes_router_collapse_sweep_packet_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    write_json(
+        &input_root,
+        "sweep.json",
+        &router_collapse_sweep_support_artifact(),
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "router-collapse-sweep",
+        "--input",
+        input_root
+            .join("sweep.json")
+            .to_str()
+            .expect("utf8 sweep input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        output_result.status.success(),
+        "s7 materialize-support-artifact failed:\n{}",
+        command_output(&output_result)
+    );
+    let sweep_self_hash = single_stdout_hash(&output_result);
+    let out_sweep = packet.join("experiments/S7/router-collapse/seed-0/sweep.json");
+    let sweep: Value = serde_json::from_slice(&std::fs::read(&out_sweep).expect("sweep reads"))
+        .expect("sweep parses");
+
+    assert_eq!(sweep["schema"], "s7_router_collapse_sweep.v1");
+    assert_eq!(sweep["seed"], 0);
+    assert_eq!(
+        sweep["sweep_self_hash"]
+            .as_str()
+            .expect("sweep hash string"),
+        sweep_self_hash
+    );
+    assert_eq!(sweep["records"].as_array().expect("records").len(), 6);
+}
+
+#[test]
+fn s7_materialize_support_artifact_rejects_router_collapse_sweep_record_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    let mut sweep = router_collapse_sweep_support_artifact();
+    sweep["records"][2]
+        .as_object_mut()
+        .expect("record object")
+        .insert(
+            "sweep_self_hash".to_owned(),
+            Value::String(test_hash(200).to_string()),
+        );
+    let sweep = with_domain_self_hash(sweep, "sweep_self_hash", S7_ROUTER_COLLAPSE_SWEEP_DOMAIN);
+    write_json(&input_root, "sweep.json", &sweep);
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "router-collapse-sweep",
+        "--input",
+        input_root
+            .join("sweep.json")
+            .to_str()
+            .expect("utf8 sweep input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 materialize-support-artifact unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("sweep_self_hash mismatch"),
         "{}",
         command_output(&output_result)
     );
@@ -2147,6 +2254,51 @@ fn switch_stats_support_artifact(seed: u64) -> Value {
         }),
         "bundle_self_hash",
         S7_SWITCH_STATS_DOMAIN,
+    )
+}
+
+fn router_collapse_sweep_support_artifact() -> Value {
+    let lambdas = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0];
+    let bpc_eval_subset = [1.0, 1.01, 1.02, 1.1, 1.2, 1.5];
+    let entropy_bits = [2.0, 1.9, 1.85, 1.7, 1.55, 1.4];
+    let quality_delta = [-0.01, 0.0, 0.01, 0.09, 0.19, 0.49];
+    let records = lambdas
+        .iter()
+        .enumerate()
+        .map(|(index, lambda_switch)| {
+            with_domain_self_hash(
+                serde_json::json!({
+                    "schema_version": {"major": 1, "minor": 0, "patch": 0},
+                    "seed": 0,
+                    "lambda_switch": lambda_switch,
+                    "base_train_step": 20_000,
+                    "train_step": 21_000,
+                    "completion": {"kind": "completed"},
+                    "bpc_eval_subset": bpc_eval_subset[index],
+                    "expert_usage_entropy_bits_mean": entropy_bits[index],
+                    "quality_delta_per_lambda_switch": quality_delta[index],
+                    "sweep_self_hash": test_hash(170 + u8::try_from(index).expect("index fits u8")),
+                }),
+                "sweep_self_hash",
+                S7_LAMBDA_SWITCH_RECORD_DOMAIN,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    with_domain_self_hash(
+        serde_json::json!({
+            "schema": "s7_router_collapse_sweep.v1",
+            "seed": 0,
+            "base_checkpoint_sha": test_hash(176),
+            "grid": lambdas,
+            "records": records,
+            "production_lambda": 0.05,
+            "collapse_threshold": 1.0,
+            "guardrail_verdict": "Pass",
+            "sweep_self_hash": test_hash(177),
+        }),
+        "sweep_self_hash",
+        S7_ROUTER_COLLAPSE_SWEEP_DOMAIN,
     )
 }
 
