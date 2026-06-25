@@ -11,6 +11,7 @@ for expected in \
   "scripts/s7_preregistration_check.sh" \
   "scripts/s7_preregistration_pin.sh --check-ready" \
   "scripts/review/f-s7/emit-report.py" \
+  "scripts/review/f-s7/assemble-packet.py --manifest <production-bundle-manifest.json> --run-reviews" \
   "s7 validate-closure" \
   "experiments/S7/dense-vs-moe/comparison.json" \
   "docs/experiments/S7-report.md" \

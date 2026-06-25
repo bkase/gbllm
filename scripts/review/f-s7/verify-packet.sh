@@ -139,8 +139,7 @@ cargo test -p gbf-experiments --features s7 --test closure_protocol
 scripts/s7_preregistration_check.sh
 scripts/s7_preregistration_pin.sh --check-ready
 scripts/review/f-s7/emit-report.py
-scripts/review/f-s7/assemble-packet.py --manifest <production-bundle-manifest.json>
-scripts/review/f-s7/run-acpx-reviews.py
+scripts/review/f-s7/assemble-packet.py --manifest <production-bundle-manifest.json> --run-reviews
 scripts/review/f-s7/validate-report.py
 scripts/review/f-s7/validate-artifacts.py
 scripts/review/f-s7/validate-reviews.py
