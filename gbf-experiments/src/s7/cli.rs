@@ -27,6 +27,10 @@ use crate::s7::replay::{
 use crate::s7::run::{
     S7CompletedRunArtifactInputs, S7RunMaterializeError, materialize_completed_run_artifacts,
 };
+use crate::s7::support_artifacts::{
+    S7SupportArtifactInputs, S7SupportArtifactKind, S7SupportArtifactMaterializeError,
+    materialize_support_artifact,
+};
 
 const DEFAULT_GUTENBERG_MANIFEST: &str = "fixtures/corpora/gutenberg.toml";
 const DEFAULT_CHARSET: &str = "fixtures/charsets/charset_v1.toml";
@@ -58,6 +62,8 @@ pub enum S7Command {
     MaterializeRun(S7MaterializeRunArgs),
     /// Derive the dense-vs-MoE comparison from materialized score artifacts.
     DeriveComparison(S7DeriveComparisonArgs),
+    /// Validate and materialize a closure support artifact.
+    MaterializeSupportArtifact(S7MaterializeSupportArtifactArgs),
     /// Emit the final S7 report from already-produced production artifact JSON.
     EmitReport(S7EmitReportArgs),
     /// Validate the final S7 report against the Rust closure contract.
@@ -154,6 +160,29 @@ pub struct S7DeriveComparisonArgs {
     pub output: PathBuf,
 }
 
+/// Arguments for `gbf s7 materialize-support-artifact`.
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 materialize-support-artifact --kind frontier --input /tmp/frontier.json\n  gbf s7 materialize-support-artifact --kind emulator-one-token --topology MoeTiny --input /tmp/emulator.json"
+)]
+pub struct S7MaterializeSupportArtifactArgs {
+    /// Packet/repository root where `experiments/S7/...` should be written.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Support artifact kind.
+    #[arg(long, value_parser = parse_support_artifact_kind)]
+    pub kind: S7SupportArtifactKind,
+    /// Externally produced support artifact JSON.
+    #[arg(long)]
+    pub input: PathBuf,
+    /// Topology for `emulator-one-token` artifacts.
+    #[arg(long, value_parser = parse_topology)]
+    pub topology: Option<S7Topology>,
+    /// Output path, relative to --root unless absolute. Defaults to the canonical packet path.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
 /// Arguments for `gbf s7 emit-report`.
 #[derive(Debug, Clone, Args)]
 #[command(
@@ -216,6 +245,7 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
         S7Command::Replay(args) => replay(args),
         S7Command::MaterializeRun(args) => materialize_run(args),
         S7Command::DeriveComparison(args) => derive_comparison(args),
+        S7Command::MaterializeSupportArtifact(args) => materialize_support(args),
         S7Command::EmitReport(args) => emit_report(args),
         S7Command::ValidateClosure(args) => validate_closure(args),
     }
@@ -317,6 +347,18 @@ fn derive_comparison(args: S7DeriveComparisonArgs) -> Result<(), S7CliError> {
     Ok(())
 }
 
+fn materialize_support(args: S7MaterializeSupportArtifactArgs) -> Result<(), S7CliError> {
+    let materialized = materialize_support_artifact(&S7SupportArtifactInputs {
+        root: args.root,
+        kind: args.kind,
+        input: args.input,
+        topology: args.topology,
+        output: args.output,
+    })?;
+    println!("{}", materialized.self_hash);
+    Ok(())
+}
+
 fn emit_report(args: S7EmitReportArgs) -> Result<(), S7CliError> {
     if args.output.as_os_str() == OsStr::new("-") {
         return Err(S7CliError::UnsupportedStdoutReport);
@@ -395,6 +437,10 @@ fn parse_topology(value: &str) -> Result<S7Topology, String> {
         "MoeTinyDenseMatched" => Ok(S7Topology::MoeTinyDenseMatched),
         _ => Err("expected MoeTiny or MoeTinyDenseMatched".to_owned()),
     }
+}
+
+fn parse_support_artifact_kind(value: &str) -> Result<S7SupportArtifactKind, String> {
+    value.parse()
 }
 
 fn parse_seed_list(value: &str) -> Result<Vec<u64>, S7CliError> {
@@ -480,6 +526,8 @@ pub enum S7CliError {
     MaterializeRun(S7RunMaterializeError),
     /// Dense-vs-MoE comparison derivation failed.
     DeriveComparison(S7ComparisonMaterializeError),
+    /// Support artifact materialization failed.
+    MaterializeSupportArtifact(S7SupportArtifactMaterializeError),
     /// Canonical JSON encoding failed.
     CanonicalJson(CanonicalJsonError),
     /// Filesystem operation failed.
@@ -527,6 +575,7 @@ impl fmt::Display for S7CliError {
             Self::Replay(error) => write!(f, "{error}"),
             Self::MaterializeRun(error) => write!(f, "{error}"),
             Self::DeriveComparison(error) => write!(f, "{error}"),
+            Self::MaterializeSupportArtifact(error) => write!(f, "{error}"),
             Self::CanonicalJson(error) => write!(f, "{error}"),
             Self::Io { path, source } => write!(f, "{path}: {source}"),
             Self::InvalidSeedList { value } => {
@@ -564,6 +613,7 @@ impl std::error::Error for S7CliError {
             Self::Replay(error) => Some(error),
             Self::MaterializeRun(error) => Some(error),
             Self::DeriveComparison(error) => Some(error),
+            Self::MaterializeSupportArtifact(error) => Some(error),
             Self::CanonicalJson(error) => Some(error),
             Self::Io { source, .. } => Some(source),
             Self::InvalidSeedList { .. }
@@ -591,6 +641,12 @@ impl From<S7RunMaterializeError> for S7CliError {
 impl From<S7ComparisonMaterializeError> for S7CliError {
     fn from(error: S7ComparisonMaterializeError) -> Self {
         Self::DeriveComparison(error)
+    }
+}
+
+impl From<S7SupportArtifactMaterializeError> for S7CliError {
+    fn from(error: S7SupportArtifactMaterializeError) -> Self {
+        Self::MaterializeSupportArtifact(error)
     }
 }
 

@@ -73,6 +73,7 @@ fn s7_help_lists_dispatch_verbs() {
         predicate::str::contains("replay")
             .and(predicate::str::contains("materialize-run"))
             .and(predicate::str::contains("derive-comparison"))
+            .and(predicate::str::contains("materialize-support-artifact"))
             .and(predicate::str::contains("emit-report"))
             .and(predicate::str::contains("validate-closure")),
     );
@@ -364,6 +365,143 @@ fn s7_derive_comparison_rejects_missing_materialized_score() {
     assert!(
         command_output(&output_result)
             .contains("experiments/S7/scores/MoeTinyDenseMatched/seed-4/score.json"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_materialize_support_artifact_writes_frontier_packet_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    write_json(&input_root, "frontier.json", &frontier_support_artifact());
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "frontier",
+        "--input",
+        input_root
+            .join("frontier.json")
+            .to_str()
+            .expect("utf8 frontier input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        output_result.status.success(),
+        "s7 materialize-support-artifact failed:\n{}",
+        command_output(&output_result)
+    );
+    let frontier_self_hash = single_stdout_hash(&output_result);
+    let out_frontier = packet.join("experiments/S7/frontier/frontier.json");
+    let frontier: Value =
+        serde_json::from_slice(&std::fs::read(&out_frontier).expect("frontier reads"))
+            .expect("frontier parses");
+
+    assert_eq!(frontier["schema"], "s7_frontier.v1");
+    assert_eq!(
+        frontier["frontier_self_hash"]
+            .as_str()
+            .expect("frontier hash string"),
+        frontier_self_hash
+    );
+    assert_eq!(frontier["points"].as_array().expect("points").len(), 2);
+}
+
+#[test]
+fn s7_materialize_support_artifact_rejects_self_hash_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    let mut frontier = frontier_support_artifact();
+    frontier.as_object_mut().expect("frontier object").insert(
+        "frontier_self_hash".to_owned(),
+        Value::String(test_hash(199).to_string()),
+    );
+    write_json(&input_root, "frontier.json", &frontier);
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "frontier",
+        "--input",
+        input_root
+            .join("frontier.json")
+            .to_str()
+            .expect("utf8 frontier input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 materialize-support-artifact unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("frontier_self_hash mismatch"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_materialize_support_artifact_requires_emulator_topology() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    write_json(
+        &input_root,
+        "emulator.json",
+        &emulator_support_artifact("MoeTiny"),
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "emulator-one-token",
+        "--input",
+        input_root
+            .join("emulator.json")
+            .to_str()
+            .expect("utf8 emulator input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 materialize-support-artifact unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("requires --topology"),
         "{}",
         command_output(&output_result)
     );
@@ -1783,6 +1921,71 @@ fn write_bytes(path: &Path, bytes: &[u8]) {
 
 fn test_hash(salt: u8) -> Hash256 {
     Hash256::from_bytes([salt; 32])
+}
+
+fn frontier_support_artifact() -> Value {
+    with_domain_self_hash(
+        serde_json::json!({
+            "schema": "s7_frontier.v1",
+            "points": [
+                {
+                    "topology": "MoeTiny",
+                    "checkpoint_sha": test_hash(101),
+                    "quality": {
+                        "median_val_bpc": 1.0,
+                        "per_seed_val_bpc": [1.0, 1.125, 1.25, 1.375, 1.5],
+                    },
+                    "conformance": {"status": "ok"},
+                    "projected_fit": {
+                        "deployed_bytes_total": 100,
+                        "deployed_bytes_per_block": [25, 25, 25, 25],
+                    },
+                    "schedule_cost": null,
+                },
+                {
+                    "topology": "MoeTinyDenseMatched",
+                    "checkpoint_sha": test_hash(102),
+                    "quality": {
+                        "median_val_bpc": 1.75,
+                        "per_seed_val_bpc": [1.5, 1.625, 1.75, 1.875, 2.0],
+                    },
+                    "conformance": {"status": "ok"},
+                    "projected_fit": {
+                        "deployed_bytes_total": 100,
+                        "deployed_bytes_per_block": [25, 25, 25, 25],
+                    },
+                    "schedule_cost": null,
+                },
+            ],
+            "pareto_verdict": "MoE-dominates",
+            "frontier_self_hash": test_hash(103),
+        }),
+        "frontier_self_hash",
+        S7_FRONTIER_DOMAIN,
+    )
+}
+
+fn emulator_support_artifact(topology: &str) -> Value {
+    with_domain_self_hash(
+        serde_json::json!({
+            "schema": "s7_emulator_one_token.v1",
+            "seed": 0,
+            "topology": topology,
+            "encoded_rom_sha": test_hash(111),
+            "prompt_sha": test_hash(112),
+            "artifact_oracle_logits_sha": test_hash(113),
+            "emulator_logits_sha": test_hash(114),
+            "pairwise_max_abs_diff": 0.0,
+            "s5_tolerance": 0.1,
+            "observed_bank_switches_per_token": 0.25,
+            "oracle_recorded_bank_switches": 0.75,
+            "bank_switch_diff": 0.5,
+            "bank_switch_within_one": true,
+            "emulator_self_hash": test_hash(115),
+        }),
+        "emulator_self_hash",
+        S7_EMULATOR_ONE_TOKEN_DOMAIN,
+    )
 }
 
 fn write_minimal_report_packet(root: &Path) {

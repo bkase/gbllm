@@ -42,6 +42,9 @@ pub mod rng_counting;
 /// S7 train-run helper surface.
 pub mod run;
 
+/// S7 closure support artifact landing helpers.
+pub mod support_artifacts;
+
 /// S7 outcome algebra helpers.
 pub mod outcome;
 
