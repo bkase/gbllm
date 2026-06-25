@@ -1,11 +1,11 @@
 schema = "s7_preregistration.v1"
 rfc_path = "history/rfcs/F-S7-moe-beats-dense.md"
 predictions_line_start = 536
-predictions_line_end = 946
-predictions_commit = "298e4534c52f41a101a09a8ffca5f2b027841537"
-predictions_section_hash = "sha256:2e6f42fd9586d229333e91ea250175a6f3fbe68b1b978b9430c50dddc4a78e41"
-pass_version_S7 = "s7-prereg-bd-2v9r-2026-06-25"
-rfc_revision = "298e4534c52f41a101a09a8ffca5f2b027841537"
+predictions_line_end = 949
+predictions_commit = "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
+predictions_section_hash = "sha256:68212b85cc2e4e24f0ec9ba86ab107cbb86000995bb415b1d89f780af0c53bb2"
+pass_version_S7 = "s7-prereg-bd-17n0-2026-06-25"
+rfc_revision = "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
 
 # TOML has no null value. Empty string is the preregistration null sentinel
 # until the first results-bearing S7 PR records the earliest result commit.
