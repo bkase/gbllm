@@ -543,50 +543,58 @@ fn s7_materialize_support_artifact_writes_burn_grad_packet_path() {
 
 #[test]
 fn s7_materialize_support_artifact_rejects_burn_grad_bias_gradient_fields() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let input_root = temp.path().join("input");
-    let packet = temp.path().join("packet");
-    let mut burn_grad = burn_grad_support_artifact();
-    burn_grad
-        .as_object_mut()
-        .expect("burn grad object")
-        .insert("grad_up_bias_sum_abs".to_owned(), serde_json::json!(1.0));
-    let burn_grad = with_domain_self_hash(burn_grad, "smoke_self_hash", S7_BURN_GRAD_SMOKE_DOMAIN);
-    write_json(&input_root, "burn-grad.json", &burn_grad);
+    for rejected_field in [
+        "grad_up_bias_sum_abs",
+        "grad_down_bias_sum_abs",
+        "grad_activation_clip_threshold_sum_abs",
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let input_root = temp.path().join("input");
+        let packet = temp.path().join("packet");
+        let mut burn_grad = burn_grad_support_artifact();
+        burn_grad
+            .as_object_mut()
+            .expect("burn grad object")
+            .insert(rejected_field.to_owned(), serde_json::json!(1.0));
+        let burn_grad =
+            with_domain_self_hash(burn_grad, "smoke_self_hash", S7_BURN_GRAD_SMOKE_DOMAIN);
+        write_json(&input_root, "burn-grad.json", &burn_grad);
 
-    let mut command = gbf();
-    command.args([
-        "--log-level",
-        "off",
-        "s7",
-        "materialize-support-artifact",
-        "--root",
-        packet.to_str().expect("utf8 packet root"),
-        "--kind",
-        "burn-grad-smoke",
-        "--input",
-        input_root
-            .join("burn-grad.json")
-            .to_str()
-            .expect("utf8 burn-grad input"),
-    ]);
+        let mut command = gbf();
+        command.args([
+            "--log-level",
+            "off",
+            "s7",
+            "materialize-support-artifact",
+            "--root",
+            packet.to_str().expect("utf8 packet root"),
+            "--kind",
+            "burn-grad-smoke",
+            "--input",
+            input_root
+                .join("burn-grad.json")
+                .to_str()
+                .expect("utf8 burn-grad input"),
+        ]);
 
-    let output_result = command
-        .output()
-        .expect("s7 materialize-support-artifact runs");
-    assert!(
-        !output_result.status.success(),
-        "s7 materialize-support-artifact unexpectedly succeeded:\n{}",
-        command_output(&output_result)
-    );
-    assert!(output_result.stdout.is_empty());
-    assert!(
-        command_output(&output_result).contains(
-            "grad_up_bias_sum_abs is unsupported because ExpertBlockQat bias and learned activation-range parameters are rejected"
-        ),
-        "{}",
-        command_output(&output_result)
-    );
+        let output_result = command
+            .output()
+            .expect("s7 materialize-support-artifact runs");
+        assert!(
+            !output_result.status.success(),
+            "s7 materialize-support-artifact unexpectedly succeeded for {rejected_field}:\n{}",
+            command_output(&output_result)
+        );
+        assert!(output_result.stdout.is_empty());
+        let expected = format!(
+            "{rejected_field} is unsupported because ExpertBlockQat bias and learned activation-range parameters are rejected"
+        );
+        assert!(
+            command_output(&output_result).contains(&expected),
+            "{}",
+            command_output(&output_result)
+        );
+    }
 }
 
 #[test]
@@ -2446,12 +2454,12 @@ fn burn_grad_support_artifact() -> Value {
             "schema": "s7_burn_grad_smoke.v1",
             "fixture_seed": 65261,
             "burn_adapter_version": "test",
-        "fixture_input_sha": test_hash(104),
-        "grad_up_weight_sum_abs": 1.0,
-        "grad_down_weight_sum_abs": 1.25,
-        "supported_clipped_activation_count": 3,
-        "learned_activation_range_unsupported": true,
-        "projection_biases_unsupported": true,
+            "fixture_input_sha": test_hash(104),
+            "grad_up_weight_sum_abs": 1.0,
+            "grad_down_weight_sum_abs": 1.25,
+            "supported_clipped_activation_count": 3,
+            "learned_activation_range_unsupported": true,
+            "projection_biases_unsupported": true,
             "glu_construction_rejected": true,
             "replay_byte_identical": true,
             "smoke_self_hash": test_hash(105),
