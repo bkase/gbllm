@@ -24,6 +24,9 @@ pub mod closure_packet;
 /// H10 one-token emulator comparison helpers.
 pub mod emulator_one_token;
 
+/// S7 Pareto frontier artifact derivation.
+pub mod frontier;
+
 /// S7 falsification-suite helpers.
 #[cfg(feature = "falsify")]
 pub mod falsify;

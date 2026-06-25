@@ -103,6 +103,7 @@ fn s7_help_lists_dispatch_verbs() {
         predicate::str::contains("replay")
             .and(predicate::str::contains("materialize-run"))
             .and(predicate::str::contains("derive-comparison"))
+            .and(predicate::str::contains("derive-frontier"))
             .and(predicate::str::contains("materialize-support-artifact"))
             .and(predicate::str::contains("oracle-routed"))
             .and(predicate::str::contains("emulator-one-token"))
@@ -409,6 +410,153 @@ fn s7_derive_comparison_rejects_missing_materialized_score() {
     assert!(
         command_output(&output_result)
             .contains("experiments/S7/scores/MoeTinyDenseMatched/seed-4/score.json"),
+        "{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
+fn s7_derive_frontier_writes_frontier_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+    write_comparison_inputs(&packet, true);
+    derive_comparison_for_test(&packet);
+    write_json(
+        &packet,
+        "inputs/moe-conformance.json",
+        &serde_json::json!({"artifact_oracle": "pass", "runtime_budget": "pass"}),
+    );
+    write_json(
+        &packet,
+        "inputs/dense-conformance.json",
+        &serde_json::json!({"artifact_oracle": "pass", "runtime_budget": "pass"}),
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "derive-frontier",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--moe-conformance",
+        "inputs/moe-conformance.json",
+        "--dense-conformance",
+        "inputs/dense-conformance.json",
+        "--moe-deployed-bytes-per-block",
+        "20944,20944,20944,20944",
+        "--dense-deployed-bytes-per-block",
+        "20948,20948,20948,20948",
+    ]);
+
+    let output_result = command.output().expect("s7 derive-frontier runs");
+    assert!(
+        output_result.status.success(),
+        "s7 derive-frontier failed:\n{}",
+        command_output(&output_result)
+    );
+    let frontier_self_hash = single_stdout_hash(&output_result);
+    let out_frontier = packet.join("experiments/S7/frontier/frontier.json");
+    let frontier: Value =
+        serde_json::from_slice(&std::fs::read(&out_frontier).expect("frontier reads"))
+            .expect("frontier parses");
+
+    assert_eq!(frontier["schema"], "s7_frontier.v1");
+    assert_eq!(frontier["pareto_verdict"], "MoE-dominates");
+    assert_eq!(
+        frontier["frontier_self_hash"]
+            .as_str()
+            .expect("frontier hash string"),
+        frontier_self_hash
+    );
+    assert_eq!(
+        frontier,
+        with_domain_self_hash(frontier.clone(), "frontier_self_hash", S7_FRONTIER_DOMAIN)
+    );
+    let points = frontier["points"].as_array().expect("frontier points");
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0]["topology"], "MoeTiny");
+    assert_eq!(points[0]["checkpoint_sha"], test_hash(42).to_string());
+    assert_eq!(points[0]["quality"]["median_val_bpc"], 1.25);
+    assert_eq!(
+        points[0]["quality"]["per_seed_val_bpc"],
+        serde_json::json!([1.0, 1.125, 1.25, 1.375, 1.5])
+    );
+    assert_eq!(points[0]["projected_fit"]["deployed_bytes_total"], 83776);
+    assert_eq!(points[1]["topology"], "MoeTinyDenseMatched");
+    assert_eq!(points[1]["quality"]["median_val_bpc"], 1.75);
+    assert_eq!(points[1]["projected_fit"]["deployed_bytes_total"], 83792);
+
+    let landed = temp.path().join("landed");
+    let mut materialize = gbf();
+    materialize.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        landed.to_str().expect("utf8 landed root"),
+        "--kind",
+        "frontier",
+        "--input",
+        out_frontier.to_str().expect("utf8 frontier input"),
+    ]);
+    let materialize_result = materialize
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        materialize_result.status.success(),
+        "generated frontier report failed materialization:\n{}",
+        command_output(&materialize_result)
+    );
+    assert_eq!(single_stdout_hash(&materialize_result), frontier_self_hash);
+}
+
+#[test]
+fn s7_derive_frontier_rejects_bad_per_block_total() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let packet = temp.path().join("packet");
+    write_comparison_inputs(&packet, true);
+    derive_comparison_for_test(&packet);
+    write_json(
+        &packet,
+        "inputs/moe-conformance.json",
+        &serde_json::json!({"artifact_oracle": "pass"}),
+    );
+    write_json(
+        &packet,
+        "inputs/dense-conformance.json",
+        &serde_json::json!({"artifact_oracle": "pass"}),
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "derive-frontier",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--moe-conformance",
+        "inputs/moe-conformance.json",
+        "--dense-conformance",
+        "inputs/dense-conformance.json",
+        "--moe-deployed-bytes-per-block",
+        "1,1,1,1",
+        "--dense-deployed-bytes-per-block",
+        "20948,20948,20948,20948",
+    ]);
+
+    let output_result = command.output().expect("s7 derive-frontier runs");
+    assert!(
+        !output_result.status.success(),
+        "s7 derive-frontier unexpectedly succeeded:\n{}",
+        command_output(&output_result)
+    );
+    assert!(output_result.stdout.is_empty());
+    assert!(
+        command_output(&output_result).contains("projected fit deployed_bytes_total"),
         "{}",
         command_output(&output_result)
     );
@@ -2648,6 +2796,29 @@ fn write_comparison_inputs(root: &Path, include_dense_seed_four: bool) {
         &root.join("experiments/S7/summaries/router-collapse-sweep-summary.json"),
         &with_trailing_newline(CanonicalJson::to_vec(&sweep).unwrap()),
     );
+}
+
+fn derive_comparison_for_test(root: &Path) -> String {
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "derive-comparison",
+        "--root",
+        root.to_str().expect("utf8 packet root"),
+        "--moe-topology-hash",
+        &test_hash(91).to_string(),
+        "--dense-matched-topology-hash",
+        &test_hash(92).to_string(),
+    ]);
+    let output_result = command.output().expect("s7 derive-comparison runs");
+    assert!(
+        output_result.status.success(),
+        "s7 derive-comparison failed:\n{}",
+        command_output(&output_result)
+    );
+    single_stdout_hash(&output_result)
 }
 
 fn write_score_packet(root: &Path, topology: S7Topology, seed: u64, bpc: f64) {

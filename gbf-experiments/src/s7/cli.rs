@@ -28,6 +28,9 @@ use crate::s7::emulator_one_token::{
     ArtifactOracleOneTokenTrace, EmulatorOneTokenComparison, EmulatorOneTokenObservation,
     compare_with_artifact_oracle_trace,
 };
+use crate::s7::frontier::{
+    S7FrontierArtifactInputs, S7FrontierMaterializeError, materialize_s7_frontier,
+};
 use crate::s7::replay::{
     S7_DETERMINISM_FIXTURE_SCOPE, S7_FULL_CLI_REPLAY_OWNER, S7_FULL_CLOSURE_OWNER, S7ReplayError,
     fixture_replay_product,
@@ -50,6 +53,7 @@ const DEFAULT_MATCHED_BYTES: &str = "experiments/S7/profile/matched_bytes.json";
 const DEFAULT_SWITCH_STATS_SUMMARY: &str = "experiments/S7/summaries/switch-stats-summary.json";
 const DEFAULT_SWEEP_SUMMARY: &str = "experiments/S7/summaries/router-collapse-sweep-summary.json";
 const DEFAULT_COMPARISON_OUTPUT: &str = "experiments/S7/dense-vs-moe/comparison.json";
+const DEFAULT_FRONTIER_OUTPUT: &str = "experiments/S7/frontier/frontier.json";
 const DEFAULT_DEVICE_PROFILE: &str = "S7CpuDeterministic";
 const DEFAULT_SEED_LIST: &str = "0,1,2,3,4";
 const DEFAULT_REPORT_EMITTER: &str = "scripts/review/f-s7/emit-report.py";
@@ -78,6 +82,8 @@ pub enum S7Command {
     MaterializeRun(S7MaterializeRunArgs),
     /// Derive the dense-vs-MoE comparison from materialized score artifacts.
     DeriveComparison(S7DeriveComparisonArgs),
+    /// Derive the S7 Pareto frontier from materialized comparison evidence.
+    DeriveFrontier(S7DeriveFrontierArgs),
     /// Validate and materialize a closure support artifact.
     MaterializeSupportArtifact(S7MaterializeSupportArtifactArgs),
     /// Build an H9 routed artifact-oracle report from measured logits.
@@ -180,6 +186,41 @@ pub struct S7DeriveComparisonArgs {
     pub sweep_summary: PathBuf,
     /// Output `s7_dense_vs_moe.v1` path, relative to --root unless absolute.
     #[arg(long, default_value = DEFAULT_COMPARISON_OUTPUT)]
+    pub output: PathBuf,
+}
+
+/// Arguments for `gbf s7 derive-frontier`.
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 derive-frontier --root . --moe-conformance /tmp/moe-conformance.json --dense-conformance /tmp/dense-conformance.json --moe-deployed-bytes-per-block 20944,20944,20944,20944 --dense-deployed-bytes-per-block 20948,20948,20948,20948"
+)]
+pub struct S7DeriveFrontierArgs {
+    /// Packet/repository root containing materialized S7 comparison and scores.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Materialized `s7_dense_vs_moe.v1` path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_COMPARISON_OUTPUT)]
+    pub comparison: PathBuf,
+    /// JSON object containing MoE conformance evidence.
+    #[arg(long)]
+    pub moe_conformance: PathBuf,
+    /// JSON object containing dense-matched conformance evidence.
+    #[arg(long)]
+    pub dense_conformance: PathBuf,
+    /// Comma-separated MoE deployed bytes per deployment block.
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub moe_deployed_bytes_per_block: Vec<u64>,
+    /// Comma-separated dense-matched deployed bytes per deployment block.
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub dense_deployed_bytes_per_block: Vec<u64>,
+    /// Optional JSON value containing MoE schedule-cost evidence.
+    #[arg(long)]
+    pub moe_schedule_cost: Option<PathBuf>,
+    /// Optional JSON value containing dense-matched schedule-cost evidence.
+    #[arg(long)]
+    pub dense_schedule_cost: Option<PathBuf>,
+    /// Output `s7_frontier.v1` path, relative to --root unless absolute.
+    #[arg(long, default_value = DEFAULT_FRONTIER_OUTPUT)]
     pub output: PathBuf,
 }
 
@@ -391,6 +432,7 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
         S7Command::Replay(args) => replay(args),
         S7Command::MaterializeRun(args) => materialize_run(args),
         S7Command::DeriveComparison(args) => derive_comparison(args),
+        S7Command::DeriveFrontier(args) => derive_frontier(args),
         S7Command::MaterializeSupportArtifact(args) => materialize_support(args),
         S7Command::OracleRouted(args) => oracle_routed(args),
         S7Command::EmulatorOneToken(args) => emulator_one_token(args),
@@ -494,6 +536,22 @@ fn derive_comparison(args: S7DeriveComparisonArgs) -> Result<(), S7CliError> {
         output: args.output,
     })?;
     println!("{}", materialized.comparison_self_hash);
+    Ok(())
+}
+
+fn derive_frontier(args: S7DeriveFrontierArgs) -> Result<(), S7CliError> {
+    let materialized = materialize_s7_frontier(&S7FrontierArtifactInputs {
+        root: args.root,
+        comparison: args.comparison,
+        moe_conformance: args.moe_conformance,
+        dense_conformance: args.dense_conformance,
+        moe_deployed_bytes_per_block: args.moe_deployed_bytes_per_block,
+        dense_deployed_bytes_per_block: args.dense_deployed_bytes_per_block,
+        moe_schedule_cost: args.moe_schedule_cost,
+        dense_schedule_cost: args.dense_schedule_cost,
+        output: args.output,
+    })?;
+    println!("{}", materialized.frontier_self_hash);
     Ok(())
 }
 
@@ -780,6 +838,8 @@ pub enum S7CliError {
     MaterializeRun(S7RunMaterializeError),
     /// Dense-vs-MoE comparison derivation failed.
     DeriveComparison(S7ComparisonMaterializeError),
+    /// Frontier derivation failed.
+    DeriveFrontier(S7FrontierMaterializeError),
     /// Support artifact materialization failed.
     MaterializeSupportArtifact(S7SupportArtifactMaterializeError),
     /// Burn gradient smoke producer failed.
@@ -841,6 +901,7 @@ impl fmt::Display for S7CliError {
             Self::Replay(error) => write!(f, "{error}"),
             Self::MaterializeRun(error) => write!(f, "{error}"),
             Self::DeriveComparison(error) => write!(f, "{error}"),
+            Self::DeriveFrontier(error) => write!(f, "{error}"),
             Self::MaterializeSupportArtifact(error) => write!(f, "{error}"),
             #[cfg(feature = "s7-burn-grad-smoke")]
             Self::BurnGradSmoke(error) => write!(f, "{error}"),
@@ -886,6 +947,7 @@ impl std::error::Error for S7CliError {
             Self::Replay(error) => Some(error),
             Self::MaterializeRun(error) => Some(error),
             Self::DeriveComparison(error) => Some(error),
+            Self::DeriveFrontier(error) => Some(error),
             Self::MaterializeSupportArtifact(error) => Some(error),
             #[cfg(feature = "s7-burn-grad-smoke")]
             Self::BurnGradSmoke(error) => Some(error),
@@ -919,6 +981,12 @@ impl From<S7RunMaterializeError> for S7CliError {
 impl From<S7ComparisonMaterializeError> for S7CliError {
     fn from(error: S7ComparisonMaterializeError) -> Self {
         Self::DeriveComparison(error)
+    }
+}
+
+impl From<S7FrontierMaterializeError> for S7CliError {
+    fn from(error: S7FrontierMaterializeError) -> Self {
+        Self::DeriveFrontier(error)
     }
 }
 
