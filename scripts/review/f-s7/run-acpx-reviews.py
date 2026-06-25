@@ -18,6 +18,7 @@ BEAD = "bd-2v9r"
 DEFAULT_REVIEW_CWD = "/Users/bkase/Documents/gbllm"
 DEFAULT_REVIEW_DIR = "docs/review/f-s7/reviews"
 DEFAULT_RAW_DIR = "docs/review/f-s7/raw"
+DEFAULT_GEMINI_AGENT = "gemini --skip-trust -m gemini-3.1-pro-preview --acp"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REVIEWERS = ("gemini", "claude")
 REQUIRED_PERSONAS = {
@@ -39,6 +40,14 @@ def main() -> int:
     parser.add_argument("--reviewer", choices=[*REVIEWERS, "all"], default="all")
     parser.add_argument("--acpx", default="acpx", help="acpx executable")
     parser.add_argument("--timeout", default="1800", help="ACPX timeout in seconds")
+    parser.add_argument(
+        "--gemini-agent",
+        default=os.environ.get("S7_GEMINI_ACP_AGENT", DEFAULT_GEMINI_AGENT),
+        help=(
+            "raw ACPX --agent command for Gemini review; defaults to "
+            "S7_GEMINI_ACP_AGENT or the project-pinned Gemini CLI command"
+        ),
+    )
     parser.add_argument("--review-dir", default=DEFAULT_REVIEW_DIR)
     parser.add_argument("--raw-dir", default=DEFAULT_RAW_DIR)
     parser.add_argument("--dry-run", action="store_true", help="print commands without running ACPX")
@@ -59,6 +68,7 @@ def main() -> int:
                 reviewer=reviewer,
                 review_cwd=args.review_cwd,
                 timeout=args.timeout,
+                gemini_agent=args.gemini_agent,
                 head=head,
             )
             for reviewer in reviewers
@@ -148,14 +158,20 @@ class ReviewPlan:
 
 
 def review_plan(
-    *, acpx: str, reviewer: str, review_cwd: str, timeout: str, head: str
+    *,
+    acpx: str,
+    reviewer: str,
+    review_cwd: str,
+    timeout: str,
+    gemini_agent: str,
+    head: str,
 ) -> ReviewPlan:
     prompt = review_prompt(reviewer, head)
     if reviewer == "gemini":
         command = [
             acpx,
             "--agent",
-            "gemini --skip-trust -m gemini-3.1-pro-preview --acp",
+            gemini_agent,
             "--cwd",
             review_cwd,
             "--approve-all",
