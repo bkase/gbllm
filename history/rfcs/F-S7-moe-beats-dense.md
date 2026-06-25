@@ -164,7 +164,7 @@ D3 Routing: top-1, hard dispatch with stop-gradient
    stop-gradient: its gradient is the zero tensor by construction.
    Differentiable signal into the router flows through:
      - the soft routing distribution p_{l,t} (used by L_switch, balance loss)
-     - the router logits z_{l,t} (used by z-loss)
+     - the raw router logits z_{l,t} (pre-jitter; used by z-loss)
    No straight-through estimator on the dispatch indicator. No Gumbel
    sampling. Top-2 routing is explicitly out of scope and forbidden by
    §6.2 falsification F1.
@@ -247,7 +247,7 @@ D6 Matched-deployed-bytes formula
        - bias_policy = "folded"
        - bias_policy = "q8_8_per_output"
        - bias_policy = "fp16_per_output"
-     The canonical S7 policy is: bias_policy = "<PIN_ME>".
+    The canonical S7 policy is: bias_policy = "q8_8_per_output".
 
    compute_linear_deployed_byte_cost(linear) =
      compute_weight_byte_cost(linear) + bias_byte_cost(linear, bias_policy)
@@ -297,11 +297,11 @@ D6 Matched-deployed-bytes formula
        B_common_total + B_experts_total + B_router_overhead
 
    Tolerance:
-     |B_experts_total - B_dense_ffn_total| <= max(0.10 * B_experts_total,
-                                                  4 * one_bank_bytes)
-   per planv0 amendment item 2 (parity gate per bd-2zv4: ±10% of dense
-   bytes, with a small absolute slack to handle integer rounding across
-   four blocks).
+     |B_deployed_total(MoE) - B_deployed_total(Dense)|
+       <= max(0.10 * B_deployed_total(MoE), 4 * one_bank_bytes)
+   per planv0 amendment item 2 (parity gate per bd-2zv4: ±10% of the
+   deployed MoE reference bytes, with a small absolute slack to handle
+   integer rounding across four blocks).
 
    For the canonical S7 instance with MoeTiny (d_model=64, d_ff=128,
    n_blocks=4, n_experts=4):
@@ -323,7 +323,7 @@ D7 LowRankRouter projection
      proj_down: Linear[d_model -> rank]      ; high precision
      proj_up:   Linear[rank   -> n_experts]  ; high precision
    For MoeTiny (d_model=64, n_experts=4):
-     rank = min(n_experts / 4, 8) = 1        ; per bd-22r default formula
+     rank = max(1, min(ceil(n_experts / 4), 8)) = 1  ; non-S7 default formula
    This collapses to a degenerate rank=1 router. Rank=1 is mathematically
    well-defined (a single direction in d_model space scored against n_experts
    scales), but it is a special case: it caps the router's expressivity.
@@ -386,10 +386,14 @@ D10 Temporal smoothness window
    mathematically valid but too weak for S7's temporal-smoothness claim.
    S7 forbids smoothness_window = 1 as a scope decision, not because the
    loss is identically zero (see falsification F7).
-   Buffer behavior:
-     - per-layer ring buffer of size smoothness_window
-     - reset at sequence boundaries (sequence_mask drives the reset)
-     - first token of each sequence contributes 0 to L_switch
+   Pair-set behavior:
+     - the backend-independent model helper enumerates every valid
+       (t, u) pair in the smoothness_window.
+     - invalid sequence_mask positions and explicit sequence boundaries
+       reset the window.
+     - first token of each sequence contributes 0 to L_switch.
+     - executable Burn/ring-buffer realization and gradient assertions
+       are owned by O13 / bd-1kkf.
 
 D11 lambda_switch sweep + router collapse guardrail
    Sweep grid (mandatory; per bd-3sp0):
@@ -613,7 +617,7 @@ Consequence of Refuted:
 
 ```text
 Statement:
-  At equal deployed FFN bytes (within D6 tolerance), MoeTiny beats
+  At equal deployed bytes (within D6 tolerance), MoeTiny beats
   MoeTinyDenseMatched on Gutenberg val bpc by strictly more than 0.05 bpc,
   for every one of the five seeds.
 
@@ -776,16 +780,16 @@ Statement:
         zeroes the cross-boundary contribution)
       gradient does NOT reach expert parameters from L_switch alone
     distill_loss      (logit_distillation_loss):
-      gradient reaches student logits and through them the selected expert
+      gradient reaches student_logits and through them selected expert
         parameters, embeddings, sequence-state, and norm.
-      Under S7's hard top-1 stop-gradient dispatch, distill_loss MUST NOT
-        reach LowRankRouter parameters through the dispatch path.
+      Does NOT reach LowRankRouter parameters through dispatch, because
+        dispatch_indicator is stop-gradient by D3.
       gradient does NOT reach the frozen teacher parameters
     lm_loss           (cross-entropy on charset_v1):
-      gradient reaches student logits and through them the selected expert
+      gradient reaches student_logits and through them selected expert
         parameters, embeddings, sequence-state, and norm.
-      Under S7's hard top-1 stop-gradient dispatch, lm_loss MUST NOT reach
-        LowRankRouter parameters through the dispatch path.
+      Does NOT reach LowRankRouter parameters through dispatch, because
+        dispatch_indicator is stop-gradient by D3.
 
   Router task-coupling note:
     In S7, the router is trained only by router_z_loss, balance_loss, and
@@ -923,7 +927,7 @@ Predicted:
 Falsification:
   emulator one-token output diverges from artifact-oracle output
     beyond S5 (Pick and Fit) tolerance                                   ⇒ Refuted
-  observed_bank_switches_per_token differs from training-recorded
+  observed_bank_switches_per_token differs from artifact-oracle recorded
     value by > 1 (after prefix correction)                                ⇒ Refuted
 
 Verdict:
@@ -986,7 +990,7 @@ Rule CrateOwnership:
     - gbf-policy         (MoeTiny + MoeTinyDenseMatched ModelSizeProfile
                           instances; matched-bytes formula constants)
     - gbf-model          (Top1RouterQat, LowRankRouter, ExpertBlockQat,
-                          temporal smoothness buffer, expert dropout,
+                          temporal smoothness pair-set helper, expert dropout,
                           jitter, switch statistics collection)
     - gbf-train          (loss composer extensions for lambda_distill,
                           lambda_balance, lambda_zrouter, lambda_switch;
@@ -1138,14 +1142,12 @@ Parameter count:
 Centered z-loss (D5):
   z_loss_uncentered = (1/B) sum_b log(sum_e exp(z_{b,e}))^2
   z_loss_centered   = (1/B) sum_b (log(sum_e exp(z_{b,e})) - mu)^2
-                                    where mu is the running mean of
-                                    log(sum_e exp(z)) across the batch.
-  S7 uses CENTERED z-loss with mu = 0 baseline (D5). When all router
-  logits are 0, log(sum_e exp(0)) = log(n_experts), so centered z-loss
-  with mu = log(n_experts) gives baseline 0 by construction.
-  The S7 implementation pins mu = log(n_experts) (constant, not running
-  mean) to make the baseline analytically zero. This is the "centered"
-  variant declared by D5 and falsifiable by F7-z-uncentered (§16 O5).
+                                    where mu = log(n_experts).
+  S7 uses CENTERED z-loss with a constant mu = log(n_experts), not a
+  batch running mean. When all router logits are 0, log(sum_e exp(0)) =
+  log(n_experts), so the centered z-loss baseline is 0 by construction.
+  This is the "centered" variant declared by D5 and falsifiable by
+  F5-z-uncentered (§16 O5).
 ```
 
 ## 3.3 TemporalSwitchDigest (export-fact schema)
@@ -1299,10 +1301,12 @@ LambdaSwitchSweepStep :=
     seed:                           Seed
     train_step:                     TrainStep
     lambda_switch:                  LambdaSwitch
-    bpc_eval_subset:                BpcValue
+    completion:                     Completed | DivergedAt(TrainStep)
+    bpc_eval_subset:                Null | BpcValue
     expert_usage_entropy_bits_mean: f32          ; averaged across layers (bits)
-    quality_delta_per_lambda_switch: f32         ; bpc_eval_subset(lambda) -
-                                                  ;   bpc_eval_subset(lambda_production)
+    quality_delta_per_lambda_switch: Null | f32  ; bpc_eval_subset(lambda) -
+                                                  ;   bpc_eval_subset(lambda_production);
+                                                  ;   null iff completion = DivergedAt(_)
     sweep_self_hash:                Hash256
   }
 
@@ -1314,6 +1318,10 @@ Invariants:
   LSS-2  exactly one record per grid point; each record produced after
          1000 additional training steps from the same base checkpoint
          (post-Phase-D sweep harness; D11 / D19 / §9.3)
+  LSS-Diverged
+         bpc_eval_subset and quality_delta_per_lambda_switch are null iff
+         completion = DivergedAt(_); expert_usage_entropy_bits_mean is the
+         last finite observed value in bits
 ```
 
 ## 3.7 RouterRng and seed derivation
@@ -1453,7 +1461,6 @@ State :=
                matched_bytes_pin)
   | BaselineMatched(state, d_ff_dense, byte_parity_check)
   | TrainAttempted(state, topology, seed, phase_products)
-  | TeacherFrozen(state, topology, seed, teacher_checkpoint_sha)
   | MoeTrainAttempted(state, run_products[5])
   | DenseTrainAttempted(state, run_products[5])         ; parallel with MoE
   | MoeTrained(state, completed_runs[5])
@@ -1493,6 +1500,9 @@ T2 train-with-internal-teacher-freeze:
       (topology, seed) is frozen.
     - Phases C, D, and E use that frozen same-topology, same-seed teacher
       for distillation.
+    - The top-level experiment state does not contain TeacherFrozen; the
+      freeze is a run-internal boundary recorded as
+      frozen_teacher_checkpoint_sha in the run provenance.
 
 T3 moe-train (parallel with T4):
   BaselineMatched(c, _, _) → MoeTrainAttempted(c,
@@ -1848,18 +1858,30 @@ Where pairs(b) =
     (t, u) :
       t in [1, seq),
       u in [max(0, t - smoothness_window), t),
-      sequence_mask[b, t] = 1,
-      sequence_mask[b, u] = 1,
-      no sequence boundary occurs between u and t
+      sequence_mask[b, v] = 1 for every v in [u, t],
+      no explicit boundary-before marker occurs at any v in [u + 1, t]
+        (a marker at t starts a fresh sequence and excludes (t, u))
   }
+
+Pair-count sanity check:
+  For an all-valid sequence with no boundaries, this range gives
+    n_pairs = sum_{t=1}^{seq-1} min(t, smoothness_window).
+  When seq > smoothness_window, this is
+    seq * smoothness_window
+      - smoothness_window * (smoothness_window + 1) / 2.
+  Therefore D9's seq=256 and D10's smoothness_window=32 give
+    n_pairs = 256*32 - 32*33/2 = 7664.
+  The alternative 256*32 - 32*(32-1)/2 would count one extra
+  full-window current-token slot not present in the u < t pair set.
 
 Window semantics:
   - smoothness_window = 1 is forbidden by D10; construction rejects it.
   - smoothness_window = 32 (D10 default) means t can pair with any t' in
-    [t - 32, t - 1] within the same window; the running buffer holds
-    distributions for the last 32 valid tokens.
-  - At a sequence boundary (sequence_mask transitions 1 -> 0), the buffer
-    resets to empty; the next 1 starts a fresh window.
+    [t - 32, t - 1] within the same window; a streaming implementation
+    may realize this by holding distributions for the last 32 valid tokens.
+  - At a sequence boundary (an invalid sequence_mask gap or an explicit
+    boundary-before marker), the candidate window resets to empty; the next
+    valid token starts a fresh window.
 
 Gradient provenance (per H7):
   ∂ L_switch_router / ∂ routing_probs[b, t, l, *] : alive (autodiff through inner product)
@@ -1869,6 +1891,9 @@ Gradient provenance (per H7):
   ∂ L_switch_router / ∂ <expert parameters> : ZERO at this loss term alone
                                                 (expert parameters reached
                                                  via lm_loss / distill, not L_switch)
+  The lines above are the formula-level provenance. The executable
+  Burn/autodiff proof that every valid u receives nonzero gradient remains
+  the O13 / bd-1kkf gradient-assertion owner.
 
 Finite-value guard (per CLAUDE.md "burn loss helpers must validate
 finite values before returning"):
@@ -1914,21 +1939,21 @@ from step number for reproducibility"):
 
 ```text
 operation s7_router_jitter
-  input:  routing_logits: Tensor[batch, seq, n_experts]
+  input:  raw_router_logits: Tensor[batch, seq, n_experts]
           jitter_stddev:  f32 >= 0
           training:       bool
           seed:           Seed
           step:           TrainStep
           layer_id:       LayerId
-  output: jittered_logits: Tensor[batch, seq, n_experts]
+  output: effective_logits: Tensor[batch, seq, n_experts]
 
 Forward semantics:
   if not training or jitter_stddev = 0:
-    return routing_logits
+    return raw_router_logits
   rng = JitterSubRng(seed, step, layer_id)
   jitter = gaussian(rng, mean=0, stddev=jitter_stddev,
                     shape=[batch, seq, n_experts])
-  return routing_logits + jitter
+  return raw_router_logits + jitter
 
 Phase-effective jitter_stddev:
   Phase A: 0.0
@@ -1951,7 +1976,7 @@ L_total(step, batch) =
     lm_loss(student_logits, target)
   + lambda_distill_eff(step) * logit_distillation_loss(student_logits, teacher_logits)
   + lambda_balance_eff(step) * expert_load_balance_loss(routing_probs, dispatch_indicator)
-  + lambda_zrouter_eff(step) * router_z_loss(routing_logits)
+  + lambda_zrouter_eff(step) * router_z_loss(raw_router_logits)
   + lambda_switch_eff(step)  * temporal_switch_penalty(routing_probs, sequence_mask)
 
 where lambda_*_eff(step) is the phase-effective lambda per D5
@@ -2031,10 +2056,10 @@ Reduction:
   Final divide once by (B * T)             ; equivalent to mean
 
 Gradient provenance:
-  Reaches student_logits and through them selected expert parameters,
-  embeddings, sequence-state, and norm.
+  gradient reaches student_logits and through them selected expert
+    parameters, embeddings, sequence-state, and norm.
   Does NOT reach LowRankRouter parameters through dispatch, because
-  dispatch_indicator is stop-gradient by D3.
+    dispatch_indicator is stop-gradient by D3.
 ```
 
 ### 8.3.2 logit_distillation_loss
@@ -2049,8 +2074,10 @@ Reduction:
   Batch axis b: SUM then mean over (B * T)
 
 Gradient provenance:
-  ∂ distill_loss / ∂ student_logits         : alive
-  ∂ distill_loss / ∂ LowRankRouter params   : ZERO through dispatch
+  gradient reaches student_logits and through them selected expert
+    parameters, embeddings, sequence-state, and norm.
+  Does NOT reach LowRankRouter parameters through dispatch, because
+    dispatch_indicator is stop-gradient by D3.
   ∂ distill_loss / ∂ teacher_logits         : ZERO (teacher frozen at end of Phase A)
   ∂ distill_loss / ∂ teacher_parameters     : ZERO (teacher frozen)
 
@@ -2087,7 +2114,7 @@ Gradient provenance:
   ∂ balance_loss / ∂ expert_parameters          : ZERO at this term alone
   Reach claim per CLAUDE.md "gradient claims must identify whether the proof
   reaches routing probabilities, router logits, or full router parameters":
-    Reaches: routing_probs (and through them, router_logits via softmax,
+    Reaches: routing_probs (and through them, effective_logits via softmax,
              and through them, the LowRankRouter parameters)
     Does NOT reach: dispatch_indicator, expert parameters, embeddings,
                     sequence-state, norm.
@@ -2191,13 +2218,20 @@ Postconditions:
 
 ```text
 operation s7_emit_router_step_telemetry
-  input:  routing_logits, routing_probs, dispatch_indicator
+  input:  raw_router_logits, effective_logits, routing_probs, dispatch_indicator
           training_step, seed, layer_id
   output: RouterStepTelemetry (subscriber-captured)
 
 Emitter contract:
   - Emitted under structured tracing event "s7.router.step" at INFO level.
   - One event per (training_step, layer_id).
+  - v0.2 schema/helper home: gbf_experiments::s7::schema. This helper
+    is the O12 subscriber-proof surface; production training-loop
+    adoption or a later artifact-schema re-export must be claimed by
+    its owner bead, not inferred from the helper alone.
+  - The tracing event carries flat subscriber fields for the D19 scalar
+    checks plus telemetry_canonical_json so the captured event can be
+    deserialized as RouterStepTelemetry and self-hash verified.
   - Subscriber-level capture is the proof obligation per CLAUDE.md
     logging-bead bullet ("subscriber-level capture for event shape").
   - Real dashboard / report adoption is owned by F-C4
@@ -2271,15 +2305,20 @@ Decision:
   ent_high           = sweep[lambda_switch=5.0].expert_usage_entropy_bits_mean
   log2_n_experts     = log2(4) = 2.0
 
-  if bpc_production - bpc_baseline > 0.05:                    FailA
-  elif ent_production < 0.85 * log2_n_experts (= 1.7):        FailB
-  elif (ent_production - ent_high) < 0.3:                      FailC
-  elif (bpc_high - bpc_production) < 0.3:                      FailD
-  else:                                                        Pass
+  if any non-5.0 sweep point completion = DivergedAt(step):          InconclusiveDiverged(lambda, step)
+  elif bpc_production - bpc_baseline > 0.05:                         FailA
+  elif ent_production < 0.85 * log2_n_experts (= 1.7):               FailB
+  elif sweep[lambda_switch=5.0].completion = DivergedAt(step):
+       if (ent_production - ent_high) >= 0.3:                        Pass
+       else:                                                         InconclusiveDiverged(5.0, step)
+  elif (ent_production - ent_high) < 0.3:                             FailC
+  elif (bpc_high - bpc_production) < 0.3:                             FailD
+  else:                                                              Pass
 
 Closure rule:
-  Pass            ⇒ H6 Confirmed
-  FailA|B|C|D     ⇒ H6 Refuted; S7Outcome = Fail-router-collapse-guardrail
+  Pass                   ⇒ H6 Confirmed
+  FailA|B|C|D            ⇒ H6 Refuted; S7Outcome = Fail-router-collapse-guardrail
+  InconclusiveDiverged   ⇒ H6 Refuted; S7Outcome = Fail-router-collapse-guardrail
 ```
 
 ---
@@ -2290,11 +2329,16 @@ Closure rule:
 
 ```text
 operation s7_parity_seed
-  input:  bpc_moe_seed_s, bpc_dense_matched_seed_s
+  input:  production_moe_score: S7ScoreReport
+          production_dense_matched_score: S7ScoreReport
+          ; from experiments/S7/scores/{topology}/seed-{seed}/score.json
+          ; (§13.2 production-run score artifacts, not sweep-local records)
           margin: 0.05
   output: ParityVerdict in {Pass, Fail}
 
 Decision:
+  bpc_moe_seed_s = production_moe_score.bpc
+  bpc_dense_matched_seed_s = production_dense_matched_score.bpc
   if bpc_moe_seed_s < bpc_dense_matched_seed_s - margin: Pass
   else:                                                   Fail
 ```
@@ -2473,6 +2517,13 @@ RunLog (JSON) :=
     expert_block_config_hash: Hash256          ; null for dense
     loss_config_hash:        Hash256
     phase_schedule_hash:     Hash256
+    frozen_teacher_checkpoint_sha:
+                              Null | Hash256        ; null only before the
+                                                     ; Phase A boundary in an
+                                                     ; in-progress log;
+                                                     ; otherwise the
+                                                     ; same-topology,
+                                                     ; same-seed Phase A teacher
     losses:                  List[(TrainStep, RawLossDiagnostics)]
     grad_norms:              List[(TrainStep, GradNormSummary)]
     eval_points:             List[(EvalStep, BpcValue)]
@@ -2493,6 +2544,9 @@ Invariants:
                   DivergedAt/CollapsedAt
   RL-Finite     every recorded value is finite (else completion = DivergedAt
                                                   or CollapsedAt)
+  RL-Teacher    after the Phase A boundary, frozen_teacher_checkpoint_sha is
+                non-null, scoped to this exact (topology, seed), and is the
+                only teacher hash Phases C/D/E may use for distillation
   RL-Topology   topology field matches the model_topology_hash exactly.
   RL-Router-Null
                 For topology = "MoeTinyDenseMatched", router_config_hash and
@@ -2613,6 +2667,7 @@ Invariants:
   RCS-Grid      grid = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0]    ; exact (D11)
   RCS-Records   records.length = grid.length
   RCS-Cadence   each record's training-extra step delta = 1000 (D11/§9.3)
+  RCS-Diverged  bpc_eval_subset may be null iff record completion = DivergedAt(_)
   RCS-Verdict   guardrail_verdict deterministically derived from records
                 per §10 decision table.
 ```
@@ -2735,6 +2790,9 @@ OracleRoutedReport (JSON) :=
     train_logits_sha:             Hash256
     bundle_logits_sha:            Hash256
     artifact_logits_sha:          Hash256
+    frozen_teacher_checkpoint_sha: Hash256      ; equals
+                                                ; RunLog.frozen_teacher_checkpoint_sha
+                                                ; for this (topology, seed)
     pairwise_max_abs_diff_train_bundle:  f64
     pairwise_max_abs_diff_bundle_artifact: f64
     pairwise_max_abs_diff_train_artifact: f64
@@ -3057,7 +3115,7 @@ O5  Falsification suite
         (gradient leaks to expert parameters via dispatch)
       F7-window-one:
         smoothness_window = 1 silently constructs            → H5 Refuted
-        (D10 / §6.4 forbids; degenerate window)
+        (D10 / §6.4 forbids as too weak for the S7 claim)
       F8-sweep-constant-lambda:
         lambda_switch sweep grid contains only
         the production value (no actual sweep)               → H6 Refuted
@@ -3125,7 +3183,7 @@ O11 Matched-bytes formula CI
     A standalone CI test (independent of any training run) computes
     d_ff_dense from the canonical MoeTiny instance and asserts:
       d_ff_dense_resolved = the value pinned in matched_bytes.json
-      |b_experts_total - b_dense_ffn_total| <= D6 tolerance
+      |b_deployed_total_moe - b_deployed_total_dense| <= D6 tolerance
       formula_version matches matched_bytes_pin.formula_version
     Any drift fails CI before any training begins.
 
@@ -3215,6 +3273,7 @@ Then:
     Fail-switch-stats    (H5 Refuted)
     Fail-router-collapse-guardrail  (H6 Refuted)
     Fail-suspicious      (median MoE bpc < 0.5)
+    Fail-bytes           (matched-deployed-bytes invalid)
     Fail-parity          (H3 Refuted)
     Fail-pareto          (H4 Refuted)
     Fail-oracle-routed   (H9 Refuted)
@@ -3228,7 +3287,7 @@ Then:
       router collapse, for all five seeds.
     – MoeTinyDenseMatched trains end-to-end on Gutenberg, for all five
       seeds, under the SAME training scaffold.
-    – At equal deployed FFN bytes (within D6 tolerance), MoE beats
+    – At equal deployed bytes (within D6 tolerance), MoE beats
       dense by > 0.05 bpc on Gutenberg val, for every seed.
     – On the (val_bpc, deployed_bytes_total) Pareto plane, MoE
       dominates dense.
@@ -3302,12 +3361,13 @@ gbf-model
   Required  Top1RouterQat with stop-gradient hard dispatch (D3) and
             top-k = 1 hardcoded.
   Required  LowRankRouter with router_rank parameter; S7 pins rank = 4
-            via configuration; default formula `min(n_experts/4, 8)`
+            via configuration; default formula
+            `max(1, min(ceil(n_experts/4), 8))`
             preserved for non-S7 callers.
   Required  ExpertBlockQat two-matrix module (bd-x75) with explicit
             GLU rejection at construction (bd-2c8z).
-  Required  Temporal smoothness buffer with sequence-mask reset and
-            window pinning (D10; bd-122).
+  Required  Temporal smoothness pair-set helper with sequence-mask reset,
+            boundary exclusion, and window pinning (D10; bd-2llp/bd-295u).
   Required  Expert dropout (bd-1oc) with phase-effective rates per
             §7.4 and step-derived RNG seeding.
   Required  Gaussian jitter on router logits (bd-1oc) with phase-
@@ -3529,6 +3589,11 @@ cargo run --release -p gbf-cli --features s7-dense-matched -- s7 replay \
   --device-profile S7CpuDeterministic
 ```
 
+`scripts/s7_isolation_check.sh --self-test` pins this command shape and
+the MoE-then-dense order without running training. Live replay execution
+and final end-to-end adoption remain owned by bd-1ryn until the split
+S7 replay binaries/features are available.
+
 Optional non-normative subcommands:
 
 ```text
@@ -3704,10 +3769,10 @@ scripts/s7_matched_bytes_check.sh
 |  A7 | Pareto verdict tie semantics                                                              | Strict dominance required; ties = Refute H4 (D13)                          | What if it's an exact tie on both axes?                                             | A tie on both axes means MoE bought no advantage at matched bytes. It is not a Fail-parity (the per-seed margin may have been met) but it does fail H4. Closure variant: Fail-pareto, not Fail-parity. |
 |  A8 | lambda_switch sweep grid choice                                                          | {0.0, 0.05, 0.1, 0.5, 1.0, 5.0} (D11)                                      | Why not log-uniform 0.0..10.0?                                                      | The grid covers four decades centered on the production value (0.05) and includes both 0.0 (no regularization, baseline) and 5.0 (high enough to demonstrably collapse). bd-3sp0 originally specified [0.0, 0.1, 0.5, 1.0, 5.0]; S7 adds 0.05 as the production point. |
 |  A9 | Router collapse threshold (lambda_switch_collapse_threshold = 1.0)                         | Pinned at 1.0 (D11)                                                        | Reviewer-tunable?                                                                  | Pinned. The high-lambda guardrail point (5.0) is well above; the production point (0.05) is well below. Tuning would invalidate the H6 falsifiability claim. If 1.0 is wrong, the high-lambda probe (5.0) will demonstrate or fail to demonstrate collapse cleanly. |
-| A10 | expert_usage_entropy floor (0.85 * log2(n_experts))                                      | Pinned per D11 [ESTIMATE]                                                  | What if observed entropy is naturally lower at MoeTiny?                             | Reviewer must verify on first run. 0.85 is a literature-typical floor; if MoeTiny+Gutenberg cannot sustain it, the floor itself may be the wrong threshold and S7 would re-pin. Document any tightening or loosening in a follow-up bead. |
+| A10 | expert_usage_entropy_bits floor (0.85 * log2(n_experts))                                 | Pinned per D11 [ESTIMATE]                                                  | What if observed entropy is naturally lower at MoeTiny?                             | Reviewer must verify on first run. 0.85 is a literature-typical floor; if MoeTiny+Gutenberg cannot sustain it, the floor itself may be the wrong threshold and S7 would re-pin. Document any tightening or loosening in a follow-up bead. |
 | A11 | Centered z-loss baseline (mu = log(n_experts))                                            | Pinned (D5; §3.2)                                                          | Why not running mean?                                                               | Constant mu makes the baseline analytically zero (when all logits are 0). Running mean introduces a hidden statistic that breaks per-step replay determinism. Constant mu is reproducible and falsifiable; F5-z-uncentered tests it directly. |
 | A12 | Stop-gradient on dispatch indicator                                                       | Yes (D3); declared explicitly per CLAUDE.md routing/expert-loss bullet      | Wouldn't a straight-through estimator help expert specialization?                   | STE would let balance_loss leak through dispatch into expert parameters, breaking the H7 declared provenance and making the MoE win attributable to a phantom path. Stop-gradient is the honest semantics. STE would be admissible in S8 only if explicitly amended. |
-| A13 | Temporal smoothness window = 32                                                           | Pinned (D10; bd-122 default)                                                | Why not 64 or 128?                                                                  | 32 = eighth of sequence_length=256, giving 8 windows per sequence — enough to amortize the boundary cost while still giving the regularizer a meaningful pair set per sequence. Window=1 forbidden (degenerate); window=128 would over-couple distant tokens. |
+| A13 | Temporal smoothness window = 32                                                           | Pinned (D10; bd-122 default)                                                | Why not 64 or 128?                                                                  | 32 = eighth of sequence_length=256, giving 8 windows per sequence — enough to amortize the boundary cost while still giving the regularizer a meaningful pair set per sequence. Window=1 is mathematically valid as an adjacent-token penalty, but too weak for S7 and rejected at construction; window=128 would over-couple distant tokens. |
 | A14 | sequence_length = 256                                                                    | Bumped from S1's 128 (D9)                                                  | Doesn't this break inheritance?                                                     | The bpc reset-context primitive extends naturally; chunk_size matches sequence_length. The bump is justified by the temporal smoothness window's need for ≥ 8 windows per sequence. Documented in Delta-3. |
 | A15 | RouterRng disjoint stream                                                                 | New stream per D14                                                         | Couldn't dropout reuse BatchRng?                                                   | Reusing BatchRng would couple dropout sampling to batch indexing, breaking O9 isolation when seeds are run in different orders. RouterRng is disjoint, with sub-streams for dropout/jitter derived from (seed, step, layer_id) for reconstructability. |
 | A16 | ExpertId scoping: global vs layer-local                                                  | Layer-local + LayerId carried alongside (per CLAUDE.md export-fact bullet)  | Global is simpler; why layer-local?                                                | At MoeTiny n_experts=4 / n_blocks=4, global ExpertIds (0..15) are technically possible but conflate "the expert in the same slot in different layers". CLAUDE.md mandates layer-local + LayerId. The cost is minimal and the schema is self-describing. |
@@ -3717,7 +3782,7 @@ scripts/s7_matched_bytes_check.sh
 | A20 | Frozen-teacher provenance for the dense run                                              | Same Phase A run produces the dense teacher AND seeds the dense student     | Couldn't we share the MoE teacher?                                                  | No. The matched-bytes parity is a TOPOLOGY parity, not a teacher parity. The dense student must be distilled from a dense teacher of the SAME topology so the comparison is over architectural choice alone, not teacher-quality differential. |
 | A21 | One-token emulator harness for dense (carry-through)                                     | Required for Decision = ProceedToS8-DenseOnly (§15)                         | If MoE is the subject, why test dense?                                              | Under Fail-parity outcome, the dense path is the production track; the emulator must work on it. The MoE one-token harness is mandatory regardless of outcome variant because H10 is a closure gate; the dense one is conditional. |
 | A22 | What if the matched-bytes formula is unsolvable (D-Fail-1)?                              | Halt; bd-2v9r blocked; investigation bead                                  | Could MoE be too small?                                                             | At MoeTiny dimensions the formula has solutions in [d_model, 4096]; D-Fail-1 would only fire on a future profile change. If it fires at S7, the F-A4 metadata constants likely changed; investigate before running. |
-| A23 | What if the lambda_switch sweep itself diverges at lambda=5.0?                            | Recorded as DivergedAt; sweep continues at the next grid point             | Doesn't divergence preclude entropy comparison?                                     | A divergent sweep point is logged with completion=DivergedAt; the GuardrailVerdict treats divergence as collapse evidence (very low entropy by collapsed-pi convention) AND records it as a Surprise. FailC/D thresholds may still trigger. |
+| A23 | What if the lambda_switch sweep itself diverges at lambda=5.0?                            | Recorded as DivergedAt; sweep continues at the next grid point             | Doesn't divergence preclude entropy comparison?                                     | A divergent sweep point is logged with completion=DivergedAt and bpc_eval_subset=null. GuardrailVerdict is InconclusiveDiverged unless the last finite route telemetry independently satisfies the high-lambda entropy-collapse criterion; in that recovery case divergence supplies the quality-regression evidence. |
 | A24 | Why both H3 and H4 (parity AND Pareto)?                                                  | Both required; H3 is per-seed strict, H4 is median-Pareto                   | Aren't they redundant?                                                              | H3 catches per-seed misses that median-Pareto would average away. H4 catches Pareto-incomparable cases (MoE wins bpc but pays bytes, or vice versa) that H3 alone wouldn't surface. They are complementary closure gates. |
 | A25 | Why include H8 (Burn grad smoke) when S2 already proved LinearState gradient flow?       | ExpertBlockQat is a NEW Burn module; bd-2c8z is OPEN                       | Doesn't S2's smoke generalize?                                                      | No. S2 proved gradient flow for LinearState only. ExpertBlockQat's two-matrix expert with clipped activation is structurally distinct (clip threshold, no GLU rejection); it requires its own gradient smoke. CLAUDE.md mandates the burn-adapter feature gate citation. |
 | A26 | Why include H7 (loss gradient provenance) when individual loss tests cover each term?    | Provenance is a closure-level invariant; per-term tests cover correctness   | Isn't this duplicative?                                                             | Per-term tests prove the loss VALUE; H7 proves the loss GRADIENT REACH set. CLAUDE.md training-loss bullets require the distinction explicitly: "gradient claims must identify whether the proof reaches routing probabilities, router logits, or full router parameters". |
@@ -3774,8 +3839,8 @@ F-S7 MoE Beats Dense at Matched Bytes is correct when:
     S3 tolerance; weights resolved via QuantSpec::weight_quant.
 
 10. EncodedRom + emulator one-token harness preserves on the MoE
-    artifact; observed bank_switches_per_token agrees with training-
-    recorded value within ±1.
+    artifact; observed bank_switches_per_token agrees with the artifact-
+    oracle recorded value within ±1.
 
 11. s7_report.v1 emits pre-registered predictions in git history
     strictly before the first S7 result artifact commit, and concludes
