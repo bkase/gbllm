@@ -61,22 +61,41 @@ scripts/review/f-s7/assemble-packet.py \
   --claude-agent "custom-claude --acp" \
   --dry-run >"$tmp/dry-run-reviews.out"
 
-rg -n "run-acpx-reviews\\.py" "$tmp/dry-run-reviews.out" >/dev/null
+rg -c "run-acpx-reviews\\.py" "$tmp/dry-run-reviews.out" | rg '^2$' >/dev/null
 rg -n -- "--acpx custom-acpx" "$tmp/dry-run-reviews.out" >/dev/null
 rg -n -- "--timeout 77" "$tmp/dry-run-reviews.out" >/dev/null
 rg -n -- "--reviewer all" "$tmp/dry-run-reviews.out" >/dev/null
 rg -n -- "--gemini-agent 'custom-gemini --acp'" "$tmp/dry-run-reviews.out" >/dev/null
 rg -n -- "--claude-agent 'custom-claude --acp'" "$tmp/dry-run-reviews.out" >/dev/null
+rg -n -- "--preflight" "$tmp/dry-run-reviews.out" >/dev/null
 python3 - "$tmp/dry-run-reviews.out" <<'PY'
 from pathlib import Path
 import sys
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-report_index = text.index(" emit-report ")
-review_index = text.index("run-acpx-reviews.py")
-verify_index = text.index("verify-packet.sh --skip-gates")
-if not (report_index < review_index < verify_index):
-    raise SystemExit("run-acpx-reviews.py must run after emit-report and before verify-packet")
+command_lines = [line for line in text.splitlines() if line.startswith("+ ")]
+review_lines = [line for line in command_lines if "run-acpx-reviews.py" in line]
+if len(review_lines) != 2:
+    raise SystemExit("expected preflight and final run-acpx-reviews.py commands")
+if "--preflight" not in review_lines[0]:
+    raise SystemExit("first run-acpx-reviews.py command must be the preflight")
+if "--preflight" in review_lines[1]:
+    raise SystemExit("final run-acpx-reviews.py command must write review evidence")
+preflight_index = command_lines.index(review_lines[0])
+materialize_index = next(
+    index for index, line in enumerate(command_lines) if " materialize-run " in line
+)
+report_index = next(
+    index for index, line in enumerate(command_lines) if " emit-report " in line
+)
+review_index = command_lines.index(review_lines[1])
+verify_index = next(
+    index for index, line in enumerate(command_lines) if "verify-packet.sh --skip-gates" in line
+)
+if not (preflight_index < materialize_index < report_index < review_index < verify_index):
+    raise SystemExit(
+        "run-acpx-reviews.py must preflight before materialization, then run after emit-report and before verify-packet"
+    )
 PY
 
 scripts/review/f-s7/assemble-packet.py \
@@ -87,12 +106,28 @@ scripts/review/f-s7/assemble-packet.py \
   --run-reviews \
   --dry-run >"$tmp/dry-run-reviews-default-cwd.out"
 
-rg -n "run-acpx-reviews\\.py" "$tmp/dry-run-reviews-default-cwd.out" >/dev/null
+rg -c "run-acpx-reviews\\.py" "$tmp/dry-run-reviews-default-cwd.out" | rg '^2$' >/dev/null
 rg -n -- "--review-cwd $ROOT" "$tmp/dry-run-reviews-default-cwd.out" >/dev/null
 if rg -n -- "--review-cwd /Users/bkase/Documents/gbllm" "$tmp/dry-run-reviews-default-cwd.out" >/dev/null; then
   echo "assemble-packet must not default ACPX reviews to a sibling checkout" >&2
   exit 1
 fi
+python3 - "$tmp/dry-run-reviews-default-cwd.out" <<'PY'
+from pathlib import Path
+import sys
+
+command_lines = [
+    line
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.startswith("+ ") and "run-acpx-reviews.py" in line
+]
+if len(command_lines) != 2:
+    raise SystemExit("expected preflight and final review commands")
+if any("--review-cwd /Users/bkase/Documents/gbllm" in line for line in command_lines):
+    raise SystemExit("assemble-packet must not default ACPX reviews to a sibling checkout")
+if "--preflight" not in command_lines[0] or "--preflight" in command_lines[1]:
+    raise SystemExit("default review cwd dry-run must preserve preflight/final command split")
+PY
 
 if scripts/review/f-s7/assemble-packet.py \
   --manifest "$manifest" \

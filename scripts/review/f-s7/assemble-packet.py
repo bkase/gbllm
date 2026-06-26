@@ -181,6 +181,8 @@ def build_commands(
 ) -> list[list[str]]:
     validate_known_fields(manifest)
     commands: list[list[str]] = []
+    if review_options is not None:
+        commands.append(review_command(root, review_options, preflight=True))
     for topology in TOPOLOGIES:
         topology_runs = require_object(manifest, ["runs", topology])
         for seed in SEEDS:
@@ -331,7 +333,7 @@ def review_options_from_args(args: argparse.Namespace, root: Path) -> ReviewOpti
     )
 
 
-def review_command(root: Path, options: ReviewOptions) -> list[str]:
+def review_command(root: Path, options: ReviewOptions, *, preflight: bool = False) -> list[str]:
     command = [
         str(root / "scripts/review/f-s7/run-acpx-reviews.py"),
         "--root",
@@ -353,6 +355,8 @@ def review_command(root: Path, options: ReviewOptions) -> list[str]:
         if not options.claude_agent.strip():
             raise AssembleError("--claude-agent must be a non-empty string")
         command.extend(["--claude-agent", options.claude_agent])
+    if preflight:
+        command.append("--preflight")
     return command
 
 
