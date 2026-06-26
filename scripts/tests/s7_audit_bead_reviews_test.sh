@@ -67,7 +67,7 @@ import sys
 issues = [
     {
         "id": "bd-file",
-        "title": "Synthetic S7 bead with structured Gemini evidence",
+        "title": "Synthetic S7 bead with structured file evidence",
         "status": "closed",
         "close_reason": "Claude ACPX review: PASS",
         "comments": [],
@@ -94,6 +94,94 @@ scripts/review/f-s7/audit-bead-reviews.py \
   --evidence-dir "$evidence_dir" \
   >/tmp/s7-audit-bead-reviews-evidence-ok.out
 rg -n "S7 bead review coverage: ok" /tmp/s7-audit-bead-reviews-evidence-ok.out >/dev/null
+
+scripts/review/f-s7/audit-bead-reviews.py \
+  --issues-file "$issues" \
+  --evidence-dir "$evidence_dir" \
+  --expected-head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  >/tmp/s7-audit-bead-reviews-head-ok.out
+rg -n "S7 bead review coverage: ok" /tmp/s7-audit-bead-reviews-head-ok.out >/dev/null
+
+if scripts/review/f-s7/audit-bead-reviews.py \
+  --issues-file "$issues" \
+  --evidence-dir "$evidence_dir" \
+  --expected-head bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  >/tmp/s7-audit-bead-reviews-head-bad.out 2>&1; then
+  echo "expected reviewed_head mismatch to fail audit" >&2
+  exit 1
+fi
+rg -n "reviewed_head must match expected_head" /tmp/s7-audit-bead-reviews-head-bad.out >/dev/null
+
+review_repo="$tmp/review-repo"
+review_issues="$tmp/review-issues.json"
+mkdir -p "$review_repo"
+git -C "$review_repo" init -q
+git -C "$review_repo" config user.email s7-test@example.com
+git -C "$review_repo" config user.name "S7 Test"
+printf 'initial\n' >"$review_repo/README.md"
+git -C "$review_repo" add README.md
+git -C "$review_repo" commit -q -m init
+review_base="$(git -C "$review_repo" rev-parse HEAD)"
+mkdir -p "$review_repo/docs/review/f-s7/bead-reviews"
+python3 - "$review_issues" "$review_repo/docs/review/f-s7/bead-reviews/bd-file-gemini.json" "$review_base" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+issues = [
+    {
+        "id": "bd-file",
+        "title": "Synthetic S7 bead with review-admin-only post-review diff",
+        "status": "closed",
+        "close_reason": "Claude ACPX review: PASS",
+        "comments": [],
+    }
+]
+Path(sys.argv[1]).write_text(json.dumps(issues, indent=2) + "\n", encoding="utf-8")
+payload = {
+    "schema": "s7_bead_acpx_review.v1",
+    "bead": "bd-file",
+    "reviewer": "gemini",
+    "transport": "acpx",
+    "verdict": "PASS",
+    "personas": ["P1", "P2", "P4", "P5", "P6", "P8"],
+    "command": "acpx --agent 'gemini --acp' exec review",
+    "reviewed_head": sys.argv[3],
+    "summary": "Structured Gemini bead review passed before evidence was committed.",
+    "findings": [],
+}
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+git -C "$review_repo" add docs/review/f-s7/bead-reviews/bd-file-gemini.json
+git -C "$review_repo" commit -q -m "add review evidence"
+review_admin_head="$(git -C "$review_repo" rev-parse HEAD)"
+
+scripts/review/f-s7/audit-bead-reviews.py \
+  --root "$review_repo" \
+  --issues-file "$review_issues" \
+  --evidence-dir "$review_repo/docs/review/f-s7/bead-reviews" \
+  --allow-reviewed-head-ancestor-of "$review_admin_head" \
+  --require-reviewed-diff-admin-only \
+  >/tmp/s7-audit-bead-reviews-ancestor-ok.out
+rg -n "S7 bead review coverage: ok" /tmp/s7-audit-bead-reviews-ancestor-ok.out >/dev/null
+
+mkdir -p "$review_repo/src"
+printf 'pub fn changed_after_review() {}\n' >"$review_repo/src/lib.rs"
+git -C "$review_repo" add src/lib.rs
+git -C "$review_repo" commit -q -m "change code after review"
+review_stale_head="$(git -C "$review_repo" rev-parse HEAD)"
+if scripts/review/f-s7/audit-bead-reviews.py \
+  --root "$review_repo" \
+  --issues-file "$review_issues" \
+  --evidence-dir "$review_repo/docs/review/f-s7/bead-reviews" \
+  --allow-reviewed-head-ancestor-of "$review_stale_head" \
+  --require-reviewed-diff-admin-only \
+  >/tmp/s7-audit-bead-reviews-ancestor-bad.out 2>&1; then
+  echo "expected non-review post-review diff to fail audit" >&2
+  exit 1
+fi
+rg -n "reviewed_head is stale: commits after it changed non-review files" \
+  /tmp/s7-audit-bead-reviews-ancestor-bad.out >/dev/null
 
 python3 - "$issues" "$evidence_dir/bd-file-gemini.json" <<'PY'
 from pathlib import Path

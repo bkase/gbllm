@@ -291,7 +291,12 @@ run_s7_cli_feature_preflight() {
 }
 
 run_artifact_validator() {
-  if ! "$ROOT/$ARTIFACT_VALIDATOR" --root "$CHECK_ROOT" >/tmp/s7-artifact-validate.stdout 2>/tmp/s7-artifact-validate.stderr; then
+  local args=(--root "$CHECK_ROOT")
+  if [[ "$SELF_TEST" -eq 1 ]]; then
+    args+=(--self-test-optimizer-steps "${S7_SELF_TEST_OPTIMIZER_STEPS:-20}")
+    args+=(--self-test-eval-every-steps "${S7_SELF_TEST_EVAL_EVERY_STEPS:-5}")
+  fi
+  if ! "$ROOT/$ARTIFACT_VALIDATOR" "${args[@]}" >/tmp/s7-artifact-validate.stdout 2>/tmp/s7-artifact-validate.stderr; then
     local detail
     detail="$(tr '\n' ' ' </tmp/s7-artifact-validate.stdout | sed 's/[[:space:]]\+/ /g' | cut -c1-500)"
     record_failure "S7 artifact closure validation failed${detail:+: $detail}"
@@ -320,7 +325,14 @@ run_bead_review_auditor() {
   if [[ "$SELF_TEST" -eq 1 ]]; then
     return
   fi
-  if ! "$ROOT/$BEAD_REVIEW_AUDITOR" --root "$ROOT" \
+  local current_head
+  current_head="$(git -C "$CHECK_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  local args=(--root "$ROOT")
+  if [[ -n "$current_head" ]]; then
+    args+=(--allow-reviewed-head-ancestor-of "$current_head")
+    args+=(--require-reviewed-diff-admin-only)
+  fi
+  if ! "$ROOT/$BEAD_REVIEW_AUDITOR" "${args[@]}" \
     >/tmp/s7-bead-review-audit.stdout \
     2>/tmp/s7-bead-review-audit.stderr; then
     local detail
@@ -360,6 +372,8 @@ check_production_surfaces() {
 run_self_test() {
   local tmp
   tmp="$(mktemp -d /tmp/s7-verify-packet-self-test.XXXXXX)"
+  S7_SELF_TEST_OPTIMIZER_STEPS=20
+  S7_SELF_TEST_EVAL_EVERY_STEPS=5
   CHECK_ROOT="$tmp"
   check_production_surfaces
 
@@ -443,8 +457,8 @@ root = Path(sys.argv[1])
 h = "sha256:" + "3" * 64
 head = "a" * 40
 grid = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0]
-S7_OPTIMIZER_STEPS = 20_000
-S7_EVAL_EVERY_STEPS = 1_000
+S7_OPTIMIZER_STEPS = 20
+S7_EVAL_EVERY_STEPS = 5
 RUN_LOG_DOMAIN = ("gbf-artifact", "S7RunLog", "s7_run_log.v1", "1")
 RAW_LOSS_DIAGNOSTICS_DOMAIN = ("gbf-artifact", "RawLossDiagnostics", "s7_raw_loss_diagnostics.v1", "1")
 SCORE_DOMAIN = ("gbf-artifact", "S7ScoreReport", "s7_score.v1", "1")

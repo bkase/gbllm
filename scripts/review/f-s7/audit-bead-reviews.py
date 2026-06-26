@@ -76,9 +76,29 @@ def main() -> int:
         default=DEFAULT_EVIDENCE_DIR,
         help="directory containing optional s7_bead_acpx_review.v1 JSON evidence",
     )
+    parser.add_argument(
+        "--expected-head",
+        help="40-hex git commit that every structured review evidence file must name as reviewed_head",
+    )
+    parser.add_argument(
+        "--allow-reviewed-head-ancestor-of",
+        help=(
+            "40-hex git commit that reviewed_head may equal or precede when only "
+            "review evidence/admin files changed after the review"
+        ),
+    )
+    parser.add_argument(
+        "--require-reviewed-diff-admin-only",
+        action="store_true",
+        help=(
+            "with --allow-reviewed-head-ancestor-of, require every file changed "
+            "after reviewed_head to be review evidence or .beads/issues.jsonl"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable results")
     args = parser.parse_args()
 
+    root = Path(args.root)
     try:
         issues = load_issues(args)
     except AuditInputError as error:
@@ -92,7 +112,11 @@ def main() -> int:
     rows, errors = audit_issues(
         issues,
         include_tombstones=args.include_tombstones,
-        evidence_dir=(Path(args.root) / args.evidence_dir).resolve(),
+        root=root,
+        evidence_dir=(root / args.evidence_dir).resolve(),
+        expected_head=args.expected_head,
+        allow_ancestor_head=args.allow_reviewed_head_ancestor_of,
+        require_admin_only_diff=args.require_reviewed_diff_admin_only,
     )
     if args.json:
         print(
@@ -197,10 +221,27 @@ def run_br_json(root: Path, *args: str) -> Any:
 
 
 def audit_issues(
-    issues: list[dict[str, Any]], *, include_tombstones: bool, evidence_dir: Path | None
+    issues: list[dict[str, Any]],
+    *,
+    include_tombstones: bool,
+    root: Path,
+    evidence_dir: Path | None,
+    expected_head: str | None = None,
+    allow_ancestor_head: str | None = None,
+    require_admin_only_diff: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
+    if expected_head is not None and not COMMIT_RE.match(expected_head):
+        errors.append(f"expected_head must be a 40-hex commit id, observed {expected_head!r}")
+    if allow_ancestor_head is not None and not COMMIT_RE.match(allow_ancestor_head):
+        errors.append(
+            f"allow_reviewed_head_ancestor_of must be a 40-hex commit id, observed {allow_ancestor_head!r}"
+        )
+    if require_admin_only_diff and allow_ancestor_head is None:
+        errors.append(
+            "--require-reviewed-diff-admin-only requires --allow-reviewed-head-ancestor-of"
+        )
 
     for issue in sorted(issues, key=lambda item: str(item.get("id", ""))):
         issue_id = str(issue.get("id", ""))
@@ -223,7 +264,13 @@ def audit_issues(
             state = reviewer_coverage(text, reviewer)
             if state == "missing" and evidence_dir is not None:
                 state, evidence_error = structured_reviewer_coverage(
-                    evidence_dir, issue_id, reviewer
+                    root,
+                    evidence_dir,
+                    issue_id,
+                    reviewer,
+                    expected_head,
+                    allow_ancestor_head,
+                    require_admin_only_diff,
                 )
                 if evidence_error is not None:
                     row_errors.append(evidence_error)
@@ -278,7 +325,13 @@ def reviewer_coverage(text: str, reviewer: str) -> str:
 
 
 def structured_reviewer_coverage(
-    evidence_dir: Path, issue_id: str, reviewer: str
+    root: Path,
+    evidence_dir: Path,
+    issue_id: str,
+    reviewer: str,
+    expected_head: str | None,
+    allow_ancestor_head: str | None,
+    require_admin_only_diff: bool,
 ) -> tuple[str, str | None]:
     path = evidence_dir / f"{issue_id}-{reviewer}.json"
     if not path.is_file():
@@ -301,6 +354,20 @@ def structured_reviewer_coverage(
     reviewed_head = str(payload.get("reviewed_head", ""))
     if not COMMIT_RE.match(reviewed_head):
         errors.append(f"{path} reviewed_head must be a 40-hex commit id")
+    elif expected_head is not None and reviewed_head != expected_head:
+        errors.append(
+            f"{path} reviewed_head must match expected_head {expected_head}, observed {reviewed_head}"
+        )
+    elif expected_head is None and allow_ancestor_head is not None:
+        validate_reviewed_head_ancestry(
+            errors,
+            root,
+            path,
+            evidence_dir,
+            reviewed_head,
+            allow_ancestor_head,
+            require_admin_only_diff,
+        )
     if not non_empty_string(payload.get("summary")):
         errors.append(f"{path} summary must be a non-empty string")
     personas = payload.get("personas")
@@ -318,6 +385,73 @@ def structured_reviewer_coverage(
     if errors:
         return "missing", f"{issue_id}: {'; '.join(errors)}"
     return "pass", None
+
+
+def validate_reviewed_head_ancestry(
+    errors: list[str],
+    root: Path,
+    path: Path,
+    evidence_dir: Path,
+    reviewed_head: str,
+    current_head: str,
+    require_admin_only_diff: bool,
+) -> None:
+    ancestor = run_git(root, "merge-base", "--is-ancestor", reviewed_head, current_head)
+    if ancestor.returncode != 0:
+        errors.append(
+            f"{path} reviewed_head must be current head or an ancestor of {current_head}, observed {reviewed_head}"
+        )
+        return
+    if not require_admin_only_diff or reviewed_head == current_head:
+        return
+
+    changed = run_git(root, "diff", "--name-only", f"{reviewed_head}..{current_head}", "--")
+    if changed.returncode != 0:
+        detail = (changed.stderr or changed.stdout).strip()
+        errors.append(f"{path} could not inspect post-review diff: {detail}")
+        return
+
+    unexpected = [
+        item.strip()
+        for item in changed.stdout.splitlines()
+        if item.strip() and not is_review_admin_path(root, evidence_dir, item.strip())
+    ]
+    if unexpected:
+        preview = ", ".join(unexpected[:8])
+        if len(unexpected) > 8:
+            preview += ", ..."
+        errors.append(
+            f"{path} reviewed_head is stale: commits after it changed non-review files: {preview}"
+        )
+
+
+def is_review_admin_path(root: Path, evidence_dir: Path, changed_path: str) -> bool:
+    normalized = changed_path.strip("/")
+    if normalized == ".beads/issues.jsonl":
+        return True
+
+    allowed_dirs = {"docs/review/f-s7/reviews", "docs/review/f-s7/raw"}
+    evidence_rel = repo_relative_dir(root, evidence_dir)
+    if evidence_rel is not None:
+        allowed_dirs.add(evidence_rel)
+    return any(normalized.startswith(f"{directory}/") for directory in allowed_dirs)
+
+
+def repo_relative_dir(root: Path, path: Path) -> str | None:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix().strip("/")
+    except ValueError:
+        return None
+
+
+def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
 
 def expect_structured_equal(

@@ -153,7 +153,32 @@ def main() -> int:
         action="store_true",
         help="return after the first validation phase with errors; used by focused regression tests",
     )
+    parser.add_argument(
+        "--self-test-optimizer-steps",
+        type=int,
+        help=(
+            "test-only override for verify-packet --self-test synthetic fixtures; "
+            "production closure checks must use the default 20000 steps"
+        ),
+    )
+    parser.add_argument(
+        "--self-test-eval-every-steps",
+        type=int,
+        help=(
+            "test-only eval cadence override paired with --self-test-optimizer-steps"
+        ),
+    )
     args = parser.parse_args()
+
+    config_errors = configure_self_test_step_counts(
+        args.self_test_optimizer_steps,
+        args.self_test_eval_every_steps,
+    )
+    if config_errors:
+        print("S7 artifact closure shape: NEEDS_CHANGES")
+        for error in config_errors:
+            print(f" - {error}")
+        return 1
 
     root = Path(args.root)
     errors = validate_packet(root, fast_fail=args.fast_fail)
@@ -164,6 +189,27 @@ def main() -> int:
         return 1
     print("S7 artifact closure shape: ok")
     return 0
+
+
+def configure_self_test_step_counts(
+    optimizer_steps: int | None, eval_every_steps: int | None
+) -> list[str]:
+    global S7_OPTIMIZER_STEPS, S7_EVAL_EVERY_STEPS
+    if optimizer_steps is None and eval_every_steps is None:
+        return []
+    if optimizer_steps is None or eval_every_steps is None:
+        return [
+            "--self-test-optimizer-steps and --self-test-eval-every-steps must be passed together"
+        ]
+    if optimizer_steps <= 0:
+        return ["--self-test-optimizer-steps must be positive"]
+    if eval_every_steps <= 0:
+        return ["--self-test-eval-every-steps must be positive"]
+    if optimizer_steps % eval_every_steps != 0:
+        return ["--self-test-optimizer-steps must be divisible by --self-test-eval-every-steps"]
+    S7_OPTIMIZER_STEPS = optimizer_steps
+    S7_EVAL_EVERY_STEPS = eval_every_steps
+    return []
 
 
 def validate_packet(root: Path, fast_fail: bool = False) -> list[str]:
@@ -414,8 +460,9 @@ def validate_run_log_series(errors: list[str], path: Path, data: dict[str, Any])
         errors.append(f"{path} losses length must be {S7_OPTIMIZER_STEPS} for completed run")
     if len(grad_norms) != len(losses):
         errors.append(f"{path} grad_norms length must match losses length")
-    if len(eval_points) != (S7_OPTIMIZER_STEPS // S7_EVAL_EVERY_STEPS) + 1:
-        errors.append(f"{path} eval_points length must be 21 for completed run")
+    expected_eval_points = (S7_OPTIMIZER_STEPS // S7_EVAL_EVERY_STEPS) + 1
+    if len(eval_points) != expected_eval_points:
+        errors.append(f"{path} eval_points length must be {expected_eval_points} for completed run")
     for index, entry in enumerate(losses):
         expected_step = index + 1
         location = f"{path} losses[{index}]"
