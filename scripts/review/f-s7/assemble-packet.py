@@ -131,6 +131,11 @@ def main() -> int:
         print(f" - {error}")
         return 1
 
+    if not args.dry_run and not args.run_reviews:
+        print("S7 packet assembly: NEEDS_CHANGES")
+        print(" - non-dry-run production assembly requires --run-reviews")
+        return 1
+
     if args.check_inputs or not args.dry_run:
         missing = missing_input_paths(commands)
         if missing:

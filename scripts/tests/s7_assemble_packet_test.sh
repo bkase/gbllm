@@ -34,6 +34,20 @@ rg -n -- "--topology MoeTinyDenseMatched" "$tmp/dry-run.out" >/dev/null
 rg -n -- "$tmp/bundle/runs/MoeTiny/seed-0/run-log\\.json" "$tmp/dry-run.out" >/dev/null
 rg -n "S7 packet assembly: dry-run ok" "$tmp/dry-run.out" >/dev/null
 
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$manifest" \
+  --root "$ROOT" \
+  --cargo cargo \
+  --verify-mode skip-gates >"$tmp/no-run-reviews.out" 2>&1; then
+  echo "expected non-dry-run assembly without --run-reviews to fail" >&2
+  exit 1
+fi
+rg -n "non-dry-run production assembly requires --run-reviews" "$tmp/no-run-reviews.out" >/dev/null
+if rg -n "missing input file:" "$tmp/no-run-reviews.out" >/dev/null; then
+  echo "non-dry-run assembly must require reviews before input preflight" >&2
+  exit 1
+fi
+
 scripts/review/f-s7/assemble-packet.py \
   --manifest "$manifest" \
   --root "$ROOT" \
