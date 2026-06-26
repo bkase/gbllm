@@ -14,6 +14,9 @@ from typing import Any
 
 REVIEWERS = ("gemini", "claude")
 DEFAULT_LABELS = ("slice:S7", "s7")
+DEFAULT_EVIDENCE_DIR = "docs/review/f-s7/bead-reviews"
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+ACPX_COMMAND_RE = re.compile(r"^\s*acpx(?:\s|$)", re.IGNORECASE)
 TOMBSTONE_STATUSES = {"tombstone"}
 CLOSED_STATUSES = {"closed"}
 MANAGER_DISPOSITION_RE = re.compile(
@@ -67,6 +70,11 @@ def main() -> int:
         action="store_true",
         help="audit tombstone records instead of reporting them as skipped",
     )
+    parser.add_argument(
+        "--evidence-dir",
+        default=DEFAULT_EVIDENCE_DIR,
+        help="directory containing optional s7_bead_acpx_review.v1 JSON evidence",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable results")
     args = parser.parse_args()
 
@@ -80,7 +88,11 @@ def main() -> int:
             print(f" - {error}")
         return 1
 
-    rows, errors = audit_issues(issues, include_tombstones=args.include_tombstones)
+    rows, errors = audit_issues(
+        issues,
+        include_tombstones=args.include_tombstones,
+        evidence_dir=(Path(args.root) / args.evidence_dir).resolve(),
+    )
     if args.json:
         print(
             json.dumps(
@@ -184,7 +196,7 @@ def run_br_json(root: Path, *args: str) -> Any:
 
 
 def audit_issues(
-    issues: list[dict[str, Any]], *, include_tombstones: bool
+    issues: list[dict[str, Any]], *, include_tombstones: bool, evidence_dir: Path | None
 ) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -204,8 +216,17 @@ def audit_issues(
             continue
 
         text = issue_text(issue)
-        reviewer_state = {reviewer: reviewer_coverage(text, reviewer) for reviewer in REVIEWERS}
+        reviewer_state: dict[str, str] = {}
         row_errors: list[str] = []
+        for reviewer in REVIEWERS:
+            state = reviewer_coverage(text, reviewer)
+            if state == "missing" and evidence_dir is not None:
+                state, evidence_error = structured_reviewer_coverage(
+                    evidence_dir, issue_id, reviewer
+                )
+                if evidence_error is not None:
+                    row_errors.append(evidence_error)
+            reviewer_state[reviewer] = state
         if status not in CLOSED_STATUSES:
             row_errors.append(f"status is {status or 'unknown'}")
         missing = [
@@ -253,6 +274,55 @@ def reviewer_coverage(text: str, reviewer: str) -> str:
     if has_manager_disposition(text):
         return "manager_disposition"
     return "missing"
+
+
+def structured_reviewer_coverage(
+    evidence_dir: Path, issue_id: str, reviewer: str
+) -> tuple[str, str | None]:
+    path = evidence_dir / f"{issue_id}-{reviewer}.json"
+    if not path.is_file():
+        return "missing", None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return "missing", f"{issue_id}: {path} is not valid JSON: {error}"
+    if not isinstance(payload, dict):
+        return "missing", f"{issue_id}: {path} must contain a JSON object"
+
+    errors: list[str] = []
+    expect_structured_equal(errors, path, payload, "schema", "s7_bead_acpx_review.v1")
+    expect_structured_equal(errors, path, payload, "bead", issue_id)
+    expect_structured_equal(errors, path, payload, "reviewer", reviewer)
+    expect_structured_equal(errors, path, payload, "transport", "acpx")
+    expect_structured_equal(errors, path, payload, "verdict", "PASS")
+    if not ACPX_COMMAND_RE.search(str(payload.get("command", ""))):
+        errors.append(f"{path} command must record an ACPX invocation prefix")
+    reviewed_head = str(payload.get("reviewed_head", ""))
+    if not COMMIT_RE.match(reviewed_head):
+        errors.append(f"{path} reviewed_head must be a 40-hex commit id")
+    if not non_empty_string(payload.get("summary")):
+        errors.append(f"{path} summary must be a non-empty string")
+    personas = payload.get("personas")
+    if not isinstance(personas, list) or not all(isinstance(item, str) for item in personas):
+        errors.append(f"{path} personas must be a list of persona ids")
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        errors.append(f"{path} findings must be a list")
+    if errors:
+        return "missing", f"{issue_id}: {'; '.join(errors)}"
+    return "pass", None
+
+
+def expect_structured_equal(
+    errors: list[str], path: Path, payload: dict[str, Any], field: str, expected: Any
+) -> None:
+    observed = payload.get(field)
+    if observed != expected:
+        errors.append(f"{path} {field} must be {expected!r}, observed {observed!r}")
+
+
+def non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def has_reviewer_pass(text: str, reviewer: str) -> bool:

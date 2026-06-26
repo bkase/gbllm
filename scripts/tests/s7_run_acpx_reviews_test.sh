@@ -96,6 +96,39 @@ rg -n "review verdict was NEEDS_CHANGES; not writing PASS evidence" "$tmp/nonpas
 test ! -f "$nonpass_repo/docs/review/f-s7/reviews/bd-2v9r-gemini.json"
 test -f "$nonpass_repo/docs/review/f-s7/raw/bd-2v9r-gemini.nonpass.json"
 
+bead_review_repo="$tmp/bead-review-repo"
+make_repo "$bead_review_repo"
+S7_FAKE_REVIEW_VERDICT=PASS scripts/review/f-s7/run-acpx-reviews.py \
+  --root "$bead_review_repo" \
+  --review-cwd "$bead_review_repo" \
+  --acpx "$fake_acpx" \
+  --timeout 1 \
+  --reviewer gemini \
+  --bead-review \
+  --bead bd-17n0 \
+  --personas P3,P4,P5,P6,P7,P8 >"$tmp/bead-review.out"
+
+rg -n "S7 ACPX review runner: ok" "$tmp/bead-review.out" >/dev/null
+test -f "$bead_review_repo/docs/review/f-s7/bead-reviews/bd-17n0-gemini.json"
+rg -n '"schema": "s7_bead_acpx_review.v1"' \
+  "$bead_review_repo/docs/review/f-s7/bead-reviews/bd-17n0-gemini.json" >/dev/null
+rg -n '"bead": "bd-17n0"' \
+  "$bead_review_repo/docs/review/f-s7/bead-reviews/bd-17n0-gemini.json" >/dev/null
+rg -n "Review completed F-S7 bead bd-17n0" \
+  "$bead_review_repo/docs/review/f-s7/raw/bd-17n0-gemini.command.txt" >/dev/null
+
+if scripts/review/f-s7/run-acpx-reviews.py \
+  --root "$bead_review_repo" \
+  --review-cwd "$bead_review_repo" \
+  --acpx "$fake_acpx" \
+  --timeout 1 \
+  --reviewer gemini \
+  --bead bd-17n0 >"$tmp/bead-without-mode.out" 2>&1; then
+  echo "expected --bead without --bead-review to fail" >&2
+  exit 1
+fi
+rg -n -- "--bead requires --bead-review" "$tmp/bead-without-mode.out" >/dev/null
+
 mismatch_root="$tmp/mismatch-root"
 mismatch_cwd="$tmp/mismatch-cwd"
 make_repo "$mismatch_root"

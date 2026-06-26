@@ -14,14 +14,16 @@ from pathlib import Path
 from typing import Any
 
 
-BEAD = "bd-2v9r"
+PACKET_BEAD = "bd-2v9r"
 DEFAULT_REVIEW_CWD = "/Users/bkase/Documents/gbllm"
 DEFAULT_REVIEW_DIR = "docs/review/f-s7/reviews"
+DEFAULT_BEAD_REVIEW_DIR = "docs/review/f-s7/bead-reviews"
 DEFAULT_RAW_DIR = "docs/review/f-s7/raw"
 DEFAULT_GEMINI_AGENT = "gemini --skip-trust -m gemini-3.1-pro-preview --acp"
 DEFAULT_CLAUDE_AGENT = ""
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REVIEWERS = ("gemini", "claude")
+DEFAULT_BEAD_REVIEW_PERSONAS = ("P1", "P2", "P4", "P5", "P6", "P8")
 GEMINI_AUTH_HINT_VARS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -49,6 +51,22 @@ def main() -> int:
     parser.add_argument("--root", default=".", help="repository root whose HEAD is reviewed")
     parser.add_argument("--review-cwd", default=DEFAULT_REVIEW_CWD, help="ACPX --cwd value")
     parser.add_argument("--reviewer", choices=[*REVIEWERS, "all"], default="all")
+    parser.add_argument("--bead", default=PACKET_BEAD, help="bead id under review")
+    parser.add_argument(
+        "--bead-review",
+        action="store_true",
+        help=(
+            "review a completed F-S7 bead and write s7_bead_acpx_review.v1 evidence "
+            "instead of final bd-2v9r packet evidence"
+        ),
+    )
+    parser.add_argument(
+        "--personas",
+        help=(
+            "comma-separated persona ids used with --bead-review; defaults to "
+            "P1,P2,P4,P5,P6,P8"
+        ),
+    )
     parser.add_argument("--acpx", default="acpx", help="acpx executable")
     parser.add_argument("--timeout", default="1800", help="ACPX timeout in seconds")
     parser.add_argument(
@@ -68,6 +86,7 @@ def main() -> int:
         ),
     )
     parser.add_argument("--review-dir", default=DEFAULT_REVIEW_DIR)
+    parser.add_argument("--bead-review-dir", default=DEFAULT_BEAD_REVIEW_DIR)
     parser.add_argument("--raw-dir", default=DEFAULT_RAW_DIR)
     parser.add_argument("--dry-run", action="store_true", help="print commands without running ACPX")
     parser.add_argument(
@@ -87,12 +106,18 @@ def main() -> int:
 
     root = Path(args.root).resolve()
     try:
+        if not args.bead_review and args.bead != PACKET_BEAD:
+            raise ReviewRunnerError("--bead requires --bead-review unless reviewing the final packet bead")
+        personas = personas_from_args(args)
         head = git_head(root)
         reviewers = REVIEWERS if args.reviewer == "all" else (args.reviewer,)
         plans = [
             review_plan(
                 acpx=args.acpx,
                 reviewer=reviewer,
+                bead=args.bead,
+                bead_review=args.bead_review,
+                personas=personas,
                 review_cwd=args.review_cwd,
                 timeout=args.timeout,
                 gemini_agent=args.gemini_agent,
@@ -109,7 +134,7 @@ def main() -> int:
     if args.dry_run:
         for plan in plans:
             print("+ " + shlex.join(plan.command))
-            print(f"# reviewer={plan.reviewer} personas={','.join(REQUIRED_PERSONAS[plan.reviewer])}")
+            print(f"# bead={plan.bead} reviewer={plan.reviewer} personas={','.join(plan.personas)}")
         print("S7 ACPX review runner: dry-run ok")
         return 0
 
@@ -132,7 +157,7 @@ def main() -> int:
         return 1
 
     errors: list[str] = []
-    review_dir = output_dir(root, args.review_dir)
+    review_dir = output_dir(root, args.bead_review_dir if args.bead_review else args.review_dir)
     raw_dir = output_dir(root, args.raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
@@ -145,28 +170,28 @@ def main() -> int:
             stderr=subprocess.PIPE,
             env=os.environ.copy(),
         )
-        write_text(raw_dir / f"{BEAD}-{plan.reviewer}.stdout.txt", completed.stdout)
-        write_text(raw_dir / f"{BEAD}-{plan.reviewer}.stderr.txt", completed.stderr)
-        write_text(raw_dir / f"{BEAD}-{plan.reviewer}.command.txt", shlex.join(plan.command) + "\n")
+        write_text(raw_dir / f"{plan.bead}-{plan.reviewer}.stdout.txt", completed.stdout)
+        write_text(raw_dir / f"{plan.bead}-{plan.reviewer}.stderr.txt", completed.stderr)
+        write_text(raw_dir / f"{plan.bead}-{plan.reviewer}.command.txt", shlex.join(plan.command) + "\n")
         if completed.returncode != 0:
             errors.append(f"{plan.reviewer} ACPX command failed with exit {completed.returncode}")
             continue
 
         try:
             payload = extract_review_json(completed.stdout)
-            write_json(raw_dir / f"{BEAD}-{plan.reviewer}.extracted.json", payload)
+            write_json(raw_dir / f"{plan.bead}-{plan.reviewer}.extracted.json", payload)
             evidence = evidence_from_payload(payload, plan, head)
         except ReviewRunnerError as error:
             errors.append(f"{plan.reviewer}: {error}")
             continue
 
         if evidence["verdict"] != "PASS":
-            write_json(raw_dir / f"{BEAD}-{plan.reviewer}.nonpass.json", evidence)
+            write_json(raw_dir / f"{plan.bead}-{plan.reviewer}.nonpass.json", evidence)
             errors.append(f"{plan.reviewer} review verdict was {evidence['verdict']}; not writing PASS evidence")
             continue
 
         review_dir.mkdir(parents=True, exist_ok=True)
-        write_json(review_dir / f"{BEAD}-{plan.reviewer}.json", evidence)
+        write_json(review_dir / f"{plan.bead}-{plan.reviewer}.json", evidence)
 
     if errors:
         print("S7 ACPX review runner: NEEDS_CHANGES")
@@ -174,7 +199,7 @@ def main() -> int:
             print(f" - {error}")
         return 1
 
-    if not args.skip_final_validate and args.reviewer == "all":
+    if not args.bead_review and not args.skip_final_validate and args.reviewer == "all":
         validator = Path(__file__).with_name("validate-reviews.py")
         review_dir_arg = review_dir.relative_to(root) if review_dir.is_relative_to(root) else review_dir
         command = [
@@ -197,8 +222,20 @@ def main() -> int:
 
 
 class ReviewPlan:
-    def __init__(self, reviewer: str, command: list[str], recorded_command: str) -> None:
+    def __init__(
+        self,
+        *,
+        bead: str,
+        reviewer: str,
+        personas: list[str],
+        bead_review: bool,
+        command: list[str],
+        recorded_command: str,
+    ) -> None:
+        self.bead = bead
         self.reviewer = reviewer
+        self.personas = personas
+        self.bead_review = bead_review
         self.command = command
         self.recorded_command = recorded_command
 
@@ -243,6 +280,18 @@ def run_preflight(
     for note in notes:
         print(f" - {note}")
     return 0
+
+
+def personas_from_args(args: argparse.Namespace) -> dict[str, list[str]]:
+    if not args.bead_review:
+        return {reviewer: REQUIRED_PERSONAS[reviewer] for reviewer in REVIEWERS}
+    if args.personas is None:
+        personas = list(DEFAULT_BEAD_REVIEW_PERSONAS)
+    else:
+        personas = [item.strip() for item in args.personas.split(",") if item.strip()]
+    if not personas:
+        raise ReviewRunnerError("--personas must name at least one persona")
+    return {reviewer: personas for reviewer in REVIEWERS}
 
 
 def gemini_preflight_errors(root: Path, acpx: str, gemini_agent: str) -> list[str]:
@@ -313,13 +362,16 @@ def review_plan(
     *,
     acpx: str,
     reviewer: str,
+    bead: str,
+    bead_review: bool,
+    personas: dict[str, list[str]],
     review_cwd: str,
     timeout: str,
     gemini_agent: str,
     claude_agent: str,
     head: str,
 ) -> ReviewPlan:
-    prompt = review_prompt(reviewer, head)
+    prompt = review_prompt(reviewer, head, bead, personas[reviewer], bead_review)
     if reviewer == "gemini":
         command = [
             acpx,
@@ -338,7 +390,14 @@ def review_plan(
         ]
         recorded = command.copy()
         recorded[0] = "acpx"
-        return ReviewPlan(reviewer, command, shlex.join(recorded))
+        return ReviewPlan(
+            bead=bead,
+            reviewer=reviewer,
+            personas=personas[reviewer],
+            bead_review=bead_review,
+            command=command,
+            recorded_command=shlex.join(recorded),
+        )
     if reviewer == "claude":
         if claude_agent.strip():
             command = [
@@ -373,15 +432,46 @@ def review_plan(
             ]
         recorded = command.copy()
         recorded[0] = "acpx"
-        return ReviewPlan(reviewer, command, shlex.join(recorded))
+        return ReviewPlan(
+            bead=bead,
+            reviewer=reviewer,
+            personas=personas[reviewer],
+            bead_review=bead_review,
+            command=command,
+            recorded_command=shlex.join(recorded),
+        )
     raise ReviewRunnerError(f"unsupported reviewer {reviewer!r}")
 
 
-def review_prompt(reviewer: str, head: str) -> str:
-    personas = REQUIRED_PERSONAS[reviewer]
+def review_prompt(
+    reviewer: str, head: str, bead: str, personas: list[str], bead_review: bool
+) -> str:
+    if bead_review:
+        return "\n".join(
+            [
+                f"Review completed F-S7 bead {bead} at git HEAD {head}.",
+                "Use ACPX only; do not mutate files.",
+                f"Reviewer id: {reviewer}. Required personas: {', '.join(personas)}.",
+                "Inspect the current repository state, the bead record via `br show "
+                f"{bead}`, history/rfcs/F-S7-moe-beats-dense.md, and the code/tests/artifacts "
+                "named by the bead closure.",
+                "A PASS verdict is allowed only if this bead's closure claims are supported by "
+                "current evidence and no blocking finding remains. Do not treat a PASS here as "
+                "final bd-2v9r production-packet closure; this is bead-level review coverage only.",
+                "Return exactly one JSON object. No Markdown wrapper. Shape:",
+                "{",
+                '  "verdict": "PASS or NEEDS_CHANGES",',
+                f'  "personas": {json.dumps(personas)},',
+                '  "summary": "one concise paragraph",',
+                '  "findings": [',
+                '    {"severity": "p1|p2|p3|info", "status": "open|resolved|non_blocking", "body": "finding text"}',
+                "  ]",
+                "}",
+            ]
+        )
     return "\n".join(
         [
-            f"Review F-S7 closure bead {BEAD} at git HEAD {head}.",
+            f"Review F-S7 closure bead {bead} at git HEAD {head}.",
             "Use ACPX only; do not mutate files.",
             f"Reviewer id: {reviewer}. Required personas: {', '.join(personas)}.",
             "Inspect the current repository state, including history/rfcs/F-S7-moe-beats-dense.md, "
@@ -436,8 +526,8 @@ def evidence_from_payload(payload: dict[str, Any], plan: ReviewPlan, head: str) 
             raise ReviewRunnerError(f"review findings[{index}] must be an object")
 
     return {
-        "schema": "s7_acpx_review.v1",
-        "bead": BEAD,
+        "schema": "s7_bead_acpx_review.v1" if plan.bead_review else "s7_acpx_review.v1",
+        "bead": plan.bead,
         "reviewer": plan.reviewer,
         "transport": "acpx",
         "verdict": verdict,
