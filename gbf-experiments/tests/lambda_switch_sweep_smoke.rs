@@ -5,10 +5,11 @@ mod common;
 use common::tracing_capture::{TraceCapture, captured_events, with_trace_capture};
 use gbf_experiments::s7::collapse_sweep::{
     CollapseSweepError, D11_LAMBDA_SWITCH_GRID, D11_LAMBDA_SWITCH_SWEEP_SEED,
-    D11_PRODUCTION_LAMBDA_SWITCH, DeterministicFixtureSweepProducer, GuardrailVerdict,
-    LAMBDA_SWITCH_SWEEP_STEP_EVENT, LambdaSwitchSweepCompletion, LambdaSwitchSweepInput,
-    LambdaSwitchSweepPointInput, LambdaSwitchSweepPointOutcome, LambdaSwitchSweepProducer,
-    LambdaSwitchSweepRecord, RCS_TRAINING_EXTRA_STEPS, ROUTER_COLLAPSE_SWEEP_REPORT_SCHEMA,
+    D11_PRODUCTION_LAMBDA_SWITCH, DETERMINISTIC_FIXTURE_SWEEP_PRODUCER_KIND,
+    DeterministicFixtureSweepProducer, GuardrailVerdict, LAMBDA_SWITCH_SWEEP_STEP_EVENT,
+    LambdaSwitchSweepCompletion, LambdaSwitchSweepInput, LambdaSwitchSweepPointInput,
+    LambdaSwitchSweepPointOutcome, LambdaSwitchSweepProducer, LambdaSwitchSweepRecord,
+    PRODUCTION_SWEEP_PRODUCER_KIND, RCS_TRAINING_EXTRA_STEPS, ROUTER_COLLAPSE_SWEEP_REPORT_SCHEMA,
     RouterCollapseSweepReport, canonicalize_d11_lambda_switch_grid,
     f8_constant_lambda_sweep_verdict, lambda_switch_grid_hash, run_lambda_switch_sweep,
 };
@@ -29,6 +30,10 @@ fn d11_fixture_sweep_emits_exact_six_deterministic_records() {
 
     assert_eq!(first, second);
     assert_eq!(first.schema, ROUTER_COLLAPSE_SWEEP_REPORT_SCHEMA);
+    assert_eq!(
+        first.producer_kind,
+        DETERMINISTIC_FIXTURE_SWEEP_PRODUCER_KIND
+    );
     assert_eq!(first.guardrail_verdict, GuardrailVerdict::Pass);
     assert_eq!(first.records.len(), D11_LAMBDA_SWITCH_GRID.len());
     assert_ne!(first.sweep_self_hash, Hash256::ZERO);
@@ -81,6 +86,10 @@ fn router_collapse_sweep_json_shape_pins_downstream_fields() {
     assert_eq!(value["schema"], json!(ROUTER_COLLAPSE_SWEEP_REPORT_SCHEMA));
     assert_eq!(value["seed"], json!(SEED));
     assert_eq!(value["base_checkpoint_sha"], json!(hash(0x51)));
+    assert_eq!(
+        value["producer_kind"],
+        json!(DETERMINISTIC_FIXTURE_SWEEP_PRODUCER_KIND)
+    );
     assert_eq!(value["grid"], json!(D11_LAMBDA_SWITCH_GRID));
     assert_eq!(
         value["production_lambda"],
@@ -113,6 +122,7 @@ fn producer_input_carries_validated_run_descriptor_contract() {
         run_lambda_switch_sweep(&input, &ContractAssertingProducer).expect("contract sweep report");
 
     assert_eq!(report.base_checkpoint_sha, input.base_checkpoint_sha);
+    assert_eq!(report.producer_kind, PRODUCTION_SWEEP_PRODUCER_KIND);
     assert_eq!(report.records.len(), D11_LAMBDA_SWITCH_GRID.len());
     assert_eq!(report.guardrail_verdict, GuardrailVerdict::Pass);
 }

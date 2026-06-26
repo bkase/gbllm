@@ -237,6 +237,7 @@ write(
         "schema": "s7_router_collapse_sweep.v1",
         "seed": 0,
         "base_checkpoint_sha": h,
+        "producer_kind": "production_closure_retrain_score",
         "grid": grid,
         "records": [sweep_record(index) for index in range(len(grid))],
         "production_lambda": 0.05,
@@ -378,6 +379,26 @@ for topology in ["MoeTiny", "MoeTinyDenseMatched"]:
 PY
 
 scripts/review/f-s7/validate-artifacts.py --root "$tmp" >/tmp/s7-validate-artifacts-ok.out
+
+sweep_path="$tmp/experiments/S7/router-collapse/seed-0/sweep.json"
+cp "$sweep_path" "$tmp/sweep.json.valid"
+python3 - "$sweep_path" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+data["producer_kind"] = "deterministic_fixture"
+path.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/validate-artifacts.py --root "$tmp" --fast-fail >/tmp/s7-validate-artifacts-bad.out 2>&1; then
+  echo "expected router-collapse producer provenance validation failure" >&2
+  exit 1
+fi
+rg -n "producer_kind must be 'production_closure_retrain_score'" /tmp/s7-validate-artifacts-bad.out >/dev/null
+mv "$tmp/sweep.json.valid" "$sweep_path"
 
 frontier_path="$tmp/experiments/S7/frontier/frontier.json"
 cp "$frontier_path" "$tmp/frontier.json.valid"

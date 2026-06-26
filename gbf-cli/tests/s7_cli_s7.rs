@@ -1090,6 +1090,7 @@ fn s7_materialize_support_artifact_writes_router_collapse_sweep_packet_path() {
 
     assert_eq!(sweep["schema"], "s7_router_collapse_sweep.v1");
     assert_eq!(sweep["seed"], 0);
+    assert_eq!(sweep["producer_kind"], "production_closure_retrain_score");
     assert_eq!(
         sweep["sweep_self_hash"]
             .as_str()
@@ -3129,6 +3130,7 @@ fn router_collapse_sweep_support_artifact() -> Value {
             "schema": "s7_router_collapse_sweep.v1",
             "seed": 0,
             "base_checkpoint_sha": test_hash(176),
+            "producer_kind": "production_closure_retrain_score",
             "grid": lambdas,
             "records": records,
             "production_lambda": 0.05,

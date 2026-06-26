@@ -2661,6 +2661,8 @@ RouterCollapseSweepReport (JSON) :=
     schema:                          "s7_router_collapse_sweep.v1"
     seed:                            0
     base_checkpoint_sha:             Hash256          ; end of Phase D
+    producer_kind:                   "production_closure_retrain_score"
+                                                       ; not fixture
     grid:                            Vec[LambdaSwitch]   ; pinned by D11
     records:                         Vec[LambdaSwitchSweepStep]
     production_lambda:               LambdaSwitch       ; 0.05 (D5)
@@ -2671,6 +2673,8 @@ RouterCollapseSweepReport (JSON) :=
 
 Invariants:
   RCS-Grid      grid = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0]    ; exact (D11)
+  RCS-Producer  producer_kind = "production_closure_retrain_score";
+                deterministic_fixture is invalid for bd-2v9r closure.
   RCS-Records   records.length = grid.length
   RCS-Cadence   each record's training-extra step delta = 1000 (D11/§9.3)
   RCS-Diverged  bpc_eval_subset may be null iff record completion = DivergedAt(_)

@@ -17,6 +17,7 @@ HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TOPOLOGIES = ("MoeTiny", "MoeTinyDenseMatched")
 SEEDS = range(5)
 D11_GRID = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0]
+PRODUCTION_SWEEP_PRODUCER_KIND = "production_closure_retrain_score"
 S7_N_BLOCKS = 4
 S7_N_EXPERTS = 4
 S7_OPTIMIZER_STEPS = 20_000
@@ -940,6 +941,7 @@ def validate_sweep(errors: list[str], path: Path) -> None:
         return
     require_equal(errors, path, data, "seed", 0)
     require_hash(errors, path, data, "base_checkpoint_sha")
+    require_equal(errors, path, data, "producer_kind", PRODUCTION_SWEEP_PRODUCER_KIND)
     require_equal(errors, path, data, "grid", D11_GRID)
     require_equal(errors, path, data, "production_lambda", 0.05)
     require_equal(errors, path, data, "collapse_threshold", 1.0)

@@ -22,6 +22,7 @@ const S7_N_EXPERTS: u64 = 4;
 const S7_SEED_COUNT: usize = 5;
 const RCS_TRAINING_EXTRA_STEPS: u64 = 1_000;
 const D11_LAMBDA_SWITCH_GRID: [f64; 6] = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0];
+const PRODUCTION_SWEEP_PRODUCER_KIND: &str = "production_closure_retrain_score";
 const S7_SWITCH_STATS_DOMAIN: DomainHash<'static> = DomainHash::new(
     "gbf-experiments",
     "S7SwitchStatsReport",
@@ -418,6 +419,13 @@ fn validate_router_collapse_sweep(
 ) -> Result<(), S7SupportArtifactMaterializeError> {
     require_u64_eq(value, &["seed"], "seed", 0, path)?;
     require_nonzero_hash(value, &["base_checkpoint_sha"], "base_checkpoint_sha", path)?;
+    require_string_eq(
+        value,
+        &["producer_kind"],
+        "producer_kind",
+        PRODUCTION_SWEEP_PRODUCER_KIND,
+        path,
+    )?;
     let grid = require_array(value, &["grid"], "grid")?;
     if grid.len() != D11_LAMBDA_SWITCH_GRID.len() {
         return Err(invalid(

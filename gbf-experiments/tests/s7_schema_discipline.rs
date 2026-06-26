@@ -375,6 +375,8 @@ fn s7_artifact_validator_guards_closure_artifact_invariants() {
         "points must contain one MoE and one dense point",
         "dense router_config_hash must be null",
         "guardrail_verdict",
+        "producer_kind",
+        "production_closure_retrain_score",
         "QuantSpec::weight_quant",
         "grad log record",
         "grad log must contain",

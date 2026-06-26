@@ -14,6 +14,12 @@ pub const LAMBDA_SWITCH_SWEEP_STEP_EVENT: &str = "s7.lambda_switch_sweep.step";
 /// Public schema id for the S7 router-collapse sweep report.
 pub const ROUTER_COLLAPSE_SWEEP_REPORT_SCHEMA: &str = "s7_router_collapse_sweep.v1";
 
+/// Producer provenance required for final S7 closure sweep artifacts.
+pub const PRODUCTION_SWEEP_PRODUCER_KIND: &str = "production_closure_retrain_score";
+
+/// Producer provenance used by deterministic smoke/fixture sweeps.
+pub const DETERMINISTIC_FIXTURE_SWEEP_PRODUCER_KIND: &str = "deterministic_fixture";
+
 /// Schema version carried by `LambdaSwitchSweepRecord`.
 pub const LAMBDA_SWITCH_SWEEP_STEP_SCHEMA_VERSION: SemVer = SemVer::new(1, 0, 0);
 
@@ -634,6 +640,8 @@ pub struct RouterCollapseSweepReport {
     pub seed: u64,
     /// End-of-Phase-D base checkpoint hash.
     pub base_checkpoint_sha: Hash256,
+    /// Producer class used to retrain and score sweep points.
+    pub producer_kind: String,
     /// Pinned D11 lambda-switch grid in exact order.
     pub grid: Vec<f32>,
     /// One validated LambdaSwitchSweepStep per grid point.
@@ -659,6 +667,7 @@ impl<'de> Deserialize<'de> for RouterCollapseSweepReport {
             schema: String,
             seed: u64,
             base_checkpoint_sha: Hash256,
+            producer_kind: String,
             grid: Vec<f32>,
             records: Vec<LambdaSwitchSweepRecord>,
             production_lambda: f32,
@@ -672,6 +681,7 @@ impl<'de> Deserialize<'de> for RouterCollapseSweepReport {
             schema: raw.schema,
             seed: raw.seed,
             base_checkpoint_sha: raw.base_checkpoint_sha,
+            producer_kind: raw.producer_kind,
             grid: raw.grid,
             records: raw.records,
             production_lambda: raw.production_lambda,
@@ -706,13 +716,32 @@ impl RouterCollapseSweepReport {
         grid: Vec<f32>,
         records: Vec<LambdaSwitchSweepRecord>,
     ) -> Result<Self, CollapseSweepError> {
+        Self::from_grid_records_with_producer_kind(
+            seed,
+            base_checkpoint_sha,
+            PRODUCTION_SWEEP_PRODUCER_KIND,
+            grid,
+            records,
+        )
+    }
+
+    /// Construct a report from explicit grid, records, and producer provenance.
+    pub fn from_grid_records_with_producer_kind(
+        seed: u64,
+        base_checkpoint_sha: Hash256,
+        producer_kind: &str,
+        grid: Vec<f32>,
+        records: Vec<LambdaSwitchSweepRecord>,
+    ) -> Result<Self, CollapseSweepError> {
         let grid = canonicalize_d11_lambda_switch_grid(&grid)?;
         validate_collapse_sweep_records(&records)?;
+        validate_sweep_producer_kind(producer_kind)?;
         let guardrail_verdict = h6_guardrail_verdict(&records)?;
         let report = Self {
             schema: ROUTER_COLLAPSE_SWEEP_REPORT_SCHEMA.to_owned(),
             seed,
             base_checkpoint_sha,
+            producer_kind: producer_kind.to_owned(),
             grid,
             records,
             production_lambda: D11_PRODUCTION_LAMBDA_SWITCH,
@@ -784,6 +813,7 @@ impl RouterCollapseSweepReport {
                 observed: self.schema.clone(),
             });
         }
+        validate_sweep_producer_kind(&self.producer_kind)?;
         canonicalize_d11_lambda_switch_grid(&self.grid)?;
         validate_collapse_sweep_records(&self.records)?;
         if self.production_lambda.to_bits() != D11_PRODUCTION_LAMBDA_SWITCH.to_bits() {
@@ -1010,6 +1040,11 @@ impl LambdaSwitchSweepPointOutcome {
 
 /// Producer boundary for the real checkpoint retrain/score implementation.
 pub trait LambdaSwitchSweepProducer {
+    /// Producer provenance recorded in `s7_router_collapse_sweep.v1`.
+    fn producer_kind(&self) -> &'static str {
+        PRODUCTION_SWEEP_PRODUCER_KIND
+    }
+
     /// Retrain from `base_checkpoint_sha` for the point's 1000 extra steps and score it.
     ///
     /// Implementations must hold non-`lambda_switch` loss weights at their
@@ -1027,6 +1062,10 @@ pub trait LambdaSwitchSweepProducer {
 pub struct DeterministicFixtureSweepProducer;
 
 impl LambdaSwitchSweepProducer for DeterministicFixtureSweepProducer {
+    fn producer_kind(&self) -> &'static str {
+        DETERMINISTIC_FIXTURE_SWEEP_PRODUCER_KIND
+    }
+
     fn run_sweep_point(
         &self,
         input: LambdaSwitchSweepPointInput,
@@ -1116,9 +1155,10 @@ where
         records.push(record);
     }
 
-    RouterCollapseSweepReport::from_grid_records(
+    RouterCollapseSweepReport::from_grid_records_with_producer_kind(
         input.seed,
         input.base_checkpoint_sha,
+        producer.producer_kind(),
         grid,
         records,
     )
@@ -1391,6 +1431,11 @@ pub enum CollapseSweepError {
         /// Expected collapse threshold.
         expected: f32,
     },
+    /// The report carried unsupported producer provenance.
+    UnexpectedSweepProducerKind {
+        /// Observed producer provenance.
+        observed: String,
+    },
     /// The report guardrail verdict did not match the records.
     GuardrailVerdictMismatch {
         /// Expected guardrail verdict.
@@ -1579,6 +1624,9 @@ impl fmt::Display for CollapseSweepError {
                 f,
                 "collapse_threshold {observed} does not match D11 expected {expected}"
             ),
+            Self::UnexpectedSweepProducerKind { observed } => {
+                write!(f, "unsupported collapse-sweep producer_kind {observed:?}")
+            }
             Self::GuardrailVerdictMismatch { expected, observed } => write!(
                 f,
                 "guardrail_verdict mismatch: expected {expected:?}, observed {observed:?}"
@@ -1661,6 +1709,15 @@ pub fn lambda_switch_grid_hash(grid: &[f32]) -> Result<Hash256, CollapseSweepErr
         grid_bits: grid.iter().map(|lambda| lambda.to_bits()).collect(),
     };
     Ok(lambda_switch_grid_domain().hash(&material)?)
+}
+
+fn validate_sweep_producer_kind(producer_kind: &str) -> Result<(), CollapseSweepError> {
+    match producer_kind {
+        PRODUCTION_SWEEP_PRODUCER_KIND | DETERMINISTIC_FIXTURE_SWEEP_PRODUCER_KIND => Ok(()),
+        observed => Err(CollapseSweepError::UnexpectedSweepProducerKind {
+            observed: observed.to_owned(),
+        }),
+    }
 }
 
 #[derive(Serialize)]

@@ -139,7 +139,7 @@
       "message": "s7 smoke transition",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "to_state": "TrainAttempted",
       "topology": "MoeTiny",
       "train_step": 20000
@@ -155,7 +155,7 @@
       "reason": "matched deployed byte tolerance",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "topology": "MoeTiny",
       "train_step": 20000,
       "verdict": "Pass"
@@ -171,7 +171,7 @@
       "message": "s7 smoke transition",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "to_state": "ParityAggregated",
       "topology": "MoeTiny",
       "train_step": 20000
@@ -187,7 +187,7 @@
       "reason": "per-seed production bpc margin",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "topology": "MoeTiny",
       "train_step": 20000,
       "verdict": "Pass-clean"
@@ -203,7 +203,7 @@
       "message": "s7 smoke transition",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "to_state": "ParetoChecked",
       "topology": "MoeTiny",
       "train_step": 20000
@@ -219,7 +219,7 @@
       "reason": "median bpc plus deployed bytes",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "topology": "MoeTiny",
       "train_step": 20000,
       "verdict": "MoE-dominates"
@@ -235,7 +235,7 @@
       "message": "s7 smoke transition",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "to_state": "GuardrailChecked",
       "topology": "MoeTiny",
       "train_step": 20000
@@ -246,12 +246,12 @@
   {
     "fields": {
       "event_name": "s7.guardrail.decision",
-      "inputs": "sweep_self_hash=sha256:44fa4aeaa42b83332cb8de137444c40144ca3612fcaa08f70c5ba786160e5188",
+      "inputs": "sweep_self_hash=sha256:6530071915ba75a37d7089de5d9180507f89ea2150ddd1a9d9884a1efc7a8c3b",
       "message": "s7 smoke verdict",
       "reason": "D11 collapse sweep A/B/C/D",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "topology": "MoeTiny",
       "train_step": 20000,
       "verdict": "Pass"
@@ -267,7 +267,7 @@
       "reason": "digest-only tiny switch stats replay",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "topology": "MoeTiny",
       "train_step": 20000,
       "verdict": "Pass"
@@ -283,7 +283,7 @@
       "message": "s7 smoke transition",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "to_state": "OutcomeDispatched",
       "topology": "MoeTiny",
       "train_step": 20000
@@ -299,7 +299,7 @@
       "reason": "ProceedToS8",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "topology": "MoeTiny",
       "train_step": 20000,
       "verdict": "Pass-clean"
@@ -315,7 +315,7 @@
       "message": "s7 smoke transition",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "to_state": "ClosureValidated",
       "topology": "MoeTiny",
       "train_step": 20000
@@ -331,7 +331,7 @@
       "reason": "validated",
       "schema_version": "1",
       "seed": 0,
-      "self_hash_prefix": "85da1d8d4e9b",
+      "self_hash_prefix": "22729f6928f2",
       "topology": "MoeTiny",
       "train_step": 20000,
       "verdict": "Pass"
