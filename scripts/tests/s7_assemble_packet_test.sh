@@ -206,6 +206,39 @@ if rg -n " materialize-run " "$tmp/escape.out" >/dev/null; then
   exit 1
 fi
 
+python3 - "$manifest" "$tmp/absolute-manifest.json" "$tmp/absolute-run-log.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload["runs"]["MoeTiny"]["0"]["run_log"] = str(Path(sys.argv[3]).resolve())
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/absolute-manifest.json" \
+  --root "$ROOT" \
+  --dry-run >"$tmp/absolute-denied.out" 2>&1; then
+  echo "expected absolute input path to require explicit opt-in" >&2
+  exit 1
+fi
+rg -n "absolute bundle input path requires --allow-absolute-inputs: .*/absolute-run-log\\.json" "$tmp/absolute-denied.out" >/dev/null
+if rg -n " materialize-run " "$tmp/absolute-denied.out" >/dev/null; then
+  echo "absolute path denial should fail before printing executable commands" >&2
+  exit 1
+fi
+
+scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/absolute-manifest.json" \
+  --root "$ROOT" \
+  --dry-run \
+  --allow-absolute-inputs >"$tmp/absolute-allowed.out"
+
+rg -n -- ".*/absolute-run-log\\.json" "$tmp/absolute-allowed.out" >/dev/null
+rg -c " materialize-run " "$tmp/absolute-allowed.out" | rg '^10$' >/dev/null
+rg -n "S7 packet assembly: dry-run ok" "$tmp/absolute-allowed.out" >/dev/null
+
 python3 - "$manifest" "$tmp/bad-decision-manifest.json" <<'PY'
 from pathlib import Path
 import json

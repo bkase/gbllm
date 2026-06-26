@@ -103,6 +103,14 @@ def main() -> int:
         help="preflight every referenced bundle input path before executing; useful with --dry-run",
     )
     parser.add_argument(
+        "--allow-absolute-inputs",
+        action="store_true",
+        help=(
+            "allow absolute bundle input paths; default requires manifest-relative "
+            "paths inside the bundle directory"
+        ),
+    )
+    parser.add_argument(
         "--write-template",
         help="write a canonical s7_production_bundle_manifest.v1 skeleton and exit",
     )
@@ -124,6 +132,7 @@ def main() -> int:
             root,
             args.cargo,
             args.verify_mode,
+            allow_absolute_inputs=args.allow_absolute_inputs,
             review_options=review_options_from_args(args, root),
         )
     except AssembleError as error:
@@ -177,6 +186,7 @@ def build_commands(
     root: Path,
     cargo: str,
     verify_mode: str,
+    allow_absolute_inputs: bool = False,
     review_options: ReviewOptions | None = None,
 ) -> list[list[str]]:
     validate_known_fields(manifest)
@@ -200,13 +210,19 @@ def build_commands(
                     "--seed",
                     str(seed),
                     "--run-log",
-                    str(bundle_path(manifest_dir, run["run_log"])),
+                    str(bundle_path(manifest_dir, run["run_log"], allow_absolute_inputs)),
                     "--score",
-                    str(bundle_path(manifest_dir, run["score"])),
+                    str(bundle_path(manifest_dir, run["score"], allow_absolute_inputs)),
                     "--grad-log",
-                    str(bundle_path(manifest_dir, run["grad_log"])),
+                    str(bundle_path(manifest_dir, run["grad_log"], allow_absolute_inputs)),
                     "--router-step-telemetry",
-                    str(bundle_path(manifest_dir, run["router_step_telemetry"])),
+                    str(
+                        bundle_path(
+                            manifest_dir,
+                            run["router_step_telemetry"],
+                            allow_absolute_inputs,
+                        )
+                    ),
                 ]
             )
 
@@ -214,7 +230,12 @@ def build_commands(
     for seed in SEEDS:
         path = require_string(switch_stats, [str(seed)], f"switch_stats.{seed}")
         commands.append(
-            support_command(cargo, root, "switch-stats", bundle_path(manifest_dir, path))
+            support_command(
+                cargo,
+                root,
+                "switch-stats",
+                bundle_path(manifest_dir, path, allow_absolute_inputs),
+            )
             + ["--seed", str(seed)]
         )
 
@@ -227,25 +248,25 @@ def build_commands(
                 cargo,
                 root,
                 "router-collapse-sweep",
-                bundle_path(manifest_dir, support["router_collapse_sweep"]),
+                bundle_path(manifest_dir, support["router_collapse_sweep"], allow_absolute_inputs),
             ),
             support_command(
                 cargo,
                 root,
                 "burn-grad-smoke",
-                bundle_path(manifest_dir, support["burn_grad_smoke"]),
+                bundle_path(manifest_dir, support["burn_grad_smoke"], allow_absolute_inputs),
             ),
             support_command(
                 cargo,
                 root,
                 "oracle-routed",
-                bundle_path(manifest_dir, support["oracle_routed"]),
+                bundle_path(manifest_dir, support["oracle_routed"], allow_absolute_inputs),
             ),
             support_command(
                 cargo,
                 root,
                 "emulator-one-token",
-                bundle_path(manifest_dir, support["emulator_one_token_moe"]),
+                bundle_path(manifest_dir, support["emulator_one_token_moe"], allow_absolute_inputs),
             )
             + ["--topology", "MoeTiny"],
         ]
@@ -259,7 +280,7 @@ def build_commands(
                 cargo,
                 root,
                 "emulator-one-token",
-                bundle_path(manifest_dir, dense_emulator),
+                bundle_path(manifest_dir, dense_emulator, allow_absolute_inputs),
             )
             + ["--topology", "MoeTinyDenseMatched"]
         )
@@ -286,7 +307,15 @@ def build_commands(
     )
 
     frontier = require_object(manifest, ["frontier"])
-    commands.append(frontier_command(cargo, root, manifest_dir, frontier))
+    commands.append(
+        frontier_command(
+            cargo,
+            root,
+            manifest_dir,
+            frontier,
+            allow_absolute_inputs=allow_absolute_inputs,
+        )
+    )
 
     report = require_object(manifest, ["report"])
     commands.append(report_command(cargo, root, report))
@@ -472,14 +501,22 @@ def support_command(cargo: str, root: Path, kind: str, path: Path) -> list[str]:
 
 
 def frontier_command(
-    cargo: str, root: Path, manifest_dir: Path, frontier: dict[str, Any]
+    cargo: str,
+    root: Path,
+    manifest_dir: Path,
+    frontier: dict[str, Any],
+    *,
+    allow_absolute_inputs: bool = False,
 ) -> list[str]:
     moe_conformance = bundle_path(
-        manifest_dir, require_string(frontier, ["moe_conformance"], "frontier.moe_conformance")
+        manifest_dir,
+        require_string(frontier, ["moe_conformance"], "frontier.moe_conformance"),
+        allow_absolute_inputs,
     )
     dense_conformance = bundle_path(
         manifest_dir,
         require_string(frontier, ["dense_conformance"], "frontier.dense_conformance"),
+        allow_absolute_inputs,
     )
     moe_bytes = require_u64_list(
         frontier,
@@ -512,7 +549,7 @@ def frontier_command(
         if value is not None:
             if not isinstance(value, str) or not value.strip():
                 raise AssembleError(f"frontier.{key} must be a non-empty string")
-            command.extend([flag, str(bundle_path(manifest_dir, value))])
+            command.extend([flag, str(bundle_path(manifest_dir, value, allow_absolute_inputs))])
     return command
 
 
@@ -609,9 +646,13 @@ def missing_input_paths(commands: list[list[str]]) -> list[Path]:
     return missing
 
 
-def bundle_path(manifest_dir: Path, value: str) -> Path:
+def bundle_path(manifest_dir: Path, value: str, allow_absolute_inputs: bool = False) -> Path:
     path = Path(value)
     if path.is_absolute():
+        if not allow_absolute_inputs:
+            raise AssembleError(
+                f"absolute bundle input path requires --allow-absolute-inputs: {value}"
+            )
         return path.resolve()
     root = manifest_dir.resolve()
     candidate = (root / path).resolve()
