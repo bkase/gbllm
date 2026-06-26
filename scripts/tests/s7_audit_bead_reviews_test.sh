@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+tmp="$(mktemp -d /tmp/s7-audit-bead-reviews-test.XXXXXX)"
+trap 'rm -rf "$tmp"' EXIT
+issues="$tmp/issues.json"
+
+python3 - "$issues" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+issues = [
+    {
+        "id": "bd-pass",
+        "title": "Synthetic S7 closed bead",
+        "status": "closed",
+        "close_reason": "Gemini ACPX review: PASS\nClaude ACPX review: PASS",
+        "comments": [],
+    },
+    {
+        "id": "bd-manager",
+        "title": "Synthetic S7 dispositioned bead",
+        "status": "closed",
+        "close_reason": "Gemini ACPX review: NEEDS_CHANGES\nClaude ACPX review: PASS",
+        "comments": [
+            {
+                "text": "Manager disposition: follow-up absorbed the Gemini finding. No additional ACPX review required.",
+            }
+        ],
+    },
+    {
+        "id": "bd-non-blocking",
+        "title": "Synthetic S7 non-blocking concern bead",
+        "status": "closed",
+        "close_reason": (
+            "Gemini ACPX review: PASS\n"
+            "Claude CONCERNS were closure-hygiene only, not code blockers."
+        ),
+        "comments": [],
+    },
+    {
+        "id": "bd-tombstone",
+        "title": "Synthetic S7 consolidated bead",
+        "status": "tombstone",
+        "close_reason": "",
+        "comments": [],
+    },
+]
+Path(sys.argv[1]).write_text(json.dumps(issues, indent=2) + "\n", encoding="utf-8")
+PY
+
+scripts/review/f-s7/audit-bead-reviews.py --issues-file "$issues" \
+  >/tmp/s7-audit-bead-reviews-ok.out
+rg -n "S7 bead review coverage: ok" /tmp/s7-audit-bead-reviews-ok.out >/dev/null
+
+python3 - "$issues" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+issues = [
+    {
+        "id": "bd-failed-gemini",
+        "title": "Synthetic S7 Gemini route failure",
+        "status": "closed",
+        "close_reason": (
+            "Claude ACPX review: PASS\n"
+            "Gemini ACPX review: attempted, but failed before review. No Gemini PASS is claimed."
+        ),
+        "comments": [],
+    }
+]
+Path(sys.argv[1]).write_text(json.dumps(issues, indent=2) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/audit-bead-reviews.py --issues-file "$issues" \
+  >/tmp/s7-audit-bead-reviews-bad.out 2>&1; then
+  echo "expected failed Gemini route to fail audit" >&2
+  exit 1
+fi
+rg -n "bd-failed-gemini: missing gemini review evidence" \
+  /tmp/s7-audit-bead-reviews-bad.out >/dev/null
+
+python3 - "$issues" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+issues = [
+    {
+        "id": "bd-open",
+        "title": "Synthetic S7 open bead",
+        "status": "in_progress",
+        "close_reason": "Gemini ACPX review: PASS\nClaude ACPX review: PASS",
+        "comments": [],
+    }
+]
+Path(sys.argv[1]).write_text(json.dumps(issues, indent=2) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/audit-bead-reviews.py --issues-file "$issues" \
+  >/tmp/s7-audit-bead-reviews-bad.out 2>&1; then
+  echo "expected open bead to fail audit" >&2
+  exit 1
+fi
+rg -n "bd-open: status is in_progress" /tmp/s7-audit-bead-reviews-bad.out >/dev/null
+
+scripts/review/f-s7/audit-bead-reviews.py --issues-file "$issues" --json \
+  >/tmp/s7-audit-bead-reviews-json.out || true
+rg -n '"status": "needs_changes"' /tmp/s7-audit-bead-reviews-json.out >/dev/null
+
+echo "s7_audit_bead_reviews_test: ok"

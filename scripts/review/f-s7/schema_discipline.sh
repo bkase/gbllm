@@ -29,6 +29,7 @@ ARTIFACT_VALIDATOR="scripts/review/f-s7/validate-artifacts.py"
 REVIEW_VALIDATOR="scripts/review/f-s7/validate-reviews.py"
 PACKET_ASSEMBLER="scripts/review/f-s7/assemble-packet.py"
 ACPX_REVIEW_RUNNER="scripts/review/f-s7/run-acpx-reviews.py"
+BEAD_REVIEW_AUDITOR="scripts/review/f-s7/audit-bead-reviews.py"
 
 require_present() {
   local pattern="$1"
@@ -253,6 +254,7 @@ require_present 's7_preregistration_pin_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_validate_artifacts_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_validate_report_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_validate_reviews_test\.sh' "$S7_PR_WORKFLOW"
+require_present 's7_audit_bead_reviews_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_assemble_packet_test\.sh' "$S7_PR_WORKFLOW"
 require_present 's7_run_acpx_reviews_test\.sh' "$S7_PR_WORKFLOW"
 require_present 'actions/upload-artifact@v4' "$S7_PR_WORKFLOW"
@@ -326,6 +328,14 @@ require_present 'status must be one of' "$REVIEW_VALIDATOR"
 require_present 'must be an object' "$REVIEW_VALIDATOR"
 require_present 'transport.*acpx' "$REVIEW_VALIDATOR"
 require_present 'command must record an ACPX invocation prefix' "$REVIEW_VALIDATOR"
+require_present 'audit-bead-reviews\.py' "$VERIFY_PACKET_SCRIPT"
+require_present 'S7 bead review coverage audit failed' "$VERIFY_PACKET_SCRIPT"
+require_present 'S7 bead review coverage: NEEDS_CHANGES' "$BEAD_REVIEW_AUDITOR"
+require_present '--issues-file' "$BEAD_REVIEW_AUDITOR"
+require_present 'manager disposition' "$BEAD_REVIEW_AUDITOR"
+require_present 'no additional acpx review required' "$BEAD_REVIEW_AUDITOR"
+require_present 'non_blocking_review' "$BEAD_REVIEW_AUDITOR"
+require_present 'missing .* review evidence' "$BEAD_REVIEW_AUDITOR"
 require_present 's7_production_bundle_manifest\.v1' "$PACKET_ASSEMBLER"
 require_present '--write-template' "$PACKET_ASSEMBLER"
 require_present '--check-inputs' "$PACKET_ASSEMBLER"
@@ -388,6 +398,10 @@ require_present 'docs/review/f-s7/raw' "$ACPX_REVIEW_RUNNER"
 }
 [[ -x "$REVIEW_VALIDATOR" ]] || {
   echo "schema discipline failed: $REVIEW_VALIDATOR must be executable" >&2
+  exit 1
+}
+[[ -x "$BEAD_REVIEW_AUDITOR" ]] || {
+  echo "schema discipline failed: $BEAD_REVIEW_AUDITOR must be executable" >&2
   exit 1
 }
 
