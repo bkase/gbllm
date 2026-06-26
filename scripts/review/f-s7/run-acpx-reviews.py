@@ -15,7 +15,6 @@ from typing import Any
 
 
 PACKET_BEAD = "bd-2v9r"
-DEFAULT_REVIEW_CWD = "/Users/bkase/Documents/gbllm"
 DEFAULT_REVIEW_DIR = "docs/review/f-s7/reviews"
 DEFAULT_BEAD_REVIEW_DIR = "docs/review/f-s7/bead-reviews"
 DEFAULT_RAW_DIR = "docs/review/f-s7/raw"
@@ -49,7 +48,10 @@ def main() -> int:
         )
     )
     parser.add_argument("--root", default=".", help="repository root whose HEAD is reviewed")
-    parser.add_argument("--review-cwd", default=DEFAULT_REVIEW_CWD, help="ACPX --cwd value")
+    parser.add_argument(
+        "--review-cwd",
+        help="ACPX --cwd value; defaults to the resolved --root so reviewers inspect this packet",
+    )
     parser.add_argument("--reviewer", choices=[*REVIEWERS, "all"], default="all")
     parser.add_argument("--bead", default=PACKET_BEAD, help="bead id under review")
     parser.add_argument(
@@ -105,6 +107,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
+    review_cwd = Path(args.review_cwd).resolve() if args.review_cwd else root
     try:
         if not args.bead_review and args.bead != PACKET_BEAD:
             raise ReviewRunnerError("--bead requires --bead-review unless reviewing the final packet bead")
@@ -118,7 +121,7 @@ def main() -> int:
                 bead=args.bead,
                 bead_review=args.bead_review,
                 personas=personas,
-                review_cwd=args.review_cwd,
+                review_cwd=str(review_cwd),
                 timeout=args.timeout,
                 gemini_agent=args.gemini_agent,
                 claude_agent=args.claude_agent,
@@ -141,7 +144,7 @@ def main() -> int:
     if args.preflight:
         return run_preflight(
             root=root,
-            review_cwd=Path(args.review_cwd),
+            review_cwd=review_cwd,
             expected_head=head,
             reviewers=reviewers,
             acpx=args.acpx,
@@ -150,7 +153,7 @@ def main() -> int:
         )
 
     try:
-        validate_review_cwd_head(Path(args.review_cwd), head)
+        validate_review_cwd_head(review_cwd, head)
     except ReviewRunnerError as error:
         print("S7 ACPX review runner: NEEDS_CHANGES")
         print(f" - {error}")

@@ -176,6 +176,32 @@ rg -n "ACPX review cwd HEAD mismatch" "$tmp/mismatch.out" >/dev/null
 test ! -d "$mismatch_root/docs/review/f-s7/reviews"
 test ! -d "$mismatch_root/docs/review/f-s7/raw"
 
+default_cwd_repo="$tmp/default-cwd-repo"
+make_repo "$default_cwd_repo"
+default_cwd_resolved="$(cd "$default_cwd_repo" && pwd -P)"
+scripts/review/f-s7/run-acpx-reviews.py \
+  --root "$default_cwd_repo" \
+  --acpx "$fake_acpx" \
+  --timeout 1 \
+  --reviewer claude \
+  --dry-run >"$tmp/default-cwd-dry.out"
+
+rg -n -- "--cwd $default_cwd_resolved" "$tmp/default-cwd-dry.out" >/dev/null
+if rg -n -- "--cwd /Users/bkase/Documents/gbllm" "$tmp/default-cwd-dry.out" >/dev/null; then
+  echo "run-acpx-reviews must not default ACPX reviews to a sibling checkout" >&2
+  exit 1
+fi
+
+scripts/review/f-s7/run-acpx-reviews.py \
+  --root "$default_cwd_repo" \
+  --acpx "$fake_acpx" \
+  --timeout 1 \
+  --reviewer claude \
+  --preflight >"$tmp/default-cwd-preflight.out"
+
+rg -n "S7 ACPX review preflight: ok" "$tmp/default-cwd-preflight.out" >/dev/null
+rg -n "review cwd HEAD matches packet root: $default_cwd_resolved" "$tmp/default-cwd-preflight.out" >/dev/null
+
 dry_repo="$tmp/dry-repo"
 make_repo "$dry_repo"
 scripts/review/f-s7/run-acpx-reviews.py \
