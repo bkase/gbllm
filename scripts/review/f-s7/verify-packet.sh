@@ -356,8 +356,35 @@ run_closure_dependency_auditor() {
   fi
 }
 
+require_clean_production_worktree() {
+  if [[ "$SELF_TEST" -eq 1 || "$REQUIRE_PRODUCTION" -eq 0 ]]; then
+    return
+  fi
+  if ! git -C "$CHECK_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    record_failure "S7 production closure verification requires CHECK_ROOT to be a git worktree: $CHECK_ROOT"
+    return
+  fi
+
+  local status_output preview stderr_file
+  stderr_file="$(mktemp -t s7-verify-packet-git-status.XXXXXX)"
+  if ! status_output="$(git -C "$CHECK_ROOT" status --porcelain --untracked-files=all --ignored=no 2>"$stderr_file")"; then
+    local detail
+    detail="$(tr '\n' ' ' <"$stderr_file" | sed 's/[[:space:]]\+/ /g' | cut -c1-300)"
+    rm -f "$stderr_file"
+    record_failure "S7 production closure verification could not inspect git worktree status${detail:+: $detail}"
+    return
+  fi
+  rm -f "$stderr_file"
+  if [[ -n "$status_output" ]]; then
+    preview="$(printf '%s\n' "$status_output" | sed -n '1,8p' | sed 's/[[:space:]]\+/ /g' | paste -sd '; ' -)"
+    record_failure "S7 production closure verification requires clean git worktree before review/head validation; dirty status: $preview"
+  fi
+}
+
 check_production_surfaces() {
   local kind rel_path label schema
+
+  require_clean_production_worktree
 
   while IFS=$'\t' read -r kind rel_path label; do
     case "$kind" in

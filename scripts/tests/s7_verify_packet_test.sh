@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+tmp="$(mktemp -d /tmp/s7-verify-packet-test.XXXXXX)"
+dirty_probe="experiments/S7/verify-packet-dirty-probe.tmp"
+rm -f "$dirty_probe"
+trap 'rm -f "$dirty_probe"; rm -rf "$tmp"' EXIT
+
 output="$(scripts/review/f-s7/verify-packet.sh --self-test)"
 
 for expected in \
@@ -26,5 +31,14 @@ do
     exit 1
   fi
 done
+
+printf 'dirty packet probe\n' >"$dirty_probe"
+if scripts/review/f-s7/verify-packet.sh --skip-gates >"$tmp/dirty.out" 2>&1; then
+  echo "expected production verify-packet to reject a dirty git worktree" >&2
+  exit 1
+fi
+rg -n "S7 production closure verification requires clean git worktree before review/head validation" \
+  "$tmp/dirty.out" >/dev/null
+rm -f "$dirty_probe"
 
 echo "s7_verify_packet_test: ok"
