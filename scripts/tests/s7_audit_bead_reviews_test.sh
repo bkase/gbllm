@@ -134,6 +134,45 @@ if scripts/review/f-s7/audit-bead-reviews.py \
 fi
 rg -n "verdict must be 'PASS'" /tmp/s7-audit-bead-reviews-evidence-bad.out >/dev/null
 
+python3 - "$issues" "$evidence_dir/bd-file-gemini.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+issues = [
+    {
+        "id": "bd-file",
+        "title": "Synthetic S7 bead with weak structured evidence",
+        "status": "closed",
+        "close_reason": "Claude ACPX review: PASS",
+        "comments": [],
+    }
+]
+Path(sys.argv[1]).write_text(json.dumps(issues, indent=2) + "\n", encoding="utf-8")
+payload = {
+    "schema": "s7_bead_acpx_review.v1",
+    "bead": "bd-file",
+    "reviewer": "gemini",
+    "transport": "acpx",
+    "verdict": "PASS",
+    "personas": ["P1", "P2"],
+    "command": "acpx --agent 'gemini --acp' exec review",
+    "reviewed_head": "a" * 40,
+    "summary": "Structured Gemini bead review omitted always-on personas.",
+    "findings": [],
+}
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/audit-bead-reviews.py \
+  --issues-file "$issues" \
+  --evidence-dir "$evidence_dir" \
+  >/tmp/s7-audit-bead-reviews-evidence-weak.out 2>&1; then
+  echo "expected missing always-on personas to fail audit" >&2
+  exit 1
+fi
+rg -n "missing always-on persona" /tmp/s7-audit-bead-reviews-evidence-weak.out >/dev/null
+
 python3 - "$issues" <<'PY'
 from pathlib import Path
 import json

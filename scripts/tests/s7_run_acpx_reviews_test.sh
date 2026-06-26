@@ -43,6 +43,9 @@ personas = {
     "gemini": ["P3", "P4", "P5", "P6", "P7", "P8"],
     "claude": ["P3", "P5", "P6", "P8"],
 }[reviewer]
+persona_override = os.environ.get("S7_FAKE_REVIEW_PERSONAS")
+if persona_override:
+    personas = [item for item in persona_override.split(",") if item]
 verdict = os.environ.get("S7_FAKE_REVIEW_VERDICT", "PASS")
 payload = {
     "verdict": verdict,
@@ -116,6 +119,25 @@ rg -n '"bead": "bd-17n0"' \
   "$bead_review_repo/docs/review/f-s7/bead-reviews/bd-17n0-gemini.json" >/dev/null
 rg -n "Review completed F-S7 bead bd-17n0" \
   "$bead_review_repo/docs/review/f-s7/raw/bd-17n0-gemini.command.txt" >/dev/null
+
+bead_bad_persona_repo="$tmp/bead-bad-persona-repo"
+make_repo "$bead_bad_persona_repo"
+if S7_FAKE_REVIEW_VERDICT=PASS S7_FAKE_REVIEW_PERSONAS=P3,P4 \
+  scripts/review/f-s7/run-acpx-reviews.py \
+    --root "$bead_bad_persona_repo" \
+    --review-cwd "$bead_bad_persona_repo" \
+    --acpx "$fake_acpx" \
+    --timeout 1 \
+    --reviewer gemini \
+    --bead-review \
+    --bead bd-17n0 \
+    --personas P3,P4,P5,P6 >"$tmp/bead-bad-persona.out" 2>&1; then
+  echo "expected bead review missing requested personas to fail" >&2
+  exit 1
+fi
+rg -n "review personas missing requested persona ids" "$tmp/bead-bad-persona.out" >/dev/null
+test ! -f "$bead_bad_persona_repo/docs/review/f-s7/bead-reviews/bd-17n0-gemini.json"
+test -f "$bead_bad_persona_repo/docs/review/f-s7/raw/bd-17n0-gemini.stdout.txt"
 
 if scripts/review/f-s7/run-acpx-reviews.py \
   --root "$bead_review_repo" \

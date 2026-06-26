@@ -515,6 +515,11 @@ def evidence_from_payload(payload: dict[str, Any], plan: ReviewPlan, head: str) 
     personas = payload.get("personas")
     if not isinstance(personas, list) or not all(isinstance(item, str) for item in personas):
         raise ReviewRunnerError("review personas must be a list of persona ids")
+    missing_personas = sorted(set(plan.personas) - set(personas))
+    if missing_personas:
+        raise ReviewRunnerError(
+            f"review personas missing requested persona ids: {missing_personas}"
+        )
     summary = payload.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         raise ReviewRunnerError("review summary must be a non-empty string")

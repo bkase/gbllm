@@ -17,6 +17,7 @@ DEFAULT_LABELS = ("slice:S7", "s7")
 DEFAULT_EVIDENCE_DIR = "docs/review/f-s7/bead-reviews"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ACPX_COMMAND_RE = re.compile(r"^\s*acpx(?:\s|$)", re.IGNORECASE)
+ALWAYS_ON_PERSONAS = {"P5", "P6"}
 TOMBSTONE_STATUSES = {"tombstone"}
 CLOSED_STATUSES = {"closed"}
 MANAGER_DISPOSITION_RE = re.compile(
@@ -305,6 +306,12 @@ def structured_reviewer_coverage(
     personas = payload.get("personas")
     if not isinstance(personas, list) or not all(isinstance(item, str) for item in personas):
         errors.append(f"{path} personas must be a list of persona ids")
+        observed_personas: set[str] = set()
+    else:
+        observed_personas = set(personas)
+    missing_always_on = sorted(ALWAYS_ON_PERSONAS - observed_personas)
+    if missing_always_on:
+        errors.append(f"{path} missing always-on persona(s): {missing_always_on}")
     findings = payload.get("findings")
     if not isinstance(findings, list):
         errors.append(f"{path} findings must be a list")
