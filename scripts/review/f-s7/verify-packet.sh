@@ -9,6 +9,7 @@ REPORT_EMITTER="scripts/review/f-s7/emit-report.py"
 ARTIFACT_VALIDATOR="scripts/review/f-s7/validate-artifacts.py"
 REVIEW_VALIDATOR="scripts/review/f-s7/validate-reviews.py"
 BEAD_REVIEW_AUDITOR="scripts/review/f-s7/audit-bead-reviews.py"
+CLOSURE_DEP_AUDITOR="scripts/review/f-s7/audit-closure-deps.py"
 RUN_GATES=1
 REQUIRE_PRODUCTION=1
 RUN_PREREG=1
@@ -145,6 +146,7 @@ scripts/review/f-s7/validate-report.py
 scripts/review/f-s7/validate-artifacts.py
 scripts/review/f-s7/validate-reviews.py
 scripts/review/f-s7/audit-bead-reviews.py
+scripts/review/f-s7/audit-closure-deps.py
 cargo run -q -p gbf-cli --no-default-features --features s7 -- --log-level off s7 validate-closure --root CHECK_ROOT --predictions-verified
 GATES
 }
@@ -341,6 +343,19 @@ run_bead_review_auditor() {
   fi
 }
 
+run_closure_dependency_auditor() {
+  if [[ "$SELF_TEST" -eq 1 ]]; then
+    return
+  fi
+  if ! "$ROOT/$CLOSURE_DEP_AUDITOR" --root "$ROOT" \
+    >/tmp/s7-closure-dep-audit.stdout \
+    2>/tmp/s7-closure-dep-audit.stderr; then
+    local detail
+    detail="$(tr '\n' ' ' </tmp/s7-closure-dep-audit.stdout | sed 's/[[:space:]]\+/ /g' | cut -c1-500)"
+    record_failure "S7 closure dependency audit failed${detail:+: $detail}"
+  fi
+}
+
 check_production_surfaces() {
   local kind rel_path label schema
 
@@ -365,6 +380,7 @@ check_production_surfaces() {
   run_artifact_validator
   run_review_validator
   run_bead_review_auditor
+  run_closure_dependency_auditor
   run_preregistration_gate
   run_rust_closure_gate
 }
