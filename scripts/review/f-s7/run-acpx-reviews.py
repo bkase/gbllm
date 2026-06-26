@@ -95,6 +95,13 @@ def main() -> int:
         print("S7 ACPX review runner: dry-run ok")
         return 0
 
+    try:
+        validate_review_cwd_head(Path(args.review_cwd), head)
+    except ReviewRunnerError as error:
+        print("S7 ACPX review runner: NEEDS_CHANGES")
+        print(f" - {error}")
+        return 1
+
     errors: list[str] = []
     review_dir = output_dir(root, args.review_dir)
     raw_dir = output_dir(root, args.raw_dir)
@@ -326,6 +333,15 @@ def git_head(root: Path) -> str:
     if not COMMIT_RE.match(head):
         raise ReviewRunnerError(f"git HEAD must be a 40-hex commit id, observed {head!r}")
     return head
+
+
+def validate_review_cwd_head(review_cwd: Path, expected_head: str) -> None:
+    actual_head = git_head(review_cwd)
+    if actual_head != expected_head:
+        raise ReviewRunnerError(
+            f"ACPX review cwd HEAD mismatch: {review_cwd} is at {actual_head}, "
+            f"but packet root is at {expected_head}"
+        )
 
 
 def write_text(path: Path, text: str) -> None:

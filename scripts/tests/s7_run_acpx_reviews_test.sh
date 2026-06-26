@@ -96,6 +96,31 @@ rg -n "review verdict was NEEDS_CHANGES; not writing PASS evidence" "$tmp/nonpas
 test ! -f "$nonpass_repo/docs/review/f-s7/reviews/bd-2v9r-gemini.json"
 test -f "$nonpass_repo/docs/review/f-s7/raw/bd-2v9r-gemini.nonpass.json"
 
+mismatch_root="$tmp/mismatch-root"
+mismatch_cwd="$tmp/mismatch-cwd"
+make_repo "$mismatch_root"
+make_repo "$mismatch_cwd"
+python3 - "$mismatch_cwd/README.md" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text("s7 review test repo, second commit\n", encoding="utf-8")
+PY
+git -C "$mismatch_cwd" add README.md
+git -C "$mismatch_cwd" commit -qm second
+
+if S7_FAKE_REVIEW_VERDICT=PASS scripts/review/f-s7/run-acpx-reviews.py \
+  --root "$mismatch_root" \
+  --review-cwd "$mismatch_cwd" \
+  --acpx "$fake_acpx" \
+  --timeout 1 >"$tmp/mismatch.out" 2>&1; then
+  echo "expected review cwd HEAD mismatch to fail" >&2
+  exit 1
+fi
+rg -n "ACPX review cwd HEAD mismatch" "$tmp/mismatch.out" >/dev/null
+test ! -d "$mismatch_root/docs/review/f-s7/reviews"
+test ! -d "$mismatch_root/docs/review/f-s7/raw"
+
 dry_repo="$tmp/dry-repo"
 make_repo "$dry_repo"
 scripts/review/f-s7/run-acpx-reviews.py \

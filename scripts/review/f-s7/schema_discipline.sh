@@ -352,6 +352,8 @@ require_present 'S7_CLAUDE_ACP_AGENT' "$ACPX_REVIEW_RUNNER"
 require_present 'claude' "$ACPX_REVIEW_RUNNER"
 require_present 'S7 ACPX review runner: NEEDS_CHANGES' "$ACPX_REVIEW_RUNNER"
 require_present 'not writing PASS evidence' "$ACPX_REVIEW_RUNNER"
+require_present 'validate_review_cwd_head' "$ACPX_REVIEW_RUNNER"
+require_present 'ACPX review cwd HEAD mismatch' "$ACPX_REVIEW_RUNNER"
 require_present 'validate-reviews\.py' "$ACPX_REVIEW_RUNNER"
 require_present 'docs/review/f-s7/raw' "$ACPX_REVIEW_RUNNER"
 
