@@ -63,6 +63,21 @@ if not (report_index < review_index < verify_index):
     raise SystemExit("run-acpx-reviews.py must run after emit-report and before verify-packet")
 PY
 
+scripts/review/f-s7/assemble-packet.py \
+  --manifest "$manifest" \
+  --root "$ROOT" \
+  --cargo cargo \
+  --verify-mode skip-gates \
+  --run-reviews \
+  --dry-run >"$tmp/dry-run-reviews-default-cwd.out"
+
+rg -n "run-acpx-reviews\\.py" "$tmp/dry-run-reviews-default-cwd.out" >/dev/null
+rg -n -- "--review-cwd $ROOT" "$tmp/dry-run-reviews-default-cwd.out" >/dev/null
+if rg -n -- "--review-cwd /Users/bkase/Documents/gbllm" "$tmp/dry-run-reviews-default-cwd.out" >/dev/null; then
+  echo "assemble-packet must not default ACPX reviews to a sibling checkout" >&2
+  exit 1
+fi
+
 if scripts/review/f-s7/assemble-packet.py \
   --manifest "$manifest" \
   --root "$ROOT" \
