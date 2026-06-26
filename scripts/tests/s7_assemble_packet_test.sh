@@ -183,6 +183,29 @@ if scripts/review/f-s7/assemble-packet.py \
 fi
 rg -n "runs\\.MoeTiny\\.0 has unknown field\\(s\\): runlog" "$tmp/unknown.out" >/dev/null
 
+python3 - "$manifest" "$tmp/escape-manifest.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload["runs"]["MoeTiny"]["0"]["run_log"] = "../stale-run-log.json"
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/escape-manifest.json" \
+  --root "$ROOT" \
+  --dry-run >"$tmp/escape.out" 2>&1; then
+  echo "expected manifest-relative path escape to fail" >&2
+  exit 1
+fi
+rg -n "relative bundle input path escapes manifest directory: \\../stale-run-log\\.json" "$tmp/escape.out" >/dev/null
+if rg -n " materialize-run " "$tmp/escape.out" >/dev/null; then
+  echo "path traversal should fail before printing executable commands" >&2
+  exit 1
+fi
+
 python3 - "$manifest" "$tmp/bad-decision-manifest.json" <<'PY'
 from pathlib import Path
 import json

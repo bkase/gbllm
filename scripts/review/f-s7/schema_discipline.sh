@@ -375,6 +375,7 @@ require_present 'non-dry-run production assembly requires --run-reviews' "$PACKE
 require_present '--gemini-agent' "$PACKET_ASSEMBLER"
 require_present '--claude-agent' "$PACKET_ASSEMBLER"
 require_present 'missing_input_paths' "$PACKET_ASSEMBLER"
+require_present 'relative bundle input path escapes manifest directory' "$PACKET_ASSEMBLER" "scripts/tests/s7_assemble_packet_test.sh"
 require_present 'has unknown field\(s\)' "$PACKET_ASSEMBLER"
 require_present 'materialize-run' "$PACKET_ASSEMBLER"
 require_present 'materialize-support-artifact' "$PACKET_ASSEMBLER"

@@ -612,8 +612,16 @@ def missing_input_paths(commands: list[list[str]]) -> list[Path]:
 def bundle_path(manifest_dir: Path, value: str) -> Path:
     path = Path(value)
     if path.is_absolute():
-        return path
-    return (manifest_dir / path).resolve()
+        return path.resolve()
+    root = manifest_dir.resolve()
+    candidate = (root / path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise AssembleError(
+            f"relative bundle input path escapes manifest directory: {value}"
+        ) from error
+    return candidate
 
 
 def require_object(
