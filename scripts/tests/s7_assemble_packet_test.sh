@@ -13,6 +13,7 @@ mkdir -p "$(dirname "$manifest")"
 scripts/review/f-s7/assemble-packet.py --write-template "$manifest" >"$tmp/template.out"
 rg -n "wrote manifest template" "$tmp/template.out" >/dev/null
 rg -n '"schema": "s7_production_bundle_manifest.v1"' "$manifest" >/dev/null
+rg -n '"decision": "ProceedToS8"' "$manifest" >/dev/null
 
 scripts/review/f-s7/assemble-packet.py \
   --manifest "$manifest" \
@@ -27,6 +28,7 @@ rg -n "derive-summaries" "$tmp/dry-run.out" >/dev/null
 rg -n "derive-comparison" "$tmp/dry-run.out" >/dev/null
 rg -n "derive-frontier" "$tmp/dry-run.out" >/dev/null
 rg -n "emit-report" "$tmp/dry-run.out" >/dev/null
+rg -n -- "--decision ProceedToS8" "$tmp/dry-run.out" >/dev/null
 rg -n "verify-packet\\.sh --skip-gates" "$tmp/dry-run.out" >/dev/null
 rg -n -- "--topology MoeTinyDenseMatched" "$tmp/dry-run.out" >/dev/null
 rg -n -- "$tmp/bundle/runs/MoeTiny/seed-0/run-log\\.json" "$tmp/dry-run.out" >/dev/null

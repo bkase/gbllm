@@ -391,6 +391,7 @@ def write_template(path: Path) -> None:
         },
         "report": {
             "s7_outcome": "PassClean",
+            "decision": "ProceedToS8",
             "predictions_section_hash": "sha256:" + "3" * 64,
             "predictions_commit": "4" * 40,
             "first_result_commit": "5" * 40,
