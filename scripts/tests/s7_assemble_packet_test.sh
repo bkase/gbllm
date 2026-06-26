@@ -157,6 +157,25 @@ if rg -n " materialize-run " "$tmp/bad-decision.out" >/dev/null; then
   exit 1
 fi
 
+python3 - "$manifest" "$tmp/missing-decision-manifest.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload["report"].pop("decision")
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/missing-decision-manifest.json" \
+  --root "$ROOT" \
+  --dry-run >"$tmp/missing-decision.out" 2>&1; then
+  echo "expected missing report decision to fail" >&2
+  exit 1
+fi
+rg -n "report\\.decision must be a non-empty string" "$tmp/missing-decision.out" >/dev/null
+
 python3 - "$manifest" "$tmp/bad-rfc-revision-manifest.json" <<'PY'
 from pathlib import Path
 import json
@@ -175,6 +194,25 @@ if scripts/review/f-s7/assemble-packet.py \
   exit 1
 fi
 rg -n "report\\.rfc_revision must be a 40-hex git commit id or sha256 hash" "$tmp/bad-rfc-revision.out" >/dev/null
+
+python3 - "$manifest" "$tmp/missing-rfc-revision-manifest.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload["report"].pop("rfc_revision")
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/missing-rfc-revision-manifest.json" \
+  --root "$ROOT" \
+  --dry-run >"$tmp/missing-rfc-revision.out" 2>&1; then
+  echo "expected missing report rfc_revision to fail" >&2
+  exit 1
+fi
+rg -n "report\\.rfc_revision must be a non-empty string" "$tmp/missing-rfc-revision.out" >/dev/null
 
 if scripts/review/f-s7/assemble-packet.py --root "$ROOT" --dry-run >"$tmp/missing.out" 2>&1; then
   echo "expected missing manifest argument to fail" >&2
