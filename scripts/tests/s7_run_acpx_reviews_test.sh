@@ -182,4 +182,57 @@ S7_CLAUDE_ACP_AGENT="env-claude-acp --serve" scripts/review/f-s7/run-acpx-review
 
 rg -n -- "--agent 'env-claude-acp --serve'" "$tmp/dry-claude-env.out" >/dev/null
 
+preflight_repo="$tmp/preflight-repo"
+make_repo "$preflight_repo"
+preflight_home="$tmp/preflight-home"
+mkdir -p "$preflight_home/.gemini"
+cat >"$preflight_home/.gemini/settings.json" <<'JSON'
+{"security":{"auth":{"selectedType":"oauth-personal"}}}
+JSON
+
+if env \
+  -u GEMINI_API_KEY \
+  -u GOOGLE_API_KEY \
+  -u GOOGLE_CLOUD_PROJECT \
+  -u GOOGLE_APPLICATION_CREDENTIALS \
+  -u VERTEXAI_PROJECT \
+  -u VERTEX_AI_PROJECT \
+  -u CLOUDSDK_CORE_PROJECT \
+  -u ACPX_AUTH_GEMINI_API_KEY \
+  HOME="$preflight_home" \
+  scripts/review/f-s7/run-acpx-reviews.py \
+    --root "$preflight_repo" \
+    --review-cwd "$preflight_repo" \
+    --acpx "$fake_acpx" \
+    --reviewer gemini \
+    --preflight >"$tmp/preflight-default.out" 2>&1; then
+  echo "expected default Gemini preflight without non-interactive auth to fail" >&2
+  exit 1
+fi
+rg -n "S7 ACPX review preflight: NEEDS_CHANGES" "$tmp/preflight-default.out" >/dev/null
+rg -n "default Gemini ACP agent is likely to fail headlessly" "$tmp/preflight-default.out" >/dev/null
+rg -n "selectedType is 'oauth-personal'" "$tmp/preflight-default.out" >/dev/null
+rg -n "S7_GEMINI_ACP_AGENT/--gemini-agent" "$tmp/preflight-default.out" >/dev/null
+
+env \
+  -u GEMINI_API_KEY \
+  -u GOOGLE_API_KEY \
+  -u GOOGLE_CLOUD_PROJECT \
+  -u GOOGLE_APPLICATION_CREDENTIALS \
+  -u VERTEXAI_PROJECT \
+  -u VERTEX_AI_PROJECT \
+  -u CLOUDSDK_CORE_PROJECT \
+  -u ACPX_AUTH_GEMINI_API_KEY \
+  HOME="$preflight_home" \
+  scripts/review/f-s7/run-acpx-reviews.py \
+    --root "$preflight_repo" \
+    --review-cwd "$preflight_repo" \
+    --acpx "$fake_acpx" \
+    --reviewer gemini \
+    --gemini-agent "custom-gemini-acp --stdio" \
+    --preflight >"$tmp/preflight-custom.out"
+
+rg -n "S7 ACPX review preflight: ok" "$tmp/preflight-custom.out" >/dev/null
+rg -n "custom --gemini-agent" "$tmp/preflight-custom.out" >/dev/null
+
 echo "s7_run_acpx_reviews_test: ok"

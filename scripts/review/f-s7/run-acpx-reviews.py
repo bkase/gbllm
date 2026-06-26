@@ -22,6 +22,16 @@ DEFAULT_GEMINI_AGENT = "gemini --skip-trust -m gemini-3.1-pro-preview --acp"
 DEFAULT_CLAUDE_AGENT = ""
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REVIEWERS = ("gemini", "claude")
+GEMINI_AUTH_HINT_VARS = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "VERTEXAI_PROJECT",
+    "VERTEX_AI_PROJECT",
+    "CLOUDSDK_CORE_PROJECT",
+    "ACPX_AUTH_GEMINI_API_KEY",
+)
 REQUIRED_PERSONAS = {
     "gemini": ["P3", "P4", "P5", "P6", "P7", "P8"],
     "claude": ["P3", "P5", "P6", "P8"],
@@ -61,6 +71,14 @@ def main() -> int:
     parser.add_argument("--raw-dir", default=DEFAULT_RAW_DIR)
     parser.add_argument("--dry-run", action="store_true", help="print commands without running ACPX")
     parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "check review cwd/head alignment and obvious reviewer-auth blockers "
+            "without running ACPX or writing evidence"
+        ),
+    )
+    parser.add_argument(
         "--skip-final-validate",
         action="store_true",
         help="skip validate-reviews.py after writing PASS evidence; intended for focused tests only",
@@ -94,6 +112,17 @@ def main() -> int:
             print(f"# reviewer={plan.reviewer} personas={','.join(REQUIRED_PERSONAS[plan.reviewer])}")
         print("S7 ACPX review runner: dry-run ok")
         return 0
+
+    if args.preflight:
+        return run_preflight(
+            root=root,
+            review_cwd=Path(args.review_cwd),
+            expected_head=head,
+            reviewers=reviewers,
+            acpx=args.acpx,
+            gemini_agent=args.gemini_agent,
+            claude_agent=args.claude_agent,
+        )
 
     try:
         validate_review_cwd_head(Path(args.review_cwd), head)
@@ -172,6 +201,112 @@ class ReviewPlan:
         self.reviewer = reviewer
         self.command = command
         self.recorded_command = recorded_command
+
+
+def run_preflight(
+    *,
+    root: Path,
+    review_cwd: Path,
+    expected_head: str,
+    reviewers: tuple[str, ...],
+    acpx: str,
+    gemini_agent: str,
+    claude_agent: str,
+) -> int:
+    errors: list[str] = []
+    notes: list[str] = []
+    try:
+        validate_review_cwd_head(review_cwd, expected_head)
+        notes.append(f"review cwd HEAD matches packet root: {review_cwd}")
+    except ReviewRunnerError as error:
+        errors.append(str(error))
+
+    if "gemini" in reviewers:
+        if args_uses_custom_gemini_agent(gemini_agent):
+            notes.append("Gemini review uses custom --gemini-agent; auth preflight delegated to that agent")
+        errors.extend(gemini_preflight_errors(root, acpx, gemini_agent))
+    if "claude" in reviewers:
+        if claude_agent.strip():
+            notes.append("Claude review uses custom --claude-agent; auth preflight delegated to that agent")
+        else:
+            notes.append("Claude review uses ACPX built-in claude route")
+
+    if errors:
+        print("S7 ACPX review preflight: NEEDS_CHANGES")
+        for error in errors:
+            print(f" - {error}")
+        for note in notes:
+            print(f" - {note}")
+        return 1
+
+    print("S7 ACPX review preflight: ok")
+    for note in notes:
+        print(f" - {note}")
+    return 0
+
+
+def gemini_preflight_errors(root: Path, acpx: str, gemini_agent: str) -> list[str]:
+    if args_uses_custom_gemini_agent(gemini_agent):
+        return []
+
+    errors: list[str] = []
+    auth_env = sorted(name for name in GEMINI_AUTH_HINT_VARS if os.environ.get(name))
+    acpx_methods = acpx_auth_methods(root, acpx)
+    selected_type = gemini_selected_auth_type()
+    if auth_env or acpx_methods:
+        return []
+
+    detail = "no Gemini/Google/Vertex auth env vars or ACPX auth methods are configured"
+    if selected_type:
+        detail += f"; ~/.gemini/settings.json selectedType is {selected_type!r}"
+    errors.append(
+        "default Gemini ACP agent is likely to fail headlessly: "
+        f"{detail}. Set a non-interactive Gemini auth route or provide S7_GEMINI_ACP_AGENT/--gemini-agent."
+    )
+    return errors
+
+
+def args_uses_custom_gemini_agent(gemini_agent: str) -> bool:
+    return gemini_agent.strip() != DEFAULT_GEMINI_AGENT
+
+
+def acpx_auth_methods(root: Path, acpx: str) -> list[str]:
+    completed = subprocess.run(
+        [acpx, "config", "show"],
+        cwd=str(root),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        return []
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return []
+    methods = payload.get("authMethods")
+    if not isinstance(methods, list):
+        return []
+    return [str(method) for method in methods if str(method).strip()]
+
+
+def gemini_selected_auth_type() -> str | None:
+    settings = Path.home() / ".gemini" / "settings.json"
+    if not settings.is_file():
+        return None
+    try:
+        payload = json.loads(settings.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    security = payload.get("security")
+    if not isinstance(security, dict):
+        return None
+    auth = security.get("auth")
+    if not isinstance(auth, dict):
+        return None
+    selected = auth.get("selectedType")
+    return selected if isinstance(selected, str) and selected.strip() else None
 
 
 def review_plan(
