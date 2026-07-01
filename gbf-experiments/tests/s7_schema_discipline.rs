@@ -81,16 +81,19 @@ fn s7_cli_surface_names_replay_materialization_and_report_emission() {
     for required in [
         "Replay(S7ReplayArgs)",
         "MaterializeRun(S7MaterializeRunArgs)",
+        "ProduceProductionBundle(S7ProduceProductionBundleArgs)",
         "DeriveComparison(S7DeriveComparisonArgs)",
         "MaterializeSupportArtifact(S7MaterializeSupportArtifactArgs)",
         "EmitReport(S7EmitReportArgs)",
         "ValidateClosure(S7ValidateClosureArgs)",
         "gbf s7 materialize-run",
+        "gbf s7 produce-production-bundle",
         "gbf s7 derive-comparison",
         "gbf s7 materialize-support-artifact",
         "gbf s7 emit-report",
         "gbf s7 validate-closure",
         "materialize_completed_run_artifacts",
+        "produce_s7_production_bundle",
         "materialize_dense_vs_moe_comparison",
         "materialize_support_artifact",
         "scripts/review/f-s7/emit-report.py",
@@ -101,6 +104,50 @@ fn s7_cli_surface_names_replay_materialization_and_report_emission() {
         "ClosurePacket",
     ] {
         assert!(cli.contains(required), "S7 CLI source missing {required}");
+    }
+
+    let production_runner_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/s7/production_runner.rs");
+    let production_runner =
+        std::fs::read_to_string(production_runner_path).expect("S7 production runner exists");
+    for required in [
+        "S7ProductionBundleInputs",
+        "produce_s7_production_bundle",
+        "s7_production_bundle_manifest.v1",
+        "s7_production_runner.v1",
+        "S7_OPTIMIZER_STEPS",
+        "s7_grad_log.v1",
+        "s7_router_step_telemetry.v1",
+        "optimizer_step",
+        "BurnGradientsParams::from_grads",
+        "optimizer.step",
+        "live_burn_adamw_moe_lm_state_per_topology_seed",
+        "PRODUCTION_SWEEP_PRODUCER_KIND",
+        "gutenberg_manifest_sha",
+        "train_corpus_sha",
+        "val_corpus_sha",
+    ] {
+        assert!(
+            production_runner.contains(required),
+            "S7 production runner missing {required}"
+        );
+    }
+
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let assembler_path = workspace_root.join("scripts/review/f-s7/assemble-packet.py");
+    let assembler = std::fs::read_to_string(assembler_path).expect("S7 packet assembler exists");
+    for required in [
+        "validate_production_runner",
+        "s7_production_runner.v1",
+        "production_runner.sweep_producer_kind must be production_closure_retrain_score",
+        "production_runner.optimizer_steps must be",
+    ] {
+        assert!(
+            assembler.contains(required),
+            "S7 packet assembler missing {required}"
+        );
     }
 
     let adapter_path =

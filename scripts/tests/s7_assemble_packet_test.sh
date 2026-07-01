@@ -13,6 +13,14 @@ mkdir -p "$(dirname "$manifest")"
 scripts/review/f-s7/assemble-packet.py --write-template "$manifest" >"$tmp/template.out"
 rg -n "wrote manifest template" "$tmp/template.out" >/dev/null
 rg -n '"schema": "s7_production_bundle_manifest.v1"' "$manifest" >/dev/null
+rg -n '"production_runner": \{' "$manifest" >/dev/null
+rg -n '"schema": "s7_production_runner.v1"' "$manifest" >/dev/null
+rg -n '"bead_owner": "bd-3e10j"' "$manifest" >/dev/null
+rg -n '"optimizer_model_state": "live_burn_adamw_moe_lm_state_per_topology_seed"' "$manifest" >/dev/null
+rg -n '"grad_log_schema": "s7_grad_log.v1"' "$manifest" >/dev/null
+rg -n '"router_step_telemetry_schema": "s7_router_step_telemetry.v1"' "$manifest" >/dev/null
+rg -n '"optimizer_steps": 20000' "$manifest" >/dev/null
+rg -n '"sweep_producer_kind": "production_closure_retrain_score"' "$manifest" >/dev/null
 rg -n '"decision": "ProceedToS8"' "$manifest" >/dev/null
 
 scripts/review/f-s7/assemble-packet.py \
@@ -182,6 +190,48 @@ if scripts/review/f-s7/assemble-packet.py \
   exit 1
 fi
 rg -n "runs\\.MoeTiny\\.0 has unknown field\\(s\\): runlog" "$tmp/unknown.out" >/dev/null
+
+python3 - "$manifest" "$tmp/bad-runner-manifest.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload["production_runner"]["sweep_producer_kind"] = "deterministic_fixture_projection_score"
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/bad-runner-manifest.json" \
+  --root "$ROOT" \
+  --dry-run >"$tmp/bad-runner.out" 2>&1; then
+  echo "expected non-production runner provenance to fail" >&2
+  exit 1
+fi
+rg -n "production_runner\\.sweep_producer_kind must be production_closure_retrain_score" "$tmp/bad-runner.out" >/dev/null
+if rg -n " materialize-run " "$tmp/bad-runner.out" >/dev/null; then
+  echo "invalid production runner provenance should fail before printing executable commands" >&2
+  exit 1
+fi
+
+python3 - "$manifest" "$tmp/missing-runner-manifest.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload.pop("production_runner")
+Path(sys.argv[2]).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+if scripts/review/f-s7/assemble-packet.py \
+  --manifest "$tmp/missing-runner-manifest.json" \
+  --root "$ROOT" \
+  --dry-run >"$tmp/missing-runner.out" 2>&1; then
+  echo "expected missing production runner provenance to fail" >&2
+  exit 1
+fi
+rg -n "production_runner must be an object" "$tmp/missing-runner.out" >/dev/null
 
 python3 - "$manifest" "$tmp/escape-manifest.json" <<'PY'
 from pathlib import Path

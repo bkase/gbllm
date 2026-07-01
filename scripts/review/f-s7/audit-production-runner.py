@@ -36,6 +36,33 @@ PRODUCTION_ARTIFACT_GLOBS = (
     "experiments/S7/dense-vs-moe/comparison.json",
     "experiments/S7/frontier/frontier.json",
 )
+REQUIRED_CODE_SURFACE_SNIPPETS = (
+    ("gbf-experiments/src/s7/production_runner.rs", "BurnMoeS7ModelState"),
+    ("gbf-experiments/src/s7/production_runner.rs", "BurnByteMoeS7Model"),
+    ("gbf-experiments/src/s7/production_runner.rs", "produce_s7_production_bundle"),
+    ("gbf-experiments/src/s7/production_runner.rs", "S7ProductionBundleInputs"),
+    ("gbf-experiments/src/s7/production_runner.rs", "s7_production_bundle_manifest.v1"),
+    ("gbf-experiments/src/s7/production_runner.rs", "s7_production_runner.v1"),
+    ("gbf-experiments/src/s7/production_runner.rs", "S7_OPTIMIZER_STEPS"),
+    ("gbf-experiments/src/s7/production_runner.rs", "s7_grad_log.v1"),
+    ("gbf-experiments/src/s7/production_runner.rs", "s7_router_step_telemetry.v1"),
+    ("gbf-experiments/src/s7/production_runner.rs", "optimizer_step"),
+    ("gbf-experiments/src/s7/production_runner.rs", "BurnGradientsParams::from_grads"),
+    ("gbf-experiments/src/s7/production_runner.rs", "optimizer.step"),
+    ("gbf-experiments/src/s7/production_runner.rs", "PRODUCTION_SWEEP_PRODUCER_KIND"),
+    ("gbf-experiments/src/s7/production_runner.rs", "gutenberg_manifest_sha"),
+    ("gbf-experiments/src/s7/production_runner.rs", "train_corpus_sha"),
+    ("gbf-experiments/src/s7/production_runner.rs", "val_corpus_sha"),
+    ("gbf-experiments/src/s7/cli.rs", "ProduceProductionBundle"),
+    ("gbf-experiments/src/s7/cli.rs", "produce-production-bundle"),
+    ("scripts/review/f-s7/assemble-packet.py", "validate_production_runner"),
+    ("scripts/review/f-s7/assemble-packet.py", "s7_production_runner.v1"),
+)
+FORBIDDEN_CODE_SURFACE_SNIPPETS = (
+    ("gbf-experiments/src/s7/production_runner.rs", "ScalarS7ModelState"),
+    ("gbf-experiments/src/s7/production_runner.rs", "live_adamw_scalar_state_per_topology_seed"),
+    ("scripts/review/f-s7/assemble-packet.py", "live_adamw_scalar_state_per_topology_seed"),
+)
 
 
 def main() -> int:
@@ -50,6 +77,11 @@ def main() -> int:
     parser.add_argument("--runner-issue", default=DEFAULT_RUNNER_ISSUE)
     parser.add_argument("--closure-issue-file", help="JSON fixture for the closure issue")
     parser.add_argument("--runner-issue-file", help="JSON fixture for the runner issue")
+    parser.add_argument(
+        "--skip-code-surface",
+        action="store_true",
+        help="fixture-test escape hatch: do not inspect repo source files",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable results")
     args = parser.parse_args()
 
@@ -74,6 +106,7 @@ def main() -> int:
         closure_issue,
         runner_issue,
         args.runner_issue,
+        check_code_surface=not args.skip_code_surface,
     )
     return emit(args.json, result, errors)
 
@@ -131,6 +164,8 @@ def audit(
     closure_issue: dict[str, Any],
     runner_issue: dict[str, Any],
     expected_runner_id: str,
+    *,
+    check_code_surface: bool = True,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     closure_id = str(closure_issue.get("id", ""))
@@ -139,6 +174,7 @@ def audit(
     runner_resolved = runner_status in RESOLVED_STATUSES
     dependency = find_runner_dependency(closure_issue, expected_runner_id)
     production_artifacts = find_existing_production_artifacts(root)
+    missing_code_surface = audit_code_surface(root) if check_code_surface else []
 
     if runner_id != expected_runner_id:
         errors.append(
@@ -173,6 +209,17 @@ def audit(
             f"{expected_runner_id}: production-looking S7 artifacts exist while runner owner is unresolved: {preview}{suffix}"
         )
 
+    if missing_code_surface:
+        preview = "; ".join(missing_code_surface[:8])
+        suffix = (
+            ""
+            if len(missing_code_surface) <= 8
+            else f"; ... +{len(missing_code_surface) - 8}"
+        )
+        errors.append(
+            f"{expected_runner_id}: production-runner code surface is incomplete: {preview}{suffix}"
+        )
+
     return (
         {
             "status": "ok" if not errors else "needs_changes",
@@ -182,9 +229,41 @@ def audit(
             "runner_resolved": runner_resolved,
             "blocking_dependency_present": dependency is not None,
             "production_artifact_count": len(production_artifacts),
+            "code_surface_checked": check_code_surface,
+            "missing_code_surface_count": len(missing_code_surface),
         },
         errors,
     )
+
+
+def audit_code_surface(root: Path) -> list[str]:
+    cache: dict[Path, str | None] = {}
+    missing: list[str] = []
+    for relative, snippet in REQUIRED_CODE_SURFACE_SNIPPETS:
+        path = root / relative
+        text = cache.get(path)
+        if text is None and path not in cache:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                text = None
+            cache[path] = text
+        if text is None:
+            missing.append(f"{relative} missing")
+        elif snippet not in text:
+            missing.append(f"{relative} missing {snippet!r}")
+    for relative, snippet in FORBIDDEN_CODE_SURFACE_SNIPPETS:
+        path = root / relative
+        text = cache.get(path)
+        if text is None and path not in cache:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                text = None
+            cache[path] = text
+        if text is not None and snippet in text:
+            missing.append(f"{relative} contains forbidden scalar-runner marker {snippet!r}")
+    return missing
 
 
 def find_runner_dependency(issue: dict[str, Any], runner_id: str) -> dict[str, Any] | None:

@@ -14,8 +14,10 @@ from typing import Any
 
 
 SCHEMA = "s7_production_bundle_manifest.v1"
+PRODUCTION_RUNNER_SCHEMA = "s7_production_runner.v1"
 TOPOLOGIES = ("MoeTiny", "MoeTinyDenseMatched")
 SEEDS = range(5)
+S7_OPTIMIZER_STEPS = 20_000
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_RUN_FIELDS = ("run_log", "score", "grad_log", "router_step_telemetry")
@@ -33,6 +35,20 @@ TOP_LEVEL_FIELDS = {
     "comparison",
     "frontier",
     "report",
+    "production_runner",
+}
+PRODUCTION_RUNNER_FIELDS = {
+    "schema",
+    "runner_kind",
+    "bead_owner",
+    "gutenberg_manifest_sha",
+    "train_corpus_sha",
+    "val_corpus_sha",
+    "optimizer_model_state",
+    "grad_log_schema",
+    "router_step_telemetry_schema",
+    "optimizer_steps",
+    "sweep_producer_kind",
 }
 SUPPORT_FIELDS = {*REQUIRED_SUPPORT_ARTIFACTS, "emulator_one_token_dense"}
 COMPARISON_FIELDS = {"moe_topology_hash", "dense_matched_topology_hash"}
@@ -190,6 +206,7 @@ def build_commands(
     review_options: ReviewOptions | None = None,
 ) -> list[list[str]]:
     validate_known_fields(manifest)
+    validate_production_runner(manifest)
     commands: list[list[str]] = []
     if review_options is not None:
         commands.append(review_command(root, review_options, preflight=True))
@@ -436,6 +453,19 @@ def write_template(path: Path) -> None:
             "rfc_revision": "6" * 40,
             "generated_at": "2026-06-25T00:00:00Z",
         },
+        "production_runner": {
+            "schema": PRODUCTION_RUNNER_SCHEMA,
+            "runner_kind": "gbf_experiments::s7::production_runner",
+            "bead_owner": "bd-3e10j",
+            "gutenberg_manifest_sha": "sha256:" + "7" * 64,
+            "train_corpus_sha": "sha256:" + "8" * 64,
+            "val_corpus_sha": "sha256:" + "9" * 64,
+            "optimizer_model_state": "live_burn_adamw_moe_lm_state_per_topology_seed",
+            "grad_log_schema": "s7_grad_log.v1",
+            "router_step_telemetry_schema": "s7_router_step_telemetry.v1",
+            "optimizer_steps": S7_OPTIMIZER_STEPS,
+            "sweep_producer_kind": "production_closure_retrain_score",
+        },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -463,6 +493,66 @@ def validate_known_fields(manifest: dict[str, Any]) -> None:
     reject_unknown("frontier", frontier, FRONTIER_FIELDS)
     report = require_object(manifest, ["report"])
     reject_unknown("report", report, REPORT_FIELDS)
+    production_runner = require_object(manifest, ["production_runner"])
+    reject_unknown("production_runner", production_runner, PRODUCTION_RUNNER_FIELDS)
+
+
+def validate_production_runner(manifest: dict[str, Any]) -> None:
+    runner = require_object(manifest, ["production_runner"])
+    schema = require_string(runner, ["schema"], "production_runner.schema")
+    if schema != PRODUCTION_RUNNER_SCHEMA:
+        raise AssembleError(f"production_runner.schema must be {PRODUCTION_RUNNER_SCHEMA}")
+    runner_kind = require_string(runner, ["runner_kind"], "production_runner.runner_kind")
+    if runner_kind != "gbf_experiments::s7::production_runner":
+        raise AssembleError(
+            "production_runner.runner_kind must be gbf_experiments::s7::production_runner"
+        )
+    bead_owner = require_string(runner, ["bead_owner"], "production_runner.bead_owner")
+    if bead_owner != "bd-3e10j":
+        raise AssembleError("production_runner.bead_owner must be bd-3e10j")
+    for key in ("gutenberg_manifest_sha", "train_corpus_sha", "val_corpus_sha"):
+        require_hash(runner, [key], f"production_runner.{key}")
+    optimizer_model_state = require_string(
+        runner,
+        ["optimizer_model_state"],
+        "production_runner.optimizer_model_state",
+    )
+    if optimizer_model_state != "live_burn_adamw_moe_lm_state_per_topology_seed":
+        raise AssembleError(
+            "production_runner.optimizer_model_state must be live_burn_adamw_moe_lm_state_per_topology_seed"
+        )
+    grad_log_schema = require_string(
+        runner,
+        ["grad_log_schema"],
+        "production_runner.grad_log_schema",
+    )
+    if grad_log_schema != "s7_grad_log.v1":
+        raise AssembleError("production_runner.grad_log_schema must be s7_grad_log.v1")
+    telemetry_schema = require_string(
+        runner,
+        ["router_step_telemetry_schema"],
+        "production_runner.router_step_telemetry_schema",
+    )
+    if telemetry_schema != "s7_router_step_telemetry.v1":
+        raise AssembleError(
+            "production_runner.router_step_telemetry_schema must be s7_router_step_telemetry.v1"
+        )
+    optimizer_steps = require_positive_int(
+        runner,
+        ["optimizer_steps"],
+        "production_runner.optimizer_steps",
+    )
+    if optimizer_steps != S7_OPTIMIZER_STEPS:
+        raise AssembleError(f"production_runner.optimizer_steps must be {S7_OPTIMIZER_STEPS}")
+    sweep_producer_kind = require_string(
+        runner,
+        ["sweep_producer_kind"],
+        "production_runner.sweep_producer_kind",
+    )
+    if sweep_producer_kind != "production_closure_retrain_score":
+        raise AssembleError(
+            "production_runner.sweep_producer_kind must be production_closure_retrain_score"
+        )
 
 
 def reject_unknown(label: str, payload: dict[str, Any], allowed: set[str]) -> None:
@@ -700,6 +790,17 @@ def require_commit(payload: dict[str, Any], keys: list[str], label: str) -> str:
     value = require_string(payload, keys, label)
     if not COMMIT_RE.match(value):
         raise AssembleError(f"{label} must be a 40-hex git commit id")
+    return value
+
+
+def require_positive_int(payload: dict[str, Any], keys: list[str], label: str) -> int:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            raise AssembleError(f"{label} must be a positive integer")
+        value = value.get(key)
+    if not isinstance(value, int) or value <= 0:
+        raise AssembleError(f"{label} must be a positive integer")
     return value
 
 

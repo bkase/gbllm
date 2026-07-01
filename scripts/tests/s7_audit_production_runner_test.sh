@@ -61,6 +61,7 @@ JSON
 
 if scripts/review/f-s7/audit-production-runner.py \
   --root "$tmp" \
+  --skip-code-surface \
   --closure-issue-file "$closure" \
   --runner-issue-file "$runner_open" >"$tmp/open.out"; then
   echo "expected unresolved bd-3e10j to fail" >&2
@@ -72,6 +73,7 @@ mkdir -p "$tmp/experiments/S7/runs/MoeTiny/seed-0"
 printf '{}\n' >"$tmp/experiments/S7/runs/MoeTiny/seed-0/run-log.json"
 if scripts/review/f-s7/audit-production-runner.py \
   --root "$tmp" \
+  --skip-code-surface \
   --closure-issue-file "$closure" \
   --runner-issue-file "$runner_open" >"$tmp/artifacts.out"; then
   echo "expected unresolved runner plus production-looking artifacts to fail" >&2
@@ -86,6 +88,7 @@ cat >"$missing_dep" <<'JSON'
 JSON
 if scripts/review/f-s7/audit-production-runner.py \
   --root "$tmp" \
+  --skip-code-surface \
   --closure-issue-file "$missing_dep" \
   --runner-issue-file "$runner_closed" >"$tmp/missing-dep.out"; then
   echo "expected missing bd-3e10j dependency to fail" >&2
@@ -95,6 +98,7 @@ rg -n "missing blocking dependency on bd-3e10j" "$tmp/missing-dep.out" >/dev/nul
 
 if scripts/review/f-s7/audit-production-runner.py \
   --root "$tmp" \
+  --skip-code-surface \
   --closure-issue-file "$closure" \
   --runner-issue-file "$runner_weak" >"$tmp/weak.out"; then
   echo "expected weak runner contract to fail" >&2
@@ -104,12 +108,14 @@ rg -n "production-runner contract missing required phrase" "$tmp/weak.out" >/dev
 
 scripts/review/f-s7/audit-production-runner.py \
   --root "$tmp" \
+  --skip-code-surface \
   --closure-issue-file "$closure" \
   --runner-issue-file "$runner_closed" >"$tmp/ok.out"
 rg -n "S7 production runner audit: ok" "$tmp/ok.out" >/dev/null
 
 scripts/review/f-s7/audit-production-runner.py \
   --root "$tmp" \
+  --skip-code-surface \
   --closure-issue-file "$closure" \
   --runner-issue-file "$runner_closed" \
   --json >"$tmp/ok.json"

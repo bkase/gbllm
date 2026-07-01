@@ -108,6 +108,7 @@ fn s7_help_lists_dispatch_verbs() {
             .and(predicate::str::contains("materialize-support-artifact"))
             .and(predicate::str::contains("oracle-routed"))
             .and(predicate::str::contains("emulator-one-token"))
+            .and(predicate::str::contains("produce-production-bundle"))
             .and(predicate::str::contains("emit-report"))
             .and(predicate::str::contains("validate-closure")),
     );

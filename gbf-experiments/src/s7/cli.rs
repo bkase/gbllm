@@ -1,8 +1,8 @@
 //! S7 command-line integration surface.
 //!
-//! The current command proves the split-feature replay CLI shape over the
-//! deterministic in-repo fixture. It intentionally does not claim production
-//! Gutenberg checkpoint replay; that remains owned by the full S7 closure path.
+//! The replay command proves the split-feature fixture path; the production
+//! bundle command owns the upstream source bundle consumed by F-S7 closure
+//! packet assembly.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -30,6 +30,9 @@ use crate::s7::emulator_one_token::{
 };
 use crate::s7::frontier::{
     S7FrontierArtifactInputs, S7FrontierMaterializeError, materialize_s7_frontier,
+};
+use crate::s7::production_runner::{
+    S7ProductionBundleInputs, S7ProductionRunnerError, produce_s7_production_bundle,
 };
 use crate::s7::replay::{
     S7_DETERMINISM_FIXTURE_SCOPE, S7_FULL_CLI_REPLAY_OWNER, S7_FULL_CLOSURE_OWNER, S7ReplayError,
@@ -61,6 +64,11 @@ const DEFAULT_DEVICE_PROFILE: &str = "S7CpuDeterministic";
 const DEFAULT_SEED_LIST: &str = "0,1,2,3,4";
 const DEFAULT_REPORT_EMITTER: &str = "scripts/review/f-s7/emit-report.py";
 const DEFAULT_REPORT_OUTPUT: &str = "docs/experiments/S7-report.md";
+const DEFAULT_PRODUCTION_BUNDLE_DIR: &str = "experiments/S7/production-bundle";
+const DEFAULT_PRODUCTION_BUNDLE_MANIFEST: &str =
+    "experiments/S7/production-bundle/s7-production-bundle-manifest.json";
+const DEFAULT_GUTENBERG_TRAIN: &str = "experiments/S4/corpus/gutenberg-train.bin";
+const DEFAULT_GUTENBERG_VAL: &str = "experiments/S4/corpus/gutenberg-val.bin";
 #[cfg(feature = "s7-burn-grad-smoke")]
 const DEFAULT_BURN_GRAD_SMOKE_OUTPUT: &str = "experiments/S7/burn-grad-smoke/expert_block_qat.json";
 const DEFAULT_ORACLE_ROUTED_OUTPUT: &str = "experiments/S7/oracle-routed/seed-0/oracle.json";
@@ -77,6 +85,8 @@ pub struct S7Cli {
 }
 
 /// S7 subcommands registered by the replay gate.
+// Clap derives expect direct args payloads here; command enums are short-lived at dispatch time.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Subcommand)]
 pub enum S7Command {
     /// Replay the current deterministic S7 fixture for one split-feature topology.
@@ -102,6 +112,8 @@ pub enum S7Command {
     EmitReport(S7EmitReportArgs),
     /// Validate the final S7 report against the Rust closure contract.
     ValidateClosure(S7ValidateClosureArgs),
+    /// Produce the real S7 source bundle consumed by the closure packet assembler.
+    ProduceProductionBundle(S7ProduceProductionBundleArgs),
 }
 
 /// Arguments for `gbf s7 replay`.
@@ -446,6 +458,74 @@ pub struct S7ValidateClosureArgs {
     pub predictions_verified: bool,
 }
 
+/// Arguments for `gbf s7 produce-production-bundle`.
+#[derive(Debug, Clone, Args)]
+#[command(
+    after_help = "Examples:\n  gbf s7 produce-production-bundle --burn-grad-smoke /tmp/h8.json --oracle-routed /tmp/h9.json --emulator-one-token-moe /tmp/h10-moe.json --moe-conformance /tmp/moe-conformance.json --dense-conformance /tmp/dense-conformance.json --predictions-section-hash sha256:... --predictions-commit <commit> --first-result-commit <commit> --rfc-revision <commit> --generated-at 2026-07-01T00:00:00Z"
+)]
+pub struct S7ProduceProductionBundleArgs {
+    /// Directory where source bundle artifacts are written.
+    #[arg(long, default_value = DEFAULT_PRODUCTION_BUNDLE_DIR)]
+    pub output_dir: PathBuf,
+    /// Manifest path to write.
+    #[arg(long, default_value = DEFAULT_PRODUCTION_BUNDLE_MANIFEST)]
+    pub manifest_output: PathBuf,
+    /// Pinned Project Gutenberg fixture/manifest path.
+    #[arg(long, default_value = DEFAULT_GUTENBERG_MANIFEST)]
+    pub gutenberg_manifest: PathBuf,
+    /// Gutenberg training byte stream produced by S4.
+    #[arg(long, default_value = DEFAULT_GUTENBERG_TRAIN)]
+    pub train_corpus: PathBuf,
+    /// Gutenberg validation byte stream produced by S4.
+    #[arg(long, default_value = DEFAULT_GUTENBERG_VAL)]
+    pub val_corpus: PathBuf,
+    /// Real H8 Burn gradient smoke artifact.
+    #[arg(long)]
+    pub burn_grad_smoke: PathBuf,
+    /// Real H9 routed oracle artifact.
+    #[arg(long)]
+    pub oracle_routed: PathBuf,
+    /// Real H10 MoE emulator one-token artifact.
+    #[arg(long)]
+    pub emulator_one_token_moe: PathBuf,
+    /// Optional real H10 dense emulator one-token artifact.
+    #[arg(long)]
+    pub emulator_one_token_dense: Option<PathBuf>,
+    /// MoE conformance evidence used by frontier derivation.
+    #[arg(long)]
+    pub moe_conformance: PathBuf,
+    /// Dense conformance evidence used by frontier derivation.
+    #[arg(long)]
+    pub dense_conformance: PathBuf,
+    /// Optional MoE schedule-cost evidence used by frontier derivation.
+    #[arg(long)]
+    pub moe_schedule_cost: Option<PathBuf>,
+    /// Optional dense schedule-cost evidence used by frontier derivation.
+    #[arg(long)]
+    pub dense_schedule_cost: Option<PathBuf>,
+    /// S7 report outcome.
+    #[arg(long, default_value = "PassClean", value_parser = ["PassClean", "FailParity"])]
+    pub s7_outcome: String,
+    /// Report decision matching the outcome.
+    #[arg(long, default_value = "ProceedToS8", value_parser = ["ProceedToS8", "ProceedToS8DenseOnly"])]
+    pub decision: String,
+    /// RFC revision commit/hash pinned into the final report.
+    #[arg(long)]
+    pub rfc_revision: String,
+    /// Hash of the pre-registered predictions section.
+    #[arg(long)]
+    pub predictions_section_hash: String,
+    /// Commit containing pre-registered predictions.
+    #[arg(long)]
+    pub predictions_commit: String,
+    /// First commit introducing S7 result evidence.
+    #[arg(long)]
+    pub first_result_commit: String,
+    /// RFC3339 UTC timestamp recorded as generated_at in the report.
+    #[arg(long)]
+    pub generated_at: String,
+}
+
 /// Run an S7 CLI command.
 pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
     match cli.command {
@@ -461,6 +541,7 @@ pub fn run(cli: S7Cli) -> Result<(), S7CliError> {
         S7Command::BurnGradSmoke(args) => burn_grad_smoke(args),
         S7Command::EmitReport(args) => emit_report(args),
         S7Command::ValidateClosure(args) => validate_closure(args),
+        S7Command::ProduceProductionBundle(args) => produce_production_bundle(args),
     }
 }
 
@@ -774,6 +855,33 @@ fn validate_closure(args: S7ValidateClosureArgs) -> Result<(), S7CliError> {
     Ok(())
 }
 
+fn produce_production_bundle(args: S7ProduceProductionBundleArgs) -> Result<(), S7CliError> {
+    let output = produce_s7_production_bundle(&S7ProductionBundleInputs {
+        output_dir: args.output_dir,
+        manifest_output: args.manifest_output,
+        gutenberg_manifest: args.gutenberg_manifest,
+        train_corpus: args.train_corpus,
+        val_corpus: args.val_corpus,
+        burn_grad_smoke: args.burn_grad_smoke,
+        oracle_routed: args.oracle_routed,
+        emulator_one_token_moe: args.emulator_one_token_moe,
+        emulator_one_token_dense: args.emulator_one_token_dense,
+        moe_conformance: args.moe_conformance,
+        dense_conformance: args.dense_conformance,
+        moe_schedule_cost: args.moe_schedule_cost,
+        dense_schedule_cost: args.dense_schedule_cost,
+        s7_outcome: args.s7_outcome,
+        decision: args.decision,
+        rfc_revision: args.rfc_revision,
+        predictions_section_hash: args.predictions_section_hash,
+        predictions_commit: args.predictions_commit,
+        first_result_commit: args.first_result_commit,
+        generated_at: args.generated_at,
+    })?;
+    println!("{}", output.manifest_self_hash);
+    Ok(())
+}
+
 fn parse_topology(value: &str) -> Result<S7Topology, String> {
     match value {
         "MoeTiny" => Ok(S7Topology::MoeTiny),
@@ -926,6 +1034,8 @@ pub enum S7CliError {
     UnsupportedStdoutReport,
     /// Closure packet failed the Rust closure contract adapter.
     ClosurePacket(S7ClosurePacketError),
+    /// Production bundle runner failed.
+    ProductionRunner(S7ProductionRunnerError),
 }
 
 impl fmt::Display for S7CliError {
@@ -971,6 +1081,7 @@ impl fmt::Display for S7CliError {
                 f.write_str("gbf s7 emit-report requires a file --output, not '-'")
             }
             Self::ClosurePacket(error) => write!(f, "S7 closure packet validation failed: {error}"),
+            Self::ProductionRunner(error) => write!(f, "{error}"),
         }
     }
 }
@@ -997,6 +1108,7 @@ impl std::error::Error for S7CliError {
             | Self::InvalidReportSelfHash { .. }
             | Self::UnsupportedStdoutReport => None,
             Self::ClosurePacket(error) => Some(error),
+            Self::ProductionRunner(error) => Some(error),
         }
     }
 }
@@ -1065,5 +1177,11 @@ impl From<OracleRoutedReportError> for S7CliError {
 impl From<S7ClosurePacketError> for S7CliError {
     fn from(error: S7ClosurePacketError) -> Self {
         Self::ClosurePacket(error)
+    }
+}
+
+impl From<S7ProductionRunnerError> for S7CliError {
+    fn from(error: S7ProductionRunnerError) -> Self {
+        Self::ProductionRunner(error)
     }
 }

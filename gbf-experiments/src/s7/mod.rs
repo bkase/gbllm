@@ -37,6 +37,9 @@ pub mod pareto;
 /// S7 matched-bytes parity helpers.
 pub mod parity;
 
+/// S7 production source-bundle runner.
+pub mod production_runner;
+
 /// S7 determinism and fixture replay helpers.
 pub mod replay;
 
