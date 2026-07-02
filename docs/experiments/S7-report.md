@@ -76,8 +76,8 @@ generated_at: "2026-07-02T00:56:33Z"
 rfc_revision: "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
 predictions_section_hash: "sha256:68212b85cc2e4e24f0ec9ba86ab107cbb86000995bb415b1d89f780af0c53bb2"
 predictions_commit: "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
-first_result_commit: "7d034d6d0ff824febc9f8c665abf06a7cae9a55a"
-report_self_hash: "sha256:8771a57af90076c9295b6633334f8a1b58cd99ca3e2e5711b3a07c01a59a7327"
+first_result_commit: "93be7678489df98a8edaa5138c827a6eb291666b"
+report_self_hash: "sha256:47dc8ac4ade72563a499cfadd5a9814afd9cc30e4d3e25d986a2282e235cc8d5"
 ---
 ## Pre-registered predictions
 Pinned predictions are identified by predictions_commit and predictions_section_hash in front matter.
