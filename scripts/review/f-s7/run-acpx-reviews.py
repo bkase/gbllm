@@ -484,6 +484,13 @@ def review_prompt(
             "only if the production packet and closure evidence are present and no blocking finding remains. "
             "If production artifacts, final report, RFC finalization, or required review evidence are missing, "
             "return NEEDS_CHANGES.",
+            "Final-review bootstrap rule: this runner writes docs/review/f-s7/reviews/"
+            f"{bead}-gemini.json and docs/review/f-s7/reviews/{bead}-claude.json only after "
+            "the current ACPX reviewers return PASS. If a pre-materialization verify-packet run fails "
+            "only because those two final review JSONs are absent, treat that absence as expected "
+            "bootstrap state; the runner and validate-reviews.py will enforce both files after PASS. "
+            "Still block on any other missing evidence, dirty worktree, open bead state, stale head, "
+            "or unresolved packet failure.",
             "Return exactly one JSON object. No Markdown wrapper. Shape:",
             "{",
             '  "verdict": "PASS or NEEDS_CHANGES",',

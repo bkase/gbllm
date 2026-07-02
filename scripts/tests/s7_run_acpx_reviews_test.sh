@@ -215,6 +215,8 @@ rg -n -- "--agent 'gemini --skip-trust -m gemini-3.1-pro-preview --acp'" "$tmp/d
 rg -n "claude exec" "$tmp/dry.out" >/dev/null
 rg -n "reviewer=gemini personas=P3,P4,P5,P6,P7,P8" "$tmp/dry.out" >/dev/null
 rg -n "reviewer=claude personas=P3,P5,P6,P8" "$tmp/dry.out" >/dev/null
+rg -n "Final-review bootstrap rule" "$tmp/dry.out" >/dev/null
+rg -n "only because those two final review JSONs are absent" "$tmp/dry.out" >/dev/null
 rg -n "S7 ACPX review runner: dry-run ok" "$tmp/dry.out" >/dev/null
 
 scripts/review/f-s7/run-acpx-reviews.py \
