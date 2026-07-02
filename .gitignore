@@ -16,3 +16,6 @@
 /experiments/S4/corpus/gutenberg-train.bin
 /experiments/S4/corpus/gutenberg-val.bin
 /experiments/S7/production-bundle/
+
+# Antigravity CLI workspace-local state.
+/.antigravitycli/

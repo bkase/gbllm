@@ -1,0 +1,13 @@
+{
+  "findings": [],
+  "personas": [
+    "P1",
+    "P2",
+    "P4",
+    "P5",
+    "P6",
+    "P8"
+  ],
+  "summary": "The F-S7 bead bd-17n0 successfully aligns the H8 burn gradient smoke schema and artifact contract (s7_burn_grad_smoke.v1) with the current bias-free, fixed-activation-range model contract. Legacy fields (grad_up_bias_sum_abs, grad_down_bias_sum_abs, and grad_activation_clip_threshold_sum_abs) are now correctly rejected at boundaries. Differentiable Burn training paths correctly support the two-matrix expert projection weights without fabricating biases, and activation range mode verification rejects learned/EMA models as specified. All QA assertions, schema constraints, CLI validations, and architectural boundary tests compile and pass cleanly, confirming full conformance with the F-S7 RFC.",
+  "verdict": "PASS"
+}
