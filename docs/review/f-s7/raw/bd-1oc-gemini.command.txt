@@ -1,0 +1,14 @@
+acpx --agent /tmp/agy-acp-agent.mjs --cwd /Users/bkase/.codex/worktrees/febf/gbllm --approve-all --format text --suppress-reads --timeout 900 exec 'Review completed F-S7 bead bd-1oc at git HEAD 3e3089c5100aa0b533cb7e621555e1c59ba8e8d0.
+Use ACPX only; do not mutate files.
+Reviewer id: gemini. Required personas: P1, P2, P4, P5, P6, P8.
+Inspect the current repository state, the bead record via `br show bd-1oc`, history/rfcs/F-S7-moe-beats-dense.md, and the code/tests/artifacts named by the bead closure.
+A PASS verdict is allowed only if this bead'"'"'s closure claims are supported by current evidence and no blocking finding remains. Do not treat a PASS here as final bd-2v9r production-packet closure; this is bead-level review coverage only.
+Return exactly one JSON object. No Markdown wrapper. Shape:
+{
+  "verdict": "PASS or NEEDS_CHANGES",
+  "personas": ["P1", "P2", "P4", "P5", "P6", "P8"],
+  "summary": "one concise paragraph",
+  "findings": [
+    {"severity": "p1|p2|p3|info", "status": "open|resolved|non_blocking", "body": "finding text"}
+  ]
+}'
