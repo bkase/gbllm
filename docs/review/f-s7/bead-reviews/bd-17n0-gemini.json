@@ -1,7 +1,13 @@
 {
   "bead": "bd-17n0",
-  "command": "acpx --agent /tmp/agy-acp-agent.mjs --cwd /Users/bkase/.codex/worktrees/febf/gbllm --approve-all --format text --suppress-reads --timeout 900 exec 'Review completed F-S7 bead bd-17n0 at git HEAD 3fc8fdc159fa3005a6462b6ec4e92bd03ea79da4.\nUse ACPX only; do not mutate files.\nReviewer id: gemini. Required personas: P1, P2, P4, P5, P6, P8.\nInspect the current repository state, the bead record via `br show bd-17n0`, history/rfcs/F-S7-moe-beats-dense.md, and the code/tests/artifacts named by the bead closure.\nA PASS verdict is allowed only if this bead'\"'\"'s closure claims are supported by current evidence and no blocking finding remains. Do not treat a PASS here as final bd-2v9r production-packet closure; this is bead-level review coverage only.\nReturn exactly one JSON object. No Markdown wrapper. Shape:\n{\n  \"verdict\": \"PASS or NEEDS_CHANGES\",\n  \"personas\": [\"P1\", \"P2\", \"P4\", \"P5\", \"P6\", \"P8\"],\n  \"summary\": \"one concise paragraph\",\n  \"findings\": [\n    {\"severity\": \"p1|p2|p3|info\", \"status\": \"open|resolved|non_blocking\", \"body\": \"finding text\"}\n  ]\n}'",
-  "findings": [],
+  "command": "acpx --agent /tmp/agy-acp-agent.mjs --cwd /Users/bkase/.codex/worktrees/febf/gbllm --approve-all --format text --suppress-reads --timeout 900 exec 'Review completed F-S7 bead bd-17n0 at git HEAD 9ab1b68a7a1ddca87fb19fc0adadab4ee1c20b83.\nUse ACPX only; do not mutate files.\nReviewer id: gemini. Required personas: P1, P2, P4, P5, P6, P8.\nInspect the current repository state, the bead record via `br show bd-17n0`, history/rfcs/F-S7-moe-beats-dense.md, and the code/tests/artifacts named by the bead closure.\nA PASS verdict is allowed only if this bead'\"'\"'s closure claims are supported by current evidence and no blocking finding remains. Do not treat a PASS here as final bd-2v9r production-packet closure; this is bead-level review coverage only.\nReturn exactly one JSON object. No Markdown wrapper. Shape:\n{\n  \"verdict\": \"PASS or NEEDS_CHANGES\",\n  \"personas\": [\"P1\", \"P2\", \"P4\", \"P5\", \"P6\", \"P8\"],\n  \"summary\": \"one concise paragraph\",\n  \"findings\": [\n    {\"severity\": \"p1|p2|p3|info\", \"status\": \"open|resolved|non_blocking\", \"body\": \"finding text\"}\n  ]\n}'",
+  "findings": [
+    {
+      "body": "Verified that legacy bias-gradient and dynamic activation range fields are successfully rejected at boundaries by CLI materialize-support-artifact and artifact validators, and that the burn-grad-smoke JSON artifact matches the corrected schema contract.",
+      "severity": "info",
+      "status": "resolved"
+    }
+  ],
   "personas": [
     "P1",
     "P2",
@@ -10,7 +16,7 @@
     "P6",
     "P8"
   ],
-  "reviewed_head": "3fc8fdc159fa3005a6462b6ec4e92bd03ea79da4",
+  "reviewed_head": "9ab1b68a7a1ddca87fb19fc0adadab4ee1c20b83",
   "reviewer": "gemini",
   "schema": "s7_bead_acpx_review.v1",
   "summary": "The F-S7 bead bd-17n0 successfully aligns the H8 burn gradient smoke schema and artifact contract (s7_burn_grad_smoke.v1) with the current bias-free, fixed-activation-range model contract. Legacy fields (grad_up_bias_sum_abs, grad_down_bias_sum_abs, and grad_activation_clip_threshold_sum_abs) are now correctly rejected at boundaries. Differentiable Burn training paths correctly support the two-matrix expert projection weights without fabricating biases, and activation range mode verification rejects learned/EMA models as specified. All QA assertions, schema constraints, CLI validations, and architectural boundary tests compile and pass cleanly, confirming full conformance with the F-S7 RFC.",

@@ -1,5 +1,11 @@
 {
-  "findings": [],
+  "findings": [
+    {
+      "body": "Verified that legacy bias-gradient and dynamic activation range fields are successfully rejected at boundaries by CLI materialize-support-artifact and artifact validators, and that the burn-grad-smoke JSON artifact matches the corrected schema contract.",
+      "severity": "info",
+      "status": "resolved"
+    }
+  ],
   "personas": [
     "P1",
     "P2",
