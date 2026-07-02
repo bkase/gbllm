@@ -1,12 +1,12 @@
-acpx --agent /tmp/agy-acp-agent.mjs --cwd /Users/bkase/.codex/worktrees/febf/gbllm --approve-all --format text --suppress-reads --timeout 900 exec 'Review completed F-S7 bead bd-17n0 at git HEAD 9ab1b68a7a1ddca87fb19fc0adadab4ee1c20b83.
+acpx --agent /tmp/agy-acp-agent.mjs --cwd /Users/bkase/.codex/worktrees/febf/gbllm --approve-all --format text --suppress-reads --timeout 900 exec 'Review completed F-S7 bead bd-17n0 at git HEAD c9b22033f08332153e733c3b8423de6d7e365de8.
 Use ACPX only; do not mutate files.
-Reviewer id: gemini. Required personas: P1, P2, P4, P5, P6, P8.
+Reviewer id: gemini. Required personas: P3, P4, P5, P6, P7, P8.
 Inspect the current repository state, the bead record via `br show bd-17n0`, history/rfcs/F-S7-moe-beats-dense.md, and the code/tests/artifacts named by the bead closure.
 A PASS verdict is allowed only if this bead'"'"'s closure claims are supported by current evidence and no blocking finding remains. Do not treat a PASS here as final bd-2v9r production-packet closure; this is bead-level review coverage only.
 Return exactly one JSON object. No Markdown wrapper. Shape:
 {
   "verdict": "PASS or NEEDS_CHANGES",
-  "personas": ["P1", "P2", "P4", "P5", "P6", "P8"],
+  "personas": ["P3", "P4", "P5", "P6", "P7", "P8"],
   "summary": "one concise paragraph",
   "findings": [
     {"severity": "p1|p2|p3|info", "status": "open|resolved|non_blocking", "body": "finding text"}
