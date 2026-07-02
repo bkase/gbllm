@@ -461,11 +461,7 @@ def canonical_json_text(payload: object) -> str:
     if isinstance(payload, int) and not isinstance(payload, bool):
         return str(payload)
     if isinstance(payload, float):
-        if not math.isfinite(payload):
-            raise ValueError("non-finite float in canonical JSON payload")
-        if payload == 0.0:
-            return "0.0"
-        return json.dumps(payload, allow_nan=False).replace("e+", "e")
+        return canonical_float_text(payload)
     if isinstance(payload, str):
         return json.dumps(payload, ensure_ascii=False, allow_nan=False)
     if isinstance(payload, list):
@@ -480,6 +476,38 @@ def canonical_json_text(payload: object) -> str:
             + "}"
         )
     raise TypeError(f"unsupported JSON value for canonical encoding: {type(payload).__name__}")
+
+
+def canonical_float_text(value: float) -> str:
+    if not math.isfinite(value):
+        raise ValueError("non-finite float in canonical JSON payload")
+    if value == 0.0:
+        return "0.0"
+    encoded = repr(value).replace("E", "e")
+    if "e" not in encoded:
+        return encoded
+    mantissa, exponent = encoded.split("e", 1)
+    exponent_value = int(exponent)
+    if exponent_value < 0 and abs(value) >= 1.0e-5:
+        return expand_negative_exponent_decimal(mantissa, exponent_value)
+    return f"{mantissa}e{exponent_value}"
+
+
+def expand_negative_exponent_decimal(mantissa: str, exponent: int) -> str:
+    sign = ""
+    if mantissa.startswith("-"):
+        sign = "-"
+        mantissa = mantissa[1:]
+    integer_digits = mantissa.find(".")
+    if integer_digits == -1:
+        integer_digits = len(mantissa)
+    digits = mantissa.replace(".", "")
+    decimal_at = integer_digits + exponent
+    if decimal_at <= 0:
+        return f"{sign}0.{'0' * (-decimal_at)}{digits}"
+    if decimal_at >= len(digits):
+        return f"{sign}{digits}{'0' * (decimal_at - len(digits))}.0"
+    return f"{sign}{digits[:decimal_at]}.{digits[decimal_at:]}"
 
 
 def compare_report_hash(

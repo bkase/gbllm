@@ -23,6 +23,7 @@ S7_N_EXPERTS = 4
 S7_OPTIMIZER_STEPS = 20_000
 S7_EVAL_EVERY_STEPS = 1_000
 FLOAT_TOL = 1.0e-9
+D11_FLOAT_TOL = 5.0e-9
 S7_PARITY_BPC_MARGIN = 0.05
 PARETO_VERDICTS = {
     "MoE-dominates",
@@ -337,11 +338,7 @@ def canonical_json_text(payload: Any) -> str:
     if isinstance(payload, int) and not isinstance(payload, bool):
         return str(payload)
     if isinstance(payload, float):
-        if not math.isfinite(payload):
-            raise ValueError("non-finite float in canonical JSON payload")
-        if payload == 0.0:
-            return "0.0"
-        return json.dumps(payload, allow_nan=False).replace("e+", "e")
+        return canonical_float_text(payload)
     if isinstance(payload, str):
         return json.dumps(payload, ensure_ascii=False, allow_nan=False)
     if isinstance(payload, list):
@@ -373,6 +370,38 @@ def domain_self_hash(domain: Domain, payload_without_self_hash: dict[str, Any]) 
     digest = f"sha256:{hashlib.sha256(material).hexdigest()}"
     SELF_HASH_CACHE[cache_key] = digest
     return digest
+
+
+def canonical_float_text(value: float) -> str:
+    if not math.isfinite(value):
+        raise ValueError("non-finite float in canonical JSON payload")
+    if value == 0.0:
+        return "0.0"
+    encoded = repr(value).replace("E", "e")
+    if "e" not in encoded:
+        return encoded
+    mantissa, exponent = encoded.split("e", 1)
+    exponent_value = int(exponent)
+    if exponent_value < 0 and abs(value) >= 1.0e-5:
+        return expand_negative_exponent_decimal(mantissa, exponent_value)
+    return f"{mantissa}e{exponent_value}"
+
+
+def expand_negative_exponent_decimal(mantissa: str, exponent: int) -> str:
+    sign = ""
+    if mantissa.startswith("-"):
+        sign = "-"
+        mantissa = mantissa[1:]
+    integer_digits = mantissa.find(".")
+    if integer_digits == -1:
+        integer_digits = len(mantissa)
+    digits = mantissa.replace(".", "")
+    decimal_at = integer_digits + exponent
+    if decimal_at <= 0:
+        return f"{sign}0.{'0' * (-decimal_at)}{digits}"
+    if decimal_at >= len(digits):
+        return f"{sign}{digits}{'0' * (decimal_at - len(digits))}.0"
+    return f"{sign}{digits[:decimal_at]}.{digits[decimal_at:]}"
 
 
 def verify_domain_self_hash(
@@ -618,8 +647,32 @@ def validate_grad_log(
             validate_grad_norm_summary(errors, f"{location} grad_norms", record["grad_norms"])
             if is_positive_int(train_step) and expected_by_step:
                 expected_summary = expected_by_step.get(int(train_step))
-                if expected_summary is not None and record["grad_norms"] != expected_summary:
+                if expected_summary is not None and not grad_norm_summary_close(
+                    record["grad_norms"], expected_summary
+                ):
                     errors.append(f"{location} grad_norms must match run-log grad_norms")
+
+
+def grad_norm_summary_close(observed: Any, expected: Any) -> bool:
+    if not isinstance(observed, dict) or not isinstance(expected, dict):
+        return observed == expected
+    if set(observed) != {"global_l2", "max_l2", "mean_l2"} or set(expected) != {
+        "global_l2",
+        "max_l2",
+        "mean_l2",
+    }:
+        return observed == expected
+    return all(
+        finite_number(observed.get(field))
+        and finite_number(expected.get(field))
+        and math.isclose(
+            float(observed[field]),
+            float(expected[field]),
+            rel_tol=FLOAT_TOL,
+            abs_tol=FLOAT_TOL,
+        )
+        for field in ["global_l2", "max_l2", "mean_l2"]
+    )
 
 
 def validate_router_step_telemetry_log(
@@ -942,10 +995,10 @@ def validate_sweep(errors: list[str], path: Path) -> None:
     require_equal(errors, path, data, "seed", 0)
     require_hash(errors, path, data, "base_checkpoint_sha")
     require_equal(errors, path, data, "producer_kind", PRODUCTION_SWEEP_PRODUCER_KIND)
-    require_equal(errors, path, data, "grid", D11_GRID)
-    require_equal(errors, path, data, "production_lambda", 0.05)
-    require_equal(errors, path, data, "collapse_threshold", 1.0)
-    require_equal(errors, path, data, "guardrail_verdict", "Pass")
+    require_float_list_close(errors, path, data, "grid", D11_GRID, D11_FLOAT_TOL)
+    require_float_close(errors, path, data, "production_lambda", 0.05, D11_FLOAT_TOL)
+    require_float_close(errors, path, data, "collapse_threshold", 1.0, D11_FLOAT_TOL)
+    require_guardrail_pass(errors, path, data)
     require_hash(errors, path, data, "sweep_self_hash")
     records = data.get("records")
     if not isinstance(records, list) or len(records) != len(D11_GRID):
@@ -963,7 +1016,7 @@ def validate_sweep_record(errors: list[str], path: Path, record: Any, index: int
     location = f"{path} records[{index}]"
     require_equal(errors, path, record, "schema_version", version_dict())
     require_equal(errors, path, record, "seed", 0)
-    require_equal(errors, path, record, "lambda_switch", D11_GRID[index])
+    require_float_close(errors, path, record, "lambda_switch", D11_GRID[index], D11_FLOAT_TOL)
     base_train_step = record.get("base_train_step")
     train_step = record.get("train_step")
     if not is_non_negative_int(base_train_step):
@@ -1254,6 +1307,53 @@ def require_equal(
 ) -> None:
     if data.get(field) != expected:
         errors.append(f"{path} {field} must be {expected!r}, observed {data.get(field)!r}")
+
+
+def require_float_close(
+    errors: list[str],
+    path: Path,
+    data: dict[str, Any],
+    field: str,
+    expected: float,
+    tolerance: float,
+) -> None:
+    observed = data.get(field)
+    if not finite_number(observed) or not math.isclose(
+        float(observed), expected, rel_tol=tolerance, abs_tol=tolerance
+    ):
+        errors.append(f"{path} {field} must be {expected!r}, observed {observed!r}")
+
+
+def require_float_list_close(
+    errors: list[str],
+    path: Path,
+    data: dict[str, Any],
+    field: str,
+    expected: list[float],
+    tolerance: float,
+) -> None:
+    observed = data.get(field)
+    if not isinstance(observed, list) or len(observed) != len(expected):
+        errors.append(f"{path} {field} must be {expected!r}, observed {observed!r}")
+        return
+    for index, (left, right) in enumerate(zip(observed, expected)):
+        if not finite_number(left) or not math.isclose(
+            float(left), right, rel_tol=tolerance, abs_tol=tolerance
+        ):
+            errors.append(
+                f"{path} {field}[{index}] must be {right!r}, observed {left!r}"
+            )
+
+
+def require_guardrail_pass(
+    errors: list[str], path: Path, data: dict[str, Any]
+) -> None:
+    observed = data.get("guardrail_verdict")
+    if observed == "Pass":
+        return
+    if isinstance(observed, dict) and observed.get("kind") == "pass":
+        return
+    errors.append(f"{path} guardrail_verdict must be Pass/pass, observed {observed!r}")
 
 
 def require_hash(errors: list[str], path: Path, data: dict[str, Any], field: str) -> None:

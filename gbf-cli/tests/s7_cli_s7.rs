@@ -283,6 +283,54 @@ fn s7_materialize_run_writes_completed_artifact_paths() {
 }
 
 #[test]
+fn s7_materialize_run_accepts_grad_norm_equivalent_float_spelling() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    let paths =
+        write_materialize_run_inputs(&input, S7Topology::MoeTiny, 0, S7Completion::Completed);
+    let grad_log = std::fs::read_to_string(&paths.grad_log).expect("grad log reads");
+    let rewritten = grad_log.replacen("\"max_l2\":0.250001", "\"max_l2\":0.2500010132789612", 1);
+    assert_ne!(
+        grad_log, rewritten,
+        "fixture grad log should contain target float"
+    );
+    std::fs::write(&paths.grad_log, rewritten).expect("grad log rewrites");
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-run",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--topology",
+        "MoeTiny",
+        "--seed",
+        "0",
+        "--run-log",
+        paths.run_log.to_str().expect("utf8 run log"),
+        "--score",
+        paths.score.to_str().expect("utf8 score"),
+        "--grad-log",
+        paths.grad_log.to_str().expect("utf8 grad log"),
+        "--router-step-telemetry",
+        paths
+            .router_step_telemetry
+            .to_str()
+            .expect("utf8 router telemetry"),
+    ]);
+
+    let output_result = command.output().expect("s7 materialize-run runs");
+    assert!(
+        output_result.status.success(),
+        "s7 materialize-run rejected equivalent float spelling:\n{}",
+        command_output(&output_result)
+    );
+}
+
+#[test]
 fn s7_materialize_run_rejects_incomplete_fixture_shaped_run_log() {
     let temp = tempfile::tempdir().expect("tempdir");
     let input = temp.path().join("input");
@@ -1099,6 +1147,51 @@ fn s7_materialize_support_artifact_writes_router_collapse_sweep_packet_path() {
         sweep_self_hash
     );
     assert_eq!(sweep["records"].as_array().expect("records").len(), 6);
+}
+
+#[test]
+fn s7_materialize_support_artifact_accepts_f32_spelled_router_collapse_grid() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let input_root = temp.path().join("input");
+    let packet = temp.path().join("packet");
+    write_json(
+        &input_root,
+        "sweep.json",
+        &router_collapse_sweep_support_artifact_with_lambdas([
+            0.0,
+            0.05000000074505806,
+            0.10000000149011612,
+            0.5,
+            1.0,
+            5.0,
+        ]),
+    );
+
+    let mut command = gbf();
+    command.args([
+        "--log-level",
+        "off",
+        "s7",
+        "materialize-support-artifact",
+        "--root",
+        packet.to_str().expect("utf8 packet root"),
+        "--kind",
+        "router-collapse-sweep",
+        "--input",
+        input_root
+            .join("sweep.json")
+            .to_str()
+            .expect("utf8 sweep input"),
+    ]);
+
+    let output_result = command
+        .output()
+        .expect("s7 materialize-support-artifact runs");
+    assert!(
+        output_result.status.success(),
+        "s7 materialize-support-artifact rejected f32-spelled grid:\n{}",
+        command_output(&output_result)
+    );
 }
 
 #[test]
@@ -3099,7 +3192,10 @@ fn switch_stats_support_artifact(seed: u64) -> Value {
 }
 
 fn router_collapse_sweep_support_artifact() -> Value {
-    let lambdas = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0];
+    router_collapse_sweep_support_artifact_with_lambdas([0.0, 0.05, 0.1, 0.5, 1.0, 5.0])
+}
+
+fn router_collapse_sweep_support_artifact_with_lambdas(lambdas: [f64; 6]) -> Value {
     let bpc_eval_subset = [1.0, 1.01, 1.02, 1.1, 1.2, 1.5];
     let entropy_bits = [2.0, 1.9, 1.85, 1.7, 1.55, 1.4];
     let quality_delta = [-0.01, 0.0, 0.01, 0.09, 0.19, 0.49];
@@ -3134,7 +3230,7 @@ fn router_collapse_sweep_support_artifact() -> Value {
             "producer_kind": "production_closure_retrain_score",
             "grid": lambdas,
             "records": records,
-            "production_lambda": 0.05,
+            "production_lambda": lambdas[1],
             "collapse_threshold": 1.0,
             "guardrail_verdict": "Pass",
             "sweep_self_hash": test_hash(177),

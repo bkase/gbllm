@@ -10,3 +10,9 @@
 /experiments/S1/
 /experiments/S1-production-local/
 /experiments/S1-toy1/
+
+# Local-only F-S7 production inputs/copies. The reviewed packet tracks the
+# canonical hashes plus top-level S7 closure artifacts instead.
+/experiments/S4/corpus/gutenberg-train.bin
+/experiments/S4/corpus/gutenberg-val.bin
+/experiments/S7/production-bundle/

@@ -1,0 +1,44 @@
+{
+  "findings": [
+    {
+      "body": "P5/P6: audit-production-runner.py --json currently reports status=needs_changes with two errors, but both are the by-design in_progress guard ('production runner is in_progress, not resolved' and 'production-looking S7 artifacts exist while runner owner is unresolved'). missing_code_surface_count=0, blocking_dependency_present=true, and production_artifact_count=48 all indicate the surface is in place. These errors clear on bd-3e10j closure; they do not falsify closure claims for this bead.",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P3: The five MoE seeds show wide final-step lm_loss variance (0.40 at seed 4 vs 9.77 at seed 1), which suggests substantial run-to-run instability under this schedule. This does not invalidate the FailParity verdict \u2014 val BPC across MoE seeds stays in a narrow 4.37\u20134.52 band and every seed is beaten by its matched-bytes dense counterpart \u2014 but the surprise is worth surfacing to bd-2v9r/S8 planning. The S7 report currently records 'no additional surprises.'",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P1/P6: freeze_teacher is invoked unconditionally at S7_PHASE_A_END_STEP for both S7Topology::MoeTiny and S7Topology::MoeTinyDenseMatched, so dense-matched runs also carry a distinct frozen_teacher_checkpoint_sha and receive a phase-C distill loss. This is consistent with applying one phase schedule uniformly to both subjects (both losses[step].distill_loss_raw appears for step>=8001 in both topologies) and with the RFC's requirement that both subjects complete Phase A\u2192E, but reviewers of bd-2v9r should confirm the RFC intends self-distillation for the dense-matched control rather than skipping the distill term outside MoE.",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P9: run-log.json for a single MoE seed is ~8.2MB; the full production bundle is ~80MB. This is well within reason for a bead-level artifact and matches the RFC's 20,000-step commitment, but note it for packet-transport and reviewer-fetch cost planning.",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P6/P1: frontier deployed_bytes_per_block are seeded from DEFAULT_FRONTIER_MOE_BYTES_PER_BLOCK / DEFAULT_FRONTIER_DENSE_BYTES_PER_BLOCK constants in production_runner.rs (line 54\u201355) rather than derived from the copied moe_conformance.json / dense_conformance.json inputs. The comparison artifact still reflects the matched_bytes_pin correctly (bytes_diff=16, within tolerance), and this bead only supplies frontier inputs consumed by downstream materializers, so it is non-blocking for bd-3e10j but worth confirming during bd-2v9r closure that the frontier materializer trusts the conformance inputs rather than these defaults.",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P10: telemetry surface is complete \u2014 grad-log.jsonl carries {global_l2, max_l2, mean_l2} per step with phase and optimizer_state (burn_adamw, optimizer_record_entries, training_backend=burn_ndarray_autodiff); router-step-telemetry.jsonl carries tokens_per_expert, expert_usage_entropy_bits, bank_switches_per_token, same_expert_rate and a full router_confidence_distribution per layer per step with telemetry_self_hash; run-log.json includes eval_points at 1k-step cadence plus final_grad_norms and frozen_teacher_checkpoint_sha; all top-level artifacts carry canonical self-hashes and phase-tagged optimizer state.",
+      "severity": "info",
+      "status": "resolved"
+    }
+  ],
+  "personas": [
+    "P1",
+    "P3",
+    "P5",
+    "P6",
+    "P9",
+    "P10"
+  ],
+  "summary": "The bd-3e10j closure claims are supported by the current worktree at 7d034d6. gbf-experiments/src/s7/production_runner.rs (2232 lines) implements a real Burn AdamW-backed producer that constructs BurnMoeS7ModelState / BurnByteMoeS7Model, calls loss.backward()+optimizer.step for 20,000 steps, freezes the teacher at S7_PHASE_A_END_STEP, emits per-step run/grad/router telemetry, scores on the pinned Gutenberg val subset, computes switch stats, and drives the production_closure_retrain_score lambda sweep from the seed-0 Phase-D checkpoint. Filesystem evidence agrees: experiments/S7/production-bundle contains all 10 seed\u00d7topology runs, each with 20,000-entry run-log.json (losses+grad_norms with 21 eval_points and a per-seed frozen_teacher_checkpoint_sha), 20,000-line grad-log.jsonl, and 80,000-line router-step-telemetry.jsonl (4 layers \u00d7 20,000 steps, MoE only). Seeds differ (final lm_loss ranges 0.40\u20139.77; distinct teacher SHAs per seed), phase transitions align with 4k/8k/14k/18k boundaries (distill kind flips at 8000; loss composition changes across boundaries), and the sweep grid records 6 real lambda_switch points with monotonic entropy/BPC responses. validate-artifacts.py and validate-report.py both return ok. Scientific result is correctly reported as FailParity / ProceedToS8DenseOnly \u2014 median dense BPC 4.13 vs MoE 4.51 (dense wins by ~0.38 BPC on all 5 seeds under matched bytes with bytes_diff=16). audit-production-runner.py returns needs_changes only because bd-3e10j is still in_progress (chicken-and-egg with review-gated closure) and missing_code_surface_count is 0.",
+  "verdict": "PASS"
+}

@@ -55,6 +55,7 @@ const DEFAULT_FRONTIER_MOE_BYTES_PER_BLOCK: [u64; 4] = [20_944, 20_944, 20_944, 
 const DEFAULT_FRONTIER_DENSE_BYTES_PER_BLOCK: [u64; 4] = [20_948, 20_948, 20_948, 20_948];
 const S7_PRODUCTION_DOMAIN_VERSION: &str = "1";
 const S7_PHASE_D_END_STEP: u64 = 18_000;
+const S7_PRODUCTION_PARITY_BPC_MARGIN: f64 = 0.05;
 
 /// Inputs for producing a full S7 production bundle.
 #[derive(Debug, Clone)]
@@ -85,9 +86,11 @@ pub struct S7ProductionBundleInputs {
     pub moe_schedule_cost: Option<PathBuf>,
     /// Optional dense schedule-cost evidence for frontier derivation.
     pub dense_schedule_cost: Option<PathBuf>,
-    /// Final report outcome passed through to the packet assembler.
+    /// Operator-provided report outcome hint retained for CLI compatibility.
+    /// The production manifest derives the authoritative outcome from scores.
     pub s7_outcome: String,
-    /// Final report decision passed through to the packet assembler.
+    /// Operator-provided report decision hint retained for CLI compatibility.
+    /// The production manifest derives the authoritative decision from scores.
     pub decision: String,
     /// RFC revision hash/commit pinned in the final report.
     pub rfc_revision: String,
@@ -142,6 +145,8 @@ pub fn produce_s7_production_bundle(
     let mut moe_phase_d_seed0_state = None;
     let mut moe_topology_hash = Hash256::ZERO;
     let mut dense_topology_hash = Hash256::ZERO;
+    let mut moe_bpc_by_seed = BTreeMap::<u64, f64>::new();
+    let mut dense_bpc_by_seed = BTreeMap::<u64, f64>::new();
 
     for topology in [S7Topology::MoeTiny, S7Topology::MoeTinyDenseMatched] {
         let topology_name = topology_path_segment(&topology).to_owned();
@@ -156,9 +161,11 @@ pub fn produce_s7_production_bundle(
             }
             if topology == S7Topology::MoeTiny {
                 moe_topology_hash = product.model_topology_hash;
+                moe_bpc_by_seed.insert(seed, product.score.bpc);
                 write_switch_stats(&inputs.output_dir, seed, &product)?;
             } else {
                 dense_topology_hash = product.model_topology_hash;
+                dense_bpc_by_seed.insert(seed, product.score.bpc);
             }
             seed_refs.insert(seed.to_string(), product.manifest_entry);
         }
@@ -216,15 +223,7 @@ pub fn produce_s7_production_bundle(
             moe_schedule_cost: copied_support.moe_schedule_cost,
             dense_schedule_cost: copied_support.dense_schedule_cost,
         },
-        report: ReportManifest {
-            s7_outcome: inputs.s7_outcome.clone(),
-            decision: inputs.decision.clone(),
-            rfc_revision: inputs.rfc_revision.clone(),
-            predictions_section_hash: inputs.predictions_section_hash.clone(),
-            predictions_commit: inputs.predictions_commit.clone(),
-            first_result_commit: inputs.first_result_commit.clone(),
-            generated_at: inputs.generated_at.clone(),
-        },
+        report: derive_report_manifest_from_scores(inputs, &moe_bpc_by_seed, &dense_bpc_by_seed)?,
         production_runner: ProductionRunnerManifest {
             schema: "s7_production_runner.v1",
             runner_kind: "gbf_experiments::s7::production_runner",
@@ -257,13 +256,61 @@ fn validate_inputs(inputs: &S7ProductionBundleInputs) -> Result<(), S7Production
             detail: "must be PassClean or FailParity".to_owned(),
         });
     }
-    match (inputs.s7_outcome.as_str(), inputs.decision.as_str()) {
-        ("PassClean", "ProceedToS8") | ("FailParity", "ProceedToS8DenseOnly") => Ok(()),
-        _ => Err(S7ProductionRunnerError::InvalidReportField {
+    if inputs.decision != "ProceedToS8" && inputs.decision != "ProceedToS8DenseOnly" {
+        return Err(S7ProductionRunnerError::InvalidReportField {
             field: "decision",
-            detail: "must match s7_outcome".to_owned(),
-        }),
+            detail: "must be ProceedToS8 or ProceedToS8DenseOnly".to_owned(),
+        });
     }
+    Ok(())
+}
+
+fn derive_report_manifest_from_scores(
+    inputs: &S7ProductionBundleInputs,
+    moe_bpc_by_seed: &BTreeMap<u64, f64>,
+    dense_bpc_by_seed: &BTreeMap<u64, f64>,
+) -> Result<ReportManifest, S7ProductionRunnerError> {
+    let mut all_moe_seeds_pass = true;
+    for seed in 0..5 {
+        let moe_bpc = *moe_bpc_by_seed
+            .get(&seed)
+            .ok_or(S7ProductionRunnerError::MissingScore {
+                topology: "MoeTiny",
+                seed,
+            })?;
+        let dense_bpc =
+            *dense_bpc_by_seed
+                .get(&seed)
+                .ok_or(S7ProductionRunnerError::MissingScore {
+                    topology: "MoeTinyDenseMatched",
+                    seed,
+                })?;
+        if !moe_bpc.is_finite() || !dense_bpc.is_finite() {
+            return Err(S7ProductionRunnerError::InvalidReportField {
+                field: "score.bpc",
+                detail: format!("seed {seed} BPC values must be finite"),
+            });
+        }
+        if moe_bpc >= dense_bpc - S7_PRODUCTION_PARITY_BPC_MARGIN {
+            all_moe_seeds_pass = false;
+        }
+    }
+
+    let (s7_outcome, decision) = if all_moe_seeds_pass {
+        ("PassClean", "ProceedToS8")
+    } else {
+        ("FailParity", "ProceedToS8DenseOnly")
+    };
+
+    Ok(ReportManifest {
+        s7_outcome: s7_outcome.to_owned(),
+        decision: decision.to_owned(),
+        rfc_revision: inputs.rfc_revision.clone(),
+        predictions_section_hash: inputs.predictions_section_hash.clone(),
+        predictions_commit: inputs.predictions_commit.clone(),
+        first_result_commit: inputs.first_result_commit.clone(),
+        generated_at: inputs.generated_at.clone(),
+    })
 }
 
 fn read_required_file(path: &Path) -> Result<Vec<u8>, S7ProductionRunnerError> {
@@ -2057,6 +2104,32 @@ mod tests {
     }
 
     #[test]
+    fn production_report_derives_pass_clean_when_all_moe_scores_clear_margin() {
+        let inputs = report_manifest_inputs();
+        let moe_bpc = score_map([4.00, 4.01, 4.02, 4.03, 4.04]);
+        let dense_bpc = score_map([4.10, 4.12, 4.13, 4.14, 4.15]);
+
+        let report = derive_report_manifest_from_scores(&inputs, &moe_bpc, &dense_bpc)
+            .expect("report manifest derives from scores");
+
+        assert_eq!(report.s7_outcome, "PassClean");
+        assert_eq!(report.decision, "ProceedToS8");
+    }
+
+    #[test]
+    fn production_report_derives_fail_parity_from_scores_despite_pass_hint() {
+        let inputs = report_manifest_inputs();
+        let moe_bpc = score_map([4.5113, 4.5232, 4.4761, 4.3667, 4.5102]);
+        let dense_bpc = score_map([4.1328, 4.1454, 4.1085, 4.0410, 4.1300]);
+
+        let report = derive_report_manifest_from_scores(&inputs, &moe_bpc, &dense_bpc)
+            .expect("report manifest derives from scores");
+
+        assert_eq!(report.s7_outcome, "FailParity");
+        assert_eq!(report.decision, "ProceedToS8DenseOnly");
+    }
+
+    #[test]
     fn production_manifest_serializes_required_schema() {
         let manifest = ProductionManifest {
             schema: S7_PRODUCTION_BUNDLE_MANIFEST_SCHEMA.to_owned(),
@@ -2116,5 +2189,44 @@ mod tests {
             value["production_runner"]["sweep_producer_kind"],
             PRODUCTION_SWEEP_PRODUCER_KIND
         );
+    }
+
+    fn score_map(values: [f64; 5]) -> BTreeMap<u64, f64> {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(seed, bpc)| (seed as u64, bpc))
+            .collect()
+    }
+
+    fn report_manifest_inputs() -> S7ProductionBundleInputs {
+        S7ProductionBundleInputs {
+            output_dir: PathBuf::from("experiments/S7/production-bundle"),
+            manifest_output: PathBuf::from(
+                "experiments/S7/production-bundle/s7-production-bundle-manifest.json",
+            ),
+            gutenberg_manifest: PathBuf::from("experiments/S4/corpus/gutenberg-manifest.json"),
+            train_corpus: PathBuf::from("experiments/S4/corpus/gutenberg-train.bin"),
+            val_corpus: PathBuf::from("experiments/S4/corpus/gutenberg-val.bin"),
+            burn_grad_smoke: PathBuf::from("experiments/S7/burn-grad-smoke/expert_block_qat.json"),
+            oracle_routed: PathBuf::from("experiments/S7/oracle-routed/seed-0/oracle.json"),
+            emulator_one_token_moe: PathBuf::from(
+                "experiments/S7/emulator-one-token/seed-0/MoeTiny/result.json",
+            ),
+            emulator_one_token_dense: Some(PathBuf::from(
+                "experiments/S7/emulator-one-token/seed-0/MoeTinyDenseMatched/result.json",
+            )),
+            moe_conformance: PathBuf::from("experiments/S7/frontier/moe-conformance.json"),
+            dense_conformance: PathBuf::from("experiments/S7/frontier/dense-conformance.json"),
+            moe_schedule_cost: None,
+            dense_schedule_cost: None,
+            s7_outcome: "PassClean".to_owned(),
+            decision: "ProceedToS8".to_owned(),
+            rfc_revision: "a".repeat(40),
+            predictions_section_hash: sha256(b"pred").to_string(),
+            predictions_commit: "b".repeat(40),
+            first_result_commit: "c".repeat(40),
+            generated_at: "2026-07-01T00:00:00Z".to_owned(),
+        }
     }
 }

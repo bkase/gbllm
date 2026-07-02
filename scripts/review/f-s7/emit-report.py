@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -18,6 +19,7 @@ HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TOPOLOGIES = ("MoeTiny", "MoeTinyDenseMatched")
 SEEDS = range(5)
+SURPRISE_LM_LOSS_SPREAD = 5.0
 SWITCH_STATS_MANIFEST_DOMAIN = (
     "gbf-experiments",
     "S7SwitchStatsBundleManifest",
@@ -111,7 +113,7 @@ def build_report(
     first_result_commit: str,
     generated_at: str,
 ) -> str:
-    row_text, score_rows = per_seed_rows(root)
+    row_text, score_rows, loss_rows = per_seed_rows(root)
     matched_bytes_self_hash = artifact_hash(
         root,
         "experiments/S7/dense-vs-moe/comparison.json",
@@ -156,7 +158,7 @@ def build_report(
     else:
         emulator_one_token_dense_self_hash = "null"
 
-    body = report_body(score_rows, s7_outcome, decision)
+    body = report_body(score_rows, loss_rows, s7_outcome, decision)
     report = f"""---
 schema: "s7_report.v1"
 s7_outcome: {s7_outcome}
@@ -182,9 +184,10 @@ report_self_hash: null
     return with_report_self_hash(report)
 
 
-def per_seed_rows(root: Path) -> tuple[str, list[dict[str, Any]]]:
+def per_seed_rows(root: Path) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[str] = []
     score_rows: list[dict[str, Any]] = []
+    loss_rows: list[dict[str, Any]] = []
     for topology in TOPOLOGIES:
         for seed in SEEDS:
             run = load_json(root / f"experiments/S7/runs/{topology}/seed-{seed}/run-log.json")
@@ -196,6 +199,9 @@ def per_seed_rows(root: Path) -> tuple[str, list[dict[str, Any]]]:
             score_hash = require_hash(score, ["score_self_hash"], f"{topology} seed {seed} score")
             bpc = score.get("bpc")
             deployed = "see matched-bytes artifact"
+            final_lm_loss = final_lm_loss_raw(run)
+            if final_lm_loss is not None:
+                loss_rows.append({"seed": seed, "topology": topology, "lm_loss_raw": final_lm_loss})
             score_rows.append(
                 {
                     "seed": seed,
@@ -215,10 +221,31 @@ def per_seed_rows(root: Path) -> tuple[str, list[dict[str, Any]]]:
     score_self_hash: "{score_hash}"
 """
             )
-    return "".join(rows), score_rows
+    return "".join(rows), score_rows, loss_rows
 
 
-def report_body(score_rows: list[dict[str, Any]], s7_outcome: str, decision: str) -> str:
+def final_lm_loss_raw(run: dict[str, Any]) -> float | None:
+    losses = run.get("losses")
+    if not isinstance(losses, list) or not losses:
+        return None
+    last = losses[-1]
+    if not isinstance(last, list) or len(last) != 2 or not isinstance(last[1], dict):
+        return None
+    value = last[1].get("lm_loss_raw")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def report_body(
+    score_rows: list[dict[str, Any]],
+    loss_rows: list[dict[str, Any]],
+    s7_outcome: str,
+    decision: str,
+) -> str:
     h3_status = "Refuted" if s7_outcome == "FailParity" else "Confirmed"
     observed = "\n".join(
         f"- seed {row['seed']} {row['topology']}: val_bpc={row['bpc']}, completion=Completed, "
@@ -234,6 +261,7 @@ def report_body(score_rows: list[dict[str, Any]], s7_outcome: str, decision: str
         if s7_outcome == "FailParity"
         else "No falsification rule fired for the closure-candidate outcome."
     )
+    surprises = surprise_summary(score_rows, loss_rows)
     return "\n".join(
         [
             "## Pre-registered predictions",
@@ -251,7 +279,7 @@ def report_body(score_rows: list[dict[str, Any]], s7_outcome: str, decision: str
             "## Pareto verdict",
             "See s7_dense_vs_moe.v1 and s7_frontier.v1.",
             "## Surprises",
-            "No additional surprises recorded by the emitter.",
+            surprises,
             "## Decision",
             f"{decision}.",
             "## Reproducibility statement",
@@ -259,6 +287,53 @@ def report_body(score_rows: list[dict[str, Any]], s7_outcome: str, decision: str
             "",
         ]
     )
+
+
+def surprise_summary(score_rows: list[dict[str, Any]], loss_rows: list[dict[str, Any]]) -> str:
+    moe_losses = [
+        row
+        for row in loss_rows
+        if row.get("topology") == "MoeTiny"
+        and isinstance(row.get("seed"), int)
+        and isinstance(row.get("lm_loss_raw"), float)
+    ]
+    if len(moe_losses) < 2:
+        return "No additional surprises recorded by the emitter."
+    low = min(moe_losses, key=lambda row: row["lm_loss_raw"])
+    high = max(moe_losses, key=lambda row: row["lm_loss_raw"])
+    spread = high["lm_loss_raw"] - low["lm_loss_raw"]
+    if spread < SURPRISE_LM_LOSS_SPREAD:
+        return "No additional surprises recorded by the emitter."
+    parity_context = dense_bpc_context(score_rows)
+    return (
+        "MoE final-step lm_loss_raw was noisy across seeds "
+        f"(min seed {low['seed']}={format_metric(low['lm_loss_raw'])}, "
+        f"max seed {high['seed']}={format_metric(high['lm_loss_raw'])})"
+        f"{parity_context}; treat this raw training-loss spread as follow-up context, "
+        "not parity evidence."
+    )
+
+
+def dense_bpc_context(score_rows: list[dict[str, Any]]) -> str:
+    moe: dict[int, float] = {}
+    dense: dict[int, float] = {}
+    for row in score_rows:
+        seed = row.get("seed")
+        bpc = row.get("bpc")
+        if not isinstance(seed, int) or isinstance(bpc, bool) or not isinstance(bpc, (int, float)):
+            continue
+        if row.get("topology") == "MoeTiny":
+            moe[seed] = float(bpc)
+        elif row.get("topology") == "MoeTinyDenseMatched":
+            dense[seed] = float(bpc)
+    common_seeds = sorted(set(moe) & set(dense))
+    if common_seeds and all(dense[seed] < moe[seed] for seed in common_seeds):
+        return ", while dense validation BPC beat MoE on every comparable seed"
+    return ""
+
+
+def format_metric(value: float) -> str:
+    return f"{value:.6g}"
 
 
 def switch_stats_manifest_hash(root: Path) -> str:

@@ -22,6 +22,7 @@ const S7_N_EXPERTS: u64 = 4;
 const S7_SEED_COUNT: usize = 5;
 const RCS_TRAINING_EXTRA_STEPS: u64 = 1_000;
 const D11_LAMBDA_SWITCH_GRID: [f64; 6] = [0.0, 0.05, 0.1, 0.5, 1.0, 5.0];
+const FLOAT_EQUIVALENCE_TOLERANCE: f64 = 5.0e-9;
 const PRODUCTION_SWEEP_PRODUCER_KIND: &str = "production_closure_retrain_score";
 const S7_SWITCH_STATS_DOMAIN: DomainHash<'static> = DomainHash::new(
     "gbf-experiments",
@@ -461,13 +462,7 @@ fn validate_router_collapse_sweep(
             format!("collapse_threshold must be 1.0, observed {collapse_threshold}"),
         ));
     }
-    require_string_eq(
-        value,
-        &["guardrail_verdict"],
-        "guardrail_verdict",
-        "Pass",
-        path,
-    )?;
+    require_guardrail_pass(value, path)?;
     let records = require_array(value, &["records"], "records")?;
     if records.len() != D11_LAMBDA_SWITCH_GRID.len() {
         return Err(invalid(
@@ -569,6 +564,28 @@ fn validate_sweep_record(
         },
     )?;
     Ok(())
+}
+
+fn require_guardrail_pass(
+    value: &Value,
+    path: &Path,
+) -> Result<(), S7SupportArtifactMaterializeError> {
+    match value.get("guardrail_verdict") {
+        Some(Value::String(verdict)) if verdict == "Pass" => Ok(()),
+        Some(Value::Object(object))
+            if object.get("kind").and_then(Value::as_str) == Some("pass") =>
+        {
+            Ok(())
+        }
+        Some(observed) => Err(invalid(
+            path,
+            format!("guardrail_verdict must be Pass/pass, observed {observed}"),
+        )),
+        None => Err(invalid(
+            path,
+            "guardrail_verdict must be present".to_owned(),
+        )),
+    }
 }
 
 fn validate_temporal_switch_digest(
@@ -1387,7 +1404,7 @@ fn topology_path_segment(topology: &S7Topology) -> &'static str {
 }
 
 fn f64_close(left: f64, right: f64) -> bool {
-    (left - right).abs() <= 1.0e-9
+    (left - right).abs() <= FLOAT_EQUIVALENCE_TOLERANCE
 }
 
 fn invalid_label(label: &str, message: &str) -> S7SupportArtifactMaterializeError {

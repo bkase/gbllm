@@ -264,7 +264,19 @@ expect_fail later_result_not_earliest "first_result_commit is not the earliest S
 
 write_pin "$predictions_commit" "$first_result_commit"
 git add fixtures/preregistration/s7.toml
-git commit -q -m "record S7 result commit too late"
-expect_fail late_pin_touch "commit touching fixtures/preregistration/s7.toml is not an ancestor"
+git commit -q -m "record S7 result commit after first result"
+"$SCRIPT" >/dev/null
+
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("fixtures/preregistration/s7.toml")
+text = path.read_text(encoding="utf-8")
+path.write_text(
+    text.replace('pass_version_S7 = "s7-prereg-test-2026-06-25"', 'pass_version_S7 = "s7-prereg-test-mutated"'),
+    encoding="utf-8",
+)
+PY
+expect_fail late_pin_scope "pin commits after first_result_commit may only update first_result_commit"
 
 echo "[S7 PREREG TEST] all preregistration check scenarios passed"

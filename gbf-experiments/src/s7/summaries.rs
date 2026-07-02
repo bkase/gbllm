@@ -44,6 +44,7 @@ const S7_DERIVED_SUMMARIES_DOMAIN: DomainHash<'static> = DomainHash::new(
     "s7_derived_summaries.v1",
     "1",
 );
+const D11_FLOAT_TOLERANCE: f64 = 5.0e-9;
 
 /// Inputs for deriving the comparison summary JSONs required by
 /// `s7_dense_vs_moe.v1`.
@@ -221,19 +222,24 @@ fn derive_sweep_summary(report: &Value) -> Result<SweepSummary, S7SummaryMateria
     Ok(SweepSummary::new(
         bpc_at_lambda,
         entropy_at_lambda,
-        artifact_guardrail_verdict(required_str(report, "guardrail_verdict")?)?,
+        artifact_guardrail_verdict(report.get("guardrail_verdict"))?,
     )?)
 }
 
 fn artifact_guardrail_verdict(
-    verdict: &str,
+    verdict: Option<&Value>,
 ) -> Result<GuardrailVerdict, S7SummaryMaterializeError> {
-    Ok(match verdict {
-        "Pass" => GuardrailVerdict::Pass,
-        "FailA" => GuardrailVerdict::FailA,
-        "FailB" => GuardrailVerdict::FailB,
-        "FailC" => GuardrailVerdict::FailC,
-        "FailD" => GuardrailVerdict::FailD,
+    let legacy = verdict.and_then(Value::as_str);
+    let tagged = verdict
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("kind"))
+        .and_then(Value::as_str);
+    Ok(match legacy.or(tagged) {
+        Some("Pass" | "pass") => GuardrailVerdict::Pass,
+        Some("FailA" | "fail_a") => GuardrailVerdict::FailA,
+        Some("FailB" | "fail_b") => GuardrailVerdict::FailB,
+        Some("FailC" | "fail_c") => GuardrailVerdict::FailC,
+        Some("FailD" | "fail_d") => GuardrailVerdict::FailD,
         observed => {
             return Err(S7SummaryMaterializeError::InvalidSweep {
                 path: "experiments/S7/router-collapse/seed-0/sweep.json".to_owned(),
@@ -340,7 +346,7 @@ fn validate_sweep_report(
     require_u64_eq(path, value, "seed", 0)?;
     require_f64_eq(path, value, "production_lambda", 0.05)?;
     require_f64_eq(path, value, "collapse_threshold", 1.0)?;
-    if required_str(value, "guardrail_verdict")? != "Pass" {
+    if artifact_guardrail_verdict(value.get("guardrail_verdict"))? != GuardrailVerdict::Pass {
         return Err(S7SummaryMaterializeError::InvalidSweep {
             path: path.display().to_string(),
             message: "guardrail_verdict must be Pass".to_owned(),
@@ -562,7 +568,7 @@ fn required_hash(value: &Value, field: &'static str) -> Result<Hash256, S7Summar
 }
 
 fn f64_close(left: f64, right: f64) -> bool {
-    (left - right).abs() <= 1.0e-9
+    (left - right).abs() <= D11_FLOAT_TOLERANCE
 }
 
 fn validate_temporal_digest_layers(

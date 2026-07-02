@@ -436,6 +436,23 @@ fn gutenberg_manifest_rejects_g_ok_12_drop_field_shape_mismatch() {
 }
 
 #[test]
+fn gutenberg_manifest_accepts_pre_decode_invalid_utf8_drop_without_pre_strip_hash() {
+    let mut manifest = canonical_manifest_fixture();
+    manifest.sources[2].drop_reason = Some(GutenbergDropReason::InvalidUtf8);
+    manifest.sources[2].selected_format = Some("text/plain;charset=us-ascii".to_owned());
+    manifest.sources[2].source_blob_sha256 = Some(hash(0x66));
+    manifest.sources[2].compression_kind = Some(GutenbergCompressionKind::None);
+    manifest.drop_count_no_supported_plaintext_format = 0;
+    manifest.drop_count_invalid_utf8 = 1;
+    manifest.manifest_self_hash = manifest
+        .compute_self_hash()
+        .expect("mutated self hash computes");
+
+    CanonicalGutenbergManifestWrite::to_vec(&manifest)
+        .expect("pre-decode invalid_utf8 drops may omit pre-strip fields");
+}
+
+#[test]
 fn gutenberg_manifest_rejects_dedup_drop_without_duplicate_pointer() {
     let mut manifest = canonical_manifest_fixture();
     manifest.sources[2].drop_reason = Some(GutenbergDropReason::DedupCollision);

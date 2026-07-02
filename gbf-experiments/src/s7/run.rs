@@ -293,8 +293,8 @@ fn read_grad_log(path: &Path, run_log: &S7RunLog) -> Result<Vec<Value>, S7RunMat
     let expected_by_step = run_log
         .grad_norms
         .iter()
-        .map(|(step, summary)| Ok((*step, serde_json::to_value(summary)?)))
-        .collect::<Result<BTreeMap<_, _>, serde_json::Error>>()?;
+        .map(|(step, summary)| (*step, summary.clone()))
+        .collect::<BTreeMap<_, _>>();
     for (index, record) in records.iter().enumerate() {
         let location = JsonlLocation {
             label: "grad log",
@@ -319,7 +319,7 @@ fn read_grad_log(path: &Path, run_log: &S7RunLog) -> Result<Vec<Value>, S7RunMat
                 observed: train_step.to_string(),
             });
         }
-        let grad_norms =
+        let grad_norms_value =
             record
                 .get("grad_norms")
                 .ok_or(S7RunMaterializeError::MissingJsonlField {
@@ -327,6 +327,7 @@ fn read_grad_log(path: &Path, run_log: &S7RunLog) -> Result<Vec<Value>, S7RunMat
                     line: index + 1,
                     field: "grad_norms",
                 })?;
+        let grad_norms: GradNormSummary = serde_json::from_value(grad_norms_value.clone())?;
         let expected =
             expected_by_step
                 .get(&train_step)
@@ -337,16 +338,15 @@ fn read_grad_log(path: &Path, run_log: &S7RunLog) -> Result<Vec<Value>, S7RunMat
                     expected: "step from run-log grad_norms".to_owned(),
                     observed: train_step.to_string(),
                 })?;
-        if grad_norms != expected {
+        if &grad_norms != expected {
             return Err(S7RunMaterializeError::JsonlFieldMismatch {
                 label: "grad log",
                 line: index + 1,
                 field: "grad_norms",
-                expected: expected.to_string(),
-                observed: grad_norms.to_string(),
+                expected: serde_json::to_value(expected)?.to_string(),
+                observed: serde_json::to_value(&grad_norms)?.to_string(),
             });
         }
-        let _: GradNormSummary = serde_json::from_value(grad_norms.clone())?;
     }
     Ok(records)
 }

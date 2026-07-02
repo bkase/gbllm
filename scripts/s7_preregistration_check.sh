@@ -236,20 +236,7 @@ def main() -> int:
 
         stage_start(3, "validate pin history")
         if first_result_commit is not None:
-            offenders = [
-                commit
-                for commit in commits_touching_path(repo, pin_path)
-                if not git_is_ancestor(repo, commit, first_result_commit)
-            ]
-            if offenders:
-                raise PreregError(
-                    3,
-                    (
-                        f"commit touching {pin_path} is not an ancestor of first_result_commit\n"
-                        f"  offending_commits={','.join(offenders)}"
-                    ),
-                    {"offending_commits": offenders, "first_result_commit": first_result_commit},
-                )
+            validate_pin_history(repo, pin_path, first_result_commit, pin)
         stage_done("pin_history", 3, True, {"first_result_commit": first_result_commit})
         return finish(True, 0, output_path, args.json, dry_run=args.dry_run)
     except PreregError as error:
@@ -288,14 +275,22 @@ def load_pin(path: Path) -> dict[str, Any]:
 
 
 def parse_string_toml(path: Path) -> dict[str, Any]:
+    return parse_string_toml_text(path.read_text(encoding="utf-8"))
+
+
+def parse_string_toml_text(text: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         stripped = line.split("#", 1)[0].strip()
         if not stripped:
             continue
         key, raw = stripped.split("=", 1)
         data[key.strip()] = json.loads(raw.strip())
     return data
+
+
+def parse_pin_text(text: str) -> dict[str, Any]:
+    return tomllib.loads(text) if tomllib is not None else parse_string_toml_text(text)
 
 
 def predictions_hash(path: Path, pin: dict[str, Any], section: str) -> str:
@@ -368,6 +363,54 @@ def first_result_path_at_commit(repo: Path, commit: str, paths: list[Path]) -> s
         if RESULT_HASH_RE.search(blob):
             return str(path)
     return None
+
+
+def validate_pin_history(
+    repo: Path,
+    pin_path: Path,
+    first_result_commit: str,
+    current_pin: dict[str, Any],
+) -> None:
+    later_pin_commits = [
+        commit
+        for commit in commits_touching_path(repo, pin_path)
+        if not git_is_ancestor(repo, commit, first_result_commit)
+    ]
+    if not later_pin_commits:
+        return
+    try:
+        baseline_text = git(repo, ["show", f"{first_result_commit}:{pin_path}"], text=True)
+    except subprocess.CalledProcessError as error:
+        raise PreregError(
+            3,
+            (
+                f"{pin_path} must exist at first_result_commit so later pin edits can be audited\n"
+                f"  first_result_commit={first_result_commit}"
+            ),
+            {"first_result_commit": first_result_commit},
+        ) from error
+    baseline_pin = parse_pin_text(baseline_text)
+    allowed = dict(baseline_pin)
+    allowed["first_result_commit"] = first_result_commit
+    if current_pin == allowed:
+        return
+    changed_fields = sorted(
+        key
+        for key in set(current_pin) | set(baseline_pin)
+        if key != "first_result_commit" and current_pin.get(key) != baseline_pin.get(key)
+    )
+    raise PreregError(
+        3,
+        (
+            f"pin commits after first_result_commit may only update first_result_commit\n"
+            f"  offending_commits={','.join(later_pin_commits)}"
+        ),
+        {
+            "offending_commits": later_pin_commits,
+            "first_result_commit": first_result_commit,
+            "changed_fields": changed_fields,
+        },
+    )
 
 
 def first_result_path_in_worktree(repo: Path, paths: list[Path]) -> str | None:

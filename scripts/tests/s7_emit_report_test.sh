@@ -24,9 +24,18 @@ def write(rel: str, payload) -> None:
 
 for topology in ["MoeTiny", "MoeTinyDenseMatched"]:
     for seed in range(5):
+        final_lm_loss = 1.0
+        if topology == "MoeTiny" and seed == 1:
+            final_lm_loss = 9.5
+        elif topology == "MoeTiny" and seed == 4:
+            final_lm_loss = 0.5
         write(
             f"experiments/S7/runs/{topology}/seed-{seed}/run-log.json",
-            {"completion": {"kind": "completed"}, "run_log_self_hash": h},
+            {
+                "completion": {"kind": "completed"},
+                "run_log_self_hash": h,
+                "losses": [[20000, {"lm_loss_raw": final_lm_loss}]],
+            },
         )
         write(
             f"experiments/S7/scores/{topology}/seed-{seed}/score.json",
@@ -63,6 +72,7 @@ scripts/review/f-s7/validate-report.py \
 
 rg -n 'generated_at: "2026-06-25T00:00:00Z"' "$tmp/docs/experiments/S7-report.md" >/dev/null
 rg -n 'H10 Confirmed' "$tmp/docs/experiments/S7-report.md" >/dev/null
+rg -n 'MoE final-step lm_loss_raw was noisy across seeds' "$tmp/docs/experiments/S7-report.md" >/dev/null
 
 python3 - "$tmp/docs/experiments/S7-report.md" <<'PY'
 from pathlib import Path

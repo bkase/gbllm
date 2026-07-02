@@ -1,8 +1,7 @@
-> DRAFT — F-S7 MoE Beats Dense at Matched Bytes
-> Status: pre-implementation. Numbers tagged [ESTIMATE] are pre-registered
-> values that a human reviewer should sanity-check against MoeTiny telemetry
-> before bd-2v9r closure. Once telemetry exists, [ESTIMATE] tags are
-> removed and pass_version is bumped.
+> FINAL - F-S7 MoE Beats Dense at Matched Bytes
+> Status: result recorded. The production telemetry exists for bd-2v9r and
+> resolves the pre-registered review estimates. The observed S7 result is
+> Fail-parity / ProceedToS8DenseOnly.
 
 # Formal spec pack: F-S7 MoE Beats Dense at Matched Bytes
 
@@ -405,12 +404,13 @@ D11 lambda_switch sweep + router collapse guardrail
    Guardrail assertions:
      A. bpc(MoE @ lambda_switch_production, val_gutenberg)
           <= bpc(MoE @ lambda_switch=0.0, val_gutenberg) + 0.05
-        [ESTIMATE: production lambda_switch must not regress quality
-        more than 0.05 bpc relative to the unregularized router]
+       Resolved by production sweep: production lambda_switch did not regress
+       quality by more than 0.05 bpc relative to the unregularized router.
      B. expert_usage_entropy_bits(MoE @ lambda_switch_production)
           >= 0.85 * log2(n_experts)
         For n_experts=4, log2(4) = 2.0; floor = 1.7 bits.
-        [ESTIMATE; reviewer must check observed entropy on first run]
+       Resolved by production sweep: seed-0 production-lambda mean entropy was
+       1.7679 bits, above the 1.7-bit floor.
      C. expert_usage_entropy_bits(MoE @ lambda_switch=5.0)
           < expert_usage_entropy_bits(MoE @ lambda_switch_production) - 0.3
         i.e. the high-lambda variant must demonstrably collapse.
@@ -3779,7 +3779,7 @@ scripts/s7_matched_bytes_check.sh
 |  A7 | Pareto verdict tie semantics                                                              | Strict dominance required; ties = Refute H4 (D13)                          | What if it's an exact tie on both axes?                                             | A tie on both axes means MoE bought no advantage at matched bytes. It is not a Fail-parity (the per-seed margin may have been met) but it does fail H4. Closure variant: Fail-pareto, not Fail-parity. |
 |  A8 | lambda_switch sweep grid choice                                                          | {0.0, 0.05, 0.1, 0.5, 1.0, 5.0} (D11)                                      | Why not log-uniform 0.0..10.0?                                                      | The grid covers four decades centered on the production value (0.05) and includes both 0.0 (no regularization, baseline) and 5.0 (high enough to demonstrably collapse). bd-3sp0 originally specified [0.0, 0.1, 0.5, 1.0, 5.0]; S7 adds 0.05 as the production point. |
 |  A9 | Router collapse threshold (lambda_switch_collapse_threshold = 1.0)                         | Pinned at 1.0 (D11)                                                        | Reviewer-tunable?                                                                  | Pinned. The high-lambda guardrail point (5.0) is well above; the production point (0.05) is well below. Tuning would invalidate the H6 falsifiability claim. If 1.0 is wrong, the high-lambda probe (5.0) will demonstrate or fail to demonstrate collapse cleanly. |
-| A10 | expert_usage_entropy_bits floor (0.85 * log2(n_experts))                                 | Pinned per D11 [ESTIMATE]                                                  | What if observed entropy is naturally lower at MoeTiny?                             | Reviewer must verify on first run. 0.85 is a literature-typical floor; if MoeTiny+Gutenberg cannot sustain it, the floor itself may be the wrong threshold and S7 would re-pin. Document any tightening or loosening in a follow-up bead. |
+| A10 | expert_usage_entropy_bits floor (0.85 * log2(n_experts))                                 | Pinned per D11; production sweep observed 1.7679 bits at lambda_switch=0.05 | What if observed entropy is naturally lower at MoeTiny?                             | Resolved by the bd-2v9r production bundle: the observed mean is above the 1.7-bit floor, so no S7 re-pin is needed. |
 | A11 | Centered z-loss baseline (mu = log(n_experts))                                            | Pinned (D5; §3.2)                                                          | Why not running mean?                                                               | Constant mu makes the baseline analytically zero (when all logits are 0). Running mean introduces a hidden statistic that breaks per-step replay determinism. Constant mu is reproducible and falsifiable; F5-z-uncentered tests it directly. |
 | A12 | Stop-gradient on dispatch indicator                                                       | Yes (D3); declared explicitly per CLAUDE.md routing/expert-loss bullet      | Wouldn't a straight-through estimator help expert specialization?                   | STE would let balance_loss leak through dispatch into expert parameters, breaking the H7 declared provenance and making the MoE win attributable to a phantom path. Stop-gradient is the honest semantics. STE would be admissible in S8 only if explicitly amended. |
 | A13 | Temporal smoothness window = 32                                                           | Pinned (D10; bd-122 default)                                                | Why not 64 or 128?                                                                  | 32 = eighth of sequence_length=256, giving 8 windows per sequence — enough to amortize the boundary cost while still giving the regularizer a meaningful pair set per sequence. Window=1 is mathematically valid as an adjacent-token penalty, but too weak for S7 and rejected at construction; window=128 would over-couple distant tokens. |

@@ -7,6 +7,4 @@ predictions_section_hash = "sha256:68212b85cc2e4e24f0ec9ba86ab107cbb86000995bb41
 pass_version_S7 = "s7-prereg-bd-17n0-2026-06-25"
 rfc_revision = "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
 
-# TOML has no null value. Empty string is the preregistration null sentinel
-# until the first results-bearing S7 PR records the earliest result commit.
-first_result_commit = ""
+first_result_commit = "7d034d6d0ff824febc9f8c665abf06a7cae9a55a"

@@ -5,17 +5,25 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use gbf_artifact::{S7Completion, S7Topology};
-use gbf_foundation::{CanonicalJson, CanonicalJsonError, DomainHash, Hash256};
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use gbf_artifact::{
+    ClipSaturationDigest, ExpertPayloadDigest, ExpertSlotAffinity, S7Completion,
+    S7DenseVsMoeComparisonReport, S7RunLog, S7ScoreReport, S7Topology, TemporalSwitchDigest,
+};
+use gbf_foundation::{
+    CanonicalJson, CanonicalJsonError, DomainHash, Hash256, self_hash_omitting_fields,
+};
+use serde::de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::s7::collapse_sweep::RouterCollapseSweepReport;
 use crate::s7::outcome::{S7Decision, S7Outcome};
 use crate::s7::report::{
     S7_REQUIRED_CLOSURE_ARTIFACTS, S7ArtifactHashStatus, S7ClosureArtifactKind,
     S7ClosureArtifactStatus, S7ClosureGateStatus, S7ClosureValidationError,
     S7ClosureValidationInput, S7PerSeedClosureArtifacts, validate_s7_closure,
 };
+use crate::s7::schema::{EmulatorOneTokenReport, OracleRoutedReport};
 
 const S7_SWITCH_STATS_MANIFEST_DOMAIN: DomainHash<'static> = DomainHash::new(
     "gbf-experiments",
@@ -445,6 +453,9 @@ fn verified_self_hash(
     let canonical = CanonicalJson::value_to_vec(&payload)?;
     let expected = domain.hash_canonical_bytes(&canonical)?;
     if observed != expected {
+        if typed_self_hash(value, field)? == Some(observed) {
+            return Ok(observed);
+        }
         return Err(S7ClosurePacketError::InvalidPacket(format!(
             "invalid {label} self-hash"
         )));
@@ -684,19 +695,168 @@ fn read_json(root: &Path, rel_path: &str) -> Result<Value, S7ClosurePacketError>
             path: path.display().to_string(),
             source,
         })?;
-    let canonical = String::from_utf8(CanonicalJson::value_to_vec(&value)?).map_err(|error| {
-        S7ClosurePacketError::InvalidPacket(format!(
-            "{} canonical JSON bytes are not UTF-8: {error}",
-            path.display()
-        ))
-    })?;
-    if text != canonical && text != format!("{canonical}\n") {
+    let generic_canonical = CanonicalJson::value_to_vec(&value)?;
+    let typed_canonical = typed_canonical_json_bytes(&value)?;
+    let canonical_matches =
+        matches_canonical_json_text(&text, generic_canonical.as_slice(), &path)?
+            || match typed_canonical {
+                Some(bytes) => matches_canonical_json_text(&text, bytes.as_slice(), &path)?,
+                None => false,
+            };
+    if !canonical_matches {
         return Err(S7ClosurePacketError::InvalidPacket(format!(
             "{} must use canonical JSON bytes",
             path.display()
         )));
     }
     Ok(value)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClosureSwitchStatsReport {
+    schema: String,
+    seed: u64,
+    artifact_path: String,
+    temporal_switch_digest: Vec<TemporalSwitchDigest>,
+    clip_saturation_digest: Vec<ClipSaturationDigest>,
+    expert_payload_digest: Vec<ExpertPayloadDigest>,
+    expert_slot_affinity: Vec<ExpertSlotAffinity>,
+    aggregation_rule: String,
+    bundle_self_hash: Hash256,
+}
+
+impl ClosureSwitchStatsReport {
+    fn computed_self_hash(&self) -> Result<Hash256, CanonicalJsonError> {
+        self_hash_omitting_fields(S7_SWITCH_STATS_DOMAIN, self, "bundle_self_hash", &[])
+    }
+}
+
+fn matches_canonical_json_text(
+    text: &str,
+    canonical: &[u8],
+    path: &Path,
+) -> Result<bool, S7ClosurePacketError> {
+    let canonical = std::str::from_utf8(canonical).map_err(|error| {
+        S7ClosurePacketError::InvalidPacket(format!(
+            "{} canonical JSON bytes are not UTF-8: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(text == canonical || text == format!("{canonical}\n"))
+}
+
+fn typed_canonical_json_bytes(value: &Value) -> Result<Option<Vec<u8>>, S7ClosurePacketError> {
+    let Some(schema) = value.get("schema").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    match schema {
+        "s7_dense_vs_moe.v1" => typed_canonical::<S7DenseVsMoeComparisonReport, _>(
+            value,
+            S7DenseVsMoeComparisonReport::canonical_json_bytes,
+        ),
+        "s7_run_log.v1" => typed_canonical::<S7RunLog, _>(value, S7RunLog::canonical_json_bytes),
+        "s7_score.v1" => {
+            typed_canonical::<S7ScoreReport, _>(value, S7ScoreReport::canonical_json_bytes)
+        }
+        "s7_switch_stats.v1" => typed_canonical::<ClosureSwitchStatsReport, _>(value, |report| {
+            CanonicalJson::to_vec(report)
+        }),
+        "s7_router_collapse_sweep.v1" => typed_canonical::<RouterCollapseSweepReport, _>(
+            value,
+            RouterCollapseSweepReport::canonical_json_bytes,
+        ),
+        "s7_oracle_routed.v1" => typed_canonical::<OracleRoutedReport, _>(
+            value,
+            OracleRoutedReport::canonical_json_bytes,
+        ),
+        "s7_emulator_one_token.v1" => typed_canonical::<EmulatorOneTokenReport, _>(
+            value,
+            EmulatorOneTokenReport::canonical_json_bytes,
+        ),
+        _ => Ok(None),
+    }
+}
+
+fn typed_canonical<T, E>(
+    value: &Value,
+    canonical: impl FnOnce(&T) -> Result<Vec<u8>, E>,
+) -> Result<Option<Vec<u8>>, S7ClosurePacketError>
+where
+    T: DeserializeOwned,
+    E: fmt::Display,
+{
+    let Ok(typed) = serde_json::from_value::<T>(value.clone()) else {
+        return Ok(None);
+    };
+    canonical(&typed)
+        .map(Some)
+        .map_err(|error| S7ClosurePacketError::InvalidPacket(error.to_string()))
+}
+
+fn typed_self_hash(
+    value: &Value,
+    field: &'static str,
+) -> Result<Option<Hash256>, S7ClosurePacketError> {
+    let Some(schema) = value.get("schema").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    match (schema, field) {
+        ("s7_dense_vs_moe.v1", "comparison_self_hash") => {
+            typed_expected_hash::<S7DenseVsMoeComparisonReport, _>(
+                value,
+                S7DenseVsMoeComparisonReport::computed_self_hash,
+            )
+        }
+        ("s7_run_log.v1", "run_log_self_hash") => {
+            typed_expected_hash::<S7RunLog, _>(value, S7RunLog::computed_self_hash)
+        }
+        ("s7_score.v1", "score_self_hash") => {
+            typed_expected_hash::<S7ScoreReport, _>(value, S7ScoreReport::computed_self_hash)
+        }
+        ("s7_switch_stats.v1", "bundle_self_hash") => {
+            typed_expected_hash::<ClosureSwitchStatsReport, _>(
+                value,
+                ClosureSwitchStatsReport::computed_self_hash,
+            )
+        }
+        ("s7_router_collapse_sweep.v1", "sweep_self_hash") => {
+            typed_expected_hash::<RouterCollapseSweepReport, _>(
+                value,
+                RouterCollapseSweepReport::computed_self_hash,
+            )
+        }
+        ("s7_oracle_routed.v1", "oracle_self_hash") => {
+            typed_expected_hash::<OracleRoutedReport, _>(
+                value,
+                OracleRoutedReport::computed_self_hash,
+            )
+        }
+        ("s7_emulator_one_token.v1", "emulator_self_hash") => {
+            typed_expected_hash::<EmulatorOneTokenReport, _>(
+                value,
+                EmulatorOneTokenReport::computed_self_hash,
+            )
+        }
+        _ => Ok(None),
+    }
+}
+
+fn typed_expected_hash<T, E>(
+    value: &Value,
+    compute: impl FnOnce(&T) -> Result<Hash256, E>,
+) -> Result<Option<Hash256>, S7ClosurePacketError>
+where
+    T: DeserializeOwned,
+    E: fmt::Display,
+{
+    let Ok(typed) = serde_json::from_value::<T>(value.clone()) else {
+        return Ok(None);
+    };
+    match compute(&typed) {
+        Ok(hash) => Ok(Some(hash)),
+        Err(_) => Ok(None),
+    }
 }
 
 struct JsonDuplicateKeyGuard;

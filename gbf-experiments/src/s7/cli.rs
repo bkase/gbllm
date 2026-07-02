@@ -503,10 +503,10 @@ pub struct S7ProduceProductionBundleArgs {
     /// Optional dense schedule-cost evidence used by frontier derivation.
     #[arg(long)]
     pub dense_schedule_cost: Option<PathBuf>,
-    /// S7 report outcome.
+    /// Backward-compatible report outcome hint; the producer derives the manifest outcome from scores.
     #[arg(long, default_value = "PassClean", value_parser = ["PassClean", "FailParity"])]
     pub s7_outcome: String,
-    /// Report decision matching the outcome.
+    /// Backward-compatible report decision hint; the producer derives the manifest decision from scores.
     #[arg(long, default_value = "ProceedToS8", value_parser = ["ProceedToS8", "ProceedToS8DenseOnly"])]
     pub decision: String,
     /// RFC revision commit/hash pinned into the final report.

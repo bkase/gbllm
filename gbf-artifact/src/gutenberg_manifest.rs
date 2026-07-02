@@ -762,8 +762,22 @@ fn validate_dropped_source_g_ok_12(
                 "pre_strip_byte_length",
             )?;
         }
+        GutenbergDropReason::InvalidUtf8 => {
+            require_present(
+                source.source_blob_sha256.as_ref(),
+                source.book_id,
+                reason,
+                "source_blob_sha256",
+            )?;
+            require_present(
+                source.selected_format.as_ref(),
+                source.book_id,
+                reason,
+                "selected_format",
+            )?;
+            validate_optional_pre_strip_pair(source, reason)?;
+        }
         GutenbergDropReason::GutenbergMarkerMissing
-        | GutenbergDropReason::InvalidUtf8
         | GutenbergDropReason::EmptyAfterStrip
         | GutenbergDropReason::UnmappableDensityHigh
         | GutenbergDropReason::DedupCollision => {
@@ -794,6 +808,30 @@ fn validate_dropped_source_g_ok_12(
         }
     }
     Ok(())
+}
+
+fn validate_optional_pre_strip_pair(
+    source: &GutenbergSourceRecord,
+    reason: GutenbergDropReason,
+) -> Result<(), GutenbergManifestError> {
+    match (
+        source.pre_strip_utf8_sha256.as_ref(),
+        source.pre_strip_byte_length.as_ref(),
+    ) {
+        (Some(_), Some(_)) | (None, None) => Ok(()),
+        (Some(_), None) => require_present(
+            source.pre_strip_byte_length.as_ref(),
+            source.book_id,
+            reason,
+            "pre_strip_byte_length",
+        ),
+        (None, Some(_)) => require_present(
+            source.pre_strip_utf8_sha256.as_ref(),
+            source.book_id,
+            reason,
+            "pre_strip_utf8_sha256",
+        ),
+    }
 }
 
 fn require_null<T>(
