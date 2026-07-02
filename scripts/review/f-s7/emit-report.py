@@ -20,6 +20,13 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TOPOLOGIES = ("MoeTiny", "MoeTinyDenseMatched")
 SEEDS = range(5)
 SURPRISE_LM_LOSS_SPREAD = 5.0
+PARETO_H4_CONFIRMING = {"MoE-dominates", "MoE-wins-under-byte-equivalence"}
+PARETO_H4_REFUTING = {
+    "dense-dominates",
+    "Dense-wins-under-byte-equivalence",
+    "Incomparable",
+    "Tied",
+}
 SWITCH_STATS_MANIFEST_DOMAIN = (
     "gbf-experiments",
     "S7SwitchStatsBundleManifest",
@@ -114,18 +121,19 @@ def build_report(
     generated_at: str,
 ) -> str:
     row_text, score_rows, loss_rows = per_seed_rows(root)
-    matched_bytes_self_hash = artifact_hash(
-        root,
-        "experiments/S7/dense-vs-moe/comparison.json",
+    comparison = load_json(root / "experiments/S7/dense-vs-moe/comparison.json")
+    comparison_label = "experiments/S7/dense-vs-moe/comparison.json"
+    matched_bytes_self_hash = require_hash(
+        comparison,
         ["matched_bytes_pin", "matched_bytes_self_hash"],
+        comparison_label,
     )
+    pareto_verdict = require_string(comparison, ["pareto_verdict"], comparison_label)
     switch_stats_self_hash = switch_stats_manifest_hash(root)
     router_collapse_sweep_self_hash = artifact_hash(
         root, "experiments/S7/router-collapse/seed-0/sweep.json", ["sweep_self_hash"]
     )
-    dense_vs_moe_self_hash = artifact_hash(
-        root, "experiments/S7/dense-vs-moe/comparison.json", ["comparison_self_hash"]
-    )
+    dense_vs_moe_self_hash = require_hash(comparison, ["comparison_self_hash"], comparison_label)
     frontier_self_hash = artifact_hash(
         root, "experiments/S7/frontier/frontier.json", ["frontier_self_hash"]
     )
@@ -158,7 +166,7 @@ def build_report(
     else:
         emulator_one_token_dense_self_hash = "null"
 
-    body = report_body(score_rows, loss_rows, s7_outcome, decision)
+    body = report_body(score_rows, loss_rows, s7_outcome, decision, pareto_verdict)
     report = f"""---
 schema: "s7_report.v1"
 s7_outcome: {s7_outcome}
@@ -245,22 +253,20 @@ def report_body(
     loss_rows: list[dict[str, Any]],
     s7_outcome: str,
     decision: str,
+    pareto_verdict: str,
 ) -> str:
     h3_status = "Refuted" if s7_outcome == "FailParity" else "Confirmed"
+    h4_status = h4_status_from_pareto(pareto_verdict)
     observed = "\n".join(
         f"- seed {row['seed']} {row['topology']}: val_bpc={row['bpc']}, completion=Completed, "
         f"deployed_bytes_total={row['deployed']}, score_self_hash={row['score_self_hash']}"
         for row in score_rows
     )
     hypotheses = "\n".join(
-        f"H{index} {'Confirmed' if index != 3 else h3_status}: cited by the matching closure artifact."
+        f"H{index} {hypothesis_status(index, h3_status, h4_status)}: cited by the matching closure artifact."
         for index in range(1, 11)
     )
-    falsification = (
-        "H3 was refuted by the per-seed bpc parity table under matched bytes."
-        if s7_outcome == "FailParity"
-        else "No falsification rule fired for the closure-candidate outcome."
-    )
+    falsification = falsification_summary(s7_outcome, pareto_verdict, h4_status)
     surprises = surprise_summary(score_rows, loss_rows)
     return "\n".join(
         [
@@ -332,6 +338,35 @@ def dense_bpc_context(score_rows: list[dict[str, Any]]) -> str:
     return ""
 
 
+def hypothesis_status(index: int, h3_status: str, h4_status: str) -> str:
+    if index == 3:
+        return h3_status
+    if index == 4:
+        return h4_status
+    return "Confirmed"
+
+
+def h4_status_from_pareto(pareto_verdict: str) -> str:
+    if pareto_verdict in PARETO_H4_CONFIRMING:
+        return "Confirmed"
+    if pareto_verdict in PARETO_H4_REFUTING:
+        return "Refuted"
+    raise EmitError(f"unknown pareto_verdict for H4 mapping: {pareto_verdict!r}")
+
+
+def falsification_summary(s7_outcome: str, pareto_verdict: str, h4_status: str) -> str:
+    findings: list[str] = []
+    if s7_outcome == "FailParity":
+        findings.append("H3 was refuted by the per-seed bpc parity table under matched bytes.")
+    if h4_status == "Refuted":
+        findings.append(
+            f"H4 was refuted by the Pareto verdict ({pareto_verdict}) under matched bytes."
+        )
+    if findings:
+        return " ".join(findings)
+    return "No falsification rule fired for the closure-candidate outcome."
+
+
 def format_metric(value: float) -> str:
     return f"{value:.6g}"
 
@@ -378,6 +413,17 @@ def require_hash(payload: dict[str, Any], keys: list[str], label: str) -> str:
         value = value.get(key)
     if not is_hash(value):
         raise EmitError(f"{label} {'.'.join(keys)} must be a sha256 hash")
+    return value
+
+
+def require_string(payload: dict[str, Any], keys: list[str], label: str) -> str:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            raise EmitError(f"{label} missing {'.'.join(keys)}")
+        value = value.get(key)
+    if not isinstance(value, str):
+        raise EmitError(f"{label} {'.'.join(keys)} must be a string")
     return value
 
 

@@ -45,13 +45,18 @@ for seed in range(5):
     write(f"experiments/S7/switch-stats/seed-{seed}/switch-stats.json", {"bundle_self_hash": h})
 write(
     "experiments/S7/dense-vs-moe/comparison.json",
-    {"matched_bytes_pin": {"matched_bytes_self_hash": h}, "comparison_self_hash": h},
+    {
+        "matched_bytes_pin": {"matched_bytes_self_hash": h},
+        "comparison_self_hash": h,
+        "pareto_verdict": "MoE-dominates",
+    },
 )
 write("experiments/S7/router-collapse/seed-0/sweep.json", {"sweep_self_hash": h})
 write("experiments/S7/frontier/frontier.json", {"frontier_self_hash": h})
 write("experiments/S7/burn-grad-smoke/expert_block_qat.json", {"smoke_self_hash": h})
 write("experiments/S7/oracle-routed/seed-0/oracle.json", {"oracle_self_hash": h})
 write("experiments/S7/emulator-one-token/seed-0/MoeTiny/result.json", {"emulator_self_hash": h})
+write("experiments/S7/emulator-one-token/seed-0/MoeTinyDenseMatched/result.json", {"emulator_self_hash": h})
 PY
 
 scripts/review/f-s7/emit-report.py \
@@ -72,7 +77,35 @@ scripts/review/f-s7/validate-report.py \
 
 rg -n 'generated_at: "2026-06-25T00:00:00Z"' "$tmp/docs/experiments/S7-report.md" >/dev/null
 rg -n 'H10 Confirmed' "$tmp/docs/experiments/S7-report.md" >/dev/null
+rg -n 'H4 Confirmed' "$tmp/docs/experiments/S7-report.md" >/dev/null
 rg -n 'MoE final-step lm_loss_raw was noisy across seeds' "$tmp/docs/experiments/S7-report.md" >/dev/null
+
+python3 - "$tmp" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+root = Path(sys.argv[1])
+path = root / "experiments/S7/dense-vs-moe/comparison.json"
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload["pareto_verdict"] = "Dense-wins-under-byte-equivalence"
+path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+
+scripts/review/f-s7/emit-report.py \
+  --root "$tmp" \
+  --output "$tmp/fail-parity.md" \
+  --s7-outcome FailParity \
+  --decision ProceedToS8DenseOnly \
+  --rfc-revision "$(printf 'a%.0s' {1..40})" \
+  --predictions-section-hash "sha256:$(printf '2%.0s' {1..64})" \
+  --predictions-commit "$(printf 'b%.0s' {1..40})" \
+  --first-result-commit "$(printf 'c%.0s' {1..40})" \
+  --generated-at "2026-06-25T00:00:00Z" \
+  >/tmp/s7-emit-report-fail-parity.out
+rg -n 'H3 Refuted' "$tmp/fail-parity.md" >/dev/null
+rg -n 'H4 Refuted' "$tmp/fail-parity.md" >/dev/null
+rg -n 'H4 was refuted by the Pareto verdict \(Dense-wins-under-byte-equivalence\)' "$tmp/fail-parity.md" >/dev/null
 
 python3 - "$tmp/docs/experiments/S7-report.md" <<'PY'
 from pathlib import Path

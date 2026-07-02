@@ -77,7 +77,7 @@ rfc_revision: "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
 predictions_section_hash: "sha256:68212b85cc2e4e24f0ec9ba86ab107cbb86000995bb415b1d89f780af0c53bb2"
 predictions_commit: "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
 first_result_commit: "93be7678489df98a8edaa5138c827a6eb291666b"
-report_self_hash: "sha256:47dc8ac4ade72563a499cfadd5a9814afd9cc30e4d3e25d986a2282e235cc8d5"
+report_self_hash: "sha256:9a5c4b51ae56edca858341c5765db7e66cd6e3d729c2f1d5b5459eaeb6c6d10d"
 ---
 ## Pre-registered predictions
 Pinned predictions are identified by predictions_commit and predictions_section_hash in front matter.
@@ -96,7 +96,7 @@ Pinned predictions are identified by predictions_commit and predictions_section_
 H1 Confirmed: cited by the matching closure artifact.
 H2 Confirmed: cited by the matching closure artifact.
 H3 Refuted: cited by the matching closure artifact.
-H4 Confirmed: cited by the matching closure artifact.
+H4 Refuted: cited by the matching closure artifact.
 H5 Confirmed: cited by the matching closure artifact.
 H6 Confirmed: cited by the matching closure artifact.
 H7 Confirmed: cited by the matching closure artifact.
@@ -104,7 +104,7 @@ H8 Confirmed: cited by the matching closure artifact.
 H9 Confirmed: cited by the matching closure artifact.
 H10 Confirmed: cited by the matching closure artifact.
 ## Falsification analysis
-H3 was refuted by the per-seed bpc parity table under matched bytes.
+H3 was refuted by the per-seed bpc parity table under matched bytes. H4 was refuted by the Pareto verdict (Dense-wins-under-byte-equivalence) under matched bytes.
 ## Switch statistics summary
 See s7_switch_stats.v1 bundle hashes cited by switch_stats_self_hash.
 ## lambda_switch sweep summary
