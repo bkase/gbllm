@@ -14,6 +14,6 @@
     "P7",
     "P8"
   ],
-  "summary": "The F-S7 bead bd-17n0 is verified as PASS at git HEAD c9b22033f08332153e733c3b8423de6d7e365de8. The closure claims and H8 invariants are perfectly supported by the current code, schemas, and test results. By correcting the F-S7 H8 `s7_burn_grad_smoke.v1` schema to match the bias-free, fixed-activation-range `ExpertBlockQat` model contract, the bead successfully prevents fabrication of unsupported projection-bias or learned activation-range gradients. All 11 `burn_expert` QAT tests, the activation range rejection test, the CLI field rejection tests, schema discipline validations, preregistration verification, and `verify-packet --substrate-only` checks pass cleanly with no remaining open findings.",
+  "summary": "F-S7 bead bd-17n0 is verified as PASS at git HEAD 27be9bf88d32f1af5de66bee2980f0aca6cc27a5. The closure claims and H8 invariants are perfectly supported by the current repository state, corrected RFC schema contract, and test results. By updating the H8 burn gradient smoke schema to reject legacy bias-gradients and dynamic activation range fields, the bead aligns with the bias-free, fixed-activation-range model contract. All QAT tests, schema discipline checks, preregistration verification, and substrate tests pass successfully without any remaining open findings.",
   "verdict": "PASS"
 }
