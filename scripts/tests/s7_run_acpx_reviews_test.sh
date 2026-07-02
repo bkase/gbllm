@@ -217,6 +217,8 @@ rg -n "reviewer=gemini personas=P3,P4,P5,P6,P7,P8" "$tmp/dry.out" >/dev/null
 rg -n "reviewer=claude personas=P3,P5,P6,P8" "$tmp/dry.out" >/dev/null
 rg -n "Final-review bootstrap rule" "$tmp/dry.out" >/dev/null
 rg -n "only because those two final review JSONs are absent" "$tmp/dry.out" >/dev/null
+rg -n "absent or stale relative to the HEAD" "$tmp/dry.out" >/dev/null
+rg -n "dirty-worktree failures caused only by docs/review/f-s7/raw/bd-2v9r" "$tmp/dry.out" >/dev/null
 rg -n "S7 ACPX review runner: dry-run ok" "$tmp/dry.out" >/dev/null
 
 scripts/review/f-s7/run-acpx-reviews.py \
