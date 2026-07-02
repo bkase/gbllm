@@ -2,6 +2,16 @@
   "target": "dmg-mbc5-8mib-128kib",
   "profile": "Bringup",
   "runtime_nucleus_hash": "SYNTHETIC_REFERENCE:sha256:2a1fc3405e389733a0006c5b1e6a314a7d81fbc671466a3bc02cdbb876cd1ec5",
+  "reference_shell_modules": [
+    "boot",
+    "interrupts",
+    "scheduler",
+    "banking",
+    "joypad",
+    "text",
+    "keyboard",
+    "video_commit"
+  ],
   "rom_slots": [
     {
       "id": 0,
@@ -39,6 +49,10 @@
     "hram_usable_bytes": 127,
     "source_target_profile_hash": "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7"
   },
-  "wram_reserved": 128,
+  "wram_reserved": {
+    "overlay": 128,
+    "hot_arena_floor": 4096,
+    "total": 128
+  },
   "sram_reserved": 512
 }

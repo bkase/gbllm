@@ -1,0 +1,342 @@
+[
+  {
+    "fields": {
+      "base_train_step": 16000,
+      "bpc_eval_subset": 0.9996320843107802,
+      "completion": "completed",
+      "event_name": "s7.lambda_switch_sweep.step",
+      "expert_usage_entropy_bits_mean": 1.9216214418411255,
+      "extra_train_steps": 1000,
+      "lambda_switch": 0.0,
+      "message": "s7 lambda-switch sweep step",
+      "quality_delta_per_lambda_switch": -0.020861523194318332,
+      "schema_version_major": 1,
+      "schema_version_minor": 0,
+      "schema_version_patch": 0,
+      "seed": 0,
+      "sweep_canonical_json": "{\"base_train_step\":16000,\"bpc_eval_subset\":0.9996320843107802,\"completion\":{\"kind\":\"completed\"},\"expert_usage_entropy_bits_mean\":1.9216214418411255,\"lambda_switch\":0.0,\"quality_delta_per_lambda_switch\":-0.020861523194318332,\"schema_version\":{\"major\":1,\"minor\":0,\"patch\":0},\"seed\":0,\"sweep_self_hash\":\"sha256:706ae2775569715d1fe742c05907cee928472612ca7731810b776b6d266bdda0\",\"train_step\":17000}",
+      "sweep_self_hash": "sha256:706ae2775569715d1fe742c05907cee928472612ca7731810b776b6d266bdda0",
+      "train_step": 17000
+    },
+    "level": "INFO",
+    "name": "s7.lambda_switch_sweep.step"
+  },
+  {
+    "fields": {
+      "base_train_step": 16000,
+      "bpc_eval_subset": 1.0204936075050985,
+      "completion": "completed",
+      "event_name": "s7.lambda_switch_sweep.step",
+      "expert_usage_entropy_bits_mean": 1.8641477823257446,
+      "extra_train_steps": 1000,
+      "lambda_switch": 0.05000000074505806,
+      "message": "s7 lambda-switch sweep step",
+      "quality_delta_per_lambda_switch": 0.0,
+      "schema_version_major": 1,
+      "schema_version_minor": 0,
+      "schema_version_patch": 0,
+      "seed": 0,
+      "sweep_canonical_json": "{\"base_train_step\":16000,\"bpc_eval_subset\":1.0204936075050985,\"completion\":{\"kind\":\"completed\"},\"expert_usage_entropy_bits_mean\":1.8641477823257446,\"lambda_switch\":0.05000000074505806,\"quality_delta_per_lambda_switch\":0.0,\"schema_version\":{\"major\":1,\"minor\":0,\"patch\":0},\"seed\":0,\"sweep_self_hash\":\"sha256:cc4df3726c437f53342d400c1df25213e94dab6e6da11f3f2361b657f0381552\",\"train_step\":17000}",
+      "sweep_self_hash": "sha256:cc4df3726c437f53342d400c1df25213e94dab6e6da11f3f2361b657f0381552",
+      "train_step": 17000
+    },
+    "level": "INFO",
+    "name": "s7.lambda_switch_sweep.step"
+  },
+  {
+    "fields": {
+      "base_train_step": 16000,
+      "bpc_eval_subset": 1.0298472453954965,
+      "completion": "completed",
+      "event_name": "s7.lambda_switch_sweep.step",
+      "expert_usage_entropy_bits_mean": 1.7895119190216064,
+      "extra_train_steps": 1000,
+      "lambda_switch": 0.10000000149011612,
+      "message": "s7 lambda-switch sweep step",
+      "quality_delta_per_lambda_switch": 0.009353637890398003,
+      "schema_version_major": 1,
+      "schema_version_minor": 0,
+      "schema_version_patch": 0,
+      "seed": 0,
+      "sweep_canonical_json": "{\"base_train_step\":16000,\"bpc_eval_subset\":1.0298472453954965,\"completion\":{\"kind\":\"completed\"},\"expert_usage_entropy_bits_mean\":1.7895119190216064,\"lambda_switch\":0.10000000149011612,\"quality_delta_per_lambda_switch\":0.009353637890398003,\"schema_version\":{\"major\":1,\"minor\":0,\"patch\":0},\"seed\":0,\"sweep_self_hash\":\"sha256:01ad1216d7b6cfeb12808810f645a00e4853814ed8d559ba055c550d31526d6b\",\"train_step\":17000}",
+      "sweep_self_hash": "sha256:01ad1216d7b6cfeb12808810f645a00e4853814ed8d559ba055c550d31526d6b",
+      "train_step": 17000
+    },
+    "level": "INFO",
+    "name": "s7.lambda_switch_sweep.step"
+  },
+  {
+    "fields": {
+      "base_train_step": 16000,
+      "bpc_eval_subset": 1.070462690823067,
+      "completion": "completed",
+      "event_name": "s7.lambda_switch_sweep.step",
+      "expert_usage_entropy_bits_mean": 1.6596513986587524,
+      "extra_train_steps": 1000,
+      "lambda_switch": 0.5,
+      "message": "s7 lambda-switch sweep step",
+      "quality_delta_per_lambda_switch": 0.049969083317968455,
+      "schema_version_major": 1,
+      "schema_version_minor": 0,
+      "schema_version_patch": 0,
+      "seed": 0,
+      "sweep_canonical_json": "{\"base_train_step\":16000,\"bpc_eval_subset\":1.070462690823067,\"completion\":{\"kind\":\"completed\"},\"expert_usage_entropy_bits_mean\":1.6596513986587524,\"lambda_switch\":0.5,\"quality_delta_per_lambda_switch\":0.049969083317968455,\"schema_version\":{\"major\":1,\"minor\":0,\"patch\":0},\"seed\":0,\"sweep_self_hash\":\"sha256:0170a841871d5d6e65aab70d5c01961d98d02ef7fa3d9b5f3debc6e3578c503d\",\"train_step\":17000}",
+      "sweep_self_hash": "sha256:0170a841871d5d6e65aab70d5c01961d98d02ef7fa3d9b5f3debc6e3578c503d",
+      "train_step": 17000
+    },
+    "level": "INFO",
+    "name": "s7.lambda_switch_sweep.step"
+  },
+  {
+    "fields": {
+      "base_train_step": 16000,
+      "bpc_eval_subset": 1.1597182330789033,
+      "completion": "completed",
+      "event_name": "s7.lambda_switch_sweep.step",
+      "expert_usage_entropy_bits_mean": 1.495556354522705,
+      "extra_train_steps": 1000,
+      "lambda_switch": 1.0,
+      "message": "s7 lambda-switch sweep step",
+      "quality_delta_per_lambda_switch": 0.13922462557380477,
+      "schema_version_major": 1,
+      "schema_version_minor": 0,
+      "schema_version_patch": 0,
+      "seed": 0,
+      "sweep_canonical_json": "{\"base_train_step\":16000,\"bpc_eval_subset\":1.1597182330789033,\"completion\":{\"kind\":\"completed\"},\"expert_usage_entropy_bits_mean\":1.495556354522705,\"lambda_switch\":1.0,\"quality_delta_per_lambda_switch\":0.13922462557380477,\"schema_version\":{\"major\":1,\"minor\":0,\"patch\":0},\"seed\":0,\"sweep_self_hash\":\"sha256:0215d1a45f32330700e894c6db1ae60b12e315b59720c10c349f31806891c95f\",\"train_step\":17000}",
+      "sweep_self_hash": "sha256:0215d1a45f32330700e894c6db1ae60b12e315b59720c10c349f31806891c95f",
+      "train_step": 17000
+    },
+    "level": "INFO",
+    "name": "s7.lambda_switch_sweep.step"
+  },
+  {
+    "fields": {
+      "base_train_step": 16000,
+      "bpc_eval_subset": 1.4101900133242462,
+      "completion": "completed",
+      "event_name": "s7.lambda_switch_sweep.step",
+      "expert_usage_entropy_bits_mean": 1.3244768381118774,
+      "extra_train_steps": 1000,
+      "lambda_switch": 5.0,
+      "message": "s7 lambda-switch sweep step",
+      "quality_delta_per_lambda_switch": 0.38969640581914766,
+      "schema_version_major": 1,
+      "schema_version_minor": 0,
+      "schema_version_patch": 0,
+      "seed": 0,
+      "sweep_canonical_json": "{\"base_train_step\":16000,\"bpc_eval_subset\":1.4101900133242462,\"completion\":{\"kind\":\"completed\"},\"expert_usage_entropy_bits_mean\":1.3244768381118774,\"lambda_switch\":5.0,\"quality_delta_per_lambda_switch\":0.38969640581914766,\"schema_version\":{\"major\":1,\"minor\":0,\"patch\":0},\"seed\":0,\"sweep_self_hash\":\"sha256:6a2fe8b35c00db0e04a4124bc8c7443a56513dbb1cded589f46767cada8bce9c\",\"train_step\":17000}",
+      "sweep_self_hash": "sha256:6a2fe8b35c00db0e04a4124bc8c7443a56513dbb1cded589f46767cada8bce9c",
+      "train_step": 17000
+    },
+    "level": "INFO",
+    "name": "s7.lambda_switch_sweep.step"
+  },
+  {
+    "fields": {
+      "event_name": "s7.prereg.transition",
+      "fixture": "tiny_v1",
+      "from_state": "BaselineMatched",
+      "message": "s7 smoke transition",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "to_state": "TrainAttempted",
+      "topology": "MoeTiny",
+      "train_step": 20000
+    },
+    "level": "INFO",
+    "name": "s7.prereg.transition"
+  },
+  {
+    "fields": {
+      "event_name": "s7.bytes.validate",
+      "inputs": "bytes_diff=16 tolerance=65536",
+      "message": "s7 smoke verdict",
+      "reason": "matched deployed byte tolerance",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "topology": "MoeTiny",
+      "train_step": 20000,
+      "verdict": "Pass"
+    },
+    "level": "INFO",
+    "name": "s7.bytes.validate"
+  },
+  {
+    "fields": {
+      "event_name": "s7.prereg.transition",
+      "fixture": "tiny_v1",
+      "from_state": "TrainAttempted",
+      "message": "s7 smoke transition",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "to_state": "ParityAggregated",
+      "topology": "MoeTiny",
+      "train_step": 20000
+    },
+    "level": "INFO",
+    "name": "s7.prereg.transition"
+  },
+  {
+    "fields": {
+      "event_name": "s7.parity.aggregate",
+      "inputs": "per_seed=[S7PerSeedComparison { seed: 0, val_bpc_moe: 1.0, val_bpc_dense: 1.1199999999999999, delta: 0.11999999999999988, parity_verdict: Pass }, S7PerSeedComparison { seed: 1, val_bpc_moe: 1.01, val_bpc_dense: 1.1300000000000001, delta: 0.1200000000000001, parity_verdict: Pass }, S7PerSeedComparison { seed: 2, val_bpc_moe: 1.02, val_bpc_dense: 1.1400000000000001, delta: 0.1200000000000001, parity_verdict: Pass }, S7PerSeedComparison { seed: 3, val_bpc_moe: 1.03, val_bpc_dense: 1.1500000000000001, delta: 0.1200000000000001, parity_verdict: Pass }, S7PerSeedComparison { seed: 4, val_bpc_moe: 1.04, val_bpc_dense: 1.1600000000000001, delta: 0.1200000000000001, parity_verdict: Pass }]",
+      "message": "s7 smoke verdict",
+      "reason": "per-seed production bpc margin",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "topology": "MoeTiny",
+      "train_step": 20000,
+      "verdict": "Pass-clean"
+    },
+    "level": "INFO",
+    "name": "s7.parity.aggregate"
+  },
+  {
+    "fields": {
+      "event_name": "s7.prereg.transition",
+      "fixture": "tiny_v1",
+      "from_state": "ParityAggregated",
+      "message": "s7 smoke transition",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "to_state": "ParetoChecked",
+      "topology": "MoeTiny",
+      "train_step": 20000
+    },
+    "level": "INFO",
+    "name": "s7.prereg.transition"
+  },
+  {
+    "fields": {
+      "event_name": "s7.pareto.verdict",
+      "inputs": "moe_bpc=1.02 dense_bpc=1.1400000000000001 moe_bytes=83776 dense_bytes=83792",
+      "message": "s7 smoke verdict",
+      "reason": "median bpc plus deployed bytes",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "topology": "MoeTiny",
+      "train_step": 20000,
+      "verdict": "MoE-dominates"
+    },
+    "level": "INFO",
+    "name": "s7.pareto.verdict"
+  },
+  {
+    "fields": {
+      "event_name": "s7.prereg.transition",
+      "fixture": "tiny_v1",
+      "from_state": "ParetoChecked",
+      "message": "s7 smoke transition",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "to_state": "GuardrailChecked",
+      "topology": "MoeTiny",
+      "train_step": 20000
+    },
+    "level": "INFO",
+    "name": "s7.prereg.transition"
+  },
+  {
+    "fields": {
+      "event_name": "s7.guardrail.decision",
+      "inputs": "sweep_self_hash=sha256:6530071915ba75a37d7089de5d9180507f89ea2150ddd1a9d9884a1efc7a8c3b",
+      "message": "s7 smoke verdict",
+      "reason": "D11 collapse sweep A/B/C/D",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "topology": "MoeTiny",
+      "train_step": 20000,
+      "verdict": "Pass"
+    },
+    "level": "INFO",
+    "name": "s7.guardrail.decision"
+  },
+  {
+    "fields": {
+      "event_name": "s7.switch_stats.summary",
+      "inputs": "temporal_switch_digest replayed; aggregate owner bd-2v9r",
+      "message": "s7 smoke verdict",
+      "reason": "digest-only tiny switch stats replay",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "topology": "MoeTiny",
+      "train_step": 20000,
+      "verdict": "Pass"
+    },
+    "level": "INFO",
+    "name": "s7.switch_stats.summary"
+  },
+  {
+    "fields": {
+      "event_name": "s7.prereg.transition",
+      "fixture": "tiny_v1",
+      "from_state": "GuardrailChecked",
+      "message": "s7 smoke transition",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "to_state": "OutcomeDispatched",
+      "topology": "MoeTiny",
+      "train_step": 20000
+    },
+    "level": "INFO",
+    "name": "s7.prereg.transition"
+  },
+  {
+    "fields": {
+      "event_name": "s7.outcome.dispatch",
+      "inputs": "aggregate_parity=Pass-clean pareto=MoE-dominates guardrail=Pass",
+      "message": "s7 smoke verdict",
+      "reason": "ProceedToS8",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "topology": "MoeTiny",
+      "train_step": 20000,
+      "verdict": "Pass-clean"
+    },
+    "level": "INFO",
+    "name": "s7.outcome.dispatch"
+  },
+  {
+    "fields": {
+      "event_name": "s7.prereg.transition",
+      "fixture": "tiny_v1",
+      "from_state": "OutcomeDispatched",
+      "message": "s7 smoke transition",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "to_state": "ClosureValidated",
+      "topology": "MoeTiny",
+      "train_step": 20000
+    },
+    "level": "INFO",
+    "name": "s7.prereg.transition"
+  },
+  {
+    "fields": {
+      "event_name": "s7.closure.validate",
+      "inputs": "§15 fixture closure envelope",
+      "message": "s7 smoke verdict",
+      "reason": "validated",
+      "schema_version": "1",
+      "seed": 0,
+      "self_hash_prefix": "22729f6928f2",
+      "topology": "MoeTiny",
+      "train_step": 20000,
+      "verdict": "Pass"
+    },
+    "level": "INFO",
+    "name": "s7.closure.validate"
+  }
+]

@@ -442,7 +442,7 @@ impl SharedSequenceConfig {
                 crate::sequence::SequenceSemanticsError::ZeroField { field } => {
                     ModelConfigError::EmptyDimension { field }
                 }
-                crate::sequence::SequenceSemanticsError::StateSizeMismatch { .. } => {
+                _ => {
                     unreachable!("bounded-kv constructor does not accept measured state size")
                 }
             })?;
@@ -460,7 +460,7 @@ impl SharedSequenceConfig {
     }
 
     pub fn kind(&self) -> SharedSequenceKind {
-        match self.semantics {
+        match &self.semantics {
             SequenceSemanticsSpec::LinearState(_) => SharedSequenceKind::LinearState,
             SequenceSemanticsSpec::BoundedKv(_) => SharedSequenceKind::BoundedKv,
         }
@@ -471,7 +471,7 @@ impl SharedSequenceConfig {
     }
 
     pub fn state_width(&self) -> usize {
-        match self.semantics {
+        match &self.semantics {
             SequenceSemanticsSpec::LinearState(semantics) => {
                 usize::from(semantics.state_bytes_per_layer())
             }
@@ -482,11 +482,11 @@ impl SharedSequenceConfig {
     }
 
     pub fn sequence_semantics(&self) -> SequenceSemanticsSpec {
-        self.semantics
+        self.semantics.clone()
     }
 
     pub fn sequence_export_facts(&self) -> SequenceExportFacts {
-        SequenceExportFacts::for_spec(self.semantics)
+        SequenceExportFacts::for_spec(self.semantics.clone())
     }
 }
 

@@ -482,10 +482,10 @@ fn training_trace(
             .unwrap_or_else(|error| panic!("tiny router forward should succeed: {error}"));
         trace
             .post_router_logits
-            .extend_from_slice(router_output.logits());
+            .extend_from_slice(router_output.effective_logits());
         trace
             .post_router_probs
-            .extend_from_slice(router_output.soft_probs());
+            .extend_from_slice(router_output.routing_probs());
         trace.post_router_experts.push(router_output.expert_index());
 
         let post_expert = model

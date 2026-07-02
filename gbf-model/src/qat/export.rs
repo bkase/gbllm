@@ -5,7 +5,9 @@ use std::error::Error;
 use std::fmt;
 
 use gbf_artifact::core::{ArtifactCore, ArtifactCoreError};
-use gbf_artifact::export_facts::{ExportFacts, RangeDigest};
+use gbf_artifact::export_facts::{
+    ClipSaturationDigest, ExpertPayloadDigest, ExportFacts, RangeDigest, TemporalSwitchDigest,
+};
 use gbf_artifact::ids::{ArtifactPath, ArtifactPathError};
 use gbf_artifact::norm_plan::NormExportParams;
 use gbf_artifact::quant::{
@@ -18,7 +20,7 @@ use gbf_artifact::tensor::{
     CanonicalTensor, CanonicalTensorError, CanonicalTensorId, CanonicalTensorKind,
     CanonicalTensorLayout, CanonicalTensorPayload, CanonicalTensorShape, TensorElementType,
 };
-use gbf_foundation::Hash256;
+use gbf_foundation::{ExpertId, Hash256, LayerId};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -84,6 +86,9 @@ pub struct ExportVisitor {
     activation_quant: BTreeMap<ArtifactPath, ActivationQuantEntry>,
     norm_plans: BTreeMap<ArtifactPath, NormQuantEntry>,
     activation_ranges: BTreeMap<ArtifactPath, RangeDigest>,
+    temporal_switch: BTreeMap<LayerId, TemporalSwitchDigest>,
+    clip_saturation: BTreeMap<(LayerId, ArtifactPath), ClipSaturationDigest>,
+    expert_payloads: BTreeMap<(LayerId, ExpertId), ExpertPayloadDigest>,
     sequence_tensor_handles: BTreeSet<CanonicalTensorId>,
     visited_modules: BTreeSet<VisitedModule>,
 }
@@ -98,6 +103,9 @@ impl ExportVisitor {
             activation_quant: BTreeMap::new(),
             norm_plans: BTreeMap::new(),
             activation_ranges: BTreeMap::new(),
+            temporal_switch: BTreeMap::new(),
+            clip_saturation: BTreeMap::new(),
+            expert_payloads: BTreeMap::new(),
             sequence_tensor_handles: BTreeSet::new(),
             visited_modules: BTreeSet::new(),
         }
@@ -250,6 +258,59 @@ impl ExportVisitor {
         self.add_weight_quant(WeightQuantEntry::full_precision(path.clone(), path))
     }
 
+    /// Carries a training/export-pass temporal switch digest into `ExportFacts`.
+    ///
+    /// The visitor does not collect validation-set statistics itself; callers
+    /// must provide the already-validated export-fact digest owned by
+    /// `gbf-artifact`.
+    pub fn record_temporal_switch_digest(
+        &mut self,
+        digest: TemporalSwitchDigest,
+    ) -> Result<(), ExportVisitorError> {
+        let layer = digest.layer();
+        if self.temporal_switch.insert(layer, digest).is_some() {
+            return Err(ExportVisitorError::DuplicateTemporalSwitchDigest { layer });
+        }
+
+        Ok(())
+    }
+
+    /// Carries a training/export-pass clip saturation digest into `ExportFacts`.
+    pub fn record_clip_saturation_digest(
+        &mut self,
+        digest: ClipSaturationDigest,
+    ) -> Result<(), ExportVisitorError> {
+        let layer = digest.layer();
+        let boundary = digest.boundary().as_path().clone();
+        if self
+            .clip_saturation
+            .insert((layer, boundary.clone()), digest)
+            .is_some()
+        {
+            return Err(ExportVisitorError::DuplicateClipSaturationDigest { layer, boundary });
+        }
+
+        Ok(())
+    }
+
+    /// Carries a training/export-pass expert payload digest into `ExportFacts`.
+    pub fn record_expert_payload_digest(
+        &mut self,
+        digest: ExpertPayloadDigest,
+    ) -> Result<(), ExportVisitorError> {
+        let layer = digest.layer();
+        let expert = digest.expert();
+        if self
+            .expert_payloads
+            .insert((layer, expert), digest)
+            .is_some()
+        {
+            return Err(ExportVisitorError::DuplicateExpertPayloadDigest { layer, expert });
+        }
+
+        Ok(())
+    }
+
     pub fn finish(self) -> Result<ExportedQatArtifact, ExportVisitorError> {
         let sequence_facts =
             sequence_facts_with_handles(self.sequence_facts, self.sequence_tensor_handles)?;
@@ -264,10 +325,13 @@ impl ExportVisitor {
             quant,
             sequence_facts.spec(),
         )?;
-        let facts = ExportFacts::new(
+        let mut facts = ExportFacts::new(
             self.activation_ranges.into_values().collect(),
             sequence_facts,
         );
+        facts.temporal_switch = self.temporal_switch.into_values().collect();
+        facts.clip_saturation = self.clip_saturation.into_values().collect();
+        facts.expert_payloads = self.expert_payloads.into_values().collect();
 
         Ok(ExportedQatArtifact {
             core,
@@ -716,6 +780,17 @@ pub enum ExportVisitorError {
         kind: &'static str,
         path: ArtifactPath,
     },
+    DuplicateTemporalSwitchDigest {
+        layer: LayerId,
+    },
+    DuplicateClipSaturationDigest {
+        layer: LayerId,
+        boundary: ArtifactPath,
+    },
+    DuplicateExpertPayloadDigest {
+        layer: LayerId,
+        expert: ExpertId,
+    },
 }
 
 impl fmt::Display for ExportVisitorError {
@@ -731,6 +806,19 @@ impl fmt::Display for ExportVisitorError {
             ),
             Self::DuplicatePath { kind, path } => {
                 write!(f, "duplicate {kind} path {path}")
+            }
+            Self::DuplicateTemporalSwitchDigest { layer } => {
+                write!(f, "duplicate temporal switch digest for layer {layer}")
+            }
+            Self::DuplicateClipSaturationDigest { layer, boundary } => write!(
+                f,
+                "duplicate clip saturation digest for layer {layer} boundary {boundary}"
+            ),
+            Self::DuplicateExpertPayloadDigest { layer, expert } => {
+                write!(
+                    f,
+                    "duplicate expert payload digest for layer {layer} expert {expert}"
+                )
             }
         }
     }
@@ -825,6 +913,205 @@ fn activation_nonlinearity(kind: ClippedActivationKind) -> ActivationNonlinearit
         ClippedActivationKind::Relu => ActivationNonlinearitySpec::Relu,
         ClippedActivationKind::GeluClip => ActivationNonlinearitySpec::GeluClip,
         ClippedActivationKind::SiluClip => ActivationNonlinearitySpec::SiluClip,
+    }
+}
+
+#[cfg(test)]
+mod stats {
+    use gbf_artifact::export_facts::{
+        BoundaryId, ExpertTransitionDigest, ExportFactsError, RateQ8_8,
+    };
+    use gbf_artifact::sequence::{SequenceExportFacts, SequenceSemanticsSpec};
+    use gbf_foundation::{ExpertId, LayerId};
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn visitor_carries_switch_stats_digest_families_into_export_facts() {
+        let temporal = temporal_digest(0, 192);
+        let clip = clip_digest(0, "block.0.ffn.expert.0.activation", 8);
+        let payload = payload_digest(0, 1);
+
+        let mut visitor = stats_visitor();
+        visitor
+            .record_expert_payload_digest(payload.clone())
+            .unwrap();
+        visitor.record_clip_saturation_digest(clip.clone()).unwrap();
+        visitor
+            .record_temporal_switch_digest(temporal.clone())
+            .unwrap();
+        visitor
+            .visit_embedding("token_embedding", 1, 1, &[0.0])
+            .unwrap();
+
+        let export = visitor.finish().unwrap();
+
+        assert_eq!(export.facts.temporal_switch, vec![temporal]);
+        assert_eq!(export.facts.clip_saturation, vec![clip]);
+        assert_eq!(export.facts.expert_payloads, vec![payload]);
+
+        let value = serde_json::to_value(&export.facts).unwrap();
+        assert_eq!(
+            value["temporal_switch"],
+            json!([{
+                "layer": 0,
+                "same_expert_rate_q8_8": 192,
+                "transition_mass": [
+                    { "from_expert": 0, "to_expert": 1, "rate_q8_8": 48 },
+                    { "from_expert": 1, "to_expert": 0, "rate_q8_8": 16 },
+                ],
+            }])
+        );
+        assert_eq!(
+            value["clip_saturation"],
+            json!([{
+                "layer": 0,
+                "boundary": "block.0.ffn.expert.0.activation",
+                "saturation_rate_q8_8": 8,
+            }])
+        );
+        assert_eq!(
+            value["expert_payloads"],
+            json!([{
+                "layer": 0,
+                "expert": 1,
+                "total_bytes": 128,
+                "ternary_bytes": 96,
+                "scale_bytes": 16,
+            }])
+        );
+    }
+
+    #[test]
+    fn visitor_rejects_duplicate_switch_stats_digest_keys() {
+        let mut visitor = stats_visitor();
+        visitor
+            .record_temporal_switch_digest(temporal_digest(0, 128))
+            .unwrap();
+        assert_eq!(
+            visitor
+                .record_temporal_switch_digest(temporal_digest(0, 64))
+                .unwrap_err(),
+            ExportVisitorError::DuplicateTemporalSwitchDigest {
+                layer: LayerId::new(0),
+            }
+        );
+
+        visitor
+            .record_clip_saturation_digest(clip_digest(0, "block.0.activation", 1))
+            .unwrap();
+        assert_eq!(
+            visitor
+                .record_clip_saturation_digest(clip_digest(0, "block.0.activation", 2))
+                .unwrap_err(),
+            ExportVisitorError::DuplicateClipSaturationDigest {
+                layer: LayerId::new(0),
+                boundary: ArtifactPath::new("block.0.activation").unwrap(),
+            }
+        );
+
+        visitor
+            .record_expert_payload_digest(payload_digest(0, 1))
+            .unwrap();
+        assert_eq!(
+            visitor
+                .record_expert_payload_digest(payload_digest(0, 1))
+                .unwrap_err(),
+            ExportVisitorError::DuplicateExpertPayloadDigest {
+                layer: LayerId::new(0),
+                expert: ExpertId::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn stats_digest_validation_rejects_bad_rates_masses_and_byte_counts() {
+        assert_eq!(
+            RateQ8_8::new(257),
+            Err(ExportFactsError::RateQ8_8OutOfRange { value: 257 })
+        );
+        assert_eq!(
+            TemporalSwitchDigest::new(
+                LayerId::new(0),
+                RateQ8_8::new(128).unwrap(),
+                vec![
+                    ExpertTransitionDigest::new(
+                        ExpertId::new(0),
+                        ExpertId::new(1),
+                        RateQ8_8::new(200).unwrap(),
+                    ),
+                    ExpertTransitionDigest::new(
+                        ExpertId::new(1),
+                        ExpertId::new(0),
+                        RateQ8_8::new(57).unwrap(),
+                    ),
+                ],
+            ),
+            Err(ExportFactsError::TransitionMassExceedsOne { total_q8_8: 257 })
+        );
+
+        let invalid_clip: Result<ClipSaturationDigest, _> = serde_json::from_value(json!({
+            "layer": 0,
+            "boundary": "block.0.activation",
+            "saturation_rate_q8_8": 300,
+        }));
+        assert!(invalid_clip.is_err());
+
+        assert_eq!(
+            ExpertPayloadDigest::new(LayerId::new(0), ExpertId::new(0), 100, 80, 40),
+            Err(ExportFactsError::ExpertPayloadBreakdownExceedsTotal {
+                total_bytes: 100,
+                ternary_bytes: 80,
+                scale_bytes: 40,
+            })
+        );
+        let invalid_payload: Result<ExpertPayloadDigest, _> = serde_json::from_value(json!({
+            "layer": 0,
+            "expert": 0,
+            "total_bytes": 100,
+            "ternary_bytes": 80,
+            "scale_bytes": 40,
+        }));
+        assert!(invalid_payload.is_err());
+    }
+
+    fn stats_visitor() -> ExportVisitor {
+        ExportVisitor::new(SequenceExportFacts::for_spec(
+            SequenceSemanticsSpec::linear_state(8).unwrap(),
+        ))
+    }
+
+    fn temporal_digest(layer: u16, same_expert_rate_q8_8: u16) -> TemporalSwitchDigest {
+        TemporalSwitchDigest::new(
+            LayerId::new(layer),
+            RateQ8_8::new(same_expert_rate_q8_8).unwrap(),
+            vec![
+                ExpertTransitionDigest::new(
+                    ExpertId::new(0),
+                    ExpertId::new(1),
+                    RateQ8_8::new(48).unwrap(),
+                ),
+                ExpertTransitionDigest::new(
+                    ExpertId::new(1),
+                    ExpertId::new(0),
+                    RateQ8_8::new(16).unwrap(),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn clip_digest(layer: u16, boundary: &str, saturation_rate_q8_8: u16) -> ClipSaturationDigest {
+        ClipSaturationDigest::new(
+            LayerId::new(layer),
+            BoundaryId::new(boundary).unwrap(),
+            RateQ8_8::new(saturation_rate_q8_8).unwrap(),
+        )
+    }
+
+    fn payload_digest(layer: u16, expert: u16) -> ExpertPayloadDigest {
+        ExpertPayloadDigest::new(LayerId::new(layer), ExpertId::new(expert), 128, 96, 16).unwrap()
     }
 }
 

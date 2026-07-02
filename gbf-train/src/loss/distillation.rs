@@ -7,6 +7,9 @@
 
 use std::error::Error;
 use std::fmt;
+use std::marker::PhantomData;
+
+use gbf_artifact::S7Topology;
 
 use crate::phase::TrainPhaseKind;
 use crate::teacher::{DenseTeacherModel, FrozenTeacher};
@@ -76,6 +79,9 @@ pub enum DistillationLossError {
     },
     NegativeKlBeyondTolerance {
         value: f32,
+    },
+    MissingFrozenTeacherForPhase {
+        phase: TrainPhaseKind,
     },
     #[cfg(feature = "burn-adapter")]
     InvalidClassDim {
@@ -187,6 +193,10 @@ impl PartialEq for DistillationLossError {
                 Self::NegativeKlBeyondTolerance { value: left_value },
                 Self::NegativeKlBeyondTolerance { value: right_value },
             ) => float_error_value_eq(*left_value, *right_value),
+            (
+                Self::MissingFrozenTeacherForPhase { phase: left_phase },
+                Self::MissingFrozenTeacherForPhase { phase: right_phase },
+            ) => left_phase == right_phase,
             #[cfg(feature = "burn-adapter")]
             (
                 Self::InvalidClassDim {
@@ -273,6 +283,10 @@ impl fmt::Display for DistillationLossError {
                 f,
                 "distillation KL loss was below tolerance {KL_NEGATIVE_TOLERANCE}, got {value}"
             ),
+            Self::MissingFrozenTeacherForPhase { phase } => write!(
+                f,
+                "distillation raw diagnostic requires a frozen teacher for phase {phase}"
+            ),
             #[cfg(feature = "burn-adapter")]
             Self::InvalidClassDim { class_dim, rank } => write!(
                 f,
@@ -308,7 +322,8 @@ impl Error for DistillationLossError {
             | Self::NonFiniteLambdaDistill { .. }
             | Self::NonFiniteLoss { .. }
             | Self::NegativeLoss { .. }
-            | Self::NegativeKlBeyondTolerance { .. } => None,
+            | Self::NegativeKlBeyondTolerance { .. }
+            | Self::MissingFrozenTeacherForPhase { .. } => None,
             #[cfg(feature = "burn-adapter")]
             Self::InvalidClassDim { .. } | Self::ShapeMismatch { .. } => None,
         }
@@ -324,6 +339,11 @@ impl From<BurnAdapterError> for DistillationLossError {
 
 #[derive(Debug, PartialEq)]
 pub enum FrozenTeacherDistillationError<E> {
+    RunSeedMismatch {
+        topology: &'static str,
+        student_seed: u64,
+        teacher_seed: u64,
+    },
     TeacherForward(E),
     Distillation(DistillationLossError),
 }
@@ -331,6 +351,14 @@ pub enum FrozenTeacherDistillationError<E> {
 impl<E: fmt::Display> fmt::Display for FrozenTeacherDistillationError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RunSeedMismatch {
+                topology,
+                student_seed,
+                teacher_seed,
+            } => write!(
+                f,
+                "S7 {topology} distillation requires same-seed teacher, got student seed {student_seed} and teacher seed {teacher_seed}"
+            ),
             Self::TeacherForward(error) => write!(f, "teacher forward failed: {error}"),
             Self::Distillation(error) => write!(f, "{error}"),
         }
@@ -343,6 +371,7 @@ where
 {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::RunSeedMismatch { .. } => None,
             Self::TeacherForward(error) => Some(error),
             Self::Distillation(error) => Some(error),
         }
@@ -369,6 +398,159 @@ pub struct DistillProduct {
     pub distill_loss_raw: f32,
     pub pre_clamp_kl_loss: Option<f32>,
     pub distill_loss_weighted: f32,
+}
+
+pub const DISTILL_RAW_NO_FROZEN_TEACHER_REASON: &str = "no_frozen_teacher";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DistillRawDiagnostic {
+    NotAvailable {
+        reason: &'static str,
+        phase: TrainPhaseKind,
+    },
+    Value {
+        loss: f32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DistillDiagnosticProduct {
+    pub distill_loss_raw: DistillRawDiagnostic,
+    pub pre_clamp_kl_loss: Option<f32>,
+    pub distill_loss_weighted: f32,
+}
+
+/// Type-level S7 topology marker for distillation provenance.
+pub trait S7DistillationTopology {
+    /// RFC/topology spelling carried in S7 provenance fields.
+    const NAME: &'static str;
+
+    /// Runtime topology value for diagnostics and bridge code.
+    fn topology() -> S7Topology;
+}
+
+/// S7 MoE topology marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct S7MoeTiny;
+
+impl S7DistillationTopology for S7MoeTiny {
+    const NAME: &'static str = "MoeTiny";
+
+    fn topology() -> S7Topology {
+        S7Topology::MoeTiny
+    }
+}
+
+/// S7 dense-matched topology marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct S7MoeTinyDenseMatched;
+
+impl S7DistillationTopology for S7MoeTinyDenseMatched {
+    const NAME: &'static str = "MoeTinyDenseMatched";
+
+    fn topology() -> S7Topology {
+        S7Topology::MoeTinyDenseMatched
+    }
+}
+
+/// Student logits tagged with their S7 topology and seed.
+#[derive(Debug, Clone, Copy)]
+pub struct S7StudentLogits<'a, T: S7DistillationTopology> {
+    seed: u64,
+    logits: &'a [f32],
+    _topology: PhantomData<T>,
+}
+
+impl<'a, T: S7DistillationTopology> S7StudentLogits<'a, T> {
+    /// Tag student logits with the S7 run seed and topology.
+    #[must_use]
+    pub const fn new(seed: u64, logits: &'a [f32]) -> Self {
+        Self {
+            seed,
+            logits,
+            _topology: PhantomData,
+        }
+    }
+
+    /// Run seed that produced these student logits.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Borrow the underlying logits.
+    #[must_use]
+    pub const fn logits(&self) -> &'a [f32] {
+        self.logits
+    }
+
+    /// Runtime S7 topology value.
+    pub fn topology(&self) -> S7Topology {
+        T::topology()
+    }
+
+    /// RFC/topology spelling.
+    #[must_use]
+    pub const fn topology_name(&self) -> &'static str {
+        T::NAME
+    }
+}
+
+/// Frozen teacher tagged with its S7 topology and seed.
+#[derive(Debug, Clone)]
+pub struct S7FrozenTeacher<T, M>
+where
+    T: S7DistillationTopology,
+    M: DenseTeacherModel,
+{
+    seed: u64,
+    teacher: FrozenTeacher<M>,
+    _topology: PhantomData<T>,
+}
+
+impl<T, M> S7FrozenTeacher<T, M>
+where
+    T: S7DistillationTopology,
+    M: DenseTeacherModel,
+{
+    /// Tag a frozen teacher with the S7 run seed and topology that produced it.
+    #[must_use]
+    pub const fn new(seed: u64, teacher: FrozenTeacher<M>) -> Self {
+        Self {
+            seed,
+            teacher,
+            _topology: PhantomData,
+        }
+    }
+
+    /// Run seed that produced this frozen teacher.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Borrow the underlying frozen teacher.
+    #[must_use]
+    pub const fn frozen_teacher(&self) -> &FrozenTeacher<M> {
+        &self.teacher
+    }
+
+    /// Consume the wrapper and return the underlying frozen teacher.
+    #[must_use]
+    pub fn into_frozen_teacher(self) -> FrozenTeacher<M> {
+        self.teacher
+    }
+
+    /// Runtime S7 topology value.
+    pub fn topology(&self) -> S7Topology {
+        T::topology()
+    }
+
+    /// RFC/topology spelling.
+    #[must_use]
+    pub const fn topology_name(&self) -> &'static str {
+        T::NAME
+    }
 }
 
 /// KL distillation for a single class distribution.
@@ -465,6 +647,42 @@ fn finalize_distillation_product(
     })
 }
 
+pub fn distillation_diagnostic_product_for_phase(
+    phase: TrainPhaseKind,
+    inputs: Option<DistillInputs<'_>>,
+) -> Result<DistillDiagnosticProduct, DistillationLossError> {
+    if distill_raw_diagnostic_unavailable_for_phase(phase) {
+        return Ok(DistillDiagnosticProduct {
+            distill_loss_raw: DistillRawDiagnostic::NotAvailable {
+                reason: DISTILL_RAW_NO_FROZEN_TEACHER_REASON,
+                phase,
+            },
+            pre_clamp_kl_loss: None,
+            distill_loss_weighted: 0.0,
+        });
+    }
+
+    let product = distillation_product(
+        inputs.ok_or(DistillationLossError::MissingFrozenTeacherForPhase { phase })?,
+    )?;
+
+    Ok(DistillDiagnosticProduct {
+        distill_loss_raw: DistillRawDiagnostic::Value {
+            loss: product.distill_loss_raw,
+        },
+        pre_clamp_kl_loss: product.pre_clamp_kl_loss,
+        distill_loss_weighted: product.distill_loss_weighted,
+    })
+}
+
+#[must_use]
+pub const fn distill_raw_diagnostic_unavailable_for_phase(phase: TrainPhaseKind) -> bool {
+    matches!(
+        phase,
+        TrainPhaseKind::DenseTeacherWarmup | TrainPhaseKind::RouterWarmup
+    )
+}
+
 pub fn weighted_distillation_loss(
     raw_distillation_loss: f32,
     lambda_distill: f32,
@@ -505,6 +723,93 @@ where
 
     batched_distillation_loss(student_logits, &teacher_logits, class_count, temperature)
         .map_err(Into::into)
+}
+
+/// S7 typed frozen-teacher distillation.
+///
+/// The topology marker on `student_logits` and `teacher` is part of the
+/// function signature, so cross-topology teacher use does not type-check:
+///
+/// ```compile_fail
+/// use gbf_train::loss::distillation::{
+///     S7FrozenTeacher, S7MoeTiny, S7MoeTinyDenseMatched, S7StudentLogits,
+///     s7_distillation_loss_from_frozen_teacher,
+/// };
+/// use gbf_train::teacher::{
+///     DenseTeacherModel, FrozenTeacher, TeacherStorageFingerprint, TeacherStorageIdentity,
+///     TeacherWeightFingerprint,
+/// };
+///
+/// #[derive(Clone)]
+/// struct DummyTeacher;
+///
+/// impl DenseTeacherModel for DummyTeacher {
+///     type Input = ();
+///     type Output = Vec<f32>;
+///     type ForwardError = std::convert::Infallible;
+///
+///     fn detach_for_teacher(&mut self) {}
+///     fn forward_no_grad(&self, (): Self::Input) -> Result<Self::Output, Self::ForwardError> {
+///         Ok(vec![0.0, 1.0])
+///     }
+///     fn teacher_weight_fingerprint(&self) -> TeacherWeightFingerprint {
+///         unimplemented!()
+///     }
+///     fn teacher_storage_fingerprint(&self) -> TeacherStorageFingerprint {
+///         unimplemented!()
+///     }
+///     fn teacher_storage_identity(&self) -> TeacherStorageIdentity {
+///         unimplemented!()
+///     }
+///     fn teacher_requires_grad(&self) -> bool {
+///         false
+///     }
+/// }
+///
+/// let frozen: FrozenTeacher<DummyTeacher> = unimplemented!();
+/// let student = S7StudentLogits::<S7MoeTiny>::new(0, &[1.0, 0.0]);
+/// let teacher = S7FrozenTeacher::<S7MoeTinyDenseMatched, _>::new(0, frozen);
+/// let _ = s7_distillation_loss_from_frozen_teacher(student, &teacher, (), 2.0);
+/// ```
+pub fn s7_distillation_loss_from_frozen_teacher<T, M>(
+    student_logits: S7StudentLogits<'_, T>,
+    teacher: &S7FrozenTeacher<T, M>,
+    teacher_input: M::Input,
+    temperature: f32,
+) -> Result<f32, FrozenTeacherDistillationError<M::ForwardError>>
+where
+    T: S7DistillationTopology,
+    M: DenseTeacherModel<Output = Vec<f32>>,
+{
+    ensure_s7_same_seed::<T, M::ForwardError>(student_logits.seed(), teacher.seed())?;
+    distillation_loss_from_frozen_teacher(
+        student_logits.logits(),
+        teacher.frozen_teacher(),
+        teacher_input,
+        temperature,
+    )
+}
+
+/// S7 typed frozen-teacher distillation over batched logits.
+pub fn s7_batched_distillation_loss_from_frozen_teacher<T, M>(
+    student_logits: S7StudentLogits<'_, T>,
+    teacher: &S7FrozenTeacher<T, M>,
+    teacher_input: M::Input,
+    class_count: usize,
+    temperature: f32,
+) -> Result<f32, FrozenTeacherDistillationError<M::ForwardError>>
+where
+    T: S7DistillationTopology,
+    M: DenseTeacherModel<Output = Vec<f32>>,
+{
+    ensure_s7_same_seed::<T, M::ForwardError>(student_logits.seed(), teacher.seed())?;
+    batched_distillation_loss_from_frozen_teacher(
+        student_logits.logits(),
+        teacher.frozen_teacher(),
+        teacher_input,
+        class_count,
+        temperature,
+    )
 }
 
 #[must_use]
@@ -581,6 +886,92 @@ where
 
     burn_distillation_loss(student_logits, teacher_logits, class_dim, temperature)
         .map_err(Into::into)
+}
+
+#[cfg(feature = "burn-adapter")]
+/// Burn tensor student logits tagged with their S7 topology and seed.
+#[derive(Debug)]
+pub struct S7BurnStudentLogits<T, B, const D: usize>
+where
+    T: S7DistillationTopology,
+    B: BurnBackend,
+{
+    seed: u64,
+    logits: BurnFloatTensor<B, D>,
+    _topology: PhantomData<T>,
+}
+
+#[cfg(feature = "burn-adapter")]
+impl<T, B, const D: usize> S7BurnStudentLogits<T, B, D>
+where
+    T: S7DistillationTopology,
+    B: BurnBackend,
+{
+    /// Tag Burn student logits with the S7 run seed and topology.
+    pub const fn new(seed: u64, logits: BurnFloatTensor<B, D>) -> Self {
+        Self {
+            seed,
+            logits,
+            _topology: PhantomData,
+        }
+    }
+
+    /// Run seed that produced these student logits.
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Runtime S7 topology value.
+    pub fn topology(&self) -> S7Topology {
+        T::topology()
+    }
+
+    /// RFC/topology spelling.
+    pub const fn topology_name(&self) -> &'static str {
+        T::NAME
+    }
+}
+
+#[cfg(feature = "burn-adapter")]
+/// S7 typed Burn frozen-teacher distillation.
+pub fn s7_burn_distillation_loss_from_frozen_teacher<T, B, M, const D: usize>(
+    student_logits: S7BurnStudentLogits<T, B, D>,
+    teacher: &S7FrozenTeacher<T, M>,
+    teacher_input: M::Input,
+    class_dim: usize,
+    temperature: f32,
+) -> Result<BurnFloatTensor<B, 1>, FrozenTeacherDistillationError<M::ForwardError>>
+where
+    T: S7DistillationTopology,
+    B: BurnBackend,
+    M: DenseTeacherModel<Output = BurnFloatTensor<B, D>>,
+{
+    ensure_s7_same_seed::<T, M::ForwardError>(student_logits.seed(), teacher.seed())?;
+    burn_distillation_loss_from_frozen_teacher(
+        student_logits.logits,
+        teacher.frozen_teacher(),
+        teacher_input,
+        class_dim,
+        temperature,
+    )
+}
+
+fn ensure_s7_same_seed<T, E>(
+    student_seed: u64,
+    teacher_seed: u64,
+) -> Result<(), FrozenTeacherDistillationError<E>>
+where
+    T: S7DistillationTopology,
+{
+    if student_seed != teacher_seed {
+        return Err(FrozenTeacherDistillationError::RunSeedMismatch {
+            topology: T::NAME,
+            student_seed,
+            teacher_seed,
+        });
+    }
+
+    Ok(())
 }
 
 fn single_row_pre_clamp_kl_loss(
@@ -949,6 +1340,69 @@ mod tests {
     }
 
     #[test]
+    fn distill_raw_diagnostic_is_not_available_before_teacher_freeze() {
+        for phase in [
+            TrainPhaseKind::DenseTeacherWarmup,
+            TrainPhaseKind::RouterWarmup,
+        ] {
+            let diagnostic = distillation_diagnostic_product_for_phase(phase, None).unwrap();
+
+            assert_eq!(
+                diagnostic,
+                DistillDiagnosticProduct {
+                    distill_loss_raw: DistillRawDiagnostic::NotAvailable {
+                        reason: DISTILL_RAW_NO_FROZEN_TEACHER_REASON,
+                        phase,
+                    },
+                    pre_clamp_kl_loss: None,
+                    distill_loss_weighted: 0.0,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn distill_raw_diagnostic_value_is_required_from_phase_c_onward() {
+        let student_logits = [2.0, 0.0, -1.0, 0.5, -0.5, 1.0];
+        let teacher_logits = [0.5, 1.5, -0.5, 1.0, -1.0, 0.0];
+        let inputs = DistillInputs {
+            student_logits: &student_logits,
+            teacher_logits: &teacher_logits,
+            class_count: 3,
+            temperature: 2.0,
+            lambda_distill: 0.25,
+        };
+
+        let scalar = distillation_product(inputs).unwrap();
+        for phase in [
+            TrainPhaseKind::ExpertTernaryQat,
+            TrainPhaseKind::FullNumericQat,
+            TrainPhaseKind::HardenAndSelect,
+        ] {
+            let diagnostic =
+                distillation_diagnostic_product_for_phase(phase, Some(inputs)).unwrap();
+
+            assert_eq!(
+                diagnostic,
+                DistillDiagnosticProduct {
+                    distill_loss_raw: DistillRawDiagnostic::Value {
+                        loss: scalar.distill_loss_raw,
+                    },
+                    pre_clamp_kl_loss: scalar.pre_clamp_kl_loss,
+                    distill_loss_weighted: scalar.distill_loss_weighted,
+                }
+            );
+        }
+        assert_eq!(
+            distillation_diagnostic_product_for_phase(TrainPhaseKind::FullNumericQat, None)
+                .unwrap_err(),
+            DistillationLossError::MissingFrozenTeacherForPhase {
+                phase: TrainPhaseKind::FullNumericQat,
+            }
+        );
+    }
+
+    #[test]
     fn weighted_distillation_loss_applies_explicit_lambda_distill() {
         let raw = distillation_loss(&[2.0, 0.0, -1.0], &[0.5, 1.5, -0.5], 2.0).unwrap();
 
@@ -967,6 +1421,56 @@ mod tests {
                 .unwrap();
 
         assert_close(loss, 0.920_573_7, 1.0e-6);
+    }
+
+    #[test]
+    fn s7_typed_distillation_adapter_accepts_same_topology_same_seed_teacher() {
+        let source_teacher = VecTeacherModel::new(vec![0.5, 1.5, -0.5], true);
+        let frozen_teacher =
+            S7FrozenTeacher::<S7MoeTiny, _>::new(7, freeze_teacher(&source_teacher).unwrap());
+        let student_logits = S7StudentLogits::<S7MoeTiny>::new(7, &[2.0, 0.0, -1.0]);
+
+        assert_eq!(student_logits.seed(), 7);
+        assert_eq!(student_logits.topology(), S7Topology::MoeTiny);
+        assert_eq!(student_logits.topology_name(), "MoeTiny");
+        assert_eq!(frozen_teacher.seed(), 7);
+        assert_eq!(frozen_teacher.topology(), S7Topology::MoeTiny);
+        assert_eq!(frozen_teacher.topology_name(), "MoeTiny");
+
+        let loss =
+            s7_distillation_loss_from_frozen_teacher(student_logits, &frozen_teacher, (), 2.0)
+                .unwrap();
+
+        assert_close(loss, 0.920_573_7, 1.0e-6);
+    }
+
+    #[test]
+    fn s7_typed_batched_adapter_rejects_cross_seed_teacher() {
+        let source_teacher = VecTeacherModel::new(vec![0.5, 1.5, -0.5, 1.0, -1.0, 0.0], true);
+        let frozen_teacher = S7FrozenTeacher::<S7MoeTinyDenseMatched, _>::new(
+            8,
+            freeze_teacher(&source_teacher).unwrap(),
+        );
+        let student_logits =
+            S7StudentLogits::<S7MoeTinyDenseMatched>::new(7, &[2.0, 0.0, -1.0, 0.5, -0.5, 1.0]);
+
+        let err = s7_batched_distillation_loss_from_frozen_teacher(
+            student_logits,
+            &frozen_teacher,
+            (),
+            3,
+            2.0,
+        )
+        .expect_err("cross-seed teacher must be rejected");
+
+        assert_eq!(
+            err,
+            FrozenTeacherDistillationError::RunSeedMismatch {
+                topology: "MoeTinyDenseMatched",
+                student_seed: 7,
+                teacher_seed: 8,
+            }
+        );
     }
 
     #[test]

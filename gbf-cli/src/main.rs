@@ -61,6 +61,12 @@ enum GbfCommand {
         #[command(subcommand)]
         command: gbf_experiments::s4::cli::S4Command,
     },
+    /// S7 MoE matched-bytes experiment workflows.
+    #[cfg(feature = "s7")]
+    S7 {
+        #[command(subcommand)]
+        command: gbf_experiments::s7::cli::S7Command,
+    },
 }
 
 fn main() -> ExitCode {
@@ -115,6 +121,10 @@ fn main() -> ExitCode {
                         command,
                         logging: s4_logging,
                     },
+                )),
+                #[cfg(feature = "s7")]
+                GbfCommand::S7 { command } => exit_code(gbf_experiments::s7::cli::run(
+                    gbf_experiments::s7::cli::S7Cli { command },
                 )),
             }
         }

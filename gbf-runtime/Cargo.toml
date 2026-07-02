@@ -10,6 +10,7 @@ gbf-abi = { path = "../gbf-abi" }
 gbf-asm = { path = "../gbf-asm" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
+gbf-policy = { path = "../gbf-policy" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

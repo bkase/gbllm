@@ -32,6 +32,10 @@ s3-full = [
 s4 = ["gbf-experiments/s4"]
 s4-full = ["s4", "gbf-experiments/s4-full"]
 s4-falsify = ["s4", "gbf-experiments/s4-falsify"]
+s7 = ["gbf-experiments/s7"]
+s7-moe = ["s7", "gbf-experiments/s7-moe"]
+s7-dense-matched = ["s7", "gbf-experiments/s7-dense-matched"]
+s7-burn-grad-smoke = ["s7", "gbf-experiments/s7-burn-grad-smoke"]
 falsify = ["phase-a", "gbf-experiments/falsify"]
 
 [dev-dependencies]

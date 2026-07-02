@@ -11,7 +11,6 @@ use gbf_model::qat::{
 use crate::adapter::burn::{
     BurnAdapterError, BurnBackend, BurnDevice, BurnFloatTensor, BurnModule, BurnParam, burn_linear,
     burn_softmax, float_tensor_from_vec, float_tensor_into_vec, float_tensor_shape,
-    ste_replace_forward,
 };
 
 #[derive(BurnModule, Debug)]
@@ -109,25 +108,25 @@ impl<B: BurnBackend> Top1RouterBurnQat<B> {
             self.input_projection().transpose(),
             self.input_bias(),
         );
-        let logits = burn_linear(
+        let raw_router_logits = burn_linear(
             hidden,
             self.expert_projection().transpose(),
             self.expert_bias(),
         );
-        let logits = add_logit_jitter(logits, options, device)?;
-        let masked_logits = mask_dropped_experts(logits.clone(), options, device)?;
-        let soft_probs = burn_softmax(masked_logits.clone(), 0);
-        let expert_index = top1_index_from_logits(masked_logits.detach())?;
+        let effective_logits = add_logit_jitter(raw_router_logits.clone(), options, device)?;
+        let masked_effective_logits =
+            mask_dropped_experts(effective_logits.clone(), options, device)?;
+        let routing_probs = burn_softmax(masked_effective_logits.clone(), 0);
+        let expert_index = top1_index_from_logits(masked_effective_logits.detach())?;
+        let dispatch_indicator = one_hot_tensor(expert_index, self.shape.n_experts(), device)?;
         let routing_weights = routing_weights_for_mode(
-            soft_probs.clone(),
-            expert_index,
-            self.shape.n_experts(),
+            routing_probs.clone(),
+            dispatch_indicator.clone(),
             options.mode(),
-            device,
-        )?;
+        );
         let aux_losses = self.compute_aux_losses(
-            logits.clone(),
-            soft_probs.clone(),
+            raw_router_logits.clone(),
+            routing_probs.clone(),
             expert_index,
             previous_distribution,
             device,
@@ -135,9 +134,11 @@ impl<B: BurnBackend> Top1RouterBurnQat<B> {
 
         Ok(RouterBurnForwardOutput {
             expert_index,
+            dispatch_indicator,
             routing_weights,
-            soft_probs,
-            logits,
+            routing_probs,
+            raw_router_logits,
+            effective_logits,
             aux_losses,
         })
     }
@@ -167,20 +168,20 @@ impl<B: BurnBackend> Top1RouterBurnQat<B> {
 
     fn compute_aux_losses(
         &self,
-        logits: BurnFloatTensor<B, 1>,
-        soft_probs: BurnFloatTensor<B, 1>,
+        raw_router_logits: BurnFloatTensor<B, 1>,
+        routing_probs: BurnFloatTensor<B, 1>,
         expert_index: usize,
         previous_distribution: Option<BurnFloatTensor<B, 1>>,
         device: &BurnDevice<B>,
     ) -> Result<RouterBurnAuxLosses<B>, Top1RouterBurnQatError> {
-        let max_logit = logits.clone().max().detach();
-        let z = max_logit.clone() + (logits.clone() - max_logit).exp().sum().log();
+        let max_logit = raw_router_logits.clone().max().detach();
+        let z = max_logit.clone() + (raw_router_logits.clone() - max_logit).exp().sum().log();
         let z_loss = z.clone() * z;
         let expert_mask = one_hot_tensor(expert_index, self.shape.n_experts(), device)?;
         let token_balance_proxy_loss =
-            (soft_probs.clone() * expert_mask).sum() * self.shape.n_experts() as f32;
+            (routing_probs.clone() * expert_mask).sum() * self.shape.n_experts() as f32;
         let temporal_smoothness_loss = if let Some(previous_distribution) = previous_distribution {
-            let dot = (soft_probs * previous_distribution).sum();
+            let dot = (routing_probs * previous_distribution).sum();
             (dot.ones_like() - dot).clamp(0.0, 1.0)
         } else {
             z_loss.zeros_like()
@@ -197,9 +198,11 @@ impl<B: BurnBackend> Top1RouterBurnQat<B> {
 #[derive(Debug)]
 pub struct RouterBurnForwardOutput<B: BurnBackend> {
     expert_index: usize,
+    dispatch_indicator: BurnFloatTensor<B, 1>,
     routing_weights: BurnFloatTensor<B, 1>,
-    soft_probs: BurnFloatTensor<B, 1>,
-    logits: BurnFloatTensor<B, 1>,
+    routing_probs: BurnFloatTensor<B, 1>,
+    raw_router_logits: BurnFloatTensor<B, 1>,
+    effective_logits: BurnFloatTensor<B, 1>,
     aux_losses: RouterBurnAuxLosses<B>,
 }
 
@@ -210,18 +213,28 @@ impl<B: BurnBackend> RouterBurnForwardOutput<B> {
     }
 
     #[must_use]
+    pub fn dispatch_indicator(&self) -> BurnFloatTensor<B, 1> {
+        self.dispatch_indicator.clone()
+    }
+
+    #[must_use]
     pub fn routing_weights(&self) -> BurnFloatTensor<B, 1> {
         self.routing_weights.clone()
     }
 
     #[must_use]
-    pub fn soft_probs(&self) -> BurnFloatTensor<B, 1> {
-        self.soft_probs.clone()
+    pub fn routing_probs(&self) -> BurnFloatTensor<B, 1> {
+        self.routing_probs.clone()
     }
 
     #[must_use]
-    pub fn logits(&self) -> BurnFloatTensor<B, 1> {
-        self.logits.clone()
+    pub fn raw_router_logits(&self) -> BurnFloatTensor<B, 1> {
+        self.raw_router_logits.clone()
+    }
+
+    #[must_use]
+    pub fn effective_logits(&self) -> BurnFloatTensor<B, 1> {
+        self.effective_logits.clone()
     }
 
     #[must_use]
@@ -440,18 +453,14 @@ fn mask_dropped_experts<B: BurnBackend>(
 }
 
 fn routing_weights_for_mode<B: BurnBackend>(
-    soft_probs: BurnFloatTensor<B, 1>,
-    expert_index: usize,
-    n_experts: usize,
+    routing_probs: BurnFloatTensor<B, 1>,
+    dispatch_indicator: BurnFloatTensor<B, 1>,
     mode: RouterTrainMode,
-    device: &BurnDevice<B>,
-) -> Result<BurnFloatTensor<B, 1>, BurnAdapterError> {
+) -> BurnFloatTensor<B, 1> {
     match mode {
-        RouterTrainMode::SoftTop1 => Ok(soft_probs),
-        RouterTrainMode::HardTop1 => {
-            let hard = one_hot_tensor(expert_index, n_experts, device)?;
-            Ok(ste_replace_forward(soft_probs, hard))
-        }
+        RouterTrainMode::SoftTop1 => routing_probs,
+        // H7/D3: hard dispatch is stop-gradient; no STE into router params.
+        RouterTrainMode::HardTop1 => dispatch_indicator.detach(),
     }
 }
 
@@ -492,9 +501,10 @@ mod tests {
 
     use super::*;
     use crate::adapter::burn::{
-        BurnModuleMapper, BurnNdArrayAutodiffBackend, BurnNdArrayBackend, BurnParam,
-        float_tensor_from_vec, float_tensor_into_vec,
+        BurnAutodiffBackend, BurnModuleMapper, BurnNdArrayAutodiffBackend, BurnNdArrayBackend,
+        BurnParam, burn_log_softmax, float_tensor_from_vec, float_tensor_into_vec,
     };
+    use crate::loss::distillation::{DEFAULT_DISTILLATION_TEMPERATURE, burn_distillation_loss};
 
     #[test]
     fn burn_router_forward_matches_scalar_router_outputs() {
@@ -514,19 +524,70 @@ mod tests {
 
         assert_eq!(burn_output.expert_index(), scalar_output.expert_index());
         assert_eq!(
+            float_tensor_into_vec(burn_output.dispatch_indicator()).unwrap(),
+            scalar_output.dispatch_indicator()
+        );
+        assert_eq!(
             float_tensor_into_vec(burn_output.routing_weights()).unwrap(),
             scalar_output.routing_weights()
         );
         assert_close(
-            &float_tensor_into_vec(burn_output.soft_probs()).unwrap(),
-            scalar_output.soft_probs(),
+            &float_tensor_into_vec(burn_output.routing_probs()).unwrap(),
+            scalar_output.routing_probs(),
             1.0e-6,
         );
         assert_close(
-            &float_tensor_into_vec(burn_output.logits()).unwrap(),
-            scalar_output.logits(),
+            &float_tensor_into_vec(burn_output.raw_router_logits()).unwrap(),
+            scalar_output.raw_router_logits(),
             1.0e-6,
         );
+        assert_close(
+            &float_tensor_into_vec(burn_output.effective_logits()).unwrap(),
+            scalar_output.effective_logits(),
+            1.0e-6,
+        );
+    }
+
+    #[test]
+    fn burn_router_raw_and_effective_logits_name_jitter_boundary() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let layer = Top1RouterBurnQat::<B>::from_core(fixture_router(), &device).unwrap();
+        let options = RouterForwardOptions::hard_top1(4)
+            .with_dropped_experts(vec![false, true, false, false])
+            .with_logit_jitter(vec![0.0, 0.0, 4.0, 0.0]);
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0, 2.0, -1.0], [3], &device).unwrap();
+
+        let output = layer.forward(input, None, &options, &device).unwrap();
+        let raw = float_tensor_into_vec(output.raw_router_logits()).unwrap();
+        let effective = float_tensor_into_vec(output.effective_logits()).unwrap();
+        let raw_z_loss = {
+            let z = (raw.iter().map(|value| value.exp()).sum::<f32>()).ln();
+            z * z
+        };
+        let burn_z_loss = float_tensor_into_vec(output.aux_losses().z_loss()).unwrap()[0];
+
+        assert_eq!(output.expert_index(), 2);
+        assert_close(&raw, &[2.0, 1.85, -1.325, -0.375], 1.0e-6);
+        assert_close(&effective, &[2.0, 1.85, 2.675, -0.375], 1.0e-6);
+        assert_close(&[burn_z_loss], &[raw_z_loss], 1.0e-6);
+    }
+
+    #[test]
+    fn burn_router_eval_options_keep_raw_and_effective_logits_equal() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let layer = Top1RouterBurnQat::<B>::from_core(fixture_router(), &device).unwrap();
+        let options = RouterForwardOptions::hard_top1(4);
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0, 2.0, -1.0], [3], &device).unwrap();
+
+        let output = layer.forward(input, None, &options, &device).unwrap();
+        let raw = float_tensor_into_vec(output.raw_router_logits()).unwrap();
+        let effective = float_tensor_into_vec(output.effective_logits()).unwrap();
+
+        assert_eq!(raw, effective);
     }
 
     #[test]
@@ -564,6 +625,81 @@ mod tests {
                 .iter()
                 .any(|value| value.abs() > 0.0)
         );
+    }
+
+    #[test]
+    fn burn_router_hard_lm_loss_reaches_selected_expert_logits_not_router_params() {
+        type B = BurnNdArrayAutodiffBackend;
+
+        let device = BurnDevice::<B>::default();
+        let layer = Top1RouterBurnQat::<B>::from_core(fixture_router(), &device).unwrap();
+        let options = RouterForwardOptions::hard_top1(4);
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0, 2.0, -1.0], [3], &device).unwrap();
+        let expert_logits = float_tensor_from_vec::<B, 2>(
+            vec![
+                0.1, -0.2, //
+                2.0, -1.0, //
+                -0.5, 1.5, //
+                0.0, 0.25,
+            ],
+            [4, 2],
+            &device,
+        )
+        .unwrap()
+        .require_grad();
+
+        let output = layer.forward(input, None, &options, &device).unwrap();
+        assert_eq!(output.expert_index(), 0);
+        let student_logits = burn_linear(output.routing_weights(), expert_logits.clone(), None);
+        let lm_loss = burn_log_softmax(student_logits, 0).slice([0..1]) * -1.0;
+        let gradients = lm_loss.backward();
+
+        assert_selected_expert_logits_receive_gradient(&expert_logits, &gradients, 0);
+        assert_router_projection_gradients_absent_or_zero(&layer, &gradients);
+    }
+
+    #[test]
+    fn burn_router_hard_distill_loss_reaches_selected_expert_logits_not_router_params() {
+        type B = BurnNdArrayAutodiffBackend;
+
+        let device = BurnDevice::<B>::default();
+        let layer = Top1RouterBurnQat::<B>::from_core(fixture_router(), &device).unwrap();
+        let options = RouterForwardOptions::hard_top1(4);
+        let input = float_tensor_from_vec::<B, 1>(vec![1.0, 2.0, -1.0], [3], &device).unwrap();
+        let expert_logits = float_tensor_from_vec::<B, 2>(
+            vec![
+                0.1, -0.2, //
+                2.0, -1.0, //
+                -0.5, 1.5, //
+                0.0, 0.25,
+            ],
+            [4, 2],
+            &device,
+        )
+        .unwrap()
+        .require_grad();
+        let teacher_logits = float_tensor_from_vec::<B, 1>(vec![0.25, 1.25], [2], &device)
+            .unwrap()
+            .require_grad();
+
+        let output = layer.forward(input, None, &options, &device).unwrap();
+        assert_eq!(output.expert_index(), 0);
+        let student_logits = burn_linear(output.routing_weights(), expert_logits.clone(), None);
+        let distill_loss = burn_distillation_loss(
+            student_logits,
+            teacher_logits.clone(),
+            0,
+            DEFAULT_DISTILLATION_TEMPERATURE,
+        )
+        .unwrap();
+        let gradients = distill_loss.backward();
+
+        assert_selected_expert_logits_receive_gradient(&expert_logits, &gradients, 0);
+        assert!(
+            teacher_logits.grad(&gradients).is_none(),
+            "frozen teacher logits must remain detached"
+        );
+        assert_router_projection_gradients_absent_or_zero(&layer, &gradients);
     }
 
     #[test]
@@ -704,6 +840,68 @@ mod tests {
 
     fn add_delta(values: &[f32], delta: f32) -> Vec<f32> {
         values.iter().map(|value| value + delta).collect()
+    }
+
+    fn assert_selected_expert_logits_receive_gradient(
+        expert_logits: &BurnFloatTensor<BurnNdArrayAutodiffBackend, 2>,
+        gradients: &<BurnNdArrayAutodiffBackend as BurnAutodiffBackend>::Gradients,
+        selected_expert: usize,
+    ) {
+        let grad = expert_logits
+            .grad(gradients)
+            .expect("selected expert logits should receive task-loss gradients");
+        let grad = float_tensor_into_vec(grad).unwrap();
+        assert!(
+            grad.chunks_exact(2)
+                .nth(selected_expert)
+                .expect("selected expert gradient row")
+                .iter()
+                .any(|value| value.abs() > 0.0),
+            "selected expert logits should receive non-zero gradients"
+        );
+        assert!(
+            grad.chunks_exact(2)
+                .enumerate()
+                .filter(|(index, _)| *index != selected_expert)
+                .all(|(_, row)| row.iter().all(|value| *value == 0.0)),
+            "unselected expert logits should stay zero under hard dispatch"
+        );
+    }
+
+    fn assert_router_projection_gradients_absent_or_zero(
+        layer: &Top1RouterBurnQat<BurnNdArrayAutodiffBackend>,
+        gradients: &<BurnNdArrayAutodiffBackend as BurnAutodiffBackend>::Gradients,
+    ) {
+        assert_tensor_gradient_absent_or_zero(
+            "input_projection",
+            layer.input_projection(),
+            gradients,
+        );
+        if let Some(input_bias) = layer.input_bias() {
+            assert_tensor_gradient_absent_or_zero("input_bias", input_bias, gradients);
+        }
+        assert_tensor_gradient_absent_or_zero(
+            "expert_projection",
+            layer.expert_projection(),
+            gradients,
+        );
+        if let Some(expert_bias) = layer.expert_bias() {
+            assert_tensor_gradient_absent_or_zero("expert_bias", expert_bias, gradients);
+        }
+    }
+
+    fn assert_tensor_gradient_absent_or_zero<const D: usize>(
+        name: &str,
+        tensor: BurnFloatTensor<BurnNdArrayAutodiffBackend, D>,
+        gradients: &<BurnNdArrayAutodiffBackend as BurnAutodiffBackend>::Gradients,
+    ) {
+        if let Some(grad) = tensor.grad(gradients) {
+            let grad = float_tensor_into_vec(grad).unwrap();
+            assert!(
+                grad.iter().all(|value| *value == 0.0),
+                "{name} gradient should be exactly zero, got {grad:?}"
+            );
+        }
     }
 
     struct AddToFloatParams(f32);

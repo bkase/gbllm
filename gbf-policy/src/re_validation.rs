@@ -162,6 +162,7 @@ mod tests {
 
     use crate::budget::{RomBudgetSlot, RuntimeMemoryCapSection};
     use crate::compile::PlacementProfile;
+    use crate::wram::WramReserved;
 
     fn hash(byte: u8) -> Hash256 {
         Hash256::from_bytes([byte; 32])
@@ -176,6 +177,7 @@ mod tests {
             target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
             profile: CompileProfileId::from("Bringup"),
             runtime_nucleus_hash,
+            reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
             rom_slots: vec![RomBudgetSlot {
                 id: BudgetSlotId::new(7),
                 class: BudgetSlotClass::ExpertBank,
@@ -189,7 +191,7 @@ mod tests {
                 hram_usable_bytes: 127,
                 source_target_profile_hash: hash(0x09),
             },
-            wram_reserved: 128,
+            wram_reserved: WramReserved::new(128, 4096, 128).expect("valid WRAM reservation"),
             sram_reserved: 512,
         }
     }

@@ -1,3 +1,12 @@
+#![cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+
 use gbf_experiments::s1::rng::{BatchRng, InitRng, S1Rng, ShuffleRng};
 use gbf_experiments::s1::run::{
     BatchSampler, BatchSamplerError, DivergedRunProduct, DivergenceEvent, DivergenceObserved,

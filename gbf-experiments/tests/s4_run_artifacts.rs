@@ -2,14 +2,19 @@
 
 use std::fs;
 
+mod common;
+
+use common::tracing_capture::{TraceCapture, TracingEvent, captured_events, with_trace_capture};
 use gbf_experiments::s4::run::progress_eval_steps;
 use gbf_experiments::s4::run_artifacts::{
+    S4_CHECKPOINT_EMITTED_EVENT_NAME, S4_FP_REFERENCE_EMITTED_EVENT_NAME,
     S4_FP_REFERENCE_KIND_QAT_SHADOW_AFTER_GUTENBERG, S4_FP_REFERENCE_SCHEMA,
-    S4_GUTENBERG_CHECKPOINT_SCHEMA, S4_GUTENBERG_RUN_LOG_SCHEMA, S4DivergenceObserved,
-    S4FpReferenceArtifact, S4GradNormSummary, S4GutenbergCheckpointMetadata, S4GutenbergRunLog,
-    S4LossSpikeSurpriseConfig, S4RunArtifactError, S4RunSurpriseObserved, S4StepDiagnostics,
-    d13_fail_closed_outcome, first_d13_divergence_event, first_loss_spike_surprise_event,
-    write_s4_fp_reference, write_s4_gutenberg_checkpoint_metadata, write_s4_gutenberg_run_log,
+    S4_GUTENBERG_CHECKPOINT_SCHEMA, S4_GUTENBERG_RUN_LOG_SCHEMA, S4_RUN_LOG_EMITTED_EVENT_NAME,
+    S4DivergenceObserved, S4FpReferenceArtifact, S4GradNormSummary, S4GutenbergCheckpointMetadata,
+    S4GutenbergRunLog, S4LossSpikeSurpriseConfig, S4RunArtifactError, S4RunSurpriseObserved,
+    S4StepDiagnostics, d13_fail_closed_outcome, first_d13_divergence_event,
+    first_loss_spike_surprise_event, write_s4_fp_reference, write_s4_gutenberg_checkpoint_metadata,
+    write_s4_gutenberg_run_log,
 };
 use gbf_experiments::s4::schema::{
     S4_OPTIMIZER_STEPS_GUTENBERG, S4BuildKind, S4Completion, S4InitialWeightSource, S4Outcome,
@@ -113,6 +118,62 @@ fn s4_run_artifacts_emit_canonical_self_hashed_json() {
     let fp_path = temp.path().join("artifacts/fp_reference.json");
     write_s4_fp_reference(&fp_path, &fp_reference).expect("write fp reference");
     assert_eq!(fs::read(&fp_path).expect("written fp reference"), fp_bytes);
+}
+
+#[test]
+fn s4_run_artifact_writers_emit_subscriber_captured_events() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let run_log = fixture_run_log()
+        .with_computed_self_hash()
+        .expect("run log");
+    let checkpoint = fixture_checkpoint(&run_log)
+        .with_computed_self_hash()
+        .expect("checkpoint");
+    let fp_reference = fixture_fp_reference(&checkpoint)
+        .with_computed_self_hash()
+        .expect("fp reference");
+    let capture = TraceCapture::default();
+
+    with_trace_capture(&capture, || {
+        write_s4_gutenberg_run_log(&temp.path().join("run-log.json"), &run_log)
+            .expect("write run log");
+        write_s4_gutenberg_checkpoint_metadata(&temp.path().join("checkpoint.json"), &checkpoint)
+            .expect("write checkpoint");
+        write_s4_fp_reference(&temp.path().join("fp-reference.json"), &fp_reference)
+            .expect("write fp reference");
+    });
+
+    let events = captured_events(&capture);
+    let run_log_event = captured_event(&events, S4_RUN_LOG_EMITTED_EVENT_NAME);
+    assert_eq!(
+        run_log_event.fields.get("schema"),
+        Some(&json!(S4_GUTENBERG_RUN_LOG_SCHEMA))
+    );
+    assert_eq!(run_log_event.fields.get("seed"), Some(&json!(0)));
+    assert_eq!(
+        run_log_event.fields.get("run_log_self_hash"),
+        Some(&json!(run_log.run_log_self_hash.to_string()))
+    );
+
+    let checkpoint_event = captured_event(&events, S4_CHECKPOINT_EMITTED_EVENT_NAME);
+    assert_eq!(
+        checkpoint_event.fields.get("schema"),
+        Some(&json!(S4_GUTENBERG_CHECKPOINT_SCHEMA))
+    );
+    assert_eq!(
+        checkpoint_event.fields.get("checkpoint_self_hash"),
+        Some(&json!(checkpoint.checkpoint_self_hash.to_string()))
+    );
+
+    let fp_reference_event = captured_event(&events, S4_FP_REFERENCE_EMITTED_EVENT_NAME);
+    assert_eq!(
+        fp_reference_event.fields.get("schema"),
+        Some(&json!(S4_FP_REFERENCE_SCHEMA))
+    );
+    assert_eq!(
+        fp_reference_event.fields.get("fp_reference_self_hash"),
+        Some(&json!(fp_reference.fp_reference_self_hash.to_string()))
+    );
 }
 
 #[test]
@@ -451,6 +512,13 @@ fn assert_self_hash_mismatch(
         }
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+fn captured_event<'a>(events: &'a [TracingEvent], name: &str) -> &'a TracingEvent {
+    events
+        .iter()
+        .find(|event| event.name == name)
+        .unwrap_or_else(|| panic!("missing {name}; saw {events:#?}"))
 }
 
 fn h(byte: u8) -> Hash256 {

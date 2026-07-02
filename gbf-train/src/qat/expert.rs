@@ -5,8 +5,8 @@ use std::fmt;
 
 use gbf_model::qat::{
     ActivationForwardMode, ClippedActivation, ClippedActivationKind, DenseBranchProjection,
-    ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertQat, ExpertQatForwardMode,
-    MatrixShape, QatHardnessControl, QuantHardness, SharedDenseBranch,
+    ExpertBlockQat, ExpertBlockQatError, ExpertForwardOptions, ExpertMlpConfig, ExpertQat,
+    ExpertQatForwardMode, MatrixShape, QatHardnessControl, QuantHardness, SharedDenseBranch,
 };
 
 use crate::adapter::burn::{
@@ -28,6 +28,25 @@ pub struct ExpertBlockBurnQat<B: BurnBackend> {
 
 impl<B: BurnBackend> ExpertBlockBurnQat<B> {
     pub fn from_core(
+        core: ExpertBlockQat,
+        device: &BurnDevice<B>,
+    ) -> Result<Self, ExpertBlockBurnQatError> {
+        let config = inferred_two_matrix_config(&core)?;
+        Self::from_core_with_config(core, config, device)
+    }
+
+    pub fn from_core_with_config(
+        core: ExpertBlockQat,
+        config: ExpertMlpConfig,
+        device: &BurnDevice<B>,
+    ) -> Result<Self, ExpertBlockBurnQatError> {
+        for expert in core.experts() {
+            expert.validate_config(config)?;
+        }
+        Self::from_validated_core(core, device)
+    }
+
+    fn from_validated_core(
         core: ExpertBlockQat,
         device: &BurnDevice<B>,
     ) -> Result<Self, ExpertBlockBurnQatError> {
@@ -86,7 +105,6 @@ impl<B: BurnBackend> ExpertBlockBurnQat<B> {
         options: ExpertForwardOptions,
     ) -> Result<BurnFloatTensor<B, 1>, ExpertBlockBurnQatError> {
         validate_input_shape(self.d_model(), &input)?;
-        validate_finite_input("expert input", &input)?;
         let expert =
             self.experts
                 .get(expert_id)
@@ -125,7 +143,6 @@ impl<B: BurnBackend> ExpertBlockBurnQat<B> {
                 actual: expert_ids.len(),
             });
         }
-        validate_finite_input("expert batch input", &input)?;
         if shape[0] == 0 {
             let device = input.device();
             return Ok(BurnFloatTensor::<B, 2>::zeros([0, self.d_model()], &device));
@@ -498,16 +515,15 @@ fn validate_input_shape<B: BurnBackend>(
     Ok(())
 }
 
-fn validate_finite_input<B: BurnBackend, const D: usize>(
-    name: &'static str,
-    input: &BurnFloatTensor<B, D>,
-) -> Result<(), ExpertBlockBurnQatError> {
-    let values = float_tensor_into_vec(input.clone().detach())?;
-    if let Some(index) = values.iter().position(|value| !value.is_finite()) {
-        return Err(ExpertBlockQatError::NonFiniteInput { name, index }.into());
-    }
-
-    Ok(())
+fn inferred_two_matrix_config(
+    core: &ExpertBlockQat,
+) -> Result<ExpertMlpConfig, ExpertBlockBurnQatError> {
+    let first_expert = core
+        .experts()
+        .first()
+        .ok_or(ExpertBlockQatError::EmptyExpertSet)?;
+    ExpertMlpConfig::default_two_matrix(first_expert.d_model(), first_expert.d_ff())
+        .map_err(ExpertBlockBurnQatError::Model)
 }
 
 fn full_precision_forward<B: BurnBackend>(
@@ -555,7 +571,7 @@ fn scalar_from_tensor<B: BurnBackend>(
 mod tests {
     use gbf_model::qat::{
         ActFakeQuant, ActivationForwardMode, ActivationQuantFormat, ActivationRange,
-        ActivationRangeMode, Q8_8Scale, TernaryLinearQat, TernaryThreshold,
+        ActivationRangeMode, ExpertMlpVariant, Q8_8Scale, TernaryLinearQat, TernaryThreshold,
     };
 
     use super::*;
@@ -815,6 +831,81 @@ mod tests {
     }
 
     #[test]
+    fn burn_expert_gradients_reach_all_supported_clipped_activations() {
+        type B = BurnNdArrayAutodiffBackend;
+
+        let device = BurnDevice::<B>::default();
+        for clipped_activation in [
+            ClippedActivation::relu(),
+            ClippedActivation::gelu_clip(),
+            ClippedActivation::silu_clip(),
+        ] {
+            let core = ExpertBlockQat::new(
+                vec![fixture_expert_with_clipped_activation(clipped_activation)],
+                None,
+            )
+            .unwrap();
+            let layer = ExpertBlockBurnQat::<B>::from_core(core, &device).unwrap();
+            let input = float_tensor_from_vec::<B, 1>(vec![0.25, 0.5], [2], &device)
+                .unwrap()
+                .require_grad();
+
+            let output = layer
+                .forward(input, 0, ExpertForwardOptions::hard_quantized_train())
+                .unwrap();
+            let gradients = output.sum().backward();
+            let expert = &layer.experts()[0];
+
+            assert!(
+                float_tensor_into_vec(
+                    expert
+                        .up_projection()
+                        .full_precision_weights()
+                        .grad(&gradients)
+                        .unwrap()
+                )
+                .unwrap()
+                .iter()
+                .any(|value| value.abs() > 0.0),
+                "{clipped_activation:?} must propagate gradient into the up projection"
+            );
+            assert!(
+                float_tensor_into_vec(
+                    expert
+                        .down_projection()
+                        .full_precision_weights()
+                        .grad(&gradients)
+                        .unwrap()
+                )
+                .unwrap()
+                .iter()
+                .any(|value| value.abs() > 0.0),
+                "{clipped_activation:?} must propagate gradient into the down projection"
+            );
+        }
+    }
+
+    #[test]
+    fn burn_expert_rejects_glu_config_at_adapter_boundary() {
+        type B = BurnNdArrayBackend;
+
+        let device = BurnDevice::<B>::default();
+        let core = ExpertBlockQat::new(vec![fixture_expert()], None).unwrap();
+        let two_matrix = ExpertMlpConfig::default_two_matrix(2, 3).unwrap();
+        ExpertBlockBurnQat::<B>::from_core_with_config(core.clone(), two_matrix, &device).unwrap();
+
+        let (glu, _event) = ExpertMlpConfig::glu_explicit(2, 3).unwrap();
+        assert!(matches!(
+            ExpertBlockBurnQat::<B>::from_core_with_config(core, glu, &device),
+            Err(ExpertBlockBurnQatError::Model(
+                ExpertBlockQatError::UnsupportedExpertMlpVariant {
+                    variant: ExpertMlpVariant::GatedLinearUnit,
+                }
+            ))
+        ));
+    }
+
+    #[test]
     fn burn_expert_zero_alpha_shared_branch_keeps_expert_output_and_trains_alpha() {
         type B = BurnNdArrayAutodiffBackend;
 
@@ -917,18 +1008,6 @@ mod tests {
             })
         ));
 
-        let bad_input =
-            float_tensor_from_vec::<B, 1>(vec![1.0, f32::INFINITY], [2], &device).unwrap();
-        assert!(matches!(
-            layer.forward(bad_input, 0, ExpertForwardOptions::hard_quantized_train()),
-            Err(ExpertBlockBurnQatError::Model(
-                ExpertBlockQatError::NonFiniteInput {
-                    name: "expert input",
-                    index: 1,
-                }
-            ))
-        ));
-
         let dynamic = ExpertBlockQat::new(vec![dynamic_activation_expert()], None).unwrap();
         assert!(matches!(
             ExpertBlockBurnQat::<B>::from_core(dynamic, &device),
@@ -981,6 +1060,10 @@ mod tests {
     }
 
     fn fixture_gelu_expert() -> ExpertQat {
+        fixture_expert_with_clipped_activation(ClippedActivation::gelu_clip())
+    }
+
+    fn fixture_expert_with_clipped_activation(clipped_activation: ClippedActivation) -> ExpertQat {
         ExpertQat::new_with_clipped_activation(
             ternary_linear(
                 3,
@@ -992,7 +1075,7 @@ mod tests {
                 ],
                 None,
             ),
-            ClippedActivation::gelu_clip(),
+            clipped_activation,
             activation(),
             ternary_linear(
                 2,
@@ -1081,7 +1164,7 @@ mod tests {
     fn eval_passthrough_activation() -> ActFakeQuant {
         ActFakeQuant::new(
             ActivationRangeMode::Fixed(ActivationRange::new(-1.0, 1.0).unwrap()),
-            ActivationQuantFormat::UInt4,
+            ActivationQuantFormat::Int8,
         )
         .unwrap()
         .with_eval_passthrough(true)

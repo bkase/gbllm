@@ -8,7 +8,8 @@ use gbf_train::loss::composer::{
 };
 use gbf_train::loss::range::burn_range_loss;
 use gbf_train::loss::router::{
-    burn_load_balance_loss, burn_router_z_loss, load_balance_loss, router_z_loss,
+    BurnRawRouterLogits, RawRouterLogits, burn_load_balance_loss, burn_router_z_loss,
+    load_balance_loss, router_z_loss,
 };
 use gbf_train::loss::zero::burn_zero_loss;
 
@@ -34,7 +35,10 @@ fn loss_tests_router_terms_gradient_flow_is_router_only() {
     let disconnected_expert_weights =
         tensor2(vec![0.1, -0.2, 0.3, -0.4], [2, 2], &device).require_grad();
 
-    let z_loss = burn_router_z_loss(router_logits.clone()).unwrap();
+    let z_loss = burn_router_z_loss(BurnRawRouterLogits::from_raw_router_logits(
+        router_logits.clone(),
+    ))
+    .unwrap();
     let z_gradients = z_loss.backward();
     let z_router_grad = gradient_values(router_logits.clone(), &z_gradients);
 
@@ -189,7 +193,12 @@ fn loss_tests_real_helpers_compose_and_backpropagate_to_sources() {
             balance_loss_raw: Some(
                 burn_load_balance_loss(routing_probs, &[0, 0], &device).unwrap(),
             ),
-            zrouter_loss_raw: Some(burn_router_z_loss(router_logits.clone()).unwrap()),
+            zrouter_loss_raw: Some(
+                burn_router_z_loss(BurnRawRouterLogits::from_raw_router_logits(
+                    router_logits.clone(),
+                ))
+                .unwrap(),
+            ),
             switch_loss_raw: None,
             range_loss_raw: Some(burn_range_loss(activations.clone(), -1.0, 1.0).unwrap()),
             zero_loss_raw: Some(
@@ -249,7 +258,12 @@ fn loss_tests_computed_disabled_composer_keeps_raw_but_zeroes_connected_gradient
             lm_loss_next_byte_nats: lm_loss.clone(),
             distill_loss_raw_nats: None,
             balance_loss_raw: None,
-            zrouter_loss_raw: Some(burn_router_z_loss(inert_logits.clone()).unwrap()),
+            zrouter_loss_raw: Some(
+                burn_router_z_loss(BurnRawRouterLogits::from_raw_router_logits(
+                    inert_logits.clone(),
+                ))
+                .unwrap(),
+            ),
             switch_loss_raw: None,
             range_loss_raw: Some(burn_range_loss(disabled_activations.clone(), -1.0, 1.0).unwrap()),
             zero_loss_raw: None,
@@ -299,12 +313,16 @@ fn loss_tests_extreme_router_inputs_are_finite() {
     let device = BurnDevice::<B>::default();
 
     let extreme_logits = vec![200.0, 0.0, -200.0, 121.0, 120.0, 119.0];
-    let scalar_z = router_z_loss(&extreme_logits, 3).unwrap();
+    let scalar_z =
+        router_z_loss(RawRouterLogits::from_raw_router_logits(&extreme_logits), 3).unwrap();
     assert!(scalar_z.is_finite());
 
     let expected_z_grad = expected_router_z_gradients(&extreme_logits, 3);
     let burn_logits = tensor2(extreme_logits, [2, 3], &device).require_grad();
-    let burn_z = burn_router_z_loss(burn_logits.clone()).unwrap();
+    let burn_z = burn_router_z_loss(BurnRawRouterLogits::from_raw_router_logits(
+        burn_logits.clone(),
+    ))
+    .unwrap();
     let burn_z_value = float_tensor_into_vec(burn_z.clone()).unwrap()[0];
     assert!(burn_z_value.is_finite());
 

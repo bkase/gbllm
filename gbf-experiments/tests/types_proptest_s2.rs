@@ -1,3 +1,12 @@
+#![cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+
 use gbf_experiments::s1::schema::S1CanonicalJson;
 use gbf_experiments::s2::schema::{
     HardnessTriple, PhaseEffectiveLambda, PhaseEffectiveLambdaValues, PhaseKindS2, QuantHardness,

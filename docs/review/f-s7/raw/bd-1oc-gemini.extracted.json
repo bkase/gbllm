@@ -1,0 +1,29 @@
+{
+  "findings": [
+    {
+      "body": "Deterministic top-1 tie-break (lowest expert index) documentation has been added to public Rust methods on RouterForwardOutput.",
+      "severity": "info",
+      "status": "resolved"
+    },
+    {
+      "body": "Training-loop ownership of stochastic-option construction has been clarified and assigned to owner beads bd-1ryn and bd-2v9r.",
+      "severity": "info",
+      "status": "resolved"
+    },
+    {
+      "body": "Phase defaults are correctly gated in model-core and producer wiring is appropriately marked as model-core helper support.",
+      "severity": "info",
+      "status": "resolved"
+    }
+  ],
+  "personas": [
+    "P1",
+    "P2",
+    "P4",
+    "P5",
+    "P6",
+    "P8"
+  ],
+  "summary": "The F-S7 task bead bd-1oc successfully implements expert dropout and logit jitter for Top1RouterQat with phase-gated defaults, deterministic seed/step/layer-id generation, and correct eval/export no-draw behavior. The code is well-structured and fully tested, including verification of tie-breaking determinism and z-loss/effective logit divergence. Prior review concerns regarding training-loop ownership and top-1 tie-break documentation have been fully addressed and resolved in the corrective closure-scope note and public Rust doc comments.",
+  "verdict": "PASS"
+}

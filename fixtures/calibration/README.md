@@ -20,3 +20,10 @@ calibration-confidence gate.
 currently expose a canonical CGB/MBC5 `TargetProfile` constructor or fixture.
 When that target exists, add a separate content-addressed bundle instead of
 editing the DMG fixture in place.
+
+`synthetic_reference_budget.json` is the pre-runtime `RuntimeChromeBudget`
+fixture used before real runtime-shell budget emission exists. It intentionally
+round-trips through the same `gbf_policy::RuntimeChromeBudget` schema as real
+budgets, records the pinned minimal+UI `reference_shell_modules`, and marks the
+runtime nucleus digest with `SYNTHETIC_REFERENCE:` so drift tooling can keep it
+separate from production shell hashes.

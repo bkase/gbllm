@@ -584,6 +584,8 @@ fn assert_five_seed_phase_d_run_loop(promotion_gate_self_hash: &Hash256) {
             c_ts_checkpoint_self_hash: hash(10),
             deployed_tensor_payload_sha: hash(11),
             fp_shadow_tensor_payload_sha: hash(12),
+            inherited_adamw_first_moment_payload_sha: None,
+            inherited_adamw_second_moment_payload_sha: None,
             promotion_gate_self_hash: *promotion_gate_self_hash,
         })
         .expect("D9 continuation initializes");

@@ -1,3 +1,12 @@
+#![cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+
 //! F-S1.27 tiny-fixture smoke gate.
 //!
 //! This is the fast PR-cycle smoke, not the full TinyStories closure run. On a

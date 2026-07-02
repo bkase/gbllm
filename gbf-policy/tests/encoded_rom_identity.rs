@@ -9,7 +9,9 @@ use gbf_policy::compile::{
     S5EncodedRomO11Error, verify_s5_encoded_rom_er3_runtime_nucleus_hash,
     verify_s5_encoded_rom_er7_attention_oracle_report, verify_s5_o11_all_seed_certs,
 };
-use gbf_policy::{BudgetSlotClass, PlacementProfile, RuntimeChromeBudget, RuntimeNucleusHash};
+use gbf_policy::{
+    BudgetSlotClass, PlacementProfile, RuntimeChromeBudget, RuntimeNucleusHash, WramReserved,
+};
 
 #[test]
 fn er_3_runtime_nucleus_hash_equality() {
@@ -148,6 +150,7 @@ fn runtime_budget(runtime_nucleus_hash: RuntimeNucleusHash) -> RuntimeChromeBudg
         target: TargetProfileId::from("dmg-mbc5-8mib-128kib"),
         profile: CompileProfileId::from(BRINGUP_COMPILE_PROFILE_ID),
         runtime_nucleus_hash,
+        reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
         rom_slots: vec![RomBudgetSlot {
             id: BudgetSlotId::new(0),
             class: BudgetSlotClass::Bank0Free,
@@ -161,7 +164,7 @@ fn runtime_budget(runtime_nucleus_hash: RuntimeNucleusHash) -> RuntimeChromeBudg
             hram_usable_bytes: 127,
             source_target_profile_hash: hash(0x09),
         },
-        wram_reserved: 128,
+        wram_reserved: WramReserved::new(128, 4096, 128).expect("valid WRAM reservation"),
         sram_reserved: 512,
     }
 }

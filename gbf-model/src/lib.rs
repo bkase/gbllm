@@ -6,6 +6,7 @@ pub mod budget;
 pub mod config;
 pub mod embeddings;
 pub mod expert;
+pub mod loss;
 pub mod qat;
 pub mod router;
 pub mod sequence;

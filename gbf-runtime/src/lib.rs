@@ -2,16 +2,28 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use gbf_abi::{AbiVersion, BuildIdentityArgs, BuildIdentityBlock, RuntimeShellModule};
 use gbf_asm::builder::Builder;
 use gbf_asm::effect::MachineEffectKind;
 use gbf_asm::section::{Section, SectionId};
 use gbf_asm::symbols::SymbolName;
-use gbf_foundation::{Hash256, PackerVersion};
+use gbf_foundation::{
+    BudgetSlotId, CanonicalJson, CanonicalJsonError, CompileProfileId, Hash256, PackerVersion,
+    TargetProfileId,
+};
+use gbf_policy::{
+    BudgetSlotClass, PlacementProfile, RomBudgetSlot, RuntimeChromeBudget,
+    RuntimeChromeBudgetValidationError, RuntimeMemoryCapSection, RuntimeNucleusHash,
+    WramPolicyError, WramReserved, bringup_profile, pinned_reference_shell,
+};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fmt;
 
 pub mod banking;
 pub mod boot;
@@ -29,6 +41,9 @@ pub mod video_commit;
 pub use gbf_abi::RuntimeShellModule as RuntimeModule;
 
 pub const RUNTIME_NUCLEUS_HASH_DOMAIN: &[u8] = b"gbf-runtime/v1/bank0-nucleus";
+pub const RUNTIME_NUCLEUS_BUDGET_CONTRACT_HASH_DOMAIN: &[u8] =
+    b"gbf-runtime/v1/runtime-nucleus-budget-contract";
+pub const RUNTIME_CHROME_BUDGET_FILE_NAME: &str = "chrome_budget.json";
 pub const RUNTIME_PACKER_VERSION: PackerVersion = PackerVersion::new(1, 0, 0);
 pub const FUTURE_PERSISTENCE_ROM_BYTES_BANK0: usize = 768;
 pub const FUTURE_TRACE_ROM_BYTES_BANK0: usize = 256;
@@ -38,6 +53,8 @@ pub const FUTURE_RESERVATION_ROM_BYTES_BANK0: usize = FUTURE_PERSISTENCE_ROM_BYT
     + FUTURE_HARNESS_ROM_BYTES_BANK0;
 pub const BANK0_NUCLEUS_BUDGET_BYTES: usize =
     gbf_hw::memory::BANK0_SIZE_BYTES as usize - FUTURE_RESERVATION_ROM_BYTES_BANK0;
+pub const COMMON_BANK_RESERVED_SLACK_BYTES: u16 = 512;
+pub const EXPERT_BANK_RESERVED_SLACK_BYTES: u16 = 384;
 
 pub const SECTION_ID_BOOT: SectionId = SectionId::new(0xA500);
 pub const SECTION_ID_IRQ_VECTORS: SectionId = SectionId::new(0xA501);
@@ -315,6 +332,410 @@ pub fn compute_runtime_nucleus_hash_for_test() -> Hash256 {
     compute_runtime_nucleus_hash(&normalized_bank0_image_for_test())
 }
 
+/// Budget emission facts derived from the runtime shell build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeChromeBudgetEmission {
+    pub budget: RuntimeChromeBudget,
+    pub runtime_image_hash: Hash256,
+    pub bank0_free_bytes_after_shell: u32,
+    pub bank0_future_reservation_bytes: u16,
+    pub common_bank_occupied_bytes: u32,
+    pub runtime_wram_internal_bytes: u16,
+    pub section_sizes: Vec<RuntimeSectionSize>,
+}
+
+/// Build the current runtime shell and derive its RuntimeChromeBudget.
+pub fn runtime_chrome_budget_emission()
+-> Result<RuntimeChromeBudgetEmission, RuntimeChromeBudgetEmissionError> {
+    let artifacts = demo_bank0_artifacts().map_err(RuntimeChromeBudgetEmissionError::Rom)?;
+    runtime_chrome_budget_emission_from_bank0_and_layout(&artifacts.bank0, &artifacts.layout)
+}
+
+/// Derive a RuntimeChromeBudget from a normalized Bank0 runtime image.
+///
+/// This convenience path uses the current demo shell layout for capacity
+/// accounting. Use [`runtime_chrome_budget_emission_from_bank0_and_layout`] when
+/// the caller already has the layout from the runtime shell build pass.
+pub fn runtime_chrome_budget_emission_from_bank0(
+    bank0: &[u8; gbf_hw::memory::BANK0_SIZE_BYTES as usize],
+) -> Result<RuntimeChromeBudgetEmission, RuntimeChromeBudgetEmissionError> {
+    let (_, _, layout) = normalized_bank0_image_and_symbols_for_test();
+    runtime_chrome_budget_emission_from_bank0_and_layout(bank0, &layout)
+}
+
+/// Derive a RuntimeChromeBudget from a normalized Bank0 runtime image and layout.
+///
+/// The hash is byte-driven, while the Bank0 capacity is derived from the placed
+/// sections and reserved ranges. That avoids treating literal `0xFF` bytes in
+/// occupied code or cartridge header fields as usable model capacity.
+pub fn runtime_chrome_budget_emission_from_bank0_and_layout(
+    bank0: &[u8; gbf_hw::memory::BANK0_SIZE_BYTES as usize],
+    layout: &gbf_asm::layout::LayoutPlan,
+) -> Result<RuntimeChromeBudgetEmission, RuntimeChromeBudgetEmissionError> {
+    let target = gbf_hw::target::dmg_mbc5_8mib_128kib();
+    let profile = bringup_profile();
+    let reference_shell_modules = RuntimeChromeBudget::pinned_reference_shell_modules();
+    let runtime_image_hash = compute_runtime_nucleus_hash(bank0);
+    let bank0_free_bytes_after_shell = bank0_free_bytes_after_shell(layout);
+    let bank0_future_reservation_bytes = reference_shell_bank0_future_reservation_bytes();
+    let common_bank_occupied_bytes = runtime_common_bank_occupied_bytes();
+    let runtime_wram_internal_bytes = runtime_wram_internal_reserved_bytes();
+    let wram_layout = profile.wram_layout;
+    let wram_reserved_total = wram_layout
+        .overlay_bytes
+        .checked_add(runtime_wram_internal_bytes)
+        .ok_or(RuntimeChromeBudgetEmissionError::WramTotalOverflow)?;
+    let rom_slots = vec![
+        // The byte count comes from the actual placed Bank0 shell layout.
+        // F-A5 still links a minimal panic section, so those bytes reduce
+        // capacity here even though the pinned policy module set reserves
+        // the full future panic path as slack rather than declaring it.
+        RomBudgetSlot::new(
+            BudgetSlotId::new(0),
+            BudgetSlotClass::Bank0Free,
+            bank0_free_bytes_after_shell,
+            bank0_future_reservation_bytes,
+            BTreeSet::from([PlacementProfile::StrictOnePerBank]),
+        )?,
+        RomBudgetSlot::new(
+            BudgetSlotId::new(1),
+            BudgetSlotClass::CommonBank,
+            gbf_hw::memory::SWITCHABLE_BANK_SIZE_BYTES.saturating_sub(common_bank_occupied_bytes),
+            COMMON_BANK_RESERVED_SLACK_BYTES,
+            BTreeSet::from([PlacementProfile::Budgeted]),
+        )?,
+        RomBudgetSlot::new(
+            BudgetSlotId::new(2),
+            BudgetSlotClass::ExpertBank,
+            gbf_hw::memory::SWITCHABLE_BANK_SIZE_BYTES,
+            EXPERT_BANK_RESERVED_SLACK_BYTES,
+            BTreeSet::from([
+                PlacementProfile::StrictOnePerBank,
+                PlacementProfile::Budgeted,
+            ]),
+        )?,
+    ];
+    let memory_caps = RuntimeMemoryCapSection {
+        wram_usable_bytes: gbf_hw::memory::WRAM_SIZE_BYTES,
+        sram_usable_bytes: target.cartridge().ram_size().kib() * 1024,
+        hram_usable_bytes: gbf_hw::memory::HRAM_SIZE_BYTES,
+        source_target_profile_hash: target_profile_content_hash(&target)?,
+    };
+    let wram_reserved = WramReserved::new(
+        wram_layout.overlay_bytes,
+        wram_layout.hot_arena_bytes_min,
+        wram_reserved_total,
+    )?;
+    let sram_reserved = runtime_sram_reserved_bytes();
+    let runtime_nucleus_hash =
+        RuntimeNucleusHash::real(compute_runtime_chrome_budget_nucleus_hash(
+            runtime_image_hash,
+            target.id(),
+            &reference_shell_modules,
+            &profile.id,
+            &rom_slots,
+            &memory_caps,
+            &wram_reserved,
+            sram_reserved,
+        )?);
+
+    let budget = RuntimeChromeBudget::new(
+        target.id().clone(),
+        profile.id.clone(),
+        runtime_nucleus_hash,
+        reference_shell_modules,
+        rom_slots,
+        memory_caps,
+        wram_reserved,
+        sram_reserved,
+    )?;
+
+    Ok(RuntimeChromeBudgetEmission {
+        budget,
+        runtime_image_hash,
+        bank0_free_bytes_after_shell,
+        bank0_future_reservation_bytes,
+        common_bank_occupied_bytes,
+        runtime_wram_internal_bytes,
+        section_sizes: runtime_nucleus_section_sizes(),
+    })
+}
+
+/// Write a checked RuntimeChromeBudget as `chrome_budget.json`.
+pub fn write_runtime_chrome_budget_json(
+    out_dir: impl AsRef<Path>,
+    budget: &RuntimeChromeBudget,
+) -> Result<PathBuf, RuntimeChromeBudgetEmissionError> {
+    let out_dir = out_dir.as_ref();
+    fs::create_dir_all(out_dir)?;
+    let path = out_dir.join(RUNTIME_CHROME_BUDGET_FILE_NAME);
+    fs::write(&path, serde_json::to_vec_pretty(budget)?)?;
+    Ok(path)
+}
+
+/// Build the current runtime shell and emit `chrome_budget.json`.
+pub fn emit_runtime_chrome_budget_json(
+    out_dir: impl AsRef<Path>,
+) -> Result<RuntimeChromeBudgetEmission, RuntimeChromeBudgetEmissionError> {
+    let emission = runtime_chrome_budget_emission()?;
+    write_runtime_chrome_budget_json(out_dir, &emission.budget)?;
+    Ok(emission)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_runtime_chrome_budget_nucleus_hash(
+    runtime_image_hash: Hash256,
+    target: &TargetProfileId,
+    reference_shell_modules: &BTreeSet<RuntimeShellModule>,
+    compile_profile: &CompileProfileId,
+    rom_slots: &[RomBudgetSlot],
+    memory_caps: &RuntimeMemoryCapSection,
+    wram_reserved: &WramReserved,
+    sram_reserved: u32,
+) -> Result<Hash256, CanonicalJsonError> {
+    #[derive(Serialize)]
+    struct HashInput<'a> {
+        schema: &'static str,
+        runtime_image_hash: Hash256,
+        target: &'a TargetProfileId,
+        reference_shell_modules: &'a BTreeSet<RuntimeShellModule>,
+        compile_profile: &'a CompileProfileId,
+        rom_slots: &'a [RomBudgetSlot],
+        memory_caps: &'a RuntimeMemoryCapSection,
+        wram_reserved: &'a WramReserved,
+        sram_reserved: u32,
+        runtime_packer_version: PackerVersion,
+        gbf_runtime_crate_version: &'static str,
+    }
+
+    let canonical = CanonicalJson::to_vec(&HashInput {
+        schema: "runtime_nucleus_budget_contract.v2",
+        runtime_image_hash,
+        target,
+        reference_shell_modules,
+        compile_profile,
+        rom_slots,
+        memory_caps,
+        wram_reserved,
+        sram_reserved,
+        runtime_packer_version: RUNTIME_PACKER_VERSION,
+        gbf_runtime_crate_version: env!("CARGO_PKG_VERSION"),
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(RUNTIME_NUCLEUS_BUDGET_CONTRACT_HASH_DOMAIN);
+    hasher.update(canonical);
+    Ok(Hash256::from_bytes(hasher.finalize().into()))
+}
+
+#[must_use]
+pub fn bank0_free_bytes_after_shell(layout: &gbf_asm::layout::LayoutPlan) -> u32 {
+    let occupied = merged_occupied_bytes(
+        bank0_occupied_intervals(layout),
+        u32::from(gbf_asm::layout::ROM0_START),
+        u32::from(gbf_asm::layout::ROM0_END_EXCLUSIVE),
+    );
+    u32::from(gbf_asm::layout::ROM0_END_EXCLUSIVE) - occupied
+}
+
+fn bank0_occupied_intervals(layout: &gbf_asm::layout::LayoutPlan) -> Vec<(u32, u32)> {
+    let mut ranges = Vec::new();
+    for reserved in &layout.reserved_ranges {
+        if reserved.bank == gbf_asm::layout::BankIndex::Rom(0) {
+            ranges.push((
+                u32::from(reserved.start),
+                u32::from(reserved.end_inclusive) + 1,
+            ));
+        }
+    }
+    for section in &layout.sections {
+        if section.bank == gbf_asm::layout::BankIndex::Rom(0) {
+            ranges.push((u32::from(section.cpu_start), section.cpu_end_exclusive()));
+        }
+    }
+    ranges
+}
+
+fn merged_occupied_bytes(mut ranges: Vec<(u32, u32)>, start: u32, end: u32) -> u32 {
+    ranges.sort_unstable();
+    let mut total = 0_u32;
+    let mut current: Option<(u32, u32)> = None;
+    for (range_start, range_end) in ranges {
+        let range_start = range_start.max(start);
+        let range_end = range_end.min(end);
+        if range_start >= range_end {
+            continue;
+        }
+
+        current = match current {
+            None => Some((range_start, range_end)),
+            Some((active_start, active_end)) if range_start <= active_end => {
+                Some((active_start, active_end.max(range_end)))
+            }
+            Some((active_start, active_end)) => {
+                total += active_end - active_start;
+                Some((range_start, range_end))
+            }
+        };
+    }
+    if let Some((active_start, active_end)) = current {
+        total += active_end - active_start;
+    }
+    total
+}
+
+#[must_use]
+pub fn reference_shell_bank0_future_reservation_bytes() -> u16 {
+    pinned_reference_shell()
+        .future_reservations
+        .values()
+        .map(|reservation| reservation.rom_bytes_per_bank0)
+        .sum()
+}
+
+#[must_use]
+pub const fn runtime_common_bank_occupied_bytes() -> u32 {
+    // The current F-A5 reference shell links only Bank0 sections. When common
+    // bank runtime kernels land, this becomes the measured common-bank total.
+    0
+}
+
+#[must_use]
+pub fn runtime_wram_internal_reserved_bytes() -> u16 {
+    let ranges = [
+        WramRange::inclusive(
+            joypad::JOYPAD_CACHED_STATE_ADDR,
+            joypad::JOYPAD_PREV_STATE_ADDR,
+        ),
+        WramRange::inclusive(
+            video_commit::COMMIT_QUEUE_BASE_ADDR,
+            video_commit::COMMIT_QUEUE_WORK_FRAME_REMAINING_ADDR,
+        ),
+        WramRange::inclusive(panic::WRAM_LAST_FAULT_ADDR, panic::WRAM_LAST_FAULT_HI_ADDR),
+        WramRange::inclusive(
+            keyboard::PROMPT_BUFFER_BASE_ADDR,
+            keyboard::KEYBOARD_WORK_CELL_VALUE_ADDR,
+        ),
+    ];
+    merged_wram_range_bytes(&ranges)
+}
+
+#[must_use]
+pub const fn runtime_sram_reserved_bytes() -> u32 {
+    // Persistence is intentionally outside the pinned minimal+UI shell, so the
+    // real runtime shell currently owns no SRAM bytes.
+    0
+}
+
+pub fn target_profile_content_hash(
+    profile: &gbf_hw::target::TargetProfile,
+) -> Result<Hash256, CanonicalJsonError> {
+    let canonical = CanonicalJson::to_vec(profile)?;
+    let mut hasher = Sha256::new();
+    hasher.update(gbf_hw::target::TARGET_PROFILE_CONTENT_HASH_DOMAIN);
+    hasher.update(canonical);
+    Ok(Hash256::from_bytes(hasher.finalize().into()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct WramRange {
+    start: u16,
+    end_exclusive: u16,
+}
+
+impl WramRange {
+    #[must_use]
+    const fn inclusive(start: WramAddr, end_inclusive: WramAddr) -> Self {
+        Self {
+            start: start.get(),
+            end_exclusive: end_inclusive.get() + 1,
+        }
+    }
+}
+
+fn merged_wram_range_bytes(ranges: &[WramRange]) -> u16 {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_unstable();
+
+    let mut total = 0_u16;
+    let mut current: Option<WramRange> = None;
+    for range in sorted {
+        current = match current {
+            None => Some(range),
+            Some(mut active) if range.start <= active.end_exclusive => {
+                active.end_exclusive = active.end_exclusive.max(range.end_exclusive);
+                Some(active)
+            }
+            Some(active) => {
+                total = total.saturating_add(active.end_exclusive - active.start);
+                Some(range)
+            }
+        };
+    }
+    if let Some(active) = current {
+        total = total.saturating_add(active.end_exclusive - active.start);
+    }
+    total
+}
+
+#[derive(Debug)]
+pub enum RuntimeChromeBudgetEmissionError {
+    Rom(gbf_asm::rom::RomAssemblyError),
+    Budget(RuntimeChromeBudgetValidationError),
+    Wram(WramPolicyError),
+    WramTotalOverflow,
+    CanonicalJson(CanonicalJsonError),
+    Json(serde_json::Error),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for RuntimeChromeBudgetEmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rom(error) => write!(f, "runtime shell ROM assembly failed: {error}"),
+            Self::Budget(error) => write!(f, "runtime chrome budget validation failed: {error}"),
+            Self::Wram(error) => write!(f, "runtime WRAM reservation failed: {error}"),
+            Self::WramTotalOverflow => f.write_str("runtime WRAM reserved total overflowed u16"),
+            Self::CanonicalJson(error) => {
+                write!(f, "runtime chrome budget canonical JSON failed: {error}")
+            }
+            Self::Json(error) => write!(f, "runtime chrome budget JSON failed: {error}"),
+            Self::Io(error) => write!(f, "runtime chrome budget I/O failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeChromeBudgetEmissionError {}
+
+impl From<RuntimeChromeBudgetValidationError> for RuntimeChromeBudgetEmissionError {
+    fn from(error: RuntimeChromeBudgetValidationError) -> Self {
+        Self::Budget(error)
+    }
+}
+
+impl From<WramPolicyError> for RuntimeChromeBudgetEmissionError {
+    fn from(error: WramPolicyError) -> Self {
+        Self::Wram(error)
+    }
+}
+
+impl From<CanonicalJsonError> for RuntimeChromeBudgetEmissionError {
+    fn from(error: CanonicalJsonError) -> Self {
+        Self::CanonicalJson(error)
+    }
+}
+
+impl From<serde_json::Error> for RuntimeChromeBudgetEmissionError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+impl From<std::io::Error> for RuntimeChromeBudgetEmissionError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 pub fn demo_bank0_rom_image() -> Result<Vec<u8>, gbf_asm::rom::RomAssemblyError> {
     let (bank0, _, _) = normalized_bank0_image_and_symbols_for_test();
     build_demo_rom_from_bank0(&bank0)
@@ -335,6 +756,7 @@ pub struct DemoBank0Artifacts {
     pub bank0: [u8; 16 * 1024],
     pub rom: Vec<u8>,
     pub sym: String,
+    pub layout: gbf_asm::layout::LayoutPlan,
 }
 
 pub fn demo_bank0_artifacts() -> Result<DemoBank0Artifacts, gbf_asm::rom::RomAssemblyError> {
@@ -342,7 +764,12 @@ pub fn demo_bank0_artifacts() -> Result<DemoBank0Artifacts, gbf_asm::rom::RomAss
     let rom = build_demo_rom_from_bank0(&bank0)?;
     let sym = gbf_asm::symbols::write_sym(&layout, &symbols, &demo_bank0_sym_options())
         .expect("Bank0 demo symbol table emits");
-    Ok(DemoBank0Artifacts { bank0, rom, sym })
+    Ok(DemoBank0Artifacts {
+        bank0,
+        rom,
+        sym,
+        layout,
+    })
 }
 
 fn demo_bank0_sym_options() -> gbf_asm::symbols::SymOptions {
@@ -680,6 +1107,183 @@ mod tests {
     }
 
     #[test]
+    fn runtime_chrome_budget_json_deserializes_through_policy_schema() {
+        let emission = runtime_chrome_budget_emission().expect("runtime budget emits");
+        assert!(
+            !emission
+                .budget
+                .runtime_nucleus_hash
+                .is_synthetic_reference()
+        );
+        assert_eq!(
+            emission.budget.reference_shell_modules,
+            RuntimeChromeBudget::pinned_reference_shell_modules()
+        );
+        assert_eq!(
+            target_profile_content_hash(&gbf_hw::target::dmg_mbc5_8mib_128kib())
+                .expect("target hashes")
+                .to_string(),
+            "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7"
+        );
+
+        let encoded = serde_json::to_vec_pretty(&emission.budget).expect("budget serializes");
+        let decoded: RuntimeChromeBudget =
+            serde_json::from_slice(&encoded).expect("policy budget schema deserializes");
+
+        assert_eq!(decoded, emission.budget);
+        assert_eq!(
+            decoded.target,
+            gbf_hw::target::dmg_mbc5_8mib_128kib().id().clone()
+        );
+        assert_eq!(decoded.profile, bringup_profile().id);
+    }
+
+    #[test]
+    fn runtime_chrome_budget_bank0_capacity_uses_actual_shell_layout() {
+        let artifacts = demo_bank0_artifacts().expect("demo artifacts build");
+        let baseline = runtime_chrome_budget_emission_from_bank0_and_layout(
+            &artifacts.bank0,
+            &artifacts.layout,
+        )
+        .expect("baseline budget emits");
+        let mut expanded_layout = artifacts.layout.clone();
+        let expandable_section = expanded_layout
+            .sections
+            .iter_mut()
+            .find(|section| {
+                section.bank == gbf_asm::layout::BankIndex::Rom(0)
+                    && bank0_address_is_free(&artifacts.layout, section.cpu_end_exclusive())
+            })
+            .expect("runtime layout has a Bank0 section followed by free capacity");
+        expandable_section.final_size += 1;
+
+        let changed = runtime_chrome_budget_emission_from_bank0_and_layout(
+            &artifacts.bank0,
+            &expanded_layout,
+        )
+        .expect("changed budget emits");
+
+        assert_eq!(
+            changed.bank0_free_bytes_after_shell,
+            baseline.bank0_free_bytes_after_shell - 1
+        );
+        assert_eq!(
+            bank0_slot(&changed.budget).usable_bytes,
+            bank0_slot(&baseline.budget).usable_bytes - 1
+        );
+    }
+
+    #[test]
+    fn runtime_chrome_budget_hash_binds_bank0_image_bytes() {
+        let artifacts = demo_bank0_artifacts().expect("demo artifacts build");
+        let baseline = runtime_chrome_budget_emission_from_bank0_and_layout(
+            &artifacts.bank0,
+            &artifacts.layout,
+        )
+        .expect("baseline budget emits");
+        let mut changed_bank0 = artifacts.bank0;
+        let free_index = first_free_bank0_address(&artifacts.layout)
+            .expect("normalized image has free Bank0 capacity") as usize;
+        changed_bank0[free_index] = changed_bank0[free_index].wrapping_sub(1);
+
+        let changed =
+            runtime_chrome_budget_emission_from_bank0_and_layout(&changed_bank0, &artifacts.layout)
+                .expect("changed budget emits");
+
+        assert_eq!(
+            changed.bank0_free_bytes_after_shell,
+            baseline.bank0_free_bytes_after_shell
+        );
+        assert_ne!(
+            changed.budget.runtime_nucleus_hash,
+            baseline.budget.runtime_nucleus_hash
+        );
+    }
+
+    #[test]
+    fn runtime_chrome_budget_hash_binds_profile_module_set_and_budget_contract() {
+        let image_hash = compute_runtime_nucleus_hash_for_test();
+        let emission = runtime_chrome_budget_emission().expect("runtime budget emits");
+        let budget = &emission.budget;
+        let base = compute_runtime_chrome_budget_nucleus_hash(
+            image_hash,
+            &budget.target,
+            &budget.reference_shell_modules,
+            &budget.profile,
+            &budget.rom_slots,
+            &budget.memory_caps,
+            &budget.wram_reserved,
+            budget.sram_reserved,
+        )
+        .expect("budget hash computes");
+        let profile_changed = compute_runtime_chrome_budget_nucleus_hash(
+            image_hash,
+            &budget.target,
+            &budget.reference_shell_modules,
+            &CompileProfileId::from("OtherProfile"),
+            &budget.rom_slots,
+            &budget.memory_caps,
+            &budget.wram_reserved,
+            budget.sram_reserved,
+        )
+        .expect("profile-variant budget hash computes");
+        let mut fewer_modules = budget.reference_shell_modules.clone();
+        fewer_modules.remove(&RuntimeShellModule::VideoCommit);
+        let modules_changed = compute_runtime_chrome_budget_nucleus_hash(
+            image_hash,
+            &budget.target,
+            &fewer_modules,
+            &budget.profile,
+            &budget.rom_slots,
+            &budget.memory_caps,
+            &budget.wram_reserved,
+            budget.sram_reserved,
+        )
+        .expect("module-variant budget hash computes");
+        let mut slack_changed_slots = budget.rom_slots.clone();
+        slack_changed_slots[0].reserved_slack = slack_changed_slots[0]
+            .reserved_slack
+            .checked_add(1)
+            .expect("fixture slack increments");
+        let slot_slack_changed = compute_runtime_chrome_budget_nucleus_hash(
+            image_hash,
+            &budget.target,
+            &budget.reference_shell_modules,
+            &budget.profile,
+            &slack_changed_slots,
+            &budget.memory_caps,
+            &budget.wram_reserved,
+            budget.sram_reserved,
+        )
+        .expect("slot-slack-variant budget hash computes");
+
+        assert_ne!(base, profile_changed);
+        assert_ne!(base, modules_changed);
+        assert_ne!(base, slot_slack_changed);
+    }
+
+    #[test]
+    fn runtime_chrome_budget_file_emission_writes_chrome_budget_json() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let out_dir = std::env::temp_dir().join(format!(
+            "gbf-runtime-bd-1g9-{}-{unique}",
+            std::process::id()
+        ));
+
+        let emission = emit_runtime_chrome_budget_json(&out_dir).expect("budget file emits");
+        let path = out_dir.join(RUNTIME_CHROME_BUDGET_FILE_NAME);
+        let bytes = std::fs::read(&path).expect("chrome_budget.json readable");
+        let decoded: RuntimeChromeBudget =
+            serde_json::from_slice(&bytes).expect("chrome_budget.json policy-decodes");
+
+        assert_eq!(decoded, emission.budget);
+        std::fs::remove_dir_all(out_dir).expect("temp budget dir removed");
+    }
+
+    #[test]
     fn runtime_shell_module_annotations() {
         use gbf_abi::RuntimeShellAnnotated;
 
@@ -701,6 +1305,28 @@ mod tests {
             0xC000
         );
         assert!(serde_json::from_str::<WramAddr>("32768").is_err());
+    }
+
+    fn bank0_slot(budget: &RuntimeChromeBudget) -> &RomBudgetSlot {
+        budget
+            .rom_slots
+            .iter()
+            .find(|slot| slot.class == BudgetSlotClass::Bank0Free)
+            .expect("budget has Bank0Free slot")
+    }
+
+    fn bank0_address_is_free(layout: &gbf_asm::layout::LayoutPlan, address: u32) -> bool {
+        if address >= u32::from(gbf_asm::layout::ROM0_END_EXCLUSIVE) {
+            return false;
+        }
+        !bank0_occupied_intervals(layout)
+            .into_iter()
+            .any(|(start, end)| start <= address && address < end)
+    }
+
+    fn first_free_bank0_address(layout: &gbf_asm::layout::LayoutPlan) -> Option<u32> {
+        (u32::from(gbf_asm::layout::ROM0_START)..u32::from(gbf_asm::layout::ROM0_END_EXCLUSIVE))
+            .find(|address| bank0_address_is_free(layout, *address))
     }
 
     #[test]

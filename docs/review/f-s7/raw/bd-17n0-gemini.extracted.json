@@ -1,0 +1,19 @@
+{
+  "findings": [
+    {
+      "body": "Verified that legacy bias-gradient and dynamic activation range fields are successfully rejected at boundaries by CLI materialize-support-artifact and artifact validators, and that the burn-grad-smoke JSON artifact matches the corrected schema contract.",
+      "severity": "info",
+      "status": "resolved"
+    }
+  ],
+  "personas": [
+    "P3",
+    "P4",
+    "P5",
+    "P6",
+    "P7",
+    "P8"
+  ],
+  "summary": "F-S7 bead bd-17n0 is verified as PASS at git HEAD 27be9bf88d32f1af5de66bee2980f0aca6cc27a5. The closure claims and H8 invariants are perfectly supported by the current repository state, corrected RFC schema contract, and test results. By updating the H8 burn gradient smoke schema to reject legacy bias-gradients and dynamic activation range fields, the bead aligns with the bias-free, fixed-activation-range model contract. All QAT tests, schema discipline checks, preregistration verification, and substrate tests pass successfully without any remaining open findings.",
+  "verdict": "PASS"
+}

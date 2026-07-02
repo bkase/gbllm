@@ -2601,6 +2601,7 @@ dependencies = [
  "gbf-emu",
  "gbf-foundation",
  "gbf-hw",
+ "gbf-policy",
  "serde",
  "serde_json",
  "sha2",

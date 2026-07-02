@@ -1,3 +1,12 @@
+#![cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+
 use gbf_experiments::s2::environment::{
     build_config_hash_for_features, compute_environment_hash, dependency_lockfile_hash_for_bytes,
     environment_hash_for_inputs, rust_toolchain_hash_for_identity,

@@ -1,3 +1,12 @@
+#![cfg(any(
+    feature = "phase-a",
+    feature = "ablation",
+    feature = "s2-full",
+    feature = "s2-ablation",
+    feature = "s3-phase-d",
+    feature = "falsify"
+))]
+
 use std::collections::BTreeMap;
 
 use gbf_experiments::s2::report::{decision_for_outcome, dispatch_outcome};

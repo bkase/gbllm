@@ -8304,6 +8304,8 @@ mod tests {
             target: gbf_foundation::TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Bringup"),
             runtime_nucleus_hash: gbf_policy::RuntimeNucleusHash::real(hash(0x91)),
+            reference_shell_modules:
+                gbf_policy::RuntimeChromeBudget::pinned_reference_shell_modules(),
             rom_slots: vec![
                 gbf_policy::RomBudgetSlot {
                     id: gbf_foundation::BudgetSlotId::new(0),
@@ -8333,7 +8335,8 @@ mod tests {
                 hram_usable_bytes: 127,
                 source_target_profile_hash: hash(0x92),
             },
-            wram_reserved: 128,
+            wram_reserved: gbf_policy::WramReserved::new(128, 4096, 128)
+                .expect("valid WRAM reservation"),
             sram_reserved: 512,
         }
     }
@@ -9198,7 +9201,10 @@ mod tests {
                 hram_usable_bytes: 127,
                 source_target_profile_hash: hash(42),
             },
-            wram_reserved: 64,
+            reference_shell_modules:
+                gbf_policy::RuntimeChromeBudget::pinned_reference_shell_modules(),
+            wram_reserved: gbf_policy::WramReserved::new(64, 4096, 64)
+                .expect("valid WRAM reservation"),
             sram_reserved: 128,
         }
     }

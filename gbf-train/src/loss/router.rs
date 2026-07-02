@@ -100,6 +100,11 @@ pub enum RouterLossError {
         shape: Vec<usize>,
     },
     #[cfg(feature = "burn-adapter")]
+    InvalidDispatchIndicatorShape {
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    #[cfg(feature = "burn-adapter")]
     BurnAdapter(BurnAdapterError),
 }
 
@@ -253,6 +258,17 @@ impl PartialEq for RouterLossError {
                 Self::InvalidRoutingProbabilityShape { shape: right_shape },
             ) => left_shape == right_shape,
             #[cfg(feature = "burn-adapter")]
+            (
+                Self::InvalidDispatchIndicatorShape {
+                    expected: left_expected,
+                    actual: left_actual,
+                },
+                Self::InvalidDispatchIndicatorShape {
+                    expected: right_expected,
+                    actual: right_actual,
+                },
+            ) => left_expected == right_expected && left_actual == right_actual,
+            #[cfg(feature = "burn-adapter")]
             (Self::BurnAdapter(_), Self::BurnAdapter(_)) => false,
             _ => false,
         }
@@ -343,6 +359,11 @@ impl fmt::Display for RouterLossError {
                 "routing probabilities must be rank-2 [tokens, experts], got {shape:?}"
             ),
             #[cfg(feature = "burn-adapter")]
+            Self::InvalidDispatchIndicatorShape { expected, actual } => write!(
+                f,
+                "dispatch indicator shape {actual:?} must match routing probabilities {expected:?}"
+            ),
+            #[cfg(feature = "burn-adapter")]
             Self::BurnAdapter(error) => write!(f, "{error}"),
         }
     }
@@ -369,9 +390,9 @@ impl Error for RouterLossError {
             | Self::NegativeLossWeight { .. }
             | Self::NonFiniteLossWeight { .. } => None,
             #[cfg(feature = "burn-adapter")]
-            Self::InvalidRouterLogitShape { .. } | Self::InvalidRoutingProbabilityShape { .. } => {
-                None
-            }
+            Self::InvalidRouterLogitShape { .. }
+            | Self::InvalidRoutingProbabilityShape { .. }
+            | Self::InvalidDispatchIndicatorShape { .. } => None,
         }
     }
 }
@@ -426,23 +447,77 @@ impl<'a> Top1RoutingBatch<'a> {
     }
 }
 
-/// Centered router z-loss over flattened `[token, expert]` rows.
+/// Type marker for flattened raw `[token, expert]` router logits.
+#[derive(Debug, Clone, Copy)]
+pub struct RawRouterLogits<'a> {
+    values: &'a [f32],
+}
+
+impl<'a> RawRouterLogits<'a> {
+    #[must_use]
+    pub const fn from_raw_router_logits(values: &'a [f32]) -> Self {
+        Self { values }
+    }
+
+    #[must_use]
+    pub const fn values(self) -> &'a [f32] {
+        self.values
+    }
+}
+
+#[cfg(feature = "burn-adapter")]
+#[derive(Debug)]
+pub struct BurnRawRouterLogits<B: BurnBackend> {
+    tensor: BurnFloatTensor<B, 2>,
+}
+
+#[cfg(feature = "burn-adapter")]
+impl<B: BurnBackend> BurnRawRouterLogits<B> {
+    #[must_use]
+    pub fn from_raw_router_logits(tensor: BurnFloatTensor<B, 2>) -> Self {
+        Self { tensor }
+    }
+
+    #[must_use]
+    pub fn tensor(&self) -> BurnFloatTensor<B, 2> {
+        self.tensor.clone()
+    }
+
+    #[must_use]
+    pub fn into_tensor(self) -> BurnFloatTensor<B, 2> {
+        self.tensor
+    }
+}
+
+/// Centered router z-loss over flattened raw `[token, expert]` logit rows.
 ///
 /// The expert axis is the innermost axis of width `n_experts`; row losses are
 /// averaged over all token rows. The `ln(n_experts)` center makes a uniform
 /// zero-logit router contribute zero while still penalizing large logit scale.
-pub fn router_z_loss(logits: &[f32], n_experts: usize) -> Result<f32, RouterLossError> {
-    validate_router_logits(logits, n_experts)?;
+pub fn router_z_loss(
+    raw_router_logits: RawRouterLogits<'_>,
+    n_experts: usize,
+) -> Result<f32, RouterLossError> {
+    let loss = centered_router_z_loss_f64(raw_router_logits.values(), n_experts)?;
 
-    let row_count = logits.len() / n_experts;
-    let uniform_log_partition = (n_experts as f32).ln();
-    let mut loss_sum = 0.0;
-    for row in logits.chunks_exact(n_experts) {
-        let centered_z = stable_logsumexp(row) - uniform_log_partition;
+    normalize_router_loss(loss as f32)
+}
+
+fn centered_router_z_loss_f64(
+    raw_router_logits: &[f32],
+    n_experts: usize,
+) -> Result<f64, RouterLossError> {
+    validate_router_logits(raw_router_logits, n_experts)?;
+
+    let row_count = raw_router_logits.len() / n_experts;
+    let uniform_log_partition = (n_experts as f64).ln();
+    let mut loss_sum = 0.0_f64;
+    for row in raw_router_logits.chunks_exact(n_experts) {
+        let centered_z = stable_logsumexp_f64(row) - uniform_log_partition;
         loss_sum += centered_z * centered_z;
     }
 
-    normalize_router_loss(loss_sum / row_count as f32)
+    normalize_router_loss_f64(loss_sum / row_count as f64)
 }
 
 /// Top-1 Switch/standard MoE load-balance loss over flattened token rows.
@@ -537,18 +612,19 @@ pub fn lambda_zrouter_for_phase(phase: TrainPhaseKind, configured_lambda_zrouter
 
 #[cfg(feature = "burn-adapter")]
 pub fn burn_router_z_loss<B>(
-    logits: BurnFloatTensor<B, 2>,
+    raw_router_logits: BurnRawRouterLogits<B>,
 ) -> Result<BurnFloatTensor<B, 1>, RouterLossError>
 where
     B: BurnBackend,
 {
-    let shape = float_tensor_shape(&logits);
+    let raw_router_logits = raw_router_logits.into_tensor();
+    let shape = float_tensor_shape(&raw_router_logits);
     validate_burn_router_logits_shape(shape)?;
-    validate_burn_router_logits(&logits)?;
+    validate_burn_router_logits(&raw_router_logits)?;
 
     let n_experts = shape[1];
-    let max_per_row = logits.clone().max_dim(1).detach();
-    let shifted = logits - max_per_row.clone().repeat_dim(1, n_experts);
+    let max_per_row = raw_router_logits.clone().max_dim(1).detach();
+    let shifted = raw_router_logits - max_per_row.clone().repeat_dim(1, n_experts);
     let z = max_per_row + shifted.exp().sum_dim(1).log();
     let centered_z = z - (n_experts as f32).ln();
     let loss = (centered_z.clone() * centered_z).mean();
@@ -575,6 +651,33 @@ where
     let fractions_tensor = float_tensor_from_vec::<B, 1>(fractions, [n_experts], device)?;
     let mean_probabilities = routing_probs.mean_dim(0).reshape([n_experts]);
     let loss = (mean_probabilities * fractions_tensor).sum() * n_experts as f32;
+    validate_burn_loss(&loss)?;
+
+    Ok(loss)
+}
+
+/// Burn load-balance loss with tensor dispatch provenance.
+///
+/// `routing_probs` carries the differentiable `P_e` path. The hard
+/// `dispatch_indicator` carries stop-gradient dispatch provenance for `f_e`
+/// and is detached before the fraction term is computed.
+#[cfg(feature = "burn-adapter")]
+pub fn burn_load_balance_loss_with_stop_gradient_dispatch<B>(
+    routing_probs: BurnFloatTensor<B, 2>,
+    dispatch_indicator: BurnFloatTensor<B, 2>,
+) -> Result<BurnFloatTensor<B, 1>, RouterLossError>
+where
+    B: BurnBackend,
+{
+    let shape = float_tensor_shape(&routing_probs);
+    validate_burn_routing_probability_shape(shape)?;
+    validate_burn_dispatch_indicator_shape(shape, float_tensor_shape(&dispatch_indicator))?;
+    validate_burn_routing_probability_rows(&routing_probs, shape[1])?;
+
+    let n_experts = shape[1];
+    let mean_probabilities = routing_probs.mean_dim(0).reshape([n_experts]);
+    let dispatch_fractions = dispatch_indicator.detach().mean_dim(0).reshape([n_experts]);
+    let loss = (mean_probabilities * dispatch_fractions).sum() * n_experts as f32;
     validate_burn_loss(&loss)?;
 
     Ok(loss)
@@ -695,6 +798,29 @@ fn validate_routing_probabilities(
     expert_assignments: &[usize],
     n_experts: usize,
 ) -> Result<(), RouterLossError> {
+    validate_probability_values_and_row_sums(routing_probs, n_experts)?;
+
+    for (token_index, row) in routing_probs.chunks_exact(n_experts).enumerate() {
+        let assignment = expert_assignments[token_index];
+        let assigned_probability = row[assignment];
+        let max_probability = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if assigned_probability + ROUTING_PROBABILITY_ARGMAX_TOLERANCE < max_probability {
+            return Err(RouterLossError::ExpertAssignmentNotTopProbability {
+                token_index,
+                assignment,
+                assigned_probability,
+                max_probability,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_probability_values_and_row_sums(
+    routing_probs: &[f32],
+    n_experts: usize,
+) -> Result<(), RouterLossError> {
     for (index, &value) in routing_probs.iter().enumerate() {
         if !value.is_finite() {
             return Err(RouterLossError::NonFiniteRoutingProbability { index, value });
@@ -708,18 +834,6 @@ fn validate_routing_probabilities(
         let sum = row.iter().sum::<f32>();
         if (sum - 1.0).abs() > ROUTING_PROBABILITY_SUM_TOLERANCE {
             return Err(RouterLossError::InvalidRoutingProbabilitySum { token_index, sum });
-        }
-
-        let assignment = expert_assignments[token_index];
-        let assigned_probability = row[assignment];
-        let max_probability = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        if assigned_probability + ROUTING_PROBABILITY_ARGMAX_TOLERANCE < max_probability {
-            return Err(RouterLossError::ExpertAssignmentNotTopProbability {
-                token_index,
-                assignment,
-                assigned_probability,
-                max_probability,
-            });
         }
     }
 
@@ -738,9 +852,16 @@ fn validate_loss_weight(kind: RouterLossWeightKind, value: f32) -> Result<(), Ro
     Ok(())
 }
 
-fn stable_logsumexp(values: &[f32]) -> f32 {
-    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let exp_sum = values.iter().map(|value| (value - max).exp()).sum::<f32>();
+fn stable_logsumexp_f64(values: &[f32]) -> f64 {
+    let max = values
+        .iter()
+        .copied()
+        .map(f64::from)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let exp_sum = values
+        .iter()
+        .map(|value| (f64::from(*value) - max).exp())
+        .sum::<f64>();
 
     max + exp_sum.ln()
 }
@@ -761,6 +882,16 @@ fn expert_assignment_fractions(expert_assignments: &[usize], n_experts: usize) -
 fn normalize_router_loss(value: f32) -> Result<f32, RouterLossError> {
     if !value.is_finite() {
         return Err(RouterLossError::NonFiniteLoss { value });
+    }
+
+    Ok(value)
+}
+
+fn normalize_router_loss_f64(value: f64) -> Result<f64, RouterLossError> {
+    if !value.is_finite() {
+        return Err(RouterLossError::NonFiniteLoss {
+            value: value as f32,
+        });
     }
 
     Ok(value)
@@ -793,6 +924,21 @@ fn validate_burn_routing_probability_shape(shape: [usize; 2]) -> Result<(), Rout
 }
 
 #[cfg(feature = "burn-adapter")]
+fn validate_burn_dispatch_indicator_shape(
+    expected: [usize; 2],
+    actual: [usize; 2],
+) -> Result<(), RouterLossError> {
+    if actual != expected {
+        return Err(RouterLossError::InvalidDispatchIndicatorShape {
+            expected: expected.to_vec(),
+            actual: actual.to_vec(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "burn-adapter")]
 fn validate_burn_router_logits<B>(logits: &BurnFloatTensor<B, 2>) -> Result<(), RouterLossError>
 where
     B: BurnBackend,
@@ -800,6 +946,18 @@ where
     let shape = float_tensor_shape(logits);
     let values = float_tensor_into_vec(logits.clone().detach())?;
     validate_router_logits(&values, shape[1])
+}
+
+#[cfg(feature = "burn-adapter")]
+fn validate_burn_routing_probability_rows<B>(
+    routing_probs: &BurnFloatTensor<B, 2>,
+    n_experts: usize,
+) -> Result<(), RouterLossError>
+where
+    B: BurnBackend,
+{
+    let values = float_tensor_into_vec(routing_probs.clone().detach())?;
+    validate_probability_values_and_row_sums(&values, n_experts)
 }
 
 #[cfg(feature = "burn-adapter")]
@@ -833,6 +991,10 @@ where
 mod tests {
     use super::*;
 
+    fn raw(values: &[f32]) -> RawRouterLogits<'_> {
+        RawRouterLogits::from_raw_router_logits(values)
+    }
+
     fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         assert!(
             (actual - expected).abs() <= tolerance,
@@ -842,24 +1004,55 @@ mod tests {
 
     #[test]
     fn router_z_loss_is_zero_for_all_zero_logits() {
-        let loss = router_z_loss(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 3).unwrap();
+        let logits = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let loss = router_z_loss(raw(&logits), 3).unwrap();
 
         assert_close(loss, 0.0, 1.0e-7);
+    }
+
+    #[test]
+    fn router_z_loss_centered_baseline_is_zero_with_f64_mu() {
+        let logits = [0.0; 8];
+
+        let centered = centered_router_z_loss_f64(&logits, 4).unwrap();
+        let uncentered = logits
+            .chunks_exact(4)
+            .map(|row| {
+                let z = stable_logsumexp_f64(row);
+                z * z
+            })
+            .sum::<f64>()
+            / 2.0;
+
+        assert!(
+            centered.abs() <= 1.0e-12,
+            "centered zero-logit z-loss should be exactly zero, got {centered}"
+        );
+        assert!(
+            uncentered > 1.0e-12,
+            "uncentered zero-logit z-loss must trip the S7 baseline check"
+        );
+        assert!(
+            (uncentered - 4.0_f64.ln().powi(2)).abs() <= 1.0e-12,
+            "uncentered oracle drifted: {uncentered}"
+        );
     }
 
     #[test]
     fn router_z_loss_matches_centered_logsumexp_oracle() {
         let logits = [1.0, 0.0, -1.0, 2.0, 1.0, 0.0];
 
-        let loss = router_z_loss(&logits, 3).unwrap();
+        let loss = router_z_loss(raw(&logits), 3).unwrap();
 
         assert_close(loss, 0.904_470_56, 1.0e-6);
     }
 
     #[test]
     fn router_z_loss_increases_with_logit_magnitude() {
-        let small = router_z_loss(&[0.25, 0.0, 0.0], 3).unwrap();
-        let large = router_z_loss(&[2.0, 0.0, 0.0], 3).unwrap();
+        let small_logits = [0.25, 0.0, 0.0];
+        let large_logits = [2.0, 0.0, 0.0];
+        let small = router_z_loss(raw(&small_logits), 3).unwrap();
+        let large = router_z_loss(raw(&large_logits), 3).unwrap();
 
         assert!(small > 0.0);
         assert!(large > small);
@@ -867,11 +1060,23 @@ mod tests {
 
     #[test]
     fn router_z_loss_reduces_as_mean_over_token_rows() {
-        let row_a = router_z_loss(&[1.0, 0.0, -1.0], 3).unwrap();
-        let row_b = router_z_loss(&[2.0, 1.0, 0.0], 3).unwrap();
-        let batched = router_z_loss(&[1.0, 0.0, -1.0, 2.0, 1.0, 0.0], 3).unwrap();
+        let row_a_logits = [1.0, 0.0, -1.0];
+        let row_b_logits = [2.0, 1.0, 0.0];
+        let batched_logits = [1.0, 0.0, -1.0, 2.0, 1.0, 0.0];
+        let row_a = router_z_loss(raw(&row_a_logits), 3).unwrap();
+        let row_b = router_z_loss(raw(&row_b_logits), 3).unwrap();
+        let batched = router_z_loss(raw(&batched_logits), 3).unwrap();
 
         assert_close(batched, (row_a + row_b) / 2.0, 1.0e-6);
+    }
+
+    #[test]
+    fn router_z_loss_requires_raw_router_logits_wrapper() {
+        let logits = [0.5, 0.0, -0.5];
+        let raw_router_logits = RawRouterLogits::from_raw_router_logits(&logits);
+
+        assert_eq!(raw_router_logits.values(), &logits);
+        assert!(router_z_loss(raw_router_logits, 3).unwrap().is_finite());
     }
 
     #[test]
@@ -953,18 +1158,20 @@ mod tests {
     #[test]
     fn router_loss_validation_rejects_invalid_contracts() {
         assert_eq!(
-            router_z_loss(&[], 2).unwrap_err(),
+            router_z_loss(raw(&[]), 2).unwrap_err(),
             RouterLossError::EmptyRouterLogits
         );
+        let bad_len_logits = [1.0, 2.0, 3.0];
         assert_eq!(
-            router_z_loss(&[1.0, 2.0, 3.0], 2).unwrap_err(),
+            router_z_loss(raw(&bad_len_logits), 2).unwrap_err(),
             RouterLossError::RouterLogitCountNotDivisibleByExpertCount {
                 logit_len: 3,
                 n_experts: 2,
             }
         );
+        let non_finite_logits = [f32::NAN];
         assert_eq!(
-            router_z_loss(&[f32::NAN], 1).unwrap_err(),
+            router_z_loss(raw(&non_finite_logits), 1).unwrap_err(),
             RouterLossError::NonFiniteRouterLogit {
                 index: 0,
                 value: f32::NAN,
@@ -1044,8 +1251,9 @@ mod tests {
             let values = vec![1.0, 0.0, -1.0, 2.0, 1.0, 0.0];
             let logits = float_tensor_from_vec::<B, 2>(values.clone(), [2, 3], &device).unwrap();
 
-            let burn_loss = burn_router_z_loss(logits).unwrap();
-            let scalar_loss = router_z_loss(&values, 3).unwrap();
+            let burn_loss =
+                burn_router_z_loss(BurnRawRouterLogits::from_raw_router_logits(logits)).unwrap();
+            let scalar_loss = router_z_loss(raw(&values), 3).unwrap();
 
             assert_close(
                 float_tensor_into_vec(burn_loss).unwrap()[0],
@@ -1086,7 +1294,9 @@ mod tests {
             .unwrap()
             .require_grad();
 
-            let loss = burn_router_z_loss(logits.clone()).unwrap();
+            let loss =
+                burn_router_z_loss(BurnRawRouterLogits::from_raw_router_logits(logits.clone()))
+                    .unwrap();
             let gradients = loss.backward();
             let grad = logits
                 .grad(&gradients)
@@ -1122,6 +1332,43 @@ mod tests {
         }
 
         #[test]
+        fn burn_load_balance_loss_names_stop_gradient_dispatch_provenance() {
+            let device = BurnDevice::<B>::default();
+            let probs = float_tensor_from_vec::<B, 2>(vec![0.8, 0.2, 0.25, 0.75], [2, 2], &device)
+                .unwrap()
+                .require_grad();
+            let dispatch = float_tensor_from_vec::<B, 2>(vec![1.0, 0.0, 0.0, 1.0], [2, 2], &device)
+                .unwrap()
+                .require_grad();
+
+            let loss =
+                burn_load_balance_loss_with_stop_gradient_dispatch(probs.clone(), dispatch.clone())
+                    .unwrap()
+                    + dispatch.clone().sum() * 0.0;
+            let gradients = loss.backward();
+            let probs_grad = probs
+                .grad(&gradients)
+                .expect("routing probabilities should receive gradients");
+            let dispatch_grad = dispatch
+                .grad(&gradients)
+                .expect("dispatch zero-gradient tensor should be materialized");
+
+            assert!(
+                float_tensor_into_vec(probs_grad)
+                    .unwrap()
+                    .iter()
+                    .any(|value| value.abs() > 0.0)
+            );
+            assert!(
+                float_tensor_into_vec(dispatch_grad)
+                    .unwrap()
+                    .iter()
+                    .all(|value| *value == 0.0),
+                "dispatch indicator must remain stop-gradient provenance"
+            );
+        }
+
+        #[test]
         fn burn_load_balance_loss_flows_gradient_through_softmax_logits() {
             let device = BurnDevice::<B>::default();
             let logits = float_tensor_from_vec::<B, 2>(vec![2.0, 0.0, 1.5, 0.0], [2, 2], &device)
@@ -1150,7 +1397,8 @@ mod tests {
                 float_tensor_from_vec::<B, 2>(vec![f32::MAX, 0.0], [1, 2], &device).unwrap();
 
             assert_eq!(
-                burn_router_z_loss(logits).unwrap_err(),
+                burn_router_z_loss(BurnRawRouterLogits::from_raw_router_logits(logits))
+                    .unwrap_err(),
                 RouterLossError::NonFiniteLoss {
                     value: f32::INFINITY,
                 }

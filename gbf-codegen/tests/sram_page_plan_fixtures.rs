@@ -625,6 +625,7 @@ fn fixture_inputs(bindings: Vec<SramPagePlanBindingInput>) -> SramPagePlanInputs
             target: TargetProfileId::from("dmg-mbc5"),
             profile: CompileProfileId::from("Bringup"),
             runtime_nucleus_hash: RuntimeNucleusHash::real(hash(7)),
+            reference_shell_modules: RuntimeChromeBudget::pinned_reference_shell_modules(),
             rom_slots: vec![RomBudgetSlot {
                 id: BudgetSlotId::new(0),
                 class: BudgetSlotClass::CommonBank,
@@ -638,7 +639,8 @@ fn fixture_inputs(bindings: Vec<SramPagePlanBindingInput>) -> SramPagePlanInputs
                 hram_usable_bytes: 127,
                 source_target_profile_hash: hash(8),
             },
-            wram_reserved: 0,
+            wram_reserved: gbf_policy::WramReserved::new(0, 4096, 0)
+                .expect("valid WRAM reservation"),
             sram_reserved: 512,
         },
         policy: SramKnob {

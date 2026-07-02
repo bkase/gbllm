@@ -48,7 +48,7 @@ impl ArtifactCore {
     }
 
     pub fn sequence_semantics(&self) -> SequenceSemanticsSpec {
-        self.sequence_semantics
+        self.sequence_semantics.clone()
     }
 
     pub fn tensors(&self) -> &[CanonicalTensor] {
@@ -61,7 +61,7 @@ impl ArtifactCore {
 
     pub fn semantic_hash(&self) -> Hash256 {
         stable_digest(&artifact_core_semantic_bytes(
-            self.sequence_semantics,
+            self.sequence_semantics.clone(),
             &self.tensors,
             &self.quant,
         ))
@@ -655,11 +655,32 @@ fn push_sequence_semantics(bytes: &mut Vec<u8>, semantics: SequenceSemanticsSpec
         SequenceSemanticsSpec::LinearState(semantics) => {
             push_u8(bytes, 0);
             push_u16(bytes, semantics.state_bytes_per_layer());
+            push_decay_policy(bytes, semantics.decay_policy());
         }
         SequenceSemanticsSpec::BoundedKv(semantics) => {
             push_u8(bytes, 1);
             push_u16(bytes, semantics.max_context());
             push_u16(bytes, semantics.kv_bytes_per_token());
+        }
+    }
+}
+
+fn push_decay_policy(bytes: &mut Vec<u8>, policy: &crate::sequence::DecayPolicy) {
+    match policy {
+        crate::sequence::DecayPolicy::Fixed(rate) => {
+            push_u8(bytes, 0);
+            push_u32(bytes, rate.value().to_bits());
+        }
+        crate::sequence::DecayPolicy::MultiTimescale(rates) => {
+            push_u8(bytes, 1);
+            push_u64(bytes, rates.len() as u64);
+            for rate in rates {
+                push_u32(bytes, rate.value().to_bits());
+            }
+        }
+        crate::sequence::DecayPolicy::Learned(rate) => {
+            push_u8(bytes, 2);
+            push_u32(bytes, rate.value().to_bits());
         }
     }
 }
@@ -863,13 +884,17 @@ fn push_u16(bytes: &mut Vec<u8>, value: u16) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]
 mod sequence_semantics {
-    use crate::sequence::SequenceSemanticsSpec;
+    use crate::sequence::{DecayPolicy, SequenceSemanticsSpec};
 
     use super::*;
 
@@ -893,6 +918,37 @@ mod sequence_semantics {
             SequenceSemanticsSpec::linear_state(8).unwrap()
         );
         assert_ne!(linear.semantic_hash(), bounded.semantic_hash());
+    }
+
+    #[test]
+    fn artifact_core_hash_changes_with_linear_state_decay_policy() {
+        let fixed = ArtifactCore::new(
+            vec![],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::linear_state(16).unwrap(),
+        )
+        .unwrap();
+        let multi = ArtifactCore::new(
+            vec![],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::linear_state_with_decay(
+                16,
+                DecayPolicy::multi_timescale(vec![0.5, 0.75]).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let learned = ArtifactCore::new(
+            vec![],
+            QuantSpec::default(),
+            SequenceSemanticsSpec::linear_state_with_decay(16, DecayPolicy::learned(0.5).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(fixed.semantic_hash(), multi.semantic_hash());
+        assert_ne!(fixed.semantic_hash(), learned.semantic_hash());
+        assert_ne!(multi.semantic_hash(), learned.semantic_hash());
     }
 }
 

@@ -1,0 +1,183 @@
+{
+  "target": "dmg-mbc5-8mib-128kib",
+  "profile": "Bringup",
+  "runtime_nucleus_hash": "SYNTHETIC_REFERENCE:sha256:8ed6d5bd8a9a2b6416f9de967a41f6115da41b5346f1167a52c23febf2ea1ddc",
+  "reference_shell_modules": [
+    "boot",
+    "interrupts",
+    "scheduler",
+    "banking",
+    "joypad",
+    "text",
+    "keyboard",
+    "video_commit"
+  ],
+  "rom_slots": [
+    {
+      "id": 0,
+      "class": {
+        "kind": "Bank0Free"
+      },
+      "usable_bytes": 8192,
+      "reserved_slack": 1152,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "class": {
+        "kind": "CommonBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 512,
+      "placement_caps": [
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "class": {
+        "kind": "ExpertBank"
+      },
+      "usable_bytes": 16384,
+      "reserved_slack": 384,
+      "placement_caps": [
+        {
+          "kind": "StrictOnePerBank"
+        },
+        {
+          "kind": "Budgeted"
+        }
+      ]
+    }
+  ],
+  "memory_caps": {
+    "wram_usable_bytes": 8192,
+    "sram_usable_bytes": 32768,
+    "hram_usable_bytes": 127,
+    "source_target_profile_hash": "sha256:64a347991811c5db12b7bc17dc2802d617b461c610ccde6ef81a22a1c28947c7"
+  },
+  "wram_reserved": {
+    "overlay": 512,
+    "hot_arena_floor": 4096,
+    "total": 1536
+  },
+  "sram_reserved": 1024
+}

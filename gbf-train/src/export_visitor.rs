@@ -12,6 +12,7 @@ use gbf_artifact::{
     TextCharSeq, TiedEmbeddingAlias,
 };
 use gbf_foundation::{ArtifactSchemaVersion, Hash256, sha256};
+use gbf_model::config::SharedSequenceConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::student::{FrozenStudent, HardTernaryStudentModel};
@@ -265,8 +266,9 @@ pub trait ArtifactExportModel: HardTernaryStudentModel {
 
     /// Sequence semantics accepted by this artifact.
     fn artifact_sequence_semantics(&self) -> SequenceSemanticsSpec {
-        SequenceSemanticsSpec::linear_state(4)
+        SharedSequenceConfig::linear_state(4, 4)
             .expect("pinned S3 linear-state sequence semantics are valid")
+            .sequence_semantics()
     }
 
     /// Canonical tensors emitted for the deployable artifact.

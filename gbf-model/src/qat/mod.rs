@@ -33,8 +33,9 @@ pub use norm::{
     NormExportData, TileRmsSpec,
 };
 pub use router::{
-    RouterAuxLossWeights, RouterAuxLosses, RouterForwardOptions, RouterForwardOutput, RouterShape,
-    RouterTrainMode, Top1RouterQat, Top1RouterQatError, default_router_rank,
+    RouterAuxLossWeights, RouterAuxLosses, RouterExecutionMode, RouterForwardOptions,
+    RouterForwardOutput, RouterShape, RouterStochasticConfig, RouterStochasticContext,
+    RouterStochasticPhase, RouterTrainMode, Top1RouterQat, Top1RouterQatError, default_router_rank,
 };
 pub use ternary::{
     MatrixShape, Q8_8Scale, TernaryLinearExport, TernaryLinearQat, TernaryLinearQatError,

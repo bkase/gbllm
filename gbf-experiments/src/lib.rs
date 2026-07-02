@@ -7,17 +7,28 @@
 //! wiring out of `gbf-train`.
 //!
 //! ```
+//! #[cfg(any(
+//!     feature = "phase-a",
+//!     feature = "ablation",
+//!     feature = "s2-full",
+//!     feature = "s2-ablation",
+//!     feature = "s3-phase-d",
+//!     feature = "falsify"
+//! ))]
 //! use gbf_experiments::s1::{
 //!     ablation as _, baseline as _, cli as _, device_profile as _, manifest as _, neg_test as _,
 //!     oracle as _, report as _, rng as _, run as _, schema as _, score as _,
 //! };
-//! use gbf_experiments::{S1_LOG_TARGET, S2_LOG_TARGET, S3_LOG_TARGET, S4_LOG_TARGET, S5_LOG_TARGET};
+//! use gbf_experiments::{
+//!     S1_LOG_TARGET, S2_LOG_TARGET, S3_LOG_TARGET, S4_LOG_TARGET, S5_LOG_TARGET, S7_LOG_TARGET,
+//! };
 //!
 //! assert_eq!(S1_LOG_TARGET, "gbf_experiments::s1");
 //! assert_eq!(S2_LOG_TARGET, "gbf_experiments::s2");
 //! assert_eq!(S3_LOG_TARGET, "gbf_experiments::s3");
 //! assert_eq!(S4_LOG_TARGET, "gbf_experiments::s4");
 //! assert_eq!(S5_LOG_TARGET, "gbf_experiments::s5");
+//! assert_eq!(S7_LOG_TARGET, "gbf_experiments::s7");
 //! ```
 
 #[cfg(all(feature = "phase-a", feature = "ablation"))]
@@ -32,6 +43,10 @@ compile_error!("s3-oracle-real and s3-oracle-fallback are mutually exclusive");
 compile_error!("S4 feature mutex violated: s4-full and s4-falsify are mutually exclusive");
 #[cfg(all(feature = "s5-default", feature = "s5-no-log"))]
 compile_error!("S5 feature mutex violated: s5-default and s5-no-log are mutually exclusive");
+#[cfg(all(feature = "s7-moe", feature = "s7-dense-matched"))]
+compile_error!(
+    "S7 feature mutex violated: s7-moe and s7-dense-matched must build in separate replay passes"
+);
 #[cfg(not(any(
     feature = "phase-a",
     feature = "ablation",
@@ -40,9 +55,12 @@ compile_error!("S5 feature mutex violated: s5-default and s5-no-log are mutually
     feature = "s3",
     feature = "s4",
     feature = "s5-default",
-    feature = "s5-no-log"
+    feature = "s5-no-log",
+    feature = "s7"
 )))]
-compile_error!("gbf-experiments requires at least one S1, S2, S3, S4, or S5 experiment feature");
+compile_error!(
+    "gbf-experiments requires at least one S1, S2, S3, S4, S5, or S7 experiment feature"
+);
 
 const _: () = {
     let falsifier_count = (cfg!(feature = "s5-falsify-1") as usize)
@@ -81,6 +99,9 @@ pub const S4_LOG_TARGET: &str = "gbf_experiments::s4";
 /// Tracing target shared by S5 experiment logging.
 pub const S5_LOG_TARGET: &str = "gbf_experiments::s5";
 
+/// Tracing target shared by S7 experiment logging.
+pub const S7_LOG_TARGET: &str = "gbf_experiments::s7";
+
 /// First Pulse experiment modules.
 #[cfg(any(
     feature = "phase-a",
@@ -114,3 +135,7 @@ pub mod s4;
 /// Pick-and-Fit experiment modules.
 #[cfg(any(feature = "s5-default", feature = "s5-no-log"))]
 pub mod s5;
+
+/// MoE beats dense at matched bytes experiment modules.
+#[cfg(feature = "s7")]
+pub mod s7;

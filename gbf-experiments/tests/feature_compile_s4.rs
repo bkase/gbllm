@@ -1,3 +1,5 @@
+#![cfg(feature = "s4")]
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};

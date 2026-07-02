@@ -1,0 +1,18 @@
+{
+  "schema": "s7_smoke_transcript.v1",
+  "fixture": "tiny_v1",
+  "scenario": "pass_clean",
+  "moved_real_producer_scope_to": "bd-2v9r",
+  "matched_bytes_self_hash_prefix": "5996f3e6bab2",
+  "dense_vs_moe_self_hash_prefix": "2c5da7b643fa",
+  "collapse_sweep_self_hash_prefix": "6530071915ba",
+  "aggregate_parity": "Pass-clean",
+  "pareto": "MoE-dominates",
+  "guardrail": "Pass",
+  "collapsed_at_step": null,
+  "outcome": "Pass-clean",
+  "decision": "ProceedToS8",
+  "closure_valid": true,
+  "closure_reason": "validated",
+  "transcript_self_hash_prefix": "22729f6928f2"
+}

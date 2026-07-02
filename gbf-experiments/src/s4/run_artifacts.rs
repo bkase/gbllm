@@ -28,6 +28,15 @@ pub const S4_FP_REFERENCE_SCHEMA: &str = "s4_fp_reference.v1";
 pub const S4_FP_REFERENCE_KIND_QAT_SHADOW_AFTER_GUTENBERG: &str =
     "qat_shadow_weights_after_gutenberg_continuation";
 
+/// Structured event emitted after writing `s4_gutenberg_run_log.v1`.
+pub const S4_RUN_LOG_EMITTED_EVENT_NAME: &str = "s4::run_artifacts::run_log_emitted";
+
+/// Structured event emitted after writing `s4_gutenberg_checkpoint.v1` metadata.
+pub const S4_CHECKPOINT_EMITTED_EVENT_NAME: &str = "s4::run_artifacts::checkpoint_emitted";
+
+/// Structured event emitted after writing `s4_fp_reference.v1`.
+pub const S4_FP_REFERENCE_EMITTED_EVENT_NAME: &str = "s4::run_artifacts::fp_reference_emitted";
+
 const PRODUCT_SCHEMA_VERSION: &str = "1";
 const RUN_LOG_DOMAIN: DomainHash<'static> = DomainHash::new(
     "gbf-experiments",
@@ -678,7 +687,7 @@ pub fn write_s4_gutenberg_run_log(
     write_artifact_bytes(path, &bytes)?;
     tracing::info!(
         target: S4_LOG_TARGET,
-        event_name = "s4::run_artifacts::run_log_emitted",
+        event_name = S4_RUN_LOG_EMITTED_EVENT_NAME,
         schema = S4_GUTENBERG_RUN_LOG_SCHEMA,
         seed = run_log.seed,
         run_log_self_hash = %run_log.run_log_self_hash,
@@ -697,7 +706,7 @@ pub fn write_s4_gutenberg_checkpoint_metadata(
     write_artifact_bytes(path, &bytes)?;
     tracing::info!(
         target: S4_LOG_TARGET,
-        event_name = "s4::run_artifacts::checkpoint_emitted",
+        event_name = S4_CHECKPOINT_EMITTED_EVENT_NAME,
         schema = S4_GUTENBERG_CHECKPOINT_SCHEMA,
         seed = checkpoint.seed,
         checkpoint_self_hash = %checkpoint.checkpoint_self_hash,
@@ -716,7 +725,7 @@ pub fn write_s4_fp_reference(
     write_artifact_bytes(path, &bytes)?;
     tracing::info!(
         target: S4_LOG_TARGET,
-        event_name = "s4::run_artifacts::fp_reference_emitted",
+        event_name = S4_FP_REFERENCE_EMITTED_EVENT_NAME,
         schema = S4_FP_REFERENCE_SCHEMA,
         seed = fp_reference.seed,
         fp_reference_self_hash = %fp_reference.fp_reference_self_hash,

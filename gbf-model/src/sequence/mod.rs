@@ -11,6 +11,7 @@ pub use linear_state::{
     LinearStateBlock, LinearStateBlockConfig, LinearStateBlockError, LinearStateForwardOptions,
 };
 pub use spec::{
-    SequenceActivation, SequenceActivationError, SequenceBlock, SequenceExportFacts,
-    SequenceSemanticsError, SequenceSemanticsSpec, SequenceState, SequenceStateSize,
+    DecayPolicy, DecayRate, SequenceActivation, SequenceActivationError, SequenceBlock,
+    SequenceExportFacts, SequenceSemanticsError, SequenceSemanticsSpec, SequenceState,
+    SequenceStateSize,
 };
