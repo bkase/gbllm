@@ -8,33 +8,11 @@
 [tool] Terminal (pending)
   input: {}
 
-[tool] git log --oneline -5 && echo "---" && git rev-parse HEAD (completed)
-  kind: execute
-  input: git log --oneline -5 && echo "---" && git rev-parse HEAD
-  output:
-    09e157e Repin S7 first result commit
-    93be767 Record real S7 fail-parity packet
-    7d034d6 Add real S7 production bundle runner
-    047a223 Enforce S7 production runner blocker
-    c59d874 Require explicit S7 absolute bundle inputs
-    ---
-    09e157e86d902065a7d5ff4de44a58ed38e5da79
-    
-    ```console
-    09e157e Repin S7 first result commit
-    93be767 Record real S7 fail-parity packet
-    7d034d6 Add real S7 production bundle runner
-    047a223 Enforce S7 production runner blocker
-    c59d874 Require explicit S7 absolute bundle inputs
-    ---
-    09e157e86d902065a7d5ff4de44a58ed38e5da79
-    ```
-
 [client] session/request_permission (running)
 
-[tool] br show bd-3e10j 2>&1 | head -200 (completed)
+[tool] br show bd-3e10j (completed)
   kind: execute
-  input: br show bd-3e10j 2>&1 | head -200
+  input: br show bd-3e10j
   output:
     ◐ bd-3e10j · F-S7 production training runner: real Gutenberg MoE+dense 5-seed bundle producer   [● P1 · IN_PROGRESS]
     Owner: bkase · Type: task
@@ -52,52 +30,66 @@
 [tool] Terminal (pending)
   input: {}
 
-[tool] Terminal (pending)
-  input: {}
-
-[client] session/request_permission (running)
-
-[tool] br show bd-3e10j 2>&1 | tail -100 (completed)
+[tool] git log --oneline -20 26e01079fae4a89719a52dff5540d34e2065b5e3 (completed)
   kind: execute
-  input: br show bd-3e10j 2>&1 | tail -100
+  input: git log --oneline -20 26e01079fae4a89719a52dff5540d34e2065b5e3
   output:
-    ◐ bd-3e10j · F-S7 production training runner: real Gutenberg MoE+dense 5-seed bundle producer   [● P1 · IN_PROGRESS]
-    Owner: bkase · Type: task
-    Created: 2026-07-01 · Updated: 2026-07-02
-    Labels: moe, production, slice:S7, training
-    
-    Implement the real F-S7 production runner that generates the s7_production_bundle_manifest.v1 input bundle for bd-2v9r from actual Gutenberg training, not fixture/smoke data. The runner must train MoeTiny and MoeTinyDenseMatched for seeds 0..4 through the RFC v0.2 phase schedule, maintain real optimizer/model state, freeze the dense teacher at the Phase-A boundary, emit completed s7_run_log.v1 files with 20,000 real per-step RawLossDiagnostics and GradNormSummary records, emit per-step s7_grad_log.v1 JSONL, emit MoE router-step telemetry from live routing, score the final checkpoints on the pinned Gutenberg validation subset, generate switch-stats for seeds 0..4, run the production_closure_retrain_score lambda_switch sweep from the seed-0 end-of-Phase-D MoE checkpoint, and assemble the support artifacts needed by scripts/review/f-s7/assemble-packet.py. This bead exists because bd-2v9r currently has validators/materializers but no production training producer.
-    
-    Dependents:
-      <- bd-2v9r (blocks) - Slice S7 closure: MoE beats dense at matched bytes
-    
-    Comments:
-      [2026-07-01 18:19 UTC] bkase: Started from S7 closure audit on 2026-07-01. Current repo state has S7 artifact landing/validation (`materialize-run`, support artifact materializers, report emitter, verify-packet) plus fixture replay/smoke evidence, but no full producer that maintains MoeTiny or dense-matched model state through the F-S7 v0.2 optimizer schedule on Gutenberg. S1 has a real Burn/AdamW production loop; S2/S4/S7 mostly provide deterministic substrate, schemas, and landing pads. Do not satisfy this bead by generating JSON that merely matches `s7_run_log.v1` shape; closure inputs must come from a live training run and support artifacts derived from its checkpoints/telemetry....
-
-[tool] git show 09e157e --stat 2>&1 | head -50 (completed)
-  kind: execute
-  input: git show 09e157e --stat 2>&1 | head -50
-  output:
-    commit 09e157e86d902065a7d5ff4de44a58ed38e5da79
-    Author: bkase <brandernan@gmail.com>
-    Date:   Thu Jul 2 05:08:49 2026 +0100
-    
-        Repin S7 first result commit
-    
-     docs/experiments/S7-report.md    | 4 ++--
-     fixtures/preregistration/s7.toml | 2 +-
-     2 files changed, 3 insertions(+), 3 deletions(-)
+    26e0107 Correct S7 H4 report verdict
+    d824b43 Refresh S7 runner Claude review
+    09e157e Repin S7 first result commit
+    93be767 Record real S7 fail-parity packet
+    7d034d6 Add real S7 production bundle runner
+    047a223 Enforce S7 production runner blocker
+    c59d874 Require explicit S7 absolute bundle inputs
+    acbb39a Keep S7 bundle paths within manifest root
+    bfa5d2c Require clean S7 production packet verification
+    d7a83c0 Default S7 ACPX reviews to packet root
+    e31d0cf Require production provenance for S7 sweep
+    bd26d39 Audit S7 closure dependencies
+    f46358d Require fresh S7 bead review evidence
+    a9d455a Require personas for S7 bead reviews
+    c47f158 Add S7 bead review evidence path
+    cc8f108 Preflight S7 reviews before packet assembly
+    b18fc77 Record S7 post-green closure audit
+    383e006 Add S7 ACPX review preflight
+    210b5a8 Record S7 closure blocker audit
+    aa728f2 Require S7 packet reviews during assembly
     
     ```console
-    commit 09e157e86d902065a7d5ff4de44a58ed38e5da79
-    Author: bkase <brandernan@gmail.com>
-    Date:   Thu Jul 2 05:08:49 2026 +0100
+    26e0107 Correct S7 H4 report verdict
+    d824b43 Refresh S7 runner Claude review
+    09e157e Repin S7 first result commit
+    93be767 Record real S7 fail-parity packet
+    7d034d6 Add real S7 production bundle runner
+    047a223 Enforce S7 production runner blocker
+    ... (15 more lines)
+
+[tool] ls history/rfcs/ 2>/dev/null | head (completed)
+  kind: execute
+  input: ls history/rfcs/ 2>/dev/null | head
+  output:
+    F-A1-gbf-asm.md
+    F-A1-review-packet-requirements.md
+    F-A2-gbf-hw.md
+    F-A3-gbf-abi.md
+    F-A4-banklease-banking.md
+    F-A5-bank0-runtime.md
+    F-A6-gbf-store-migrate.md
+    F-A7-gbf-emu.md
+    F-A8-gbf-debug.md
+    F-B1-compute-bringup.md
     
-        Repin S7 first result commit
-    
-     docs/experiments/S7-report.md    | 4 ++--
-     fixtures/preregistration/s7.toml | 2 +-
-     2 files changed, 3 insertions(+), 3 deletions(-)
+    ```console
+    F-A1-gbf-asm.md
+    F-A1-review-packet-requirements.md
+    F-A2-gbf-hw.md
+    F-A3-gbf-abi.md
+    F-A4-banklease-banking.md
+    F-A5-bank0-runtime.md
+    F-A6-gbf-store-migrate.md
+    F-A7-gbf-emu.md
+    F-A8-gbf-debug.md
+    F-B1-compute-bringup.md
     ```
 
 [tool] Terminal (pending)
@@ -106,47 +98,100 @@
 [tool] Terminal (pending)
   input: {}
 
-[tool] git show 09e157e 2>&1 | head -60 && echo "---93be767---" && git show 93be767 --stat 2>&1 | head -30 (completed)
+[tool] git show 26e01079 --stat (completed)
   kind: execute
-  input: git show 09e157e 2>&1 | head -60 && echo "---93be767---" && git show 93be767 --stat 2>&1 | head -30
+  input: git show 26e01079 --stat
   output:
-    commit 09e157e86d902065a7d5ff4de44a58ed38e5da79
+    commit 26e01079fae4a89719a52dff5540d34e2065b5e3
     Author: bkase <brandernan@gmail.com>
-    Date:   Thu Jul 2 05:08:49 2026 +0100
+    Date:   Thu Jul 2 05:22:13 2026 +0100
     
-        Repin S7 first result commit
+        Correct S7 H4 report verdict
+    
+     docs/experiments/S7-report.md        |  6 +--
+     scripts/review/f-s7/emit-report.py   | 72 +++++++++++++++++++++++++++++-------
+     scripts/tests/s7_emit_report_test.sh | 35 +++++++++++++++++-
+     3 files changed, 96 insertions(+), 17 deletions(-)
+    
+    ```console
+    commit 26e01079fae4a89719a52dff5540d34e2065b5e3
+    Author: bkase <brandernan@gmail.com>
+    Date:   Thu Jul 2 05:22:13 2026 +0100
+    
+        Correct S7 H4 report verdict
+    
+     docs/experiments/S7-report.md        |  6 +--
+     scripts/review/f-s7/emit-report.py   | 72 +++++++++++++++++++++++++++++-------
+     scripts/tests/s7_emit_report_test.sh | 35 +++++++++++++++++-
+     3 files changed, 96 insertions(+), 17 deletions(-)
+    ```
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] ls history/rfcs/ | grep -i s7 (completed)
+  kind: execute
+  input: ls history/rfcs/ | grep -i s7
+  output:
+    F-S7-moe-beats-dense.md
+    
+    ```console
+    F-S7-moe-beats-dense.md
+    ```
+
+[tool] git show 26e01079 --format=fuller | head -30 (completed)
+  kind: execute
+  input: git show 26e01079 --format=fuller | head -30
+  output:
+    commit 26e01079fae4a89719a52dff5540d34e2065b5e3
+    Author:     bkase <brandernan@gmail.com>
+    AuthorDate: Thu Jul 2 05:22:13 2026 +0100
+    Commit:     bkase <brandernan@gmail.com>
+    CommitDate: Thu Jul 2 05:22:13 2026 +0100
+    
+        Correct S7 H4 report verdict
     
     diff --git a/docs/experiments/S7-report.md b/docs/experiments/S7-report.md
-    index 4a92763..70323b7 100644
+    index 70323b7..b207856 100644
     --- a/docs/experiments/S7-report.md
     +++ b/docs/experiments/S7-report.md
-    @@ -76,8 +76,8 @@ generated_at: "2026-07-02T00:56:33Z"
-     rfc_revision: "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
+    @@ -77,7 +77,7 @@ rfc_revision: "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
      predictions_section_hash: "sha256:68212b85cc2e4e24f0ec9ba86ab107cbb86000995bb415b1d89f780af0c53bb2"
      predictions_commit: "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
-    -first_result_commit: "7d034d6d0ff824febc9f8c665abf06a7cae9a55a"
-    -report_self_hash: "sha256:8771a57af90076c9295b6633334f8a1b58cd99ca3e2e5711b3a07c01a59a7327"
-    +first_result_commit: "93be7678489df98a8edaa5138c827a6eb291666b"
-    +report_self_hash: "sha256:47dc8ac4ade72563a499cfadd5a9814afd9cc30e4d3e25d986a2282e235cc8d5"
+     first_result_commit: "93be7678489df98a8edaa5138c827a6eb291666b"
+    -report_self_hash: "sha256:47dc8ac4ade72563a499cfadd5a9814afd9cc30e4d3e25d986a2282e235cc8d5"
+    +report_self_hash: "sha256:9a5c4b51ae56edca858341c5765db7e66cd6e3d729c2f1d5b5459eaeb6c6d10d"
      ---
      ## Pre-registered predictions
      Pinned predictions are identified by predictions_commit and predictions_section_hash in front matter.
-    diff --git a/fixtures/preregistration/s7.toml b/fixtures/preregistration/s7.toml
-    index 109562d..036f107 100644
-    --- a/fixtures/preregistration/s7.toml
-    +++ b/fixtures/preregistration/s7.toml
-    @@ -7,4 +7,4 @@ predictions_section_hash = "sha256:68212b85cc2e4e24f0ec9ba86ab107cbb86000995bb41
-     pass_version_S7 = "s7-prereg-bd-17n0-2026-06-25"
-     rfc_revision = "f8e95a15e30fdefdd3b7e80683f5daeb56adb814"
-    ... (99 more lines)
+    @@ -96,7 +96,7 @@ Pinned predictions are identified by predictions_commit and predictions_section_
+     H1 Confirmed: cited by the matching closure artifact.
+     H2 Confirmed: cited by the matching closure artifact.
+     H3 Refuted: cited by the matching closure artifact.
+    -H4 Confirmed: cited by the matching closure artifact.
+    +H4 Refuted: cited by the matching closure artifact.
+     H5 Confirmed: cited by the matching closure artifact.
+    ... (35 more lines)
 
-[tool] ls -la docs/experiments/S7-report.md fixtures/preregistration/s7.toml 2>&1 && echo "---" && ls experiments/S7/ 2>&1 (completed)
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] ls scripts/review/f-s7/ 2>/dev/null (completed)
   kind: execute
-  input: ls -la docs/experiments/S7-report.md fixtures/preregistration/s7.toml 2>&1 && echo "---" && ls experiments/S7/ 2>&1
+  input: ls scripts/review/f-s7/ 2>/dev/null
   output:
-    -rw-r--r-- 1 bkase staff 8615 Jul  2 05:07 docs/experiments/S7-report.md
-    -rw-r--r-- 1 bkase staff  477 Jul  2 05:07 fixtures/preregistration/s7.toml
-    ---
+    [read output suppressed]
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] ls experiments/S7/ 2>/dev/null (completed)
+  kind: execute
+  input: ls experiments/S7/ 2>/dev/null
+  output:
     burn-grad-smoke
     dense-vs-moe
     emulator-one-token
@@ -161,9 +206,6 @@
     switch-stats
     
     ```console
-    -rw-r--r-- 1 bkase staff 8615 Jul  2 05:07 docs/experiments/S7-report.md
-    -rw-r--r-- 1 bkase staff  477 Jul  2 05:07 fixtures/preregistration/s7.toml
-    ---
     burn-grad-smoke
     dense-vs-moe
     emulator-one-token
@@ -172,129 +214,160 @@
     profile
     router-collapse
     runs
-    ... (5 more lines)
+    scores
+    smoke
+    summaries
+    switch-stats
+    ```
 
-[tool] Terminal (pending)
-  input: {}
-
-[tool] Terminal (pending)
-  input: {}
-
-[tool] ls experiments/S7/runs/MoeTiny/ && echo "---" && ls experiments/S7/runs/MoeTinyDenseMatched/ 2>&1 && echo "---" && ls experiments/S7/dense-vs-moe/ (completed)
+[tool] ls docs/experiments/ 2>/dev/null | grep -i s7 (completed)
   kind: execute
-  input: ls experiments/S7/runs/MoeTiny/ && echo "---" && ls experiments/S7/runs/MoeTinyDenseMatched/ 2>&1 && echo "---" && ls experiments/S7/dense-vs-moe/
+  input: ls docs/experiments/ 2>/dev/null | grep -i s7
   output:
-    seed-0
-    seed-1
-    seed-2
-    seed-3
-    seed-4
-    ---
-    seed-0
-    seed-1
-    seed-2
-    seed-3
-    seed-4
-    ---
-    comparison.json
+    S7-report.md
     
     ```console
-    seed-0
-    seed-1
-    seed-2
-    seed-3
-    seed-4
-    ---
-    seed-0
-    seed-1
-    seed-2
-    seed-3
-    seed-4
-    ---
-    comparison.json
-    ... (1 more lines)
+    S7-report.md
+    ```
 
-[tool] cat experiments/S7/dense-vs-moe/comparison.json 2>&1 | head -80 (completed)
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] ls experiments/S7/runs/ 2>/dev/null | head -30 (completed)
   kind: execute
-  input: cat experiments/S7/dense-vs-moe/comparison.json 2>&1 | head -80
+  input: ls experiments/S7/runs/ 2>/dev/null | head -30
+  output:
+    MoeTiny
+    MoeTinyDenseMatched
+    
+    ```console
+    MoeTiny
+    MoeTinyDenseMatched
+    ```
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] ls experiments/S7/scores/ 2>/dev/null | head -30 (completed)
+  kind: execute
+  input: ls experiments/S7/scores/ 2>/dev/null | head -30
+  output:
+    MoeTiny
+    MoeTinyDenseMatched
+    
+    ```console
+    MoeTiny
+    MoeTinyDenseMatched
+    ```
+
+[tool] find experiments/S7 -maxdepth 2 -type d 2>/dev/null | head -40 (completed)
+  kind: execute
+  input: find experiments/S7 -maxdepth 2 -type d 2>/dev/null | head -40
+  output:
+    experiments/S7
+    experiments/S7/smoke
+    experiments/S7/burn-grad-smoke
+    experiments/S7/switch-stats
+    experiments/S7/switch-stats/seed-4
+    experiments/S7/switch-stats/seed-3
+    experiments/S7/switch-stats/seed-2
+    experiments/S7/switch-stats/seed-0
+    experiments/S7/switch-stats/seed-1
+    experiments/S7/dense-vs-moe
+    experiments/S7/emulator-one-token
+    experiments/S7/emulator-one-token/seed-0
+    experiments/S7/scores
+    experiments/S7/scores/MoeTiny
+    experiments/S7/scores/MoeTinyDenseMatched
+    experiments/S7/oracle-routed
+    experiments/S7/oracle-routed/seed-0
+    experiments/S7/profile
+    experiments/S7/summaries
+    experiments/S7/frontier
+    experiments/S7/router-collapse
+    experiments/S7/router-collapse/seed-0
+    experiments/S7/runs
+    experiments/S7/runs/MoeTiny
+    experiments/S7/runs/MoeTinyDenseMatched
+    
+    ```console
+    experiments/S7
+    ... (25 more lines)
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] find experiments/S7/runs -maxdepth 3 -type f 2>/dev/null | head -30 (completed)
+  kind: execute
+  input: find experiments/S7/runs -maxdepth 3 -type f 2>/dev/null | head -30
+  output:
+    experiments/S7/runs/MoeTiny/seed-4/grad-log.jsonl
+    experiments/S7/runs/MoeTiny/seed-4/run-log.json
+    experiments/S7/runs/MoeTiny/seed-4/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTiny/seed-3/grad-log.jsonl
+    experiments/S7/runs/MoeTiny/seed-3/run-log.json
+    experiments/S7/runs/MoeTiny/seed-3/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTiny/seed-2/grad-log.jsonl
+    experiments/S7/runs/MoeTiny/seed-2/run-log.json
+    experiments/S7/runs/MoeTiny/seed-2/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTiny/seed-0/grad-log.jsonl
+    experiments/S7/runs/MoeTiny/seed-0/run-log.json
+    experiments/S7/runs/MoeTiny/seed-0/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTiny/seed-1/grad-log.jsonl
+    experiments/S7/runs/MoeTiny/seed-1/run-log.json
+    experiments/S7/runs/MoeTiny/seed-1/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-4/grad-log.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-4/run-log.json
+    experiments/S7/runs/MoeTinyDenseMatched/seed-4/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-3/grad-log.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-3/run-log.json
+    experiments/S7/runs/MoeTinyDenseMatched/seed-3/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-2/grad-log.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-2/run-log.json
+    experiments/S7/runs/MoeTinyDenseMatched/seed-2/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-0/grad-log.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-0/run-log.json
+    experiments/S7/runs/MoeTinyDenseMatched/seed-0/router-step-telemetry.jsonl
+    experiments/S7/runs/MoeTinyDenseMatched/seed-1/grad-log.jsonl
+    ... (35 more lines)
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] ls scripts/review/f-s7/../f-s7-bead-review-evidence/ 2>/dev/null; find scripts -type d -name '*bead*review*' 2>/dev/null | head -5 (completed)
+  kind: execute
+  input: ls scripts/review/f-s7/../f-s7-bead-review-evidence/ 2>/dev/null; find scripts -type d -name '*bead*review*' 2>/dev/null | head -5
   output:
     [read output suppressed]
+
+[tool] find . -path ./target -prune -o -name '*bd-3e10j*' -print 2>/dev/null | head -20 (completed)
+  kind: execute
+  input: find . -path ./target -prune -o -name '*bd-3e10j*' -print 2>/dev/null | head -20
+  output:
+    ./docs/review/f-s7/bead-reviews/bd-3e10j-claude.json
+    ./docs/review/f-s7/raw/bd-3e10j-claude.stdout.txt
+    ./docs/review/f-s7/raw/bd-3e10j-claude.extracted.json
+    ./docs/review/f-s7/raw/bd-3e10j-claude.stderr.txt
+    ./docs/review/f-s7/raw/bd-3e10j-claude.command.txt
+    
+    ```console
+    ./docs/review/f-s7/bead-reviews/bd-3e10j-claude.json
+    ./docs/review/f-s7/raw/bd-3e10j-claude.stdout.txt
+    ./docs/review/f-s7/raw/bd-3e10j-claude.extracted.json
+    ./docs/review/f-s7/raw/bd-3e10j-claude.stderr.txt
+    ./docs/review/f-s7/raw/bd-3e10j-claude.command.txt
+    ```
 
 [tool] Read File (pending)
   input: {}
 
-[tool] Read docs/experiments/S7-report.md (completed)
-  kind: read
-  input: {"file_path":"/Users/bkase/.codex/worktrees/febf/gbllm/docs/experiments/S7-report.md"}
-  files: /Users/bkase/.codex/worktrees/febf/gbllm/docs/experiments/S7-report.md:1
-  output:
-    [read output suppressed]
-
 [tool] Terminal (pending)
-  input: {}
-
-[tool] Terminal (pending)
-  input: {}
-
-[tool] ls scripts/review/f-s7/ 2>&1 && echo "---" && ls docs/review/f-s7/ 2>&1 (completed)
-  kind: execute
-  input: ls scripts/review/f-s7/ 2>&1 && echo "---" && ls docs/review/f-s7/ 2>&1
-  output:
-    [read output suppressed]
-
-[tool] ls gbf-experiments/src/s7/ 2>&1 | head -20 (completed)
-  kind: execute
-  input: ls gbf-experiments/src/s7/ 2>&1 | head -20
-  output:
-    baseline_match.rs
-    burn_grad_smoke.rs
-    cli.rs
-    closure_packet.rs
-    collapse_sweep.rs
-    comparison.rs
-    emulator_one_token.rs
-    falsify
-    frontier.rs
-    mod.rs
-    outcome.rs
-    pareto.rs
-    parity.rs
-    production_runner.rs
-    replay.rs
-    report.rs
-    rng_counting.rs
-    run.rs
-    schema.rs
-    smoke.rs
-    
-    ```console
-    baseline_match.rs
-    burn_grad_smoke.rs
-    cli.rs
-    closure_packet.rs
-    collapse_sweep.rs
-    comparison.rs
-    ... (15 more lines)
-
-[tool] Terminal (pending)
-  input: {}
-
-[tool] Terminal (pending)
-  input: {}
-
-[tool] wc -l gbf-experiments/src/s7/production_runner.rs && ls docs/review/f-s7/bead-reviews/ 2>&1 (completed)
-  kind: execute
-  input: wc -l gbf-experiments/src/s7/production_runner.rs && ls docs/review/f-s7/bead-reviews/ 2>&1
-  output:
-    [read output suppressed]
-
-[tool] ls experiments/S7/router-collapse/ 2>&1 && echo "---" && cat experiments/S7/router-collapse/seed-0/sweep.json 2>&1 | head -50 (completed)
-  kind: execute
-  input: ls experiments/S7/router-collapse/ 2>&1 && echo "---" && cat experiments/S7/router-collapse/seed-0/sweep.json 2>&1 | head -50
-  output:
-    [read output suppressed]
-
-[tool] Read File (pending)
   input: {}
 
 [tool] Read docs/review/f-s7/bead-reviews/bd-3e10j-claude.json (completed)
@@ -304,107 +377,289 @@
   output:
     [read output suppressed]
 
-[tool] Terminal (pending)
-  input: {}
-
-[tool] Terminal (pending)
-  input: {}
-
-[client] session/request_permission (running)
-
-[tool] python3 scripts/review/f-s7/audit-production-runner.py --json 2>&1 | head -50 (completed)
+[tool] head -80 experiments/S7/runs/MoeTiny/seed-0/run-log.json 2>/dev/null | head -60 (completed)
   kind: execute
-  input: python3 scripts/review/f-s7/audit-production-runner.py --json 2>&1 | head -50
+  input: head -80 experiments/S7/runs/MoeTiny/seed-0/run-log.json 2>/dev/null | head -60
   output:
-    [read output suppressed]
-
-[client] session/request_permission (running)
-
-[tool] python3 scripts/review/f-s7/validate-artifacts.py --root . 2>&1 | head -20 && echo "---" && python3 scripts/review/f-s7/validate-report.py --root . --report docs/experiments/S7-report.md 2>&1 | head -10 (completed)
-  kind: execute
-  input: python3 scripts/review/f-s7/validate-artifacts.py --root . 2>&1 | head -20 && echo "---" && python3 scripts/review/f-s7/validate-report.py --root . --report docs/experiments/S7-report.md 2>&1 | head -10
-  output:
-    [read output suppressed]
-
-[tool] Terminal (pending)
-  input: {}
-
-[tool] Terminal (pending)
-  input: {}
-
-[client] session/request_permission (running)
-
-[tool] wc -l experiments/S7/runs/MoeTiny/seed-0/grad-log.jsonl experiments/S7/runs/MoeTiny/seed-0/router-step-telemetry.jsonl && echo "---" && head -1 experiments/S7/runs/MoeTiny/seed-0/run-log.json | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print('losses len:', len(d.get('losses',[])), 'eval_points:', len(d.get('eval_points',[])), 'completion:', d.get('completion'), 'seed:', d.get('seed'), 'topology:', d.get('topology'), 'frozen_teacher:', d.get('frozen_teacher_checkpoint_sha') is not None)" (completed)
-  kind: execute
-  input: wc -l experiments/S7/runs/MoeTiny/seed-0/grad-log.jsonl experiments/S7/runs/MoeTiny/seed-0/router-step-telemetry.jsonl && echo "---" && head -1 experiments/S7/runs/MoeTiny/seed-0/run-log.json | python3 -c "import json...
-  output:
-    [read output suppressed]
-
-[tool] ls scripts/review/f-s7/raw/ 2>&1 && echo "---" && head -30 gbf-experiments/src/s7/production_runner.rs (failed)
-  kind: execute
-  input: ls scripts/review/f-s7/raw/ 2>&1 && echo "---" && head -30 gbf-experiments/src/s7/production_runner.rs
-  output:
-    [read output suppressed]
-
-[tool] Terminal (pending)
-  input: {}
-
-[tool] Terminal (pending)
-  input: {}
-
-[tool] head -60 gbf-experiments/src/s7/production_runner.rs (completed)
-  kind: execute
-  input: head -60 gbf-experiments/src/s7/production_runner.rs
-  output:
-    //! F-S7 production bundle producer.
-    //!
-    //! This module owns the executable upstream of `s7_production_bundle_manifest.v1`.
-    //! It is intentionally separate from the packet materializers: the materializers
-    //! validate already-produced artifacts, while this code maintains live
-    //! model/optimizer state and writes the source bundle those materializers ingest.
+    <persisted-output>
+    Output too large (8.2MB). Full output saved to: /Users/bkase/.claude/projects/-Users-bkase--codex-worktrees-febf-gbllm/0a9d5b00-2ed0-4aa0-abca-5126fdcd8082/tool-results/bg3tozdz5.txt
     
-    use std::collections::BTreeMap;
-    use std::error::Error;
-    use std::fmt;
-    use std::fs;
-    use std::io::{self, Write};
-    use std::path::{Path, PathBuf};
-    
-    use gbf_artifact::{
-        ClipSaturationDigest, DistillRawDiagnostic, ExpertPayloadDigest, ExpertPayloadEntry,
-        ExpertSlotAffinity, GradNormSummary, QuantSpec, RawLossDiagnostics, S7_EVAL_EVERY_STEPS,
-        S7_N_BLOCKS, S7_N_EXPERTS, S7_OPTIMIZER_STEPS, S7Completion, S7RunLog, S7ScoreReport,
-        S7Topology, TemporalSwitchDigest, TrainPhase, TransitionEntry,
-    };
-    use gbf_foundation::{
-        CanonicalJson, CanonicalJsonError, DomainHash, ExpertId, Hash256, LayerId,
-        self_hash_omitting_fields, sha256,
-    };
-    use gbf_policy::model_profile::ModelSizeProfile;
-    use gbf_train::adapter::burn::{
-        BurnAdapterError, BurnAutodiffBackend, BurnBackend, BurnDevice, BurnFloatTensor,
-        BurnGradientsParams, BurnModule, BurnNdArrayAutodiffBackend, BurnOptimizer, BurnParam,
-    ... (95 more lines)
+    Preview (first 2KB):
+    {"completion":{"kind":"completed"},"eval_points":[[0,7.999969195516314],[1000,4.684890395639741],[2000,4.655126724935144],[3000,4.74871092880494],[4000,4.606125590677493],[5000,4.916201085849025],[6000,4.602501070199651],[7000,4.373236718851331],[8000,4.3736556434232625],[9000,4.378636731758888],[10000,4.591739141636026],[11000,4.479853973738656],[12000,4.436140496723965],[13000,4.352486277958576],[14000,4.255307396913594],[15000,4.377425214764262],[16000,4.491371430490801],[17000,4.370451415738671],[18000,4.41275044216718],[19000,4.474559022966616],[20000,4.511301853306563]],"expert_block_config_hash":"sha256:ae3a2c3c301c613068c4933693ecbb34c8a8f9137754b6a9348b4379d15f8720","final_grad_norms":{"global_l2":1.7742944955825806,"max_l2":0.97557133436203,"mean_l2":0.0001416637096554041},"frozen_teacher_checkpoint_sha":"sha256:ed5257b3238e1ef0faeb8c23be9ad30b14fbae1ba4f3d5c0b690fa0b889a9992","grad_norms":[[1,{"global_l2":1.41144859790802,"max_l2":0.9960936307907104,"mean_l2":0.00013510907592717558}],[2,{"global_l2":1.4114590883255005,"max_l2":0.9960987567901611,"mean_l2":0.0001351093960693106}],[3,{"global_l2":1.4077796936035156,"max_l2":0.9934970140457153,"mean_l2":0.0001347545039607212}],[4,{"global_l2":1.4115233421325684,"max_l2":0.996120035648346,"mean_l2":0.00013511204451788217}],[5,{"global_l2":1.411582589149475,"max_l2":0.996138334274292,"mean_l2":0.00013511326687876135}],[6,{"global_l2":1.4116706848144531,"max_l2":0.9961614012718201,"mean_l2":0.00013511574070435017}],[7,{"global_l2":1.4118021726608276,"max_l2":0.9961926341056824,"mean_l2":0.0001351217069895938}],[8,{"global_l2":1.411816120147705,"max_l2":0.9962314367294312,"mean_l2":0.00013512829900719225}],[9,{"global_l2":1.413924217224121,"max_l2":0.9962844848632812,"mean_l2":0.0001351358...
 
-[tool] head -30 docs/review/f-s7/raw/bd-3e10j-claude.stdout.txt 2>&1 && echo "---" && head -20 docs/review/f-s7/raw/bd-3e10j-claude.extracted.json 2>&1 (completed)
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] head -120 docs/experiments/S7-report.md (completed)
   kind: execute
-  input: head -30 docs/review/f-s7/raw/bd-3e10j-claude.stdout.txt 2>&1 && echo "---" && head -20 docs/review/f-s7/raw/bd-3e10j-claude.extracted.json 2>&1
+  input: head -120 docs/experiments/S7-report.md
+  output:
+    ---
+    schema: "s7_report.v1"
+    s7_outcome: FailParity
+    decision: ProceedToS8DenseOnly
+    matched_bytes_self_hash: "sha256:5996f3e6bab2e290baa45e131db4fc317f01c96a318cac896510ec8a678919e5"
+    per_seed_artifacts:
+      - seed: 0
+        topology: "MoeTiny"
+        completion: Completed
+        checkpoint_self_hash: "sha256:f780dbfe71d29979bfba9a776bfb2740e5db11443e1275301f83028674e40e6b"
+        run_log_self_hash: "sha256:79b84457a18088ea56d1d2e0d7320184c36cde9baaad1e82528c76665ddd0ab9"
+        score_self_hash: "sha256:854e669c51e103b43e9427db5bcaed5dd7995a93a263cbec7c1f08ab54cb1d39"
+      - seed: 1
+        topology: "MoeTiny"
+        completion: Completed
+        checkpoint_self_hash: "sha256:394c639d6dbcc9e2c0d2f6b81dccb95ca93e71905a506c875c1a31b8f8ad8c73"
+        run_log_self_hash: "sha256:766863af5e8efa96c353f8cd8caab860878a351f5797a18ba4c4f71bc2ac9e6f"
+        score_self_hash: "sha256:ae35ddc0aaabba19c664fa75fa977e9f2336d40d69e33425493e9bf040153b61"
+      - seed: 2
+        topology: "MoeTiny"
+        completion: Completed
+        checkpoint_self_hash: "sha256:e5d5f13854f071349d38e9055071d0183eb2f8560b3b5cd243c33a5ba33facd6"
+        run_log_self_hash: "sha256:7f9068b4a440c863e5b8a30722c7290909a4258e0be95c37c1f923739c6f1755"
+        score_self_hash: "sha256:cee6b468bd269a2f316389199f6c353b480a1e7e268548964400d68e7dd40f8b"
+      - seed: 3
+        topology: "MoeTiny"
+        completion: Completed
+        checkpoint_self_hash: "sha256:7c74fcc8184d17e40769ef9d271f61fa8e8868ee0af8061c060eb14ffec1a5c5"
+    ... (213 more lines)
+
+[tool] grep -n "H4\|hypotheses\|H1\|H2\|H3\|H5\|H6\|H7" docs/experiments/S7-report.md | head -30 (completed)
+  kind: execute
+  input: grep -n "H4\|hypotheses\|H1\|H2\|H3\|H5\|H6\|H7" docs/experiments/S7-report.md | head -30
+  output:
+    96:H1 Confirmed: cited by the matching closure artifact.
+    97:H2 Confirmed: cited by the matching closure artifact.
+    98:H3 Refuted: cited by the matching closure artifact.
+    99:H4 Refuted: cited by the matching closure artifact.
+    100:H5 Confirmed: cited by the matching closure artifact.
+    101:H6 Confirmed: cited by the matching closure artifact.
+    102:H7 Confirmed: cited by the matching closure artifact.
+    105:H10 Confirmed: cited by the matching closure artifact.
+    107:H3 was refuted by the per-seed bpc parity table under matched bytes. H4 was refuted by the Pareto verdict (Dense-wins-under-byte-equivalence) under matched bytes.
+    
+    ```console
+    96:H1 Confirmed: cited by the matching closure artifact.
+    97:H2 Confirmed: cited by the matching closure artifact.
+    98:H3 Refuted: cited by the matching closure artifact.
+    99:H4 Refuted: cited by the matching closure artifact.
+    100:H5 Confirmed: cited by the matching closure artifact.
+    101:H6 Confirmed: cited by the matching closure artifact.
+    102:H7 Confirmed: cited by the matching closure artifact.
+    105:H10 Confirmed: cited by the matching closure artifact.
+    107:H3 was refuted by the per-seed bpc parity table under matched bytes. H4 was refuted by the Pareto verdict (Dense-wins-under-byte-equivalence) under matched bytes.
+    ```
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] grep -n "H1\b\|H2\b\|H3\b\|H4\b\|H5\b\|H6\b\|H7\b\|H8\b\|H9\b\|H10\b" history/rfcs/F-S7-moe-beats-dense.md | head -40 (completed)
+  kind: execute
+  input: grep -n "H1\b\|H2\b\|H3\b\|H4\b\|H5\b\|H6\b\|H7\b\|H8\b\|H9\b\|H10\b" history/rfcs/F-S7-moe-beats-dense.md | head -40
+  output:
+    36:  hypothesis statements H1..H10
+    151:     - does not contribute to H1..H10 verdicts,
+    268:       The byte count used by H3 and H4. Includes FFN/expert payload,
+    422:   collapse at the high end), which is a Refute on H6.
+    424:   production-lambda bpc is used only for H6 guardrail comparisons.
+    425:   H3 uses the final production training run's validation bpc, not the
+    431:   The 0.05 bpc margin mirrors S1 D6 / H2. Per-seed strict.
+    437:   for H3; the run records S7Outcome = Fail-bytes (invalid-experiment),
+    449:   `Fail-parity` because H3 must have failed too).
+    500:   If H3 (matched-bytes parity) fails, S7 closes with Fail-parity. S8
+    539:rule, verdict mapping, and downstream consequence. H1, H2, H3, H4, H6,
+    540:H7, H8 are **mandatory closure gates**. H5, H9, H10 are **closure-gating
+    544:## H1 MoeTiny trains end-to-end
+    582:## H2 Dense matched-bytes baseline trains end-to-end
+    616:## H3 Matched-bytes parity gate (mandatory closure gate)
+    652:## H4 Pareto dominance (mandatory closure gate)
+    682:## H5 Router switch-awareness (mandatory closure gate)
+    724:## H6 Router collapse guardrail (mandatory closure gate)
+    759:## H7 Loss gradient provenance (mandatory closure gate)
+    799:    H3 fails.
+    828:## H8 ExpertBlockQat Burn gradient smoke (mandatory closure gate)
+    865:  The Burn ExpertBlockQat adapter (bd-2c8z) is broken. H1 results are
+    876:## H9 ArtifactOracle three-way agreement on the routed FFN (carry-through)
+    912:## H10 EncodedRom + emulator one-token harness (carry-through)
+    956:    H1, H2, H3, H4, H5, H6, H7, H8, H9, H10,
+    1379:  "MoeTinyDenseMatched"}. Every closure obligation other than H1 vs
+    1380:  H2 is per-pair (per-seed pair across the two variants).
+    1406:  Each with its declared gradient provenance per H7. T5.5 (lambda_shape /
+    ... (55 more lines)
+
+[client] session/request_permission (running)
+
+[tool] python3 scripts/review/f-s7/audit-production-runner.py --json 2>&1 | head -100 (completed)
+  kind: execute
+  input: python3 scripts/review/f-s7/audit-production-runner.py --json 2>&1 | head -100
   output:
     [read output suppressed]
-Based on my review of HEAD 09e157e, the bead-closure evidence is intact: production_runner.rs is a 2232-line Burn AdamW producer; the ten seed×topology runs each land 20,000-step run-log.json, 20,000-line grad-log.jsonl, and 80,000-line router-step-telemetry.jsonl (MoE); the seed-0 lambda_switch sweep has 6 real points; validate-artifacts/report both return ok; audit-production-runner shows missing_code_surface_count=0 with only the by-design in_progress guard remaining. The HEAD 09e157e patch is just a re-pin of first_result_commit and report_self_hash to the actual fail-parity landing commit 93be7678, and matches the same evidence the prior claude review already assessed as PASS at 7d034d6.
 
-{
-  "verdict": "PASS",
-  "personas": ["P1", "P3", "P5", "P6", "P9", "P10"],
-  "summary": "At HEAD 09e157e the bd-3e10j closure claims are supported by current evidence. gbf-experiments/src/s7/production_runner.rs (2232 lines) implements a Burn AdamW-backed producer that constructs BurnMoeS7ModelState / BurnByteMoeS7Model, calls loss.backward() + optimizer.step for 20,000 steps, freezes the teacher at S7_PHASE_A_END_STEP, emits per-step run/grad/router telemetry, scores on the pinned Gutenberg val subset, computes switch stats, and drives the production_closure_retrain_score lambda_switch sweep from the seed-0 end-of-Phase-D MoE checkpoint. Filesystem evidence: experiments/S7/runs contains all 10 seed×topology runs, each with a 20,000-entry run-log.json (21 eval_points and per-seed frozen_teacher_checkpoint_sha), 20,000-line grad-log.jsonl, and (MoE only) 80,000-line router-step-telemetry.jsonl; experiments/S7/router-collapse/seed-0/sweep.json records six real lambda_switch points with monotonic entropy/BPC responses and producer_kind=production_closure_retrain_score. scripts/review/f-s7/validate-artifacts.py --root . and validate-report.py both report ok; audit-production-runner.py --json shows missing_code_surface_count=0, production_artifact_count=48, blocking_dependency_present=true, and only the by-design in_progress guard errors that clear on bd-3e10j closure. The scientific outcome is negative — comparison.json shows aggregate_parity_verdict=Fail-parity, dense wins on all 5 seeds with median dense BPC 4.13 vs MoE 4.51 under matched bytes (bytes_diff=16 within tolerance) — and the S7-report.md now correctly records that surprise and decision ProceedToS8DenseOnly. The HEAD 09e157e patch itself only re-pins first_result_commit from 7d034d6 to 93be7678 (the actual fail-parity landing commit) and refreshes report_self_hash accordingly, and validate-report.py --root . confirms the pinned hash still matches. This PASS covers bead-level review only; final bd-2v9r production-packet closure remains separate.",
-  "findings": [
-    {"severity": "info", "status": "non_blocking", "body": "P5/P6: audit-production-runner.py --json still returns status=needs_changes with two errors ('production runner is in_progress, not resolved' and 'production-looking S7 artifacts exist while runner owner is unresolved'), but both are the by-design in_progress guard. missing_code_surface_count=0, blocking_dependency_present=true, production_artifact_count=48. These errors will clear on bd-3e10j resolution; they do not falsify closure claims for this bead."},
-    {"severity": "info", "status": "non_blocking", "body": "P3: The five MoE seeds show wide final-step lm_loss_raw variance (min seed 4=0.396813, max seed 1=9.77902), which suggests substantial run-to-run instability under this schedule. This does not invalidate the FailParity verdict — val BPC across MoE seeds stays in a narrow 4.37–4.52 band and every seed is beaten by its matched-bytes dense counterpart by ~0.32–0.38 BPC — and the S7 report now surfaces this under 'Surprises'. Worth carrying into bd-2v9r/S8 planning as MoE-schedule stability follow-up."},
-    {"severity": "info", "status": "non_blocking", "body": "P1/P6: freeze_teacher is invoked unconditionally at S7_PHASE_A_END_STEP for both S7Topology::MoeTiny and S7Topology::MoeTinyDenseMatched, so dense-matched runs also carry a distinct frozen_teacher_checkpoint_sha and receive a phase-C distill loss. This is consistent with applying one phase schedule uniformly to both subjects (both losses[step].distill_loss_raw appears for step>=8001 in both topologies) and with the RFC's requirement that both subjects complete Phase A→E, but reviewers of bd-2v9r should confirm the RFC intends self-distillation for the dense-matched control rather than skipping the distill term outside MoE."},
-    {"severity": "info", "status": "non_blocking", "body": "P6/P1: frontier deployed_bytes_per_block are seeded from DEFAULT_FRONTIER_MOE_BYTES_PER_BLOCK / DEFAULT_FRONTIER_DENSE_BYTES_PER_BLOCK constants in production_runner.rs (~line 54–55) rather than derived from the copied moe_conformance.json / dense_conformance.json inputs. The comparison artifact still reflects the matched_bytes_pin correctly (bytes_diff=16, within tolerance), so this bead only supplies frontier inputs consumed by downstream materializers. Non-blocking for bd-3e10j; worth confirming during bd-2v9r closure that the frontier materializer trusts the conformance inputs rather than these defaults."},
-    {"severity": "info", "status": "non_blocking", "body": "P9: run-log.json for a single MoE seed is ~8.2MB; the full production bundle is ~80MB (grad-log JSONL and router-step telemetry are the dominant contributors). Well within reason for a bead-level artifact and matches the RFC's 20,000-step commitment, but note it for packet-transport and reviewer-fetch cost planning downstream."},
-    {"severity": "info", "status": "resolved", "body": "P10: telemetry surface is complete — grad-log.jsonl carries per-step {global_l2, max_l2, mean_l2} with phase and optimizer_state (burn_adamw with optimizer_record_entries and training_backend=burn_ndarray_autodiff); router-step-telemetry.jsonl carries tokens_per_expert, expert_usage_entropy_bits, bank_switches_per_token, same_expert_rate, and a full router_confidence_distribution per layer per step with telemetry_self_hash (4 layers × 20,000 steps = 80,000 lines); run-log.json includes 21 eval_points at 1k-step cadence plus final_grad_norms and frozen_teacher_checkpoint_sha; all top-level artifacts carry canonical self-hashes."}
-  ]
-}
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[client] session/request_permission (running)
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] python3 scripts/review/f-s7/validate-artifacts.py --root . 2>&1 | tail -20 (completed)
+  kind: execute
+  input: python3 scripts/review/f-s7/validate-artifacts.py --root . 2>&1 | tail -20
+  output:
+    [read output suppressed]
+
+[client] session/request_permission (running)
+
+[tool] python3 scripts/review/f-s7/validate-report.py --root . --report docs/experiments/S7-report.md 2>&1 | tail -20 (completed)
+  kind: execute
+  input: python3 scripts/review/f-s7/validate-report.py --root . --report docs/experiments/S7-report.md 2>&1 | tail -20
+  output:
+    [read output suppressed]
+
+[tool] sed -n '650,690p' history/rfcs/F-S7-moe-beats-dense.md (completed)
+  kind: execute
+  input: sed -n '650,690p' history/rfcs/F-S7-moe-beats-dense.md
+  output:
+    ```
+    
+    ## H4 Pareto dominance (mandatory closure gate)
+    
+    ```text
+    Statement:
+      On the (val_bpc, deployed_bytes_total) plane, the MoeTiny
+      CheckpointFrontierPoint dominates the MoeTinyDenseMatched
+      CheckpointFrontierPoint per D13.
+    
+    Predicted:
+      median_val_bpc(MoE)        <= median_val_bpc(dense_matched)
+      deployed_bytes_total(MoE)  <= deployed_bytes_total(dense_matched)
+                                                      ; equal within D6 tolerance
+      At least one inequality is strict.
+    
+    Falsification:
+      median_val_bpc(MoE)        > median_val_bpc(dense_matched)            ⇒ Refuted (Pareto-incomparable)
+      deployed_bytes_total(MoE)  > deployed_bytes_total(dense_matched)
+                                    + tolerance                              ⇒ Refuted
+      Neither inequality is strict (exact tie on both)                       ⇒ Refuted
+    
+    Verdict:
+      Refuted if any falsification hits.
+      Confirmed otherwise.
+    
+    Consequence of Refuted:
+      S7Outcome = Fail-pareto. (Distinct from Fail-parity: a per-seed
+    ... (55 more lines)
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[client] session/request_permission (running)
+
+[tool] cat experiments/S7/dense-vs-moe/comparison.json 2>/dev/null | python3 -m json.tool | head -60 (completed)
+  kind: execute
+  input: cat experiments/S7/dense-vs-moe/comparison.json 2>/dev/null | python3 -m json.tool | head -60
+  output:
+    [read output suppressed]
+
+[client] session/request_permission (running)
+
+[tool] cat experiments/S7/frontier/frontier.json 2>/dev/null | python3 -m json.tool | head -40 (completed)
+  kind: execute
+  input: cat experiments/S7/frontier/frontier.json 2>/dev/null | python3 -m json.tool | head -40
+  output:
+    [read output suppressed]
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] git log --oneline 09e157e..26e01079 (completed)
+  kind: execute
+  input: git log --oneline 09e157e..26e01079
+  output:
+    26e0107 Correct S7 H4 report verdict
+    d824b43 Refresh S7 runner Claude review
+    
+    ```console
+    26e0107 Correct S7 H4 report verdict
+    d824b43 Refresh S7 runner Claude review
+    ```
+
+[tool] git diff 09e157e..26e01079 --stat (completed)
+  kind: execute
+  input: git diff 09e157e..26e01079 --stat
+  output:
+    docs/experiments/S7-report.md                      |   6 +-
+     docs/review/f-s7/bead-reviews/bd-3e10j-claude.json |  16 +-
+     docs/review/f-s7/raw/bd-3e10j-claude.command.txt   |   2 +-
+     .../review/f-s7/raw/bd-3e10j-claude.extracted.json |  12 +-
+     docs/review/f-s7/raw/bd-3e10j-claude.stdout.txt    | 948 +++++----------------
+     scripts/review/f-s7/emit-report.py                 |  72 +-
+     scripts/tests/s7_emit_report_test.sh               |  35 +-
+     7 files changed, 327 insertions(+), 764 deletions(-)
+    
+    ```console
+     docs/experiments/S7-report.md                      |   6 +-
+     docs/review/f-s7/bead-reviews/bd-3e10j-claude.json |  16 +-
+     docs/review/f-s7/raw/bd-3e10j-claude.command.txt   |   2 +-
+     .../review/f-s7/raw/bd-3e10j-claude.extracted.json |  12 +-
+     docs/review/f-s7/raw/bd-3e10j-claude.stdout.txt    | 948 +++++----------------
+     scripts/review/f-s7/emit-report.py                 |  72 +-
+     scripts/tests/s7_emit_report_test.sh               |  35 +-
+     7 files changed, 327 insertions(+), 764 deletions(-)
+    ```
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] git diff 09e157e..26e01079 -- scripts/review/f-s7/emit-report.py scripts/tests/s7_emit_report_test.sh (completed)
+  kind: execute
+  input: git diff 09e157e..26e01079 -- scripts/review/f-s7/emit-report.py scripts/tests/s7_emit_report_test.sh
+  output:
+    [read output suppressed]
+
+[tool] Terminal (pending)
+  input: {}
+
+[tool] Terminal (pending)
+  input: {}
+
+[client] session/request_permission (running)
+
+[tool] bash scripts/tests/s7_emit_report_test.sh 2>&1 | tail -10 (completed)
+  kind: execute
+  input: bash scripts/tests/s7_emit_report_test.sh 2>&1 | tail -10
+  output:
+    s7_emit_report_test: ok
+    
+    ```console
+    s7_emit_report_test: ok
+    ```
+
+[client] session/request_permission (running)
+
+[tool] bash scripts/review/f-s7/verify-packet.sh 2>&1 | tail -40 (completed)
+  kind: execute
+  input: bash scripts/review/f-s7/verify-packet.sh 2>&1 | tail -40
+  output:
+    [read output suppressed]
+Based on my inspection at HEAD 26e01079, the only substantive change since the prior PASS at 09e157e is the H4 verdict correction (Confirmed→Refuted), which properly derives H4 from `comparison.json.pareto_verdict` per RFC §H4 falsification rules. Everything else in bd-3e10j's closure surface (Burn AdamW producer, 10 seed×topology runs, telemetry, sweeps, artifacts) is unchanged and continues to satisfy the closure claims.
+
+{"verdict":"PASS","personas":["P1","P3","P5","P6","P9","P10"],"summary":"At HEAD 26e01079 the bd-3e10j closure claims remain supported. The only patches since the prior PASS at 09e157e are (1) d824b43 refreshing the Claude review record and (2) 26e0107 which corrects the report's H4 verdict from Confirmed to Refuted by deriving it from comparison.json.pareto_verdict (Dense-wins-under-byte-equivalence) rather than pinning Confirmed. This aligns the report with RFC §H4 falsification rules (Pareto refutation when dense wins on the (val_bpc, deployed_bytes_total) plane under matched bytes) and with the FailParity outcome that already refuted H3. emit-report.py now enforces this mapping (PARETO_H4_REFUTING set, hypothesis_status/h4_status_from_pareto helpers, falsification_summary), and scripts/tests/s7_emit_report_test.sh exercises both the H4-Confirmed (MoE-dominates) and H4-Refuted (Dense-wins-under-byte-equivalence) branches with the associated falsification-summary string. The refreshed report_self_hash (9a5c4b5...) validates cleanly: validate-report.py --root . and validate-artifacts.py --root . both report ok; scripts/tests/s7_emit_report_test.sh passes. The production-runner substrate itself (gbf-experiments/src/s7/production_runner.rs, 20,000-step Burn AdamW loop, Phase-A teacher freeze, per-step run/grad/router telemetry, matched-bytes scores across 10 seed×topology runs, seed-0 production_closure_retrain_score lambda_switch sweep, comparison/frontier/oracle/emulator support artifacts) is unchanged from the prior PASSed review and audit-production-runner.py still reports missing_code_surface_count=0, production_artifact_count=48, blocking_dependency_present=true. The remaining audit errors are the by-design guards that clear on bd-3e10j resolution. Bead-level review only; final bd-2v9r packet closure remains separate.","findings":[{"severity":"info","status":"resolved","body":"P1/P6: The H4 verdict correction is the right fix. RFC §H4 falsification says any of {median_val_bpc(MoE) > median_val_bpc(dense_matched), dense byte overhead beyond tolerance, exact tie} refutes H4; comparison.json shows median_val_bpc_moe=4.51023 > median_val_bpc_dense=4.13283 and pareto_verdict=Dense-wins-under-byte-equivalence, so H4 must be Refuted. The prior report emitted H4 Confirmed because emit-report.py hardcoded 'Confirmed' for every hypothesis except H3. The new emit-report.py derives H4 from comparison.json.pareto_verdict and rejects unknown verdicts via EmitError, closing the loophole for future outcomes."},{"severity":"info","status":"resolved","body":"P3: falsification analysis now correctly cites both H3 (per-seed bpc parity) and H4 (Pareto verdict Dense-wins-under-byte-equivalence). The Surprises section still records the MoE lm_loss_raw noise (seed 4=0.396813 → seed 1=9.77902) as follow-up context for bd-2v9r/S8 planning; report_self_hash refresh does not affect that section."},{"severity":"info","status":"non_blocking","body":"P5/P6: audit-production-runner.py --json still returns needs_changes with the two by-design errors (production runner is in_progress; production-looking artifacts exist while runner owner is unresolved). missing_code_surface_count=0 and production_artifact_count=48 confirm the code and artifacts remain in place; both errors clear on bd-3e10j close and do not falsify this bead's closure claims."},{"severity":"info","status":"non_blocking","body":"P5/P10: verify-packet.sh also fails on missing bd-2v9r Gemini/Claude review evidence, bd-2v9r/bd-1cdu/bd-1rb unresolved dependencies for bd-2v9r, and the audit's observation that this bd-3e10j-claude.json review record was stale before the current run. Those are downstream/packet-level concerns owned by bd-2v9r closure and by the review runner that must land a fresh bd-3e10j Claude review at HEAD 26e01079 (which this invocation supplies) plus the Gemini counterpart."},{"severity":"info","status":"non_blocking","body":"P9: bundle size and telemetry surface are unchanged from the prior review — full production bundle ~80MB, single MoE seed run-log ~8.2MB, 20,000 grad-log lines per run, 80,000 router-step telemetry lines per MoE seed (4 layers × 20,000 steps). No new size regression from the HEAD 26e01079 patch, which touches only Markdown/Python/review-record files."},{"severity":"info","status":"non_blocking","body":"P10: telemetry surface remains complete — grad-log.jsonl carries per-step {global_l2, max_l2, mean_l2} with phase and burn_adamw optimizer_state; router-step-telemetry.jsonl carries tokens_per_expert, expert_usage_entropy_bits, bank_switches_per_token, same_expert_rate, and per-layer router_confidence_distribution; run-log.json includes 21 eval_points at 1k-step cadence, final_grad_norms, and frozen_teacher_checkpoint_sha; all top-level artifacts carry canonical self-hashes and validate-artifacts.py reports ok."}]}
 
 [done] end_turn

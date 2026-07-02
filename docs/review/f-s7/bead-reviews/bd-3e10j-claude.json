@@ -1,36 +1,36 @@
 {
   "bead": "bd-3e10j",
-  "command": "acpx --cwd /Users/bkase/.codex/worktrees/febf/gbllm --approve-all --format text --suppress-reads --timeout 1800 claude exec 'Review completed F-S7 bead bd-3e10j at git HEAD 09e157e86d902065a7d5ff4de44a58ed38e5da79.\nUse ACPX only; do not mutate files.\nReviewer id: claude. Required personas: P1, P3, P5, P6, P9, P10.\nInspect the current repository state, the bead record via `br show bd-3e10j`, history/rfcs/F-S7-moe-beats-dense.md, and the code/tests/artifacts named by the bead closure.\nA PASS verdict is allowed only if this bead'\"'\"'s closure claims are supported by current evidence and no blocking finding remains. Do not treat a PASS here as final bd-2v9r production-packet closure; this is bead-level review coverage only.\nReturn exactly one JSON object. No Markdown wrapper. Shape:\n{\n  \"verdict\": \"PASS or NEEDS_CHANGES\",\n  \"personas\": [\"P1\", \"P3\", \"P5\", \"P6\", \"P9\", \"P10\"],\n  \"summary\": \"one concise paragraph\",\n  \"findings\": [\n    {\"severity\": \"p1|p2|p3|info\", \"status\": \"open|resolved|non_blocking\", \"body\": \"finding text\"}\n  ]\n}'",
+  "command": "acpx --cwd /Users/bkase/.codex/worktrees/febf/gbllm --approve-all --format text --suppress-reads --timeout 1800 claude exec 'Review completed F-S7 bead bd-3e10j at git HEAD 26e01079fae4a89719a52dff5540d34e2065b5e3.\nUse ACPX only; do not mutate files.\nReviewer id: claude. Required personas: P1, P3, P5, P6, P9, P10.\nInspect the current repository state, the bead record via `br show bd-3e10j`, history/rfcs/F-S7-moe-beats-dense.md, and the code/tests/artifacts named by the bead closure.\nA PASS verdict is allowed only if this bead'\"'\"'s closure claims are supported by current evidence and no blocking finding remains. Do not treat a PASS here as final bd-2v9r production-packet closure; this is bead-level review coverage only.\nReturn exactly one JSON object. No Markdown wrapper. Shape:\n{\n  \"verdict\": \"PASS or NEEDS_CHANGES\",\n  \"personas\": [\"P1\", \"P3\", \"P5\", \"P6\", \"P9\", \"P10\"],\n  \"summary\": \"one concise paragraph\",\n  \"findings\": [\n    {\"severity\": \"p1|p2|p3|info\", \"status\": \"open|resolved|non_blocking\", \"body\": \"finding text\"}\n  ]\n}'",
   "findings": [
     {
-      "body": "P5/P6: audit-production-runner.py --json still returns status=needs_changes with two errors ('production runner is in_progress, not resolved' and 'production-looking S7 artifacts exist while runner owner is unresolved'), but both are the by-design in_progress guard. missing_code_surface_count=0, blocking_dependency_present=true, production_artifact_count=48. These errors will clear on bd-3e10j resolution; they do not falsify closure claims for this bead.",
-      "severity": "info",
-      "status": "non_blocking"
-    },
-    {
-      "body": "P3: The five MoE seeds show wide final-step lm_loss_raw variance (min seed 4=0.396813, max seed 1=9.77902), which suggests substantial run-to-run instability under this schedule. This does not invalidate the FailParity verdict \u2014 val BPC across MoE seeds stays in a narrow 4.37\u20134.52 band and every seed is beaten by its matched-bytes dense counterpart by ~0.32\u20130.38 BPC \u2014 and the S7 report now surfaces this under 'Surprises'. Worth carrying into bd-2v9r/S8 planning as MoE-schedule stability follow-up.",
-      "severity": "info",
-      "status": "non_blocking"
-    },
-    {
-      "body": "P1/P6: freeze_teacher is invoked unconditionally at S7_PHASE_A_END_STEP for both S7Topology::MoeTiny and S7Topology::MoeTinyDenseMatched, so dense-matched runs also carry a distinct frozen_teacher_checkpoint_sha and receive a phase-C distill loss. This is consistent with applying one phase schedule uniformly to both subjects (both losses[step].distill_loss_raw appears for step>=8001 in both topologies) and with the RFC's requirement that both subjects complete Phase A\u2192E, but reviewers of bd-2v9r should confirm the RFC intends self-distillation for the dense-matched control rather than skipping the distill term outside MoE.",
-      "severity": "info",
-      "status": "non_blocking"
-    },
-    {
-      "body": "P6/P1: frontier deployed_bytes_per_block are seeded from DEFAULT_FRONTIER_MOE_BYTES_PER_BLOCK / DEFAULT_FRONTIER_DENSE_BYTES_PER_BLOCK constants in production_runner.rs (~line 54\u201355) rather than derived from the copied moe_conformance.json / dense_conformance.json inputs. The comparison artifact still reflects the matched_bytes_pin correctly (bytes_diff=16, within tolerance), so this bead only supplies frontier inputs consumed by downstream materializers. Non-blocking for bd-3e10j; worth confirming during bd-2v9r closure that the frontier materializer trusts the conformance inputs rather than these defaults.",
-      "severity": "info",
-      "status": "non_blocking"
-    },
-    {
-      "body": "P9: run-log.json for a single MoE seed is ~8.2MB; the full production bundle is ~80MB (grad-log JSONL and router-step telemetry are the dominant contributors). Well within reason for a bead-level artifact and matches the RFC's 20,000-step commitment, but note it for packet-transport and reviewer-fetch cost planning downstream.",
-      "severity": "info",
-      "status": "non_blocking"
-    },
-    {
-      "body": "P10: telemetry surface is complete \u2014 grad-log.jsonl carries per-step {global_l2, max_l2, mean_l2} with phase and optimizer_state (burn_adamw with optimizer_record_entries and training_backend=burn_ndarray_autodiff); router-step-telemetry.jsonl carries tokens_per_expert, expert_usage_entropy_bits, bank_switches_per_token, same_expert_rate, and a full router_confidence_distribution per layer per step with telemetry_self_hash (4 layers \u00d7 20,000 steps = 80,000 lines); run-log.json includes 21 eval_points at 1k-step cadence plus final_grad_norms and frozen_teacher_checkpoint_sha; all top-level artifacts carry canonical self-hashes.",
+      "body": "P1/P6: The H4 verdict correction is the right fix. RFC \u00a7H4 falsification says any of {median_val_bpc(MoE) > median_val_bpc(dense_matched), dense byte overhead beyond tolerance, exact tie} refutes H4; comparison.json shows median_val_bpc_moe=4.51023 > median_val_bpc_dense=4.13283 and pareto_verdict=Dense-wins-under-byte-equivalence, so H4 must be Refuted. The prior report emitted H4 Confirmed because emit-report.py hardcoded 'Confirmed' for every hypothesis except H3. The new emit-report.py derives H4 from comparison.json.pareto_verdict and rejects unknown verdicts via EmitError, closing the loophole for future outcomes.",
       "severity": "info",
       "status": "resolved"
+    },
+    {
+      "body": "P3: falsification analysis now correctly cites both H3 (per-seed bpc parity) and H4 (Pareto verdict Dense-wins-under-byte-equivalence). The Surprises section still records the MoE lm_loss_raw noise (seed 4=0.396813 \u2192 seed 1=9.77902) as follow-up context for bd-2v9r/S8 planning; report_self_hash refresh does not affect that section.",
+      "severity": "info",
+      "status": "resolved"
+    },
+    {
+      "body": "P5/P6: audit-production-runner.py --json still returns needs_changes with the two by-design errors (production runner is in_progress; production-looking artifacts exist while runner owner is unresolved). missing_code_surface_count=0 and production_artifact_count=48 confirm the code and artifacts remain in place; both errors clear on bd-3e10j close and do not falsify this bead's closure claims.",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P5/P10: verify-packet.sh also fails on missing bd-2v9r Gemini/Claude review evidence, bd-2v9r/bd-1cdu/bd-1rb unresolved dependencies for bd-2v9r, and the audit's observation that this bd-3e10j-claude.json review record was stale before the current run. Those are downstream/packet-level concerns owned by bd-2v9r closure and by the review runner that must land a fresh bd-3e10j Claude review at HEAD 26e01079 (which this invocation supplies) plus the Gemini counterpart.",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P9: bundle size and telemetry surface are unchanged from the prior review \u2014 full production bundle ~80MB, single MoE seed run-log ~8.2MB, 20,000 grad-log lines per run, 80,000 router-step telemetry lines per MoE seed (4 layers \u00d7 20,000 steps). No new size regression from the HEAD 26e01079 patch, which touches only Markdown/Python/review-record files.",
+      "severity": "info",
+      "status": "non_blocking"
+    },
+    {
+      "body": "P10: telemetry surface remains complete \u2014 grad-log.jsonl carries per-step {global_l2, max_l2, mean_l2} with phase and burn_adamw optimizer_state; router-step-telemetry.jsonl carries tokens_per_expert, expert_usage_entropy_bits, bank_switches_per_token, same_expert_rate, and per-layer router_confidence_distribution; run-log.json includes 21 eval_points at 1k-step cadence, final_grad_norms, and frozen_teacher_checkpoint_sha; all top-level artifacts carry canonical self-hashes and validate-artifacts.py reports ok.",
+      "severity": "info",
+      "status": "non_blocking"
     }
   ],
   "personas": [
@@ -41,10 +41,10 @@
     "P9",
     "P10"
   ],
-  "reviewed_head": "09e157e86d902065a7d5ff4de44a58ed38e5da79",
+  "reviewed_head": "26e01079fae4a89719a52dff5540d34e2065b5e3",
   "reviewer": "claude",
   "schema": "s7_bead_acpx_review.v1",
-  "summary": "At HEAD 09e157e the bd-3e10j closure claims are supported by current evidence. gbf-experiments/src/s7/production_runner.rs (2232 lines) implements a Burn AdamW-backed producer that constructs BurnMoeS7ModelState / BurnByteMoeS7Model, calls loss.backward() + optimizer.step for 20,000 steps, freezes the teacher at S7_PHASE_A_END_STEP, emits per-step run/grad/router telemetry, scores on the pinned Gutenberg val subset, computes switch stats, and drives the production_closure_retrain_score lambda_switch sweep from the seed-0 end-of-Phase-D MoE checkpoint. Filesystem evidence: experiments/S7/runs contains all 10 seed\u00d7topology runs, each with a 20,000-entry run-log.json (21 eval_points and per-seed frozen_teacher_checkpoint_sha), 20,000-line grad-log.jsonl, and (MoE only) 80,000-line router-step-telemetry.jsonl; experiments/S7/router-collapse/seed-0/sweep.json records six real lambda_switch points with monotonic entropy/BPC responses and producer_kind=production_closure_retrain_score. scripts/review/f-s7/validate-artifacts.py --root . and validate-report.py both report ok; audit-production-runner.py --json shows missing_code_surface_count=0, production_artifact_count=48, blocking_dependency_present=true, and only the by-design in_progress guard errors that clear on bd-3e10j closure. The scientific outcome is negative \u2014 comparison.json shows aggregate_parity_verdict=Fail-parity, dense wins on all 5 seeds with median dense BPC 4.13 vs MoE 4.51 under matched bytes (bytes_diff=16 within tolerance) \u2014 and the S7-report.md now correctly records that surprise and decision ProceedToS8DenseOnly. The HEAD 09e157e patch itself only re-pins first_result_commit from 7d034d6 to 93be7678 (the actual fail-parity landing commit) and refreshes report_self_hash accordingly, and validate-report.py --root . confirms the pinned hash still matches. This PASS covers bead-level review only; final bd-2v9r production-packet closure remains separate.",
+  "summary": "At HEAD 26e01079 the bd-3e10j closure claims remain supported. The only patches since the prior PASS at 09e157e are (1) d824b43 refreshing the Claude review record and (2) 26e0107 which corrects the report's H4 verdict from Confirmed to Refuted by deriving it from comparison.json.pareto_verdict (Dense-wins-under-byte-equivalence) rather than pinning Confirmed. This aligns the report with RFC \u00a7H4 falsification rules (Pareto refutation when dense wins on the (val_bpc, deployed_bytes_total) plane under matched bytes) and with the FailParity outcome that already refuted H3. emit-report.py now enforces this mapping (PARETO_H4_REFUTING set, hypothesis_status/h4_status_from_pareto helpers, falsification_summary), and scripts/tests/s7_emit_report_test.sh exercises both the H4-Confirmed (MoE-dominates) and H4-Refuted (Dense-wins-under-byte-equivalence) branches with the associated falsification-summary string. The refreshed report_self_hash (9a5c4b5...) validates cleanly: validate-report.py --root . and validate-artifacts.py --root . both report ok; scripts/tests/s7_emit_report_test.sh passes. The production-runner substrate itself (gbf-experiments/src/s7/production_runner.rs, 20,000-step Burn AdamW loop, Phase-A teacher freeze, per-step run/grad/router telemetry, matched-bytes scores across 10 seed\u00d7topology runs, seed-0 production_closure_retrain_score lambda_switch sweep, comparison/frontier/oracle/emulator support artifacts) is unchanged from the prior PASSed review and audit-production-runner.py still reports missing_code_surface_count=0, production_artifact_count=48, blocking_dependency_present=true. The remaining audit errors are the by-design guards that clear on bd-3e10j resolution. Bead-level review only; final bd-2v9r packet closure remains separate.",
   "transport": "acpx",
   "verdict": "PASS"
 }
