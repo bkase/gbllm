@@ -33,6 +33,12 @@ Projections at 400 permille zeros (matvec floor, no norms/router/decode):
 | UpperBankCandidate-128 | 272384 | v1_interpreted | 7743059 | 0.135 | 0.094 |
 | UpperBankCandidate-128 | 272384 | v2_dispatch | 2794932 | 0.375 | 0.262 |
 | UpperBankCandidate-128 | 272384 | v3_weights_as_code | 1466787 | 0.714 | 0.500 |
+| QualityDense-144x288x6 | 633600 | v1_interpreted | 18011347 | 0.058 | 0.040 |
+| QualityDense-144x288x6 | 633600 | v2_dispatch | 6501369 | 0.161 | 0.112 |
+| QualityDense-144x288x6 | 633600 | v3_weights_as_code | 3411936 | 0.307 | 0.215 |
+| QualityDense-160x320x6 | 780800 | v1_interpreted | 22195801 | 0.047 | 0.033 |
+| QualityDense-160x320x6 | 780800 | v2_dispatch | 8011788 | 0.130 | 0.091 |
+| QualityDense-160x320x6 | 780800 | v3_weights_as_code | 4204608 | 0.249 | 0.174 |
 
 - Single-bank fixture: no ROM bank switching or SRAM paging in the measured region.
 - Kernels run with interrupts disabled and SP repurposed (V2/V3); production kernels pay yield/safe-point overhead on top.
