@@ -5,7 +5,7 @@ use gbf_foundation::{Hash256, PackerVersion};
 use gbf_hw::calibration::CalibrationConfidenceClass;
 use gbf_policy::calibration::{
     BootstrapCalibrationBundle, CalibrationBundle, CalibrationBundleSet, CalibrationLayer,
-    CalibrationSetRef, MeasurementBlob, ValidityEnvelope,
+    CalibrationSetDigestRef, MeasurementBlob, SessionValidityEnvelope,
 };
 use gbf_policy::risk::CalibrationConfidenceRequirement;
 
@@ -31,7 +31,7 @@ fn calibration_bundle_fixture(layer: CalibrationLayer) -> CalibrationBundle {
         kernel_set_hash: hash(0x20),
         packer_version: PackerVersion::new(1, 2, 3),
         calibration_schema_hash: hash(0x30),
-        validity_envelope: ValidityEnvelope::default(),
+        validity_envelope: SessionValidityEnvelope::default(),
         confidence: CalibrationConfidenceClass::Reasonable,
         measurements: Some(measurement_blob_fixture()),
     }
@@ -127,12 +127,13 @@ fn calibration_bundle_set_round_trip() {
 
 #[test]
 fn calibration_set_ref_round_trip() {
-    let reference = CalibrationSetRef {
+    let reference = CalibrationSetDigestRef {
         set_hash: hash(0x55),
         layers: BTreeSet::from([CalibrationLayer::Kernel, CalibrationLayer::Platform]),
     };
     let encoded = serde_json::to_string(&reference).expect("ref serializes");
-    let decoded: CalibrationSetRef = serde_json::from_str(&encoded).expect("ref deserializes");
+    let decoded: CalibrationSetDigestRef =
+        serde_json::from_str(&encoded).expect("ref deserializes");
 
     assert_eq!(decoded, reference);
     assert_eq!(
@@ -149,9 +150,10 @@ fn calibration_set_ref_round_trip() {
 
 #[test]
 fn validity_envelope_round_trip_empty() {
-    let envelope = ValidityEnvelope::default();
+    let envelope = SessionValidityEnvelope::default();
     let encoded = serde_json::to_string(&envelope).expect("envelope serializes");
-    let decoded: ValidityEnvelope = serde_json::from_str(&encoded).expect("envelope deserializes");
+    let decoded: SessionValidityEnvelope =
+        serde_json::from_str(&encoded).expect("envelope deserializes");
 
     assert_eq!(decoded, envelope);
     assert_eq!(
@@ -255,7 +257,7 @@ fn validity_envelope_rejects_unknown_field() {
         "unexpected": true
     });
 
-    assert!(serde_json::from_value::<ValidityEnvelope>(value).is_err());
+    assert!(serde_json::from_value::<SessionValidityEnvelope>(value).is_err());
 }
 
 #[test]
@@ -266,7 +268,7 @@ fn validity_envelope_rejects_unknown_nested_future_field() {
         }
     });
 
-    assert!(serde_json::from_value::<ValidityEnvelope>(value).is_err());
+    assert!(serde_json::from_value::<SessionValidityEnvelope>(value).is_err());
 }
 
 #[test]
@@ -280,14 +282,14 @@ fn measurement_blob_rejects_unknown_field() {
 
 #[test]
 fn calibration_set_ref_rejects_unknown_field() {
-    let mut value = serde_json::to_value(CalibrationSetRef {
+    let mut value = serde_json::to_value(CalibrationSetDigestRef {
         set_hash: hash(0x55),
         layers: BTreeSet::from([CalibrationLayer::Kernel]),
     })
     .expect("ref serializes");
     value["unexpected"] = serde_json::json!(true);
 
-    assert!(serde_json::from_value::<CalibrationSetRef>(value).is_err());
+    assert!(serde_json::from_value::<CalibrationSetDigestRef>(value).is_err());
 }
 
 #[test]

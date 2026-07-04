@@ -902,7 +902,7 @@ fn packer_version_freshness_hash(version: &gbf_foundation::PackerVersion) -> Has
     .expect("packer version is canonical-serializable")
 }
 
-fn validity_envelope_hash(envelope: &gbf_policy::ValidityEnvelope) -> Hash256 {
+fn validity_envelope_hash(envelope: &gbf_policy::SessionValidityEnvelope) -> Hash256 {
     DomainHash::new(
         "gbf-policy",
         "ValidityEnvelope",

@@ -40,8 +40,8 @@ pub use budget::{
 };
 pub use calibration::{
     BootstrapCalibrationBundle, CalibrationBundle, CalibrationBundleSet, CalibrationLayer,
-    CalibrationSessionProfile, CalibrationSetRef, MeasurementBlob, ValidityEnvelope,
-    ValidityEnvelopeFuturePlaceholder,
+    CalibrationSessionProfile, CalibrationSetDigestRef, MeasurementBlob, SessionValidityEnvelope,
+    SessionValidityEnvelopeFuturePlaceholder,
 };
 pub use capabilities::{
     STAGE0_CLASS10_TARGET_CAPABILITY_OWNER, STAGE0_CLASS10_TARGET_CAPABILITY_RULES,

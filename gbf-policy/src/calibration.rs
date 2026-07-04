@@ -97,7 +97,7 @@ pub struct CalibrationBundle {
     pub kernel_set_hash: Hash256,
     pub packer_version: PackerVersion,
     pub calibration_schema_hash: Hash256,
-    pub validity_envelope: ValidityEnvelope,
+    pub validity_envelope: SessionValidityEnvelope,
     pub confidence: CalibrationConfidenceClass,
     pub measurements: Option<MeasurementBlob>,
 }
@@ -168,7 +168,7 @@ impl<'de> Deserialize<'de> for CalibrationBundleSet {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CalibrationSetRef {
+pub struct CalibrationSetDigestRef {
     pub set_hash: Hash256,
     pub layers: BTreeSet<CalibrationLayer>,
 }
@@ -183,14 +183,14 @@ pub struct CalibrationSessionProfile {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ValidityEnvelope {
+pub struct SessionValidityEnvelope {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub session_profiles: BTreeSet<CalibrationSessionProfile>,
     #[serde(default)]
-    pub future_fields: ValidityEnvelopeFuturePlaceholder,
+    pub future_fields: SessionValidityEnvelopeFuturePlaceholder,
 }
 
-impl ValidityEnvelope {
+impl SessionValidityEnvelope {
     #[must_use]
     pub fn contains_session_profile(&self, active: &CalibrationSessionProfile) -> bool {
         self.session_profiles.contains(active)
@@ -199,7 +199,7 @@ impl ValidityEnvelope {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ValidityEnvelopeFuturePlaceholder {}
+pub struct SessionValidityEnvelopeFuturePlaceholder {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,7 +240,7 @@ impl BootstrapCalibrationBundle {
                         kernel_set_hash: Hash256::ZERO,
                         packer_version: PackerVersion::new(1, 0, 0),
                         calibration_schema_hash: Hash256::ZERO,
-                        validity_envelope: ValidityEnvelope::default(),
+                        validity_envelope: SessionValidityEnvelope::default(),
                         confidence: CalibrationConfidenceClass::None,
                         measurements: None,
                     },
