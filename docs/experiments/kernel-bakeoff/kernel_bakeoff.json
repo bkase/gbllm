@@ -1,0 +1,246 @@
+{
+  "schema": "kernel_bakeoff.v1",
+  "fan_in": 64,
+  "rows": 32,
+  "weight_seed": 3126726640,
+  "activation_seed": 44145,
+  "projection_zero_permille": 400,
+  "runs": [
+    {
+      "variant": "V1Interpreted",
+      "zero_permille": 0,
+      "mac_count": 2048,
+      "nonzero_count": 2048,
+      "measured_m_cycles": 63123,
+      "m_cycles_per_mac_x1000": 30821,
+      "program_bytes": 227,
+      "data_bytes": 576
+    },
+    {
+      "variant": "V2Dispatch",
+      "zero_permille": 0,
+      "mac_count": 2048,
+      "nonzero_count": 2048,
+      "measured_m_cycles": 27153,
+      "m_cycles_per_mac_x1000": 13258,
+      "program_bytes": 2699,
+      "data_bytes": 774
+    },
+    {
+      "variant": "V3WeightsAsCode",
+      "zero_permille": 0,
+      "mac_count": 2048,
+      "nonzero_count": 2048,
+      "measured_m_cycles": 16032,
+      "m_cycles_per_mac_x1000": 7828,
+      "program_bytes": 13943,
+      "data_bytes": 0
+    },
+    {
+      "variant": "V1Interpreted",
+      "zero_permille": 400,
+      "mac_count": 2048,
+      "nonzero_count": 1228,
+      "measured_m_cycles": 58219,
+      "m_cycles_per_mac_x1000": 28427,
+      "program_bytes": 227,
+      "data_bytes": 576
+    },
+    {
+      "variant": "V2Dispatch",
+      "zero_permille": 400,
+      "mac_count": 2048,
+      "nonzero_count": 1228,
+      "measured_m_cycles": 21015,
+      "m_cycles_per_mac_x1000": 10261,
+      "program_bytes": 2699,
+      "data_bytes": 774
+    },
+    {
+      "variant": "V3WeightsAsCode",
+      "zero_permille": 400,
+      "mac_count": 2048,
+      "nonzero_count": 1228,
+      "measured_m_cycles": 11030,
+      "m_cycles_per_mac_x1000": 5385,
+      "program_bytes": 9013,
+      "data_bytes": 0
+    },
+    {
+      "variant": "V1Interpreted",
+      "zero_permille": 600,
+      "mac_count": 2048,
+      "nonzero_count": 813,
+      "measured_m_cycles": 55755,
+      "m_cycles_per_mac_x1000": 27224,
+      "program_bytes": 227,
+      "data_bytes": 576
+    },
+    {
+      "variant": "V2Dispatch",
+      "zero_permille": 600,
+      "mac_count": 2048,
+      "nonzero_count": 813,
+      "measured_m_cycles": 17922,
+      "m_cycles_per_mac_x1000": 8750,
+      "program_bytes": 2699,
+      "data_bytes": 774
+    },
+    {
+      "variant": "V3WeightsAsCode",
+      "zero_permille": 600,
+      "mac_count": 2048,
+      "nonzero_count": 813,
+      "measured_m_cycles": 8297,
+      "m_cycles_per_mac_x1000": 4051,
+      "program_bytes": 6482,
+      "data_bytes": 0
+    },
+    {
+      "variant": "V1Interpreted",
+      "zero_permille": 900,
+      "mac_count": 2048,
+      "nonzero_count": 194,
+      "measured_m_cycles": 51979,
+      "m_cycles_per_mac_x1000": 25380,
+      "program_bytes": 227,
+      "data_bytes": 576
+    },
+    {
+      "variant": "V2Dispatch",
+      "zero_permille": 900,
+      "mac_count": 2048,
+      "nonzero_count": 194,
+      "measured_m_cycles": 13233,
+      "m_cycles_per_mac_x1000": 6461,
+      "program_bytes": 2699,
+      "data_bytes": 774
+    },
+    {
+      "variant": "V3WeightsAsCode",
+      "zero_permille": 900,
+      "mac_count": 2048,
+      "nonzero_count": 194,
+      "measured_m_cycles": 2923,
+      "m_cycles_per_mac_x1000": 1427,
+      "program_bytes": 2236,
+      "data_bytes": 0
+    }
+  ],
+  "projections": [
+    {
+      "profile": "Toy1",
+      "d_model": 32,
+      "d_ff": 64,
+      "n_blocks": 2,
+      "macs_per_token": 12800,
+      "per_variant": [
+        {
+          "variant": "V1Interpreted",
+          "m_cycles_per_token": 363865,
+          "tokens_per_second_x1000": 2881,
+          "tokens_per_second_ui_reserve_x1000": 2017
+        },
+        {
+          "variant": "V2Dispatch",
+          "m_cycles_per_token": 131340,
+          "tokens_per_second_x1000": 7983,
+          "tokens_per_second_ui_reserve_x1000": 5588
+        },
+        {
+          "variant": "V3WeightsAsCode",
+          "m_cycles_per_token": 68928,
+          "tokens_per_second_x1000": 15212,
+          "tokens_per_second_ui_reserve_x1000": 10648
+        }
+      ]
+    },
+    {
+      "profile": "MoeTiny",
+      "d_model": 64,
+      "d_ff": 128,
+      "n_blocks": 4,
+      "macs_per_token": 87040,
+      "per_variant": [
+        {
+          "variant": "V1Interpreted",
+          "m_cycles_per_token": 2474286,
+          "tokens_per_second_x1000": 423,
+          "tokens_per_second_ui_reserve_x1000": 296
+        },
+        {
+          "variant": "V2Dispatch",
+          "m_cycles_per_token": 893117,
+          "tokens_per_second_x1000": 1174,
+          "tokens_per_second_ui_reserve_x1000": 821
+        },
+        {
+          "variant": "V3WeightsAsCode",
+          "m_cycles_per_token": 468710,
+          "tokens_per_second_x1000": 2237,
+          "tokens_per_second_ui_reserve_x1000": 1566
+        }
+      ]
+    },
+    {
+      "profile": "UpperBankCandidate-96",
+      "d_model": 96,
+      "d_ff": 192,
+      "n_blocks": 4,
+      "macs_per_token": 192000,
+      "per_variant": [
+        {
+          "variant": "V1Interpreted",
+          "m_cycles_per_token": 5457984,
+          "tokens_per_second_x1000": 192,
+          "tokens_per_second_ui_reserve_x1000": 134
+        },
+        {
+          "variant": "V2Dispatch",
+          "m_cycles_per_token": 1970112,
+          "tokens_per_second_x1000": 532,
+          "tokens_per_second_ui_reserve_x1000": 372
+        },
+        {
+          "variant": "V3WeightsAsCode",
+          "m_cycles_per_token": 1033920,
+          "tokens_per_second_x1000": 1014,
+          "tokens_per_second_ui_reserve_x1000": 709
+        }
+      ]
+    },
+    {
+      "profile": "UpperBankCandidate-128",
+      "d_model": 128,
+      "d_ff": 192,
+      "n_blocks": 4,
+      "macs_per_token": 272384,
+      "per_variant": [
+        {
+          "variant": "V1Interpreted",
+          "m_cycles_per_token": 7743059,
+          "tokens_per_second_x1000": 135,
+          "tokens_per_second_ui_reserve_x1000": 94
+        },
+        {
+          "variant": "V2Dispatch",
+          "m_cycles_per_token": 2794932,
+          "tokens_per_second_x1000": 375,
+          "tokens_per_second_ui_reserve_x1000": 262
+        },
+        {
+          "variant": "V3WeightsAsCode",
+          "m_cycles_per_token": 1466787,
+          "tokens_per_second_x1000": 714,
+          "tokens_per_second_ui_reserve_x1000": 500
+        }
+      ]
+    }
+  ],
+  "caveats": [
+    "Single-bank fixture: no ROM bank switching or SRAM paging in the measured region.",
+    "Kernels run with interrupts disabled and SP repurposed (V2/V3); production kernels pay yield/safe-point overhead on top.",
+    "Projections cover matvec MACs only; norms, router, per-row scales, and decode are excluded.",
+    "MACs-per-token formula assumes one d_model^2 state mix plus a 2*d_model*d_ff expert per block plus a tied 80-token head."
+  ]
+}

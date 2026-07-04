@@ -10,6 +10,5 @@ gbf-abi = { path = "../gbf-abi" }
 gbf-artifact = { path = "../gbf-artifact" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
-gbf-kernel = { path = "../gbf-kernel" }
 serde.workspace = true
 serde_json.workspace = true

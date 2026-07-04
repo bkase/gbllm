@@ -2287,7 +2287,6 @@ version = "0.1.0"
 dependencies = [
  "gbf-foundation",
  "gbf-hw",
- "gbf-kernel",
  "serde",
  "serde_json",
 ]
@@ -2302,6 +2301,7 @@ dependencies = [
  "gbf-emu",
  "gbf-foundation",
  "gbf-hw",
+ "gbf-kernel",
  "gbf-policy",
  "gbf-report",
  "gbf-runtime",
@@ -2344,7 +2344,6 @@ dependencies = [
  "gbf-foundation",
  "gbf-hw",
  "gbf-ir",
- "gbf-kernel",
  "gbf-policy",
  "gbf-report",
  "gbf-runtime",
@@ -2490,7 +2489,6 @@ dependencies = [
  "gbf-artifact",
  "gbf-foundation",
  "gbf-hw",
- "gbf-kernel",
  "serde",
  "serde_json",
 ]
@@ -2509,10 +2507,7 @@ dependencies = [
 name = "gbf-kernel"
 version = "0.1.0"
 dependencies = [
- "gbf-foundation",
- "gbf-hw",
- "serde",
- "serde_json",
+ "gbf-asm",
 ]
 
 [[package]]

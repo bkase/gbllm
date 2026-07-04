@@ -6,7 +6,4 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-gbf-foundation = { path = "../gbf-foundation" }
-gbf-hw = { path = "../gbf-hw" }
-serde.workspace = true
-serde_json.workspace = true
+gbf-asm = { path = "../gbf-asm" }
