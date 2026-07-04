@@ -1,0 +1,86 @@
+{
+  "backend": "burn_ndarray_autodiff",
+  "bead": "bd-2k1iv",
+  "caveats": [
+    "Undertrained toy-scale evidence: a bigram-context dense FFN predicts the next byte from only the single previous byte, so absolute bpc is bounded near the order-1 (bigram) entropy of the corpus and is NOT a strong language model.",
+    "Sequence model is intentionally stateless (bigram context); no recurrent/bounded-KV sequence state is trained here.",
+    "Training corpus is the front prefix of the committed concatenated Gutenberg train stream (train_cap_bytes); validation is book-level held out from the val split.",
+    "The gap number is the honest fp-vs-hard-ternary delta on ONE identical checkpoint / val stream / seed; it is the QAT-survival signal, not a production-quality claim. Full-quality replication is bd-3771m scope."
+  ],
+  "corpus": {
+    "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
+    "train_bytes_sha256": "f2881247c3614a5d0a455fd6eca7f2a8b4fbd503d2524e062830f5757dc3d61e",
+    "train_bytes_used": 67108864,
+    "train_cap_bytes": 67108864,
+    "val_book_ids_used": [
+      1017,
+      1233,
+      1475,
+      2105,
+      2156,
+      3440
+    ],
+    "val_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "val_bytes_used": 1048576,
+    "val_cap_bytes": 1048576,
+    "val_source": "corpus/gutenberg/splits.json val-split book bodies (book-level held out)"
+  },
+  "export": {
+    "embedding_shape": [
+      256,
+      64
+    ],
+    "manifest": "experiments/S6/checkpoint-export/manifest.json",
+    "n_tensors": 17
+  },
+  "git_sha": "71f3f68b65c13d8ec63e1619151c33db5be820b6",
+  "measurement": {
+    "diagnostic_fake_quant_fully_off": {
+      "diagnostic_fp_rawweights_alloff_bpc": 7.572658623441471,
+      "note": "literal fake-quant-OFF using raw f32 weights WITHOUT the deployed per-output-row scale. For a scale-decoupled ternary scheme the raw-weight magnitudes drift freely under STE, so this path is intentionally uncalibrated and is NOT the full-precision ceiling; recorded only for completeness."
+    },
+    "eval_pairs": 262144,
+    "fp_semantics": "SOFT continuous ternary relaxation with the SAME learned per-output-row Q8.8 scales (the calibrated STE full-precision ceiling) + Int8 activation fake-quant + full-vector RMS norm",
+    "fp_val_bpc": 3.6732583512812016,
+    "gap_bpc": -0.004542614563217473,
+    "gap_interpretation": "gap_bpc = ternary_val_bpc - fp_val_bpc is the cost of hardening the QAT-trained weights to deployable ternary on the identical checkpoint/val/seed; small (or negative) gap is the 'QAT survives' signal",
+    "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scale + Int8 activation fake-quant + full-vector RMS norm",
+    "ternary_val_bpc": 3.668715736717984
+  },
+  "model": {
+    "activation_fake_quant": {
+      "format": "Int8",
+      "range_hi": 8.0,
+      "range_lo": -8.0
+    },
+    "d_ff": 128,
+    "d_model": 64,
+    "n_blocks": 4,
+    "norm": {
+      "affine_bias": 0.0,
+      "affine_scale": 1.0,
+      "clip": 8.0,
+      "epsilon": 9.999999747378752e-6,
+      "kind": "tile_rms_then_affine_clip(full_vector)"
+    },
+    "sequence_state_kind": "stateless_bigram_context",
+    "sequence_state_params": {},
+    "tied_head": true,
+    "topology": "dense_ffn_bigram_context (MoeTinyDenseMatched-class, no MoE)",
+    "vocab": 256,
+    "weight_quant": "ternary {-1,0,+1}, per-output-row Q8.8 scale, threshold=0-init learned"
+  },
+  "purpose": "F-S2 'QAT survives' fp-vs-ternary val bits-per-char gap on a real trained dense QAT checkpoint",
+  "schema": "f_s2_qat_gap.v1",
+  "seed": 0,
+  "training": {
+    "batch": 512,
+    "learning_rate": 0.01,
+    "optimizer": "burn_adamw",
+    "qat_hardness_after_warmup": "Hard",
+    "steps": 20000,
+    "wall_clock_seconds": 372.910429334,
+    "warmup_steps_hardness_off": 5000,
+    "weight_decay": 0.0
+  }
+}

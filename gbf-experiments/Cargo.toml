@@ -102,3 +102,8 @@ harness = false
 name = "s5_falsification_loop"
 path = "src/bin/s5_falsification_loop.rs"
 required-features = ["s5-default"]
+
+[[bin]]
+name = "s2_gap_and_export"
+path = "src/bin/s2_gap_and_export.rs"
+required-features = ["s7"]

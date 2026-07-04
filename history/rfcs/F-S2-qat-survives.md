@@ -1,5 +1,18 @@
 # Formal spec pack: F-S2 QAT Survives — DRAFT
 
+> **Evidence note (2026-07-04, bd-2k1iv / review Action 3).** The S2 slice was
+> closed (commit ca21eb4) without any committed measurement; the referenced
+> `experiments/S2/result.json` never existed. The first committed QAT-gap
+> measurement now lives at `experiments/S2/gap/gap.json`
+> (`f_s2_qat_gap.v1`): dense d64/ff128/4-block bigram-context byte model,
+> 20k AdamW steps on committed Gutenberg, seed 0 — fp (soft ternary, same
+> learned per-row Q8.8 scales) 3.6733 bpc vs hard ternary 3.6687 bpc,
+> **gap −0.0045 bpc — QAT survives at this scale**. Scope caveats recorded in
+> the artifact: toy-scale stateless bigram context, byte vocab 256 (not the
+> charset-80 LexicalSpec), 64 MiB train prefix; NOT this RFC's full protocol.
+> The RFC's pre-registered protocol below remains DRAFT/unexecuted; the
+> full-quality replication is bd-3771m scope.
+
 > **Status: DRAFT.** Numeric values tagged `[ESTIMATE]` are unresolved and
 > must be hardened before the first S2 result artifact is committed.
 >
@@ -83,9 +96,9 @@ Does not own:
   Project Gutenberg / progression           (S4)
   BoundedKv vs LinearState A/B comparison   (S5)
   multi-timescale LinearState variants      (S5)
-  RuntimeChromeBudget preflight             (S6)
-  shadow_compile path                       (S6)
-  Game Boy ROM build                        (S6)
+  RuntimeChromeBudget preflight             (S5 "Pick and Fit")
+  shadow_compile path                       (S5 "Pick and Fit")
+  Game Boy ROM build                        (S5 "Pick and Fit")
   MoE / router (lambda_balance, lambda_zrouter, lambda_switch, low-rank
     router, expert dropout, switch stats export) on real model topology   (S7)
   StructuredWidthGates / lambda_shape / lambda_overflow                    (S8)
@@ -2923,7 +2936,7 @@ Not proven:
   Project Gutenberg generalization (S4)
   multi-timescale LinearState (S5)
   BoundedKv comparison (S5)
-  Game Boy ROM fit (S6)
+  Game Boy ROM fit (S5 "Pick and Fit")
   MoE benefit (S7)
   StructuredWidthGates (S8)
 ```

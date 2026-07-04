@@ -1,0 +1,294 @@
+{
+  "bead": "bd-2k1iv",
+  "consumer_bead": "bd-59qiq",
+  "git_sha": "71f3f68b65c13d8ec63e1619151c33db5be820b6",
+  "layers": [
+    {
+      "down_scales": "block0_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block0_down.ternary",
+      "index": 0,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block0_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block0_up.ternary"
+    },
+    {
+      "down_scales": "block1_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block1_down.ternary",
+      "index": 1,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block1_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block1_up.ternary"
+    },
+    {
+      "down_scales": "block2_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block2_down.ternary",
+      "index": 2,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block2_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block2_up.ternary"
+    },
+    {
+      "down_scales": "block3_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block3_down.ternary",
+      "index": 3,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block3_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block3_up.ternary"
+    }
+  ],
+  "numeric_convention": {
+    "activation_fake_quant": {
+      "format": "Int8_symmetric",
+      "quant_steps": 127,
+      "range_hi": 8.0,
+      "range_lo": -8.0
+    },
+    "block_forward": "x' = x + Down( gelu( Up( actq( rms_norm(x) ) ) ) ); logits = rms_norm(x_final) @ embedding^T",
+    "embedding_dtype": "f32_le",
+    "norm": {
+      "affine_bias": 0.0,
+      "affine_scale": 1.0,
+      "clip_hi": 8.0,
+      "clip_lo": -8.0,
+      "epsilon": 9.999999747378752e-6,
+      "kind": "tile_rms_then_affine_clip(full_vector)"
+    },
+    "weight_encoding": "Ternary2 {-1,0,+1}",
+    "weight_scale": "per_output_row Q8.8 (u16 raw, f32 = raw/256)"
+  },
+  "schema": "f_s6_dense_checkpoint_export.v1",
+  "seed": 0,
+  "tensors": [
+    {
+      "dtype": "f32_le",
+      "file": "tensors/embedding.f32.bin",
+      "layout": "row_major",
+      "name": "embedding",
+      "role": "token_embedding_and_tied_head",
+      "sha256": "0930262b128348f5fabe8a6fa9361699b38e2afac7a34379d41951e8eaf0c397",
+      "shape": [
+        256,
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block0_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block0_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "56aa840c610293e7ff1401daee4b92351356e14393a05ffa4b8ec28d73b5bc61",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_up.scales.q8_8_u16le.bin",
+      "name": "block0_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "07e531838b5c61fa360c867fca6866cc5cd6c23ed86779366065b7abfbdda349",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block0_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block0_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "233b6c21718358e2e9b61b902cd946c50f3de1c0cc29199034266e015865d81b",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_down.scales.q8_8_u16le.bin",
+      "name": "block0_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "4e0458675fcb9806154fc7f8dd0ab91268576325470b5e5258cf6cb7dabcfe54",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block1_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block1_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "73a84c660414f6f58136279a091c6a4fe1d45bbb35b99f6f99e4fa0077158083",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_up.scales.q8_8_u16le.bin",
+      "name": "block1_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "71ca78f552e85b641b13743999304ab8b7850c94dddf0b521415a0c3bf1d509d",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block1_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block1_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "79eaf39176fa598dac7b204c4490b49c659c6e21e20eaee024348930ba163a42",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_down.scales.q8_8_u16le.bin",
+      "name": "block1_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "4a065959d5cf1c30655be9ae9f9237a735b38c6bd80117b170f7de39536f8118",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block2_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block2_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "a412ae4f8a71498d5e881b2e46312069d9a59f18c14d32fed6157ed7b3f4592e",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_up.scales.q8_8_u16le.bin",
+      "name": "block2_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "2031796b32fd8fed2c6342d374028e48204568db4b2aa0c271bd7133ec314d58",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block2_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block2_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "abc2a954525e6fc0ede266e3c00a37adca6213aa1a63c4e42d41748cd46b0c96",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_down.scales.q8_8_u16le.bin",
+      "name": "block2_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "e3aff95315b9265e79b8bb69085afdbc797732c7a2c74eae612b84dab2fac76f",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block3_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block3_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "7a7c6ce0d7fc9e4e5c71a06e8f189b2070ab734d4b3935fbb91197a34d18c92b",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_up.scales.q8_8_u16le.bin",
+      "name": "block3_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "4adb0073ded296013abbfd83b1dac4565aefe926ef283de3877e336e8cfaf39a",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block3_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block3_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "5e04f70943c56205f6f9594134a0d6f36fd5d5d4d32275b899731eab666f3cd6",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_down.scales.q8_8_u16le.bin",
+      "name": "block3_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "cd2907968685b6a961f16ddce36f2843b7cb19b2d6733249f8ccfe69377b127f",
+      "shape": [
+        64
+      ]
+    }
+  ],
+  "topology": {
+    "d_ff": 128,
+    "d_model": 64,
+    "family": "dense_ffn_bigram_context",
+    "moe": false,
+    "n_blocks": 4,
+    "sequence_state_kind": "stateless_bigram_context",
+    "sequence_state_params": {},
+    "tied_head": true,
+    "vocab": 256
+  }
+}
