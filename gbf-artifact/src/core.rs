@@ -22,10 +22,28 @@ use crate::weight_plan::{
 };
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "ArtifactCoreRepr")]
 pub struct ArtifactCore {
     sequence_semantics: SequenceSemanticsSpec,
     tensors: Vec<CanonicalTensor>,
     quant: QuantSpec,
+}
+
+/// Deserialization repr: routes through [`ArtifactCore::new`] so serde input
+/// cannot bypass tensor/quant cross-validation.
+#[derive(serde::Deserialize)]
+struct ArtifactCoreRepr {
+    sequence_semantics: SequenceSemanticsSpec,
+    tensors: Vec<CanonicalTensor>,
+    quant: QuantSpec,
+}
+
+impl TryFrom<ArtifactCoreRepr> for ArtifactCore {
+    type Error = ArtifactCoreError;
+
+    fn try_from(repr: ArtifactCoreRepr) -> Result<Self, Self::Error> {
+        Self::new(repr.tensors, repr.quant, repr.sequence_semantics)
+    }
 }
 
 impl ArtifactCore {
@@ -617,7 +635,10 @@ fn artifact_core_semantic_bytes(
     quant: &QuantSpec,
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
-    push_bytes(&mut bytes, b"gbf.artifact.core.v2");
+    // v3: semantic hashing moved from the ad-hoc FNV digest to SHA-256
+    // (bd-ha15); the domain bump makes old and new hashes incomparable by
+    // construction.
+    push_bytes(&mut bytes, b"gbf.artifact.core.v3");
     push_sequence_semantics(&mut bytes, sequence_semantics);
 
     push_u64(&mut bytes, tensors.len() as u64);

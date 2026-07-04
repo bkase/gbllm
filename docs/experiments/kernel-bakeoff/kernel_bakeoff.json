@@ -289,6 +289,33 @@
           "tokens_per_second_ui_reserve_x1000": 174
         }
       ]
+    },
+    {
+      "profile": "QualityDense-192x384x7",
+      "d_model": 192,
+      "d_ff": 384,
+      "n_blocks": 7,
+      "macs_per_token": 1305600,
+      "per_variant": [
+        {
+          "variant": "V1Interpreted",
+          "m_cycles_per_token": 37114291,
+          "tokens_per_second_x1000": 28,
+          "tokens_per_second_ui_reserve_x1000": 19
+        },
+        {
+          "variant": "V2Dispatch",
+          "m_cycles_per_token": 13396761,
+          "tokens_per_second_x1000": 78,
+          "tokens_per_second_ui_reserve_x1000": 54
+        },
+        {
+          "variant": "V3WeightsAsCode",
+          "m_cycles_per_token": 7030656,
+          "tokens_per_second_x1000": 149,
+          "tokens_per_second_ui_reserve_x1000": 104
+        }
+      ]
     }
   ],
   "caveats": [

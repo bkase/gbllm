@@ -1163,9 +1163,11 @@ mod tests {
     fn qat_export_visitor_has_committed_golden_core_hash() {
         let export = fixture_export();
 
+        // Golden re-pinned 2026-07-04 (bd-ha15): semantic hashing moved from
+        // the ad-hoc FNV digest to real SHA-256 (domain gbf.artifact.core.v3).
         assert_eq!(
             export.artifact_core_hash().to_string(),
-            "sha256:c523e698a2dbe9db334d41a72b2c0f0621edc3992d5db0d61276e614226399f0"
+            "sha256:e0fab65271d601d8ab5a01c8c60a3dafc801dc43a5b23d30d2369774ccbaab17"
         );
         assert_eq!(export.core.tensors().len(), 16);
         assert_eq!(export.facts.activation_ranges.len(), 2);

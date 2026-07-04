@@ -29,7 +29,7 @@ fn full_sweep_conforms_and_orders_strategies() {
     );
 
     // Report must cover every projection profile for every variant.
-    assert_eq!(report.projections.len(), 6);
+    assert_eq!(report.projections.len(), 7);
     for projection in &report.projections {
         assert_eq!(projection.per_variant.len(), 3);
         for entry in &projection.per_variant {

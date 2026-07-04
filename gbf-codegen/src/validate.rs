@@ -5521,44 +5521,44 @@ mod tests {
 
     #[test]
     fn f_b2_validate_rejects_artifact_payload_malformed_tensor_payload() {
-        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
-        let tensor = CanonicalTensor {
-            id: CanonicalTensorId::new("tensor.bad").expect("tensor id"),
-            kind: CanonicalTensorKind::Bias,
-            layout: CanonicalTensorLayout::new(
-                CanonicalTensorShape::from_usize_dims(&[2]).expect("shape"),
-                TensorElementType::Float32,
-            ),
-            payload: CanonicalTensorPayload::F32(vec![1.0]),
-            content_hash: hash(0x52),
-        };
-        fixture.artifact.core = unchecked_artifact_core(
-            vec![tensor.clone()],
-            QuantSpec::default(),
-            SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
-        );
-        fixture.artifact.manifest.components = vec![ManifestComponent {
-            digest: tensor.content_hash,
-            id: ComponentId("tensor.bad".to_owned()),
-            kind: ComponentKind::CanonicalTensor,
-        }];
-        fixture.refresh_core_identity();
-
-        let failure =
-            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
-
-        assert_failure_code(&failure, |code| {
-            matches!(
-                code,
-                ValidationCode::ArtifactPayloadMalformed { field }
-                    if field == &FieldPath::from("core.tensors.tensor.bad.payload")
+        // Since bd-ha15 the contract crate validates on deserialize
+        // (`#[serde(try_from)]`), so a malformed tensor payload can no longer
+        // even be materialized as an `ArtifactCore` from transport bytes —
+        // the F-B2 rejection now fires at the deserialization boundary.
+        // Stage 0's own payload check remains as defense-in-depth.
+        let mut tensor = serde_json::to_value(
+            CanonicalTensor::new(
+                CanonicalTensorId::new("tensor.bad").expect("tensor id"),
+                CanonicalTensorKind::Bias,
+                CanonicalTensorLayout::new(
+                    CanonicalTensorShape::from_usize_dims(&[2]).expect("shape"),
+                    TensorElementType::Float32,
+                ),
+                CanonicalTensorPayload::F32(vec![1.0, 2.0]),
             )
-        });
+            .expect("valid bias tensor"),
+        )
+        .expect("tensor serializes");
+        tensor["payload"] = serde_json::json!({ "F32": [1.0] });
+        let error = serde_json::from_value::<ArtifactCore>(serde_json::json!({
+            "sequence_semantics":
+                SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
+            "tensors": [tensor],
+            "quant": QuantSpec::default(),
+        }))
+        .expect_err("malformed tensor payload must not deserialize");
+        assert!(
+            error.to_string().contains("payload length mismatch"),
+            "{error}"
+        );
     }
 
     #[test]
     fn f_b2_validate_rejects_artifact_payload_malformed_quant_spec() {
-        let mut fixture = Fixture::new(Some(HintBundle::empty()), Some(calibration()));
+        // See the note in the malformed-tensor-payload test: the contract
+        // crate now enforces quant/tensor cross-validation on deserialize,
+        // so a core whose weight tensor lacks a quant entry rejects at the
+        // deserialization boundary.
         let tensor = CanonicalTensor::new(
             CanonicalTensorId::new("tensor.dense").expect("tensor id"),
             CanonicalTensorKind::DenseWeight,
@@ -5569,28 +5569,17 @@ mod tests {
             CanonicalTensorPayload::F32(vec![1.0]),
         )
         .expect("valid dense tensor");
-        fixture.artifact.core = unchecked_artifact_core(
-            vec![tensor.clone()],
-            QuantSpec::default(),
-            SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
+        let error = serde_json::from_value::<ArtifactCore>(serde_json::json!({
+            "sequence_semantics":
+                SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
+            "tensors": [tensor],
+            "quant": QuantSpec::default(),
+        }))
+        .expect_err("core with missing weight quant entry must not deserialize");
+        assert!(
+            error.to_string().contains("missing a weight quant entry"),
+            "{error}"
         );
-        fixture.artifact.manifest.components = vec![ManifestComponent {
-            digest: tensor.content_hash,
-            id: ComponentId("tensor.dense".to_owned()),
-            kind: ComponentKind::CanonicalTensor,
-        }];
-        fixture.refresh_core_identity();
-
-        let failure =
-            validate_artifact_and_request(fixture.inputs()).expect_err("validation fails");
-
-        assert_failure_code(&failure, |code| {
-            matches!(
-                code,
-                ValidationCode::ArtifactPayloadMalformed { field }
-                    if field == &FieldPath::from("core.quant.weight_quant.tensor.dense")
-            )
-        });
     }
 
     #[test]
@@ -6536,19 +6525,6 @@ mod tests {
             SequenceSemanticsSpec::linear_state(1).expect("fixture state width is nonzero"),
         )
         .expect("empty core with linear state is valid")
-    }
-
-    fn unchecked_artifact_core(
-        tensors: Vec<CanonicalTensor>,
-        quant: QuantSpec,
-        sequence_semantics: SequenceSemanticsSpec,
-    ) -> ArtifactCore {
-        serde_json::from_value(serde_json::json!({
-            "sequence_semantics": sequence_semantics,
-            "tensors": tensors,
-            "quant": quant,
-        }))
-        .expect("unchecked ArtifactCore fixture deserializes")
     }
 
     fn artifact_aux() -> ArtifactAux {

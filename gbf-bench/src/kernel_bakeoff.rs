@@ -123,14 +123,15 @@ pub struct KernelBakeoffReport {
 /// Model shapes projected against. The first four mirror
 /// `gbf_policy::model_profile::ModelSizeProfile` registry constants; the
 /// `QualityDense` rows probe the 2026-07-04 quality-first UX budget
-/// (<= ~5 s/char, i.e. >= 0.2 tok/s at 70% CPU).
-const PROJECTION_PROFILES: [(&str, u16, u16, u8); 6] = [
+/// (revised same day to <= ~10 s/char, i.e. >= 0.1 tok/s at 70% CPU).
+const PROJECTION_PROFILES: [(&str, u16, u16, u8); 7] = [
     ("Toy1", 32, 64, 2),
     ("MoeTiny", 64, 128, 4),
     ("UpperBankCandidate-96", 96, 192, 4),
     ("UpperBankCandidate-128", 128, 192, 4),
     ("QualityDense-144x288x6", 144, 288, 6),
     ("QualityDense-160x320x6", 160, 320, 6),
+    ("QualityDense-192x384x7", 192, 384, 7),
 ];
 
 /// Estimated matvec MACs per generated token: per block one `d_model^2`

@@ -34,27 +34,29 @@ between (13.3 → 6.5).
 | UpperBank-128 (d128/ff192/4blk) | 272,384 | 0.09 | 0.26 | **0.50** | 2.0 |
 | QualityDense (d144/ff288/6blk) | 633,600 | 0.04 | 0.11 | **0.22** | 4.7 |
 | QualityDense (d160/ff320/6blk) | 780,800 | 0.03 | 0.09 | **0.17** | 5.7 |
+| QualityDense (d192/ff384/7blk) | 1,305,600 | 0.02 | 0.05 | **0.10** | 9.6 |
 
 These are floors: norms, router, per-row scale application, decode, yield
 overhead, and bank switching are all excluded (see report caveats).
 
-## UX budget (updated 2026-07-04)
+## UX budget (updated 2026-07-04, revised to 10 s/char the same day)
 
-bkase's directive: **quality over speed — up to ~5 s/char is acceptable.**
-That sets the per-token budget at ~3.67M M-cycles (5 s x 1,048,576 x 70%),
-i.e. **~680k matvec MACs/token under V3**. Sizing consequences:
+bkase's directive: **quality over speed — up to ~10 s/char is acceptable.**
+That sets the per-token budget at ~7.34M M-cycles (10 s x 1,048,576 x 70%),
+i.e. **~1.36M matvec MACs/token under V3**. Sizing consequences:
 
-- The whole registered profile ladder (Toy1 → UpperBank-128) is comfortably
-  inside budget under V3; the binding constraint moves from cycles to
-  **capacity per ROM byte**.
-- The dense frontier at this budget is roughly d144/ff288/6-block (~634k
-  MACs/token, ~4.7 s/char floor); d160/ff320/6 is just over.
+- The whole registered profile ladder (Toy1 → UpperBank-128) is far inside
+  budget under V3; the binding constraint is now **capacity per ROM byte**,
+  not cycles.
+- The dense frontier at this budget is roughly d192/ff384/7-block (~1.31M
+  MACs/token, ~9.6 s/char floor) — ~5.8 MiB of weights-as-code, tight but
+  inside the 8 MiB MBC5 ceiling. A V3/V2 mixed lowering (hot layers as code,
+  cold bulk as 0.25 B/w dispatch data) buys headroom on both axes.
 - **MoE re-enters** under the new constraint: top-1 routing stores k experts
   but spends one expert of cycles per token, so at fixed cycles/token MoE
-  buys capacity with ROM (V3 ≈ 4.4 B/weight, 8 MiB MBC5 ceiling ≈ ~1.8M
-  weights as code). The S7 dense-vs-MoE verdict was pinned at matched
+  buys capacity with ROM. The S7 dense-vs-MoE verdict was pinned at matched
   deployed *bytes*; the decision-relevant comparison is now matched
-  *cycles/token* with a ROM ceiling. Revisit before S8 sizing.
+  *cycles/token* with a ROM ceiling. Revisit before S8 sizing (bd-3771m).
 
 ## Findings
 

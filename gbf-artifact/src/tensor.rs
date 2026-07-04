@@ -13,12 +13,40 @@ pub type CanonicalTensorId = ArtifactPath;
 pub type CanonicalTensorPayloadHash = Hash256;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "CanonicalTensorRepr")]
 pub struct CanonicalTensor {
     pub id: CanonicalTensorId,
     pub kind: CanonicalTensorKind,
     pub layout: CanonicalTensorLayout,
     pub payload: CanonicalTensorPayload,
     pub content_hash: Hash256,
+}
+
+/// Deserialization repr: routes through [`CanonicalTensor::new`] so serde
+/// input cannot bypass payload validation, and rejects a stored
+/// `content_hash` that disagrees with the recomputed one.
+#[derive(Deserialize)]
+struct CanonicalTensorRepr {
+    id: CanonicalTensorId,
+    kind: CanonicalTensorKind,
+    layout: CanonicalTensorLayout,
+    payload: CanonicalTensorPayload,
+    content_hash: Hash256,
+}
+
+impl TryFrom<CanonicalTensorRepr> for CanonicalTensor {
+    type Error = CanonicalTensorError;
+
+    fn try_from(repr: CanonicalTensorRepr) -> Result<Self, Self::Error> {
+        let tensor = Self::new(repr.id, repr.kind, repr.layout, repr.payload)?;
+        if tensor.content_hash != repr.content_hash {
+            return Err(CanonicalTensorError::ContentHashMismatch {
+                stored: repr.content_hash,
+                computed: tensor.content_hash,
+            });
+        }
+        Ok(tensor)
+    }
 }
 
 impl CanonicalTensor {
@@ -258,6 +286,10 @@ pub enum CanonicalTensorError {
     NonFiniteFloat {
         index: usize,
     },
+    ContentHashMismatch {
+        stored: Hash256,
+        computed: Hash256,
+    },
     InvalidTernaryValue {
         index: usize,
         value: i8,
@@ -289,6 +321,10 @@ impl fmt::Display for CanonicalTensorError {
                     "canonical tensor float payload at index {index} is not finite"
                 )
             }
+            Self::ContentHashMismatch { stored, computed } => write!(
+                f,
+                "canonical tensor content hash mismatch: stored {stored}, computed {computed}"
+            ),
             Self::InvalidTernaryValue { index, value } => {
                 write!(
                     f,
@@ -301,31 +337,13 @@ impl fmt::Display for CanonicalTensorError {
 
 impl Error for CanonicalTensorError {}
 
+/// Cryptographic digest for artifact semantic identity (bd-ha15).
+///
+/// `Hash256` serializes with a `sha256:` prefix, so every producer feeding it
+/// must be real SHA-256; the previous multi-lane FNV construction here made
+/// that prefix a lie and was trivially collidable.
 pub(crate) fn stable_digest(bytes: &[u8]) -> Hash256 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut lanes = [
-        FNV_OFFSET,
-        FNV_OFFSET ^ 0x9e37_79b9_7f4a_7c15,
-        FNV_OFFSET ^ 0xc2b2_ae3d_27d4_eb4f,
-        FNV_OFFSET ^ 0x1656_67b1_9e37_79f9,
-    ];
-
-    for &byte in bytes {
-        for (lane_index, lane) in lanes.iter_mut().enumerate() {
-            *lane ^= u64::from(byte).wrapping_add((lane_index as u64) << 8);
-            *lane = lane.wrapping_mul(FNV_PRIME.wrapping_add(lane_index as u64));
-            *lane ^= *lane >> 32;
-        }
-    }
-
-    let mut digest = [0_u8; 32];
-    for (index, lane) in lanes.into_iter().enumerate() {
-        digest[index * 8..(index + 1) * 8].copy_from_slice(&lane.to_le_bytes());
-    }
-
-    Hash256::from_bytes(digest)
+    gbf_foundation::sha256(bytes)
 }
 
 fn validate_payload_values(payload: &CanonicalTensorPayload) -> Result<(), CanonicalTensorError> {
@@ -458,6 +476,37 @@ mod tests {
         assert_eq!(tensor.layout.shape.dims(), &[1, 3]);
         assert_eq!(tensor.payload.as_i8_slice(), Some(&[-1, 0, 1][..]));
         assert_ne!(tensor.content_hash, Hash256::ZERO);
+    }
+
+    #[test]
+    fn stable_digest_is_real_sha256() {
+        // The serialized `sha256:` prefix must be honest (bd-ha15): pin the
+        // digest of a known vector to the actual SHA-256 value.
+        assert_eq!(
+            stable_digest(b"abc").to_string(),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_forged_content_hash() {
+        let tensor = tensor(
+            "layer.0.weight",
+            CanonicalTensorKind::TernaryWeight,
+            TensorElementType::TernaryI2,
+            CanonicalTensorPayload::I8(vec![-1, 0, 1]),
+            &[1, 3],
+        );
+        let mut value = serde_json::to_value(&tensor).unwrap();
+        value["content_hash"] = serde_json::Value::String(
+            "sha256:abababababababababababababababababababababababababababababababab".into(),
+        );
+        let err = serde_json::from_value::<CanonicalTensor>(value).unwrap_err();
+        assert!(err.to_string().contains("content hash mismatch"), "{err}");
+        // The honest round-trip still works.
+        let round_trip: CanonicalTensor =
+            serde_json::from_value(serde_json::to_value(&tensor).unwrap()).unwrap();
+        assert_eq!(round_trip, tensor);
     }
 
     #[test]

@@ -39,6 +39,9 @@ Projections at 400 permille zeros (matvec floor, no norms/router/decode):
 | QualityDense-160x320x6 | 780800 | v1_interpreted | 22195801 | 0.047 | 0.033 |
 | QualityDense-160x320x6 | 780800 | v2_dispatch | 8011788 | 0.130 | 0.091 |
 | QualityDense-160x320x6 | 780800 | v3_weights_as_code | 4204608 | 0.249 | 0.174 |
+| QualityDense-192x384x7 | 1305600 | v1_interpreted | 37114291 | 0.028 | 0.019 |
+| QualityDense-192x384x7 | 1305600 | v2_dispatch | 13396761 | 0.078 | 0.054 |
+| QualityDense-192x384x7 | 1305600 | v3_weights_as_code | 7030656 | 0.149 | 0.104 |
 
 - Single-bank fixture: no ROM bank switching or SRAM paging in the measured region.
 - Kernels run with interrupts disabled and SP repurposed (V2/V3); production kernels pay yield/safe-point overhead on top.
