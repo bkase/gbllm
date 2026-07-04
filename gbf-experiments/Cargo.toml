@@ -112,3 +112,8 @@ required-features = ["s7"]
 name = "s4_kn5_baseline_gutenberg"
 path = "src/bin/s4_kn5_baseline_gutenberg.rs"
 required-features = ["s4"]
+
+[[bin]]
+name = "s5_state_ab"
+path = "src/bin/s5_state_ab.rs"
+required-features = ["s7"]

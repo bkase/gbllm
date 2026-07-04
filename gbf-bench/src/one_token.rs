@@ -453,7 +453,9 @@ pub struct RomGateReport {
 }
 
 /// Expected WRAM segments for one host trace: (name, address, bytes).
-fn expected_segments(trace: &IntForwardTrace) -> Vec<(String, u16, Vec<u8>)> {
+/// Shared with the multi-token gate, which compares the same dump set at the
+/// first and last token boundaries.
+pub(crate) fn expected_segments(trace: &IntForwardTrace) -> Vec<(String, u16, Vec<u8>)> {
     let mut segments = Vec::new();
     let i16s = |v: &[i16]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     segments.push((

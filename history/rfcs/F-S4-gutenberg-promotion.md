@@ -93,8 +93,8 @@ Does not own:
   StructuredWidthGates / M6            (S8)
   BoundedKv vs LinearState A/B         (S5; bd-36y1)
   Multi-timescale LinearState          (S5)
-  RuntimeChromeBudget preflight        (S6)
-  Shadow compile / EncodedRom path     (S6)
+  RuntimeChromeBudget preflight        (S5 "Pick and Fit")
+  Shadow compile / EncodedRom path     (S5 "Pick and Fit")
   MoE / router                         (S7)
 ```
 
@@ -2418,7 +2418,7 @@ S4V0SuccessProduct :=
                                            ; - bpc_fp_reference(
                                            ;     c_GB_fp_shadow, GB_val)
                                            ; <= 0.5
-        runtime_chrome_budget_ok:   Bool   ; conservative S6-stub estimate
+        runtime_chrome_budget_ok:   Bool   ; conservative S5 (Pick and Fit)-stub estimate
         emulator_smoke_ok:          Bool   ; one token through emu, S3 stub
       }
     pass:                  Bool                ; AND over acceptance bits
@@ -3434,9 +3434,9 @@ Not proven:
   UpperBankCandidate production-scale quality on Gutenberg (S8)
   gutenberg_manifest.v2 test-partition correctness (S8)
   BoundedKv vs LinearState A/B (S5)
-  RuntimeChromeBudget end-to-end (S6)
-  shadow_compile / EncodedRom path (S6)
-  emulator harness end-to-end (S6)
+  RuntimeChromeBudget end-to-end (S5 "Pick and Fit")
+  shadow_compile / EncodedRom path (S5 "Pick and Fit")
+  emulator harness end-to-end (S5 "Pick and Fit")
   MoE / router (S7)
   Toy1 sufficiency on Gutenberg (no Toy1 was trained)
   Cross-machine determinism (Rep-2)
@@ -3897,7 +3897,7 @@ scripts/tests/s4_ci_scripts_test.sh
 | A17 | Cross-corpus rng leakage between S3 and S4                                          | Disjoint by domain string ("s4-..." vs "s3-..."); enforced by O10 lint                                                     | Should S4 inherit any S3 rng state?                                                                                         | No. Rep-8 is explicit. Even if seeds match, the seed128 domain prefix differs.                                                                                                                                                                                          |
 | A18 | Network access for Gutenberg fetch                                                  | Permitted only during the explicit fixture-build CLI op                                                                    | Should the trainer fetch books on demand?                                                                                   | No. On-demand fetch breaks reproducibility and S1CpuDeterministic. Fetching is a one-time fixture-build step; replay reads from the content-addressed mirror.                                                                                                           |
 | A19 | Catalog snapshot freshness                                                          | One-shot snapshot dated 2026-05-09 (D1)                                                                                    | What if Gutenberg catalog changes after snapshot?                                                                           | The snapshot is hash-pinned. Catalog drift produces a different snapshot sha256 and constitutes a different experiment requiring an RFC amendment per Rule Amendment.                                                                                                   |
-| A20 | Whether S4 closure depends on S5 / S6 readiness                                     | No                                                                                                                         | Should we hold S4 closure until shadow_compile / RuntimeChromeBudget land?                                                  | No. v0_success on Gutenberg uses S3-stub forms of the runtime_chrome_budget and emulator-smoke acceptance bits. S4 inherits S3's stub semantics; tightening those bits is S6's job.                                                                                     |
+| A20 | Whether S4 closure depends on S5 (Pick and Fit) readiness                           | No                                                                                                                         | Should we hold S4 closure until shadow_compile / RuntimeChromeBudget land?                                                  | No. v0_success on Gutenberg uses S3-stub forms of the runtime_chrome_budget and emulator-smoke acceptance bits. S4 inherits S3's stub semantics; tightening those bits is the S5 (Pick and Fit) job.                                                                    |
 | A21 | What if the Gutenberg KN-5 baseline bpc is *worse* than the TinyStories KN-5 bpc    | Report it; do not auto-fail                                                                                                | Should H4's margin be normalized?                                                                                           | No. H4's gate is `bpc_ternary < bpc_kn5_gutenberg - 0.05`, computed on Gutenberg numbers only. Cross-corpus bpc comparisons are not meaningful (different vocab usage distributions); ranges in §3 are sanity only.                                                      |
 | A22 | What if a single book straddles 5% of corpus mass                                   | Allow it; record in s4_corpus_quality.v1                                                                                   | Should one giant book skew the eval?                                                                                        | Allow. Per-book fairness is not an S4 commitment; the per-book split rule is the only invariant. Future tightening (per-book downweighting) is out of scope.                                                                                                            |
 | A23 | What if F-G2 charset_v1 spec is amended after S4 RFC commit                         | Amendment is a new experiment per Rule Amendment                                                                           | Could a charset_v1 patch invalidate S4 results?                                                                             | Yes by design. normalization_spec_self_hash is part of gutenberg_manifest.v1; a spec amendment changes the hash and invalidates the manifest.                                                                                                                           |
@@ -3974,7 +3974,7 @@ F-S4 Promote to Gutenberg is correct when:
     UpperBankCandidate production-scale readiness on Gutenberg (S8),
     gutenberg_manifest.v2 test-partition correctness (S8), BoundedKv
     vs LinearState A/B (S5), shadow_compile or EncodedRom soundness
-    (S6), MoE benefit (S7), or any quality claim about a Toy1 /
+    (S5 "Pick and Fit"), MoE benefit (S7), or any quality claim about a Toy1 /
     MoeTiny / UpperBankCandidate model — those are later slices'
     proof obligations.
 ```

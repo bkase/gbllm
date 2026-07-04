@@ -45,10 +45,10 @@ Does not own:
   Project Gutenberg corpus (S4); production-scale UpperBankCandidate
     runs on Gutenberg (S8)
   multi-timescale LinearState (T12.5; arrives in S5 unless promoted)
-  Game Boy ROM build (S6)
+  Game Boy ROM build (S5 "Pick and Fit")
   MoE / router (S7)
   v0_success workload manifest (S3)
-  RuntimeChromeBudget preflight (S6)
+  RuntimeChromeBudget preflight (S5 "Pick and Fit")
 ```
 
 ## Decisions
@@ -1673,7 +1673,7 @@ Not proven:
   ternary survival (S2)
   charset_v1 normalization (S3)
   ArtifactOracle round-trip (S3)
-  Game Boy ROM fit (S6)
+  Game Boy ROM fit (S5 "Pick and Fit")
   MoE benefit (S7)
   v0_success workload pass (S3)
 ```
@@ -2023,7 +2023,7 @@ scripts/s1_isolation_check.sh
 | A16 | Pre-registration enforcement                                                       | Git history check (R-Predictions, O1)                                      | What if predictions section is edited after runs?                                | Reject the report. CI script compares git blame of predictions section to checkpoint metadata commits.                                |
 | A17 | What if all five seeds produce *identical* checkpoint bytes?                       | Suspicious. O9 asserts at least two seeds differ.                          | Could mean RNG isn't seeded per-run.                                             | Add explicit O9 assertion in CI.                                                                                                      |
 | A18 | Burn version drift between writing RFC and running S1                              | Pin via Cargo.toml `=` syntax (already enforced workspace-wide)            | What if Burn ships a fix that changes numerics?                                  | Bump pass_version, re-run, document.                                                                                                  |
-| A19 | RuntimeChromeBudget linkage                                                        | Not used in S1                                                             | Toy0 has byte cost; should we preflight?                                         | No. RuntimeChromeBudget is S6's concern. Toy0 byte cost is a static check that doesn't gate S1 outcome.                               |
+| A19 | RuntimeChromeBudget linkage                                                        | Not used in S1                                                             | Toy0 has byte cost; should we preflight?                                         | No. RuntimeChromeBudget is S5 "Pick and Fit"'s concern. Toy0 byte cost is a static check that doesn't gate S1 outcome.                               |
 | A20 | F0 / F1 / F4 closure dependencies                                                  | Treat as substrate; assert versions in metadata                            | What if F4 phase scheduler has a known bug?                                      | Block S1 by adding the bug bead to bd-12pl's blockers and fixing first.                                                               |
 | A21 | "Decision-decided" git commit vs "Decision-honored" PR merge                       | Both required; closure is gated on PR merge AND honored Decision           | Could a Halt PR be merged with a "we'll fix later" justification?                | No. Halt blocks merge of bd-12pl's closure commit.                                                                                    |
 | A22 | What if H1 confirms but loss only barely decreased (e.g. by 0.6 over 100 steps)?   | The H1 falsification rule uses 0.5 — values just above are Confirmed       | Is "barely confirmed" a Pass-with-warning?                                       | No. H1 is binary. Surprises section may flag this for follow-up, but it does not change Outcome.                                      |

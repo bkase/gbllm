@@ -21,7 +21,7 @@ denotation/artifact agreement risk under the workload. Only a passing
 agreement verdict produced by the real F-C1/F-C2 oracle backends, together
 with H1, H2, H3, H5, H6, and H7, retires real-oracle denotation/artifact
 agreement risk for the v0_success workload. It still does not retire
-emulator end-to-end risk (S6) or cross-corpus generalization risk (S4).
+emulator end-to-end risk (S5 "Pick and Fit") or cross-corpus generalization risk (S4).
 
 When a named S3 fallback evaluator is used, bd-3k8o may close only as
 Pass-with-fallback-oracle / ProceedToS4-with-deferred-clause. That closure
@@ -84,9 +84,9 @@ Does not own:
   cross-corpus contamination report (S4)
   BoundedKv attention-oracle conformance (S5)
   LinearState multi-timescale A/B (S5)
-  RuntimeChromeBudget end-to-end real measurement (S6)
-  shadow compile + EncodedRom + emulator harness end-to-end (S6)
-  emulator-runs-at-least-one-token clause of v0 success (deferred to S6)
+  RuntimeChromeBudget end-to-end real measurement (S5 "Pick and Fit")
+  shadow compile + EncodedRom + emulator harness end-to-end (S5 "Pick and Fit")
+  emulator-runs-at-least-one-token clause of v0 success (deferred to S5 "Pick and Fit")
   MoE / router (S7)
   UpperBankCandidate production-scale runs on Gutenberg +
     StructuredWidthGates (S8)
@@ -246,7 +246,7 @@ D3 fixed train budget (S3 instance; PhaseBudget_S3 = PhaseBudget_S2)
    update; the artifact export contract (§7) consumes that snapshot.
 
    Phase E (HardenAndSelect) is replaced for S3 closure by §7 Bundle and
-   Artifact Export Contract; shadow compile is deferred to S6.
+   Artifact Export Contract; shadow compile is deferred to S5 (Pick and Fit).
 
    The deterministic batch/eval sampling rule, training objective, and
    gate scoring rule of F-S1 D3a are re-affirmed verbatim, with one
@@ -485,7 +485,7 @@ D13 bpc-per-character semantics
    This is the S3 reset-context bpc-per-character primitive. Both the
    model scorer and the 5-gram KN baseline scorer use this primitive.
 
-D14 v0_success workload defers emulator end-to-end to S6
+D14 v0_success workload defers emulator end-to-end to S5 (Pick and Fit)
    The eighth clause of the planv0 2026-05-06 amendment ("runs at
    least one token through the emulator harness end-to-end") is
    relaxed at S3 to:
@@ -494,8 +494,8 @@ D14 v0_success workload defers emulator end-to-end to S6
       pinned three-way agreement subset, and whose serialized bytes
       fit a conservative_chrome_budget_bytes estimate."
 
-   The emulator-runs-at-least-one-token clause is pinned to S6 (Slice
-   S6: Game Boy ROM build) and recorded in the ambiguity ledger as
+   The emulator-runs-at-least-one-token clause is pinned to S5 (Pick
+   and Fit: Game Boy ROM build) and recorded in the ambiguity ledger as
    A6.
 
 D15 RuntimeChromeBudget estimate is conservative and synthetic at S3
@@ -506,7 +506,7 @@ D15 RuntimeChromeBudget estimate is conservative and synthetic at S3
      Bank0Free  usable_bytes := bank0_free_default_bytes * 0.90
    The defaults are pinned in fixtures/runtime/chrome_budget.synthetic.toml.
    The real RuntimeChromeBudget produced by a UI/runtime shell build
-   is owned by S6.
+   is owned by S5 (Pick and Fit).
 ```
 
 ---
@@ -666,7 +666,7 @@ Verdict:
 
 Consequence of Refuted:
   Either export drift, oracle implementation drift, or
-  quantization-resolution drift. Block S6 and any future
+  quantization-resolution drift. Block S5 (Pick and Fit) and any future
   ROM-emitting bead per the planv0 2026-05-06 ordering rule.
 ```
 
@@ -750,7 +750,7 @@ Verdict:
 
 Consequence of Refuted:
   ArtifactOracle is silently using a brittle fallback path. Per D12
-  this is a closure-blocking implementation defect. Block S6.
+  this is a closure-blocking implementation defect. Block S5 (Pick and Fit).
 
 Note:
   H6 is a deliberate implementation-direction predicate; the
@@ -824,7 +824,7 @@ Verdict:
 
 Consequence of Refuted:
   F4 cannot close at S3. Open follow-up under F4 phase contract;
-  block S6.
+  block S5 (Pick and Fit).
 ```
 
 Hypothesis composition rules are formalized in §10 (Outcome algebra).
@@ -1765,8 +1765,8 @@ ExecutionMatrix_S3 :=
   {
     denotational:         true
     artifact:             true
-    schedule:             false   ; deferred to S6
-    harness:              false   ; deferred to S6 per D14
+    schedule:             false   ; deferred to S5 (Pick and Fit)
+    harness:              false   ; deferred to S5 (Pick and Fit) per D14
     hardware:             false   ; deferred to S8
   }
 
@@ -1781,8 +1781,8 @@ AcceptanceMatrix_S3 :=
       argmax_token_must_match: true
     })
     bundle_vs_artifact:       ReportOnly                     ; quantization gap
-    artifact_vs_schedule:     None                           ; deferred to S6
-    schedule_vs_runtime:      None                           ; deferred to S6
+    artifact_vs_schedule:     None                           ; deferred to S5 (Pick and Fit)
+    schedule_vs_runtime:      None                           ; deferred to S5 (Pick and Fit)
     performance:              None
     experience:               None
     recovery:                 None
@@ -2243,7 +2243,7 @@ Conservative chrome budget (D15):
       sum over RomBudgetSlot floor(0.90 * default_bytes)
 
   The 0.90 factor is applied exactly once.
-  Real RuntimeChromeBudget consumption is owned by S6.
+  Real RuntimeChromeBudget consumption is owned by S5 (Pick and Fit).
 
 Acceptance:
   overall_pass = ∀ s. per_seed[s].pass = true
@@ -3299,9 +3299,9 @@ Not proven:
   cross-corpus contamination (S4)
   BoundedKv attention-oracle conformance (S5)
   multi-timescale LinearState A/B (S5)
-  RuntimeChromeBudget end-to-end real measurement (S6)
-  emulator harness end-to-end (S6)
-  EncodedRom build (S6)
+  RuntimeChromeBudget end-to-end real measurement (S5 "Pick and Fit")
+  emulator harness end-to-end (S5 "Pick and Fit")
+  EncodedRom build (S5 "Pick and Fit")
   MoE benefit (S7)
   UpperBankCandidate production-scale generalization on Gutenberg (S8)
   StructuredWidthGates (S8)
@@ -3887,13 +3887,13 @@ scripts/s3_no_naming_resolution_check.sh
 |  A3 | bpc-per-byte vs bpc-per-character regression                                              | bpc-per-character at vocab=80 supersedes for S3+; S1 bpc-per-byte numbers are not directly comparable | Should we report both?                                              | Report bpc-per-character as the gate; S1's bpc-per-byte is recorded in cross-revision traceability only. The 0.05 margin in Q1 is per character.       |
 |  A4 | 5-gram KN discount D-rule on small per-order count-of-counts                              | No fallback. If any required n_1, n_2, or n_3 is zero for orders 2..5, abort baseline fit. | What if the corpus is too small to estimate discounts? | Abort with Fail-baseline. TinyStories train_post is expected to be large enough; if not, the baseline is not pre-registered well enough for S3. |
 |  A5 | "<\|endoftext\|>" handling under charset_v1                                                | Pipes are unmappable → <unk>; not a semantic token                         | Should we re-introduce <bos>/<eos> at story boundaries?                              | No at S3. Document boundary insertion is reserved for S4+ once corpus governance defines it. The <unk>-from-pipe is a known artifact, recorded in drop_log_summary. |
-|  A6 | v0_success eighth clause (emulator runs ≥1 token end-to-end)                              | Deferred to S6 per D14                                                     | Should S3 attempt a stub emulator run?                                               | No. Stub would be misleading. S3's gate is artifact + oracle agreement, not emulator. Recorded in s3_report.v1 as a pinned deferral.                  |
+|  A6 | v0_success eighth clause (emulator runs ≥1 token end-to-end)                              | Deferred to S5 (Pick and Fit) per D14                                      | Should S3 attempt a stub emulator run?                                               | No. Stub would be misleading. S3's gate is artifact + oracle agreement, not emulator. Recorded in s3_report.v1 as a pinned deferral.                  |
 |  A7 | Phase A vs Phase D oracle tolerance                                                       | Phase A: 4.0e-6 abs (fp32 elementwise); Phase D: bitwise under canonical reduction order | Why 4.0e-6 and not 1e-7 or 1e-5?                                          | 4.0e-6 [ESTIMATE] is approximately 32x f32 epsilon; tolerates one round of canonical reduction on Toy0's small vocabulary. Should be re-examined when real oracle ships; flag for P7. |
 |  A8 | Three-way agreement subset size                                                           | First three prompts (manifest order); ≥16 generated steps each              | Why three prompts and not all of v0_success?                                          | Three is enough to detect agreement-direction defects; all-eight runs are too slow under S1CpuDeterministic. Tightening to all eight is a follow-up.   |
 |  A9 | Bundle Phase D logits comparison                                                          | At Phase D the bundle stays the dense teacher (Phase A); train_vs_bundle uses Phase A tolerance | Should we also export a Phase D bundle?                                | No. The bundle's purpose is denotational truth, which is the dense teacher. Quantization gap (bundle vs artifact at Phase D) is reported in conformance, not gated. |
 | A10 | Tied embedding alias representation in safetensors                                        | One CanonicalTensor referenced twice via TiedEmbeddingAlias metadata        | Why not two tensors with byte-equal payloads?                                         | Byte-equal duplicate would silently double payload + classifier-bank cost. F6 falsification asserts the alias is preserved. See bd-3bf1.              |
-| A11 | Real oracle vs fallback oracle for closure                                                | Both permitted at S3; fallback usage explicit in s3_report.v1               | Should closure require real oracle?                                                   | No, per Rule OracleOwnerNaming and bd-c4wg's handoff comment. S3 may close with fallback if and only if the fallback satisfies §8 contract. Real-oracle requirement is a strict S6 prerequisite. |
-| A12 | conservative_chrome_budget_bytes derivation                                                | 90% of pinned synthetic defaults (D15)                                      | Why 0.90 not 0.50?                                                                    | 0.90 [ESTIMATE] is conservative-but-realistic — assumes the runtime shell takes ≤10% of each bank. Tighten when S6 produces real RuntimeChromeBudget. |
+| A11 | Real oracle vs fallback oracle for closure                                                | Both permitted at S3; fallback usage explicit in s3_report.v1               | Should closure require real oracle?                                                   | No, per Rule OracleOwnerNaming and bd-c4wg's handoff comment. S3 may close with fallback if and only if the fallback satisfies §8 contract. Real-oracle requirement is a strict S5 (Pick and Fit) prerequisite. |
+| A12 | conservative_chrome_budget_bytes derivation                                                | 90% of pinned synthetic defaults (D15)                                      | Why 0.90 not 0.50?                                                                    | 0.90 [ESTIMATE] is conservative-but-realistic — assumes the runtime shell takes ≤10% of each bank. Tighten when S5 (Pick and Fit) produces real RuntimeChromeBudget. |
 | A13 | Q5 expected_min_gen vs decode_max                                                         | expected_min_gen = 128 chars; decode budget max_chars = 256                 | What if model emits <eos> before 128?                                                 | Q5 fails for that prompt. Argmax + small Toy0 may produce premature <eos>; the gate is per-prompt strict by design.                                    |
 | A14 | Generation determinism for Argmax decode                                                   | Argmax is deterministic; rng_spec = NoRng                                   | Should we also pin a sampling decode for completeness?                                | Not at S3. TopKTemperature is reserved for later workloads (e.g. S5+).                                                                                |
 | A15 | reserved_id 76 forbidden in input                                                         | Reject + abort loader on encounter                                          | Should we map to <unk>?                                                                | No. Reject preserves the v1.1 forward-expansion contract. <unk> mapping would silently corrupt v1.1 streams in a future migration.                     |
@@ -3907,7 +3907,7 @@ scripts/s3_no_naming_resolution_check.sh
 | A23 | Real-oracle ReductionOrderPolicy default                                                  | Enforced at S3 (D7 / §3 ReferenceNumericProfile)                            | What if the real oracle ships with Advisory?                                          | Per planv0 §366..369, both are valid policies; at S3 we enforce. If gbf-oracle ships with Advisory by default, S3 overrides via ReferenceNumericProfile construction. Flag for P7.                       |
 | A24 | bpc_kn5_val sanity range [1.7, 2.6] [ESTIMATE]                                             | Range is sanity-only; H2 gate is the oracle equality, not the range         | What if real bpc_kn5 is outside [1.7, 2.6]?                                            | Report as a Surprise; H2 verdict is unaffected. The 5-gram KN on charset_v1 TinyStories has no published number; range is a cautious estimate.       |
 | A25 | unmappable_drop_rate predicted bound 0.005 [ESTIMATE]                                      | Sanity prediction; H1 hard gate is 0.02 (D1)                                 | What if real drop rate exceeds 0.005?                                                  | Surprise (P3 signal); not a Refutation unless > 0.02.                                                                                                  |
-| A26 | conservative_chrome_budget_bytes synthetic table at S3                                    | Pinned in fixtures/runtime/chrome_budget.synthetic.toml                     | Why not derive from gbf-hw at S3?                                                      | gbf-hw integration is S6 territory. The synthetic budget is conservative (0.90 of small ExpertBank default) so a Toy0 artifact safely fits.            |
+| A26 | conservative_chrome_budget_bytes synthetic table at S3                                    | Pinned in fixtures/runtime/chrome_budget.synthetic.toml                     | Why not derive from gbf-hw at S3?                                                      | gbf-hw integration is S5 (Pick and Fit) territory. The synthetic budget is conservative (0.90 of small ExpertBank default) so a Toy0 artifact safely fits.            |
 | A27 | What if all five seeds' bundle_self_hash are *identical*?                                  | Suspicious; O-10 asserts at least two seeds differ                          | Could mean ExportVisitor is seed-independent.                                          | Add explicit O-10 assertion; investigate ExportVisitor RNG dependence if it fires. The dense teacher's parameters are seed-dependent so bundles must differ.                                              |
 | A28 | gbf-train ExportVisitor identity bump policy                                              | Pinned by export_visitor_hash (D11); bumping invalidates s3_bundle.v1 + s3_artifact.v1 | What if a trivial whitespace fix is rolled into ExportVisitor?    | Bump pass_version + export_visitor_hash; re-run S3. The closure script verifies export_visitor_hash matches the report's pin.                          |
 
@@ -4001,7 +4001,7 @@ F-S3 v0_success on TinyStories is correct when:
     + reference bundle export) for the v0_success workload only. It
     does not claim cross-corpus generalization (S4), attention-oracle
     conformance or multi-timescale state (S5), emulator end-to-end or
-    EncodedRom (S6), MoE benefit (S7), or UpperBankCandidate production-
+    EncodedRom (S5 "Pick and Fit"), MoE benefit (S7), or UpperBankCandidate production-
     scale generalization on Gutenberg (S8) — those are later slices'
     proof obligations.
 ```

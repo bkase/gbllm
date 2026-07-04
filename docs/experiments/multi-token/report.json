@@ -1,0 +1,141 @@
+{
+  "schema": "multi_token_generation.v1",
+  "bead": "bd-2gc6p",
+  "git_sha": "a8b152616fd8efc01478e6bb6f1f1df073b2bb81",
+  "checkpoint": {
+    "export_dir": "experiments/S6/checkpoint-export",
+    "manifest_schema": "f_s6_dense_checkpoint_export.v1",
+    "manifest_sha256": "acefecbe5c22c22d54dcea03315d83f7571744686647cdf12691162b1fa4d14d",
+    "trainer_git_sha": "71f3f68b65c13d8ec63e1619151c33db5be820b6",
+    "tensors_verified_sha256": 17
+  },
+  "rom": {
+    "rom_bytes": 1048576,
+    "bank_count": 34,
+    "driver_bytes": 8215,
+    "weight_code_bytes": 413125,
+    "weight_chunk_count": 30,
+    "table_bytes": 49152,
+    "token_start_pc": 347,
+    "token_boundary_pc": 811,
+    "token_end_pc": 819,
+    "n_tokens": 256
+  },
+  "seeds": [
+    10,
+    32,
+    84,
+    101
+  ],
+  "all_sequences_match": true,
+  "all_health_checks_pass": true,
+  "mean_m_cycles_per_token": 2731307,
+  "seconds_per_token_dmg": 2.6047773361206055,
+  "runs": [
+    {
+      "seed": 10,
+      "n_tokens": 256,
+      "host_sequence_sha256": "98a78051865776937de080caa6bedab036b4578b26a5ced17a6277e0749f4d9f",
+      "rom_sequence_sha256": "98a78051865776937de080caa6bedab036b4578b26a5ced17a6277e0749f4d9f",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2729311,
+        "median": 2729315,
+        "max": 2729315,
+        "mean": 2729314,
+        "max_over_min": 1.0000014655713474,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x0A.txt"
+    },
+    {
+      "seed": 32,
+      "n_tokens": 256,
+      "host_sequence_sha256": "c9754a2d34d9409b765a7012ecc9a8940690e1b98993952ce1902f9e411f710e",
+      "rom_sequence_sha256": "c9754a2d34d9409b765a7012ecc9a8940690e1b98993952ce1902f9e411f710e",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2730552,
+        "median": 2731716,
+        "max": 2733644,
+        "mean": 2731977,
+        "max_over_min": 1.0011323717695177,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x20.txt"
+    },
+    {
+      "seed": 84,
+      "n_tokens": 256,
+      "host_sequence_sha256": "9eb8a547601068691a4784435efe9e5f2dea3d95edd15e54096bc98a96d5ebc5",
+      "rom_sequence_sha256": "9eb8a547601068691a4784435efe9e5f2dea3d95edd15e54096bc98a96d5ebc5",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2730039,
+        "median": 2731716,
+        "max": 2733644,
+        "mean": 2731968,
+        "max_over_min": 1.0013204939563134,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x54.txt"
+    },
+    {
+      "seed": 101,
+      "n_tokens": 256,
+      "host_sequence_sha256": "17212acb9cd5cd31c4a362f41b90d2d9e6b83e58cba2eecc50e4a88125c543a4",
+      "rom_sequence_sha256": "17212acb9cd5cd31c4a362f41b90d2d9e6b83e58cba2eecc50e4a88125c543a4",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2730552,
+        "median": 2731716,
+        "max": 2733644,
+        "mean": 2731972,
+        "max_over_min": 1.0011323717695177,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x65.txt"
+    }
+  ],
+  "caveats": [
+    "Bigram-context model: each step depends only on the previous byte, so deterministic argmax generation enters a repeating cycle as soon as any byte recurs; the sample text is expected to be babble with local structure, not coherent prose. All 4 blocks still execute in full every token.",
+    "The host observes the run through passive PC traps at the per-token boundary; the generation loop (forward pass, argmax, ring write, feedback) executes entirely in ROM code on the emulated CPU with no host pokes after the seed.",
+    "Token 0's cycle count is measured from the loop head and later tokens from boundary to boundary, so token 0 excludes one loop-back jump (4 M-cycles); this is far below the 5% stability threshold."
+  ]
+}
