@@ -320,7 +320,7 @@ pub fn f32_forward(ck: &DenseBigramCheckpoint, prev: u8) -> [f32; VOCAB] {
 // ---------------------------------------------------------------------------
 
 /// Round-half-even f64 -> integer used for lowering-time table construction.
-fn rte_i64(v: f64) -> i64 {
+pub(crate) fn rte_i64(v: f64) -> i64 {
     v.round_ties_even() as i64
 }
 
@@ -342,6 +342,23 @@ pub fn isqrt_u32(n: u32) -> u16 {
     u16::try_from(root).expect("isqrt of u32 fits u16")
 }
 
+/// GELU LUT on the activation grid: index `p + 127` for `p in [-127, 127]`;
+/// entries are the activation-quantized GELU output stored as `u8` at zero
+/// point 128. Shared between the dense and stateful lowerings.
+#[must_use]
+pub(crate) fn build_gelu_lut() -> [u8; 255] {
+    let mut gelu_lut = [0u8; 255];
+    for (idx, entry) in gelu_lut.iter_mut().enumerate() {
+        let p = idx as i64 - i64::from(QMAX);
+        let x = p as f64 * f64::from(ACT_RANGE) / f64::from(QMAX);
+        let g = gelu_approx_f64(x).clamp(-f64::from(ACT_RANGE), f64::from(ACT_RANGE));
+        let q = rte_i64(g * f64::from(QMAX) / f64::from(ACT_RANGE))
+            .clamp(-i64::from(QMAX), i64::from(QMAX));
+        *entry = (q + 128) as u8;
+    }
+    gelu_lut
+}
+
 /// One lowered ternary layer plus its accumulator seeds.
 #[derive(Debug, Clone)]
 pub struct LoweredLayer {
@@ -351,7 +368,7 @@ pub struct LoweredLayer {
 }
 
 impl LoweredLayer {
-    fn new(layer: &TernaryLayer) -> Self {
+    pub(crate) fn new(layer: &TernaryLayer) -> Self {
         let biases = (0..layer.rows())
             .map(|row| layer.row_zero_point_bias(row))
             .collect();
@@ -438,15 +455,7 @@ impl IntLoweredModel {
         }
 
         // GELU LUT on the activation grid.
-        let mut gelu_lut = [0u8; 255];
-        for (idx, entry) in gelu_lut.iter_mut().enumerate() {
-            let p = idx as i64 - i64::from(QMAX);
-            let x = p as f64 * f64::from(ACT_RANGE) / f64::from(QMAX);
-            let g = gelu_approx_f64(x).clamp(-f64::from(ACT_RANGE), f64::from(ACT_RANGE));
-            let q = rte_i64(g * f64::from(QMAX) / f64::from(ACT_RANGE))
-                .clamp(-i64::from(QMAX), i64::from(QMAX));
-            *entry = (q + 128) as u8;
-        }
+        let gelu_lut = build_gelu_lut();
 
         // Down-epilogue u32 bound: |m| * 2 + 127 < 2^32 with
         // |m| <= 65535 * 16256 (structural scale/acc bounds), i.e.
@@ -629,7 +638,7 @@ pub fn int_norm_quant(x: &[i16; D_MODEL], stats: &mut IntForwardStats) -> [i16; 
 /// Ternary matvec with u8 zero-point-128 activations and i16 accumulators
 /// seeded with the per-row zero-point bias. Asserts the (structural) i16
 /// bound on the true accumulator value.
-fn int_matvec(
+pub(crate) fn int_matvec(
     layer: &TernaryLayer,
     biases: &[i16],
     act: &[u8],
@@ -654,7 +663,7 @@ fn int_matvec(
 
 /// Up epilogue: requantize `scale_raw * acc` onto the activation grid.
 /// `p = sign(m) * min(127, (|m| + 128) >> 8)` where `m = scale_raw * acc`.
-fn int_scale_to_grid(acc: i16, scale_raw: u16, stats: &mut IntForwardStats) -> i32 {
+pub(crate) fn int_scale_to_grid(acc: i16, scale_raw: u16, stats: &mut IntForwardStats) -> i32 {
     let m = i64::from(scale_raw) * i64::from(acc);
     stats.max_abs_scale_product = stats.max_abs_scale_product.max(m.unsigned_abs());
     debug_assert!(m.unsigned_abs() < 1 << 31, "u32 scale product bound");
@@ -665,7 +674,7 @@ fn int_scale_to_grid(acc: i16, scale_raw: u16, stats: &mut IntForwardStats) -> i
 /// Down epilogue: Q11.5 residual delta
 /// `sign(m) * min(65535, (|m|*2 + 127) div 254)` with `m = scale_raw * acc`
 /// (round-half-away of `m * 8 * 32 / (127 * 256) = m / 127`).
-fn int_down_delta(acc: i16, scale_raw: u16, stats: &mut IntForwardStats) -> i32 {
+pub(crate) fn int_down_delta(acc: i16, scale_raw: u16, stats: &mut IntForwardStats) -> i32 {
     let m = i64::from(scale_raw) * i64::from(acc);
     stats.max_abs_scale_product = stats.max_abs_scale_product.max(m.unsigned_abs());
     let num = m.unsigned_abs() * 2 + 127;

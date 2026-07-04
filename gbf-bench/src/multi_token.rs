@@ -114,7 +114,7 @@ pub struct CycleStats {
 }
 
 impl CycleStats {
-    fn from_samples(samples: &[u64]) -> Self {
+    pub(crate) fn from_samples(samples: &[u64]) -> Self {
         assert!(!samples.is_empty(), "cycle stats need at least one token");
         let mut sorted = samples.to_vec();
         sorted.sort_unstable();

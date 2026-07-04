@@ -84,37 +84,37 @@ pub const DUMP_DOWNACC0: u16 = 0xCF00;
 pub const MODEL_STACK_TOP: u16 = 0xDFF0;
 
 // scratch (0xC28x..0xC2Dx, single page so pointer walks never carry)
-const SPSAVE: u16 = 0xC280;
-const MUL_R: u16 = 0xC284; // u32
-const NORM_SS: u16 = 0xC288; // 5 bytes
-const NORM_R: u16 = 0xC290; // u16
-const NORM_D: u16 = 0xC294; // u32 (8r)
-const NORM_D2: u16 = 0xC298; // u32 (16r)
-const DIV_NUM: u16 = 0xC29C; // u32
-const DIV_T1: u16 = 0xC2A0; // u32
-const DIV_T2: u16 = 0xC2A4; // u32
+pub(crate) const SPSAVE: u16 = 0xC280;
+pub(crate) const MUL_R: u16 = 0xC284; // u32
+pub(crate) const NORM_SS: u16 = 0xC288; // 5 bytes
+pub(crate) const NORM_R: u16 = 0xC290; // u16
+pub(crate) const NORM_D: u16 = 0xC294; // u32 (8r)
+pub(crate) const NORM_D2: u16 = 0xC298; // u32 (16r)
+pub(crate) const DIV_NUM: u16 = 0xC29C; // u32
+pub(crate) const DIV_T1: u16 = 0xC2A0; // u32
+pub(crate) const DIV_T2: u16 = 0xC2A4; // u32
 const ISQ_REM: u16 = 0xC2A8; // u32
 const ISQ_T1: u16 = 0xC2AC; // u32
 const ISQ_ROOT: u16 = 0xC2B0; // u32
 const ISQ_IN: u16 = 0xC2B4; // u32 (input)
-const LANE: u16 = 0xC2C0;
-const ROWCNT: u16 = 0xC2C1;
-const SIGN: u16 = 0xC2C2;
-const PTR: u16 = 0xC2C4;
-const APTR: u16 = 0xC2C6;
-const OPTR: u16 = 0xC2C8;
-const IPTR: u16 = 0xC2CA;
-const SPTR: u16 = 0xC2CC;
-const XPTR: u16 = 0xC2CE;
-const ARG_BEST: u16 = 0xC2D0; // 3 bytes (hi byte sign-flipped)
-const ARG_CAND: u16 = 0xC2D4; // 3 bytes
+pub(crate) const LANE: u16 = 0xC2C0;
+pub(crate) const ROWCNT: u16 = 0xC2C1;
+pub(crate) const SIGN: u16 = 0xC2C2;
+pub(crate) const PTR: u16 = 0xC2C4;
+pub(crate) const APTR: u16 = 0xC2C6;
+pub(crate) const OPTR: u16 = 0xC2C8;
+pub(crate) const IPTR: u16 = 0xC2CA;
+pub(crate) const SPTR: u16 = 0xC2CC;
+pub(crate) const XPTR: u16 = 0xC2CE;
+pub(crate) const ARG_BEST: u16 = 0xC2D0; // 3 bytes (hi byte sign-flipped)
+pub(crate) const ARG_CAND: u16 = 0xC2D4; // 3 bytes
 
 /// MBC5 low ROM bank register.
-const MBC5_ROMB0: u16 = 0x2000;
+pub(crate) const MBC5_ROMB0: u16 = 0x2000;
 /// Banked chunk entry point (all switchable-bank code starts here).
-const CHUNK_ENTRY: u16 = 0x4000;
+pub(crate) const CHUNK_ENTRY: u16 = 0x4000;
 /// Per-bank code budget for weight chunks.
-const BANK_BYTES: usize = 0x4000;
+pub(crate) const BANK_BYTES: usize = 0x4000;
 
 const DRIVER_SECTION_ID: u32 = 0xB59A_0000;
 
@@ -224,7 +224,7 @@ impl From<RomAssemblyError> for ModelRomError {
 // small two-pass assembler with call/label-immediate support
 // ---------------------------------------------------------------------------
 
-enum ModelOp {
+pub(crate) enum ModelOp {
     Instr(Instr),
     Label(String),
     Jp {
@@ -247,14 +247,14 @@ enum ModelOp {
     Bytes(Vec<u8>),
 }
 
-struct ModelAsm {
+pub(crate) struct ModelAsm {
     start: u16,
     ops: Vec<ModelOp>,
     unique: u32,
 }
 
 impl ModelAsm {
-    fn new(start: u16) -> Self {
+    pub(crate) fn new(start: u16) -> Self {
         Self {
             start,
             ops: Vec::new(),
@@ -262,40 +262,40 @@ impl ModelAsm {
         }
     }
 
-    fn i(&mut self, instr: Instr) {
+    pub(crate) fn i(&mut self, instr: Instr) {
         self.ops.push(ModelOp::Instr(instr));
     }
 
-    fn label(&mut self, name: &str) {
+    pub(crate) fn label(&mut self, name: &str) {
         self.ops.push(ModelOp::Label(name.to_owned()));
     }
 
-    fn fresh(&mut self, prefix: &str) -> String {
+    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
         self.unique += 1;
         format!("{prefix}_{}", self.unique)
     }
 
-    fn jp(&mut self, cond: Option<Cond>, label: &str) {
+    pub(crate) fn jp(&mut self, cond: Option<Cond>, label: &str) {
         self.ops.push(ModelOp::Jp {
             cond,
             label: label.to_owned(),
         });
     }
 
-    fn jr(&mut self, cond: Option<Cond>, label: &str) {
+    pub(crate) fn jr(&mut self, cond: Option<Cond>, label: &str) {
         self.ops.push(ModelOp::Jr {
             cond,
             label: label.to_owned(),
         });
     }
 
-    fn call(&mut self, label: &str) {
+    pub(crate) fn call(&mut self, label: &str) {
         self.ops.push(ModelOp::CallLabel {
             label: label.to_owned(),
         });
     }
 
-    fn ld16_label(&mut self, dst: Reg16Data, label: &str, off: i32) {
+    pub(crate) fn ld16_label(&mut self, dst: Reg16Data, label: &str, off: i32) {
         self.ops.push(ModelOp::Ld16Label {
             dst,
             label: label.to_owned(),
@@ -303,7 +303,7 @@ impl ModelAsm {
         });
     }
 
-    fn bytes(&mut self, bytes: Vec<u8>) {
+    pub(crate) fn bytes(&mut self, bytes: Vec<u8>) {
         self.ops.push(ModelOp::Bytes(bytes));
     }
 
@@ -317,7 +317,7 @@ impl ModelAsm {
         }
     }
 
-    fn finish(self) -> Result<(Vec<u8>, BTreeMap<String, u16>), ModelRomError> {
+    pub(crate) fn finish(self) -> Result<(Vec<u8>, BTreeMap<String, u16>), ModelRomError> {
         let mut labels = BTreeMap::new();
         let mut pc = self.start;
         for op in &self.ops {
@@ -387,32 +387,32 @@ impl ModelAsm {
 // tiny emit helpers
 // ---------------------------------------------------------------------------
 
-fn direct(addr: u16) -> DirectAddr {
+pub(crate) fn direct(addr: u16) -> DirectAddr {
     DirectAddr::new(addr).expect("one-token WRAM/MBC addresses stay below high memory")
 }
 
-fn a_from(asm: &mut ModelAsm, addr: u16) {
+pub(crate) fn a_from(asm: &mut ModelAsm, addr: u16) {
     asm.i(Instr::LdAFromDirect { addr: direct(addr) });
 }
 
-fn a_to(asm: &mut ModelAsm, addr: u16) {
+pub(crate) fn a_to(asm: &mut ModelAsm, addr: u16) {
     asm.i(Instr::LdDirectFromA { addr: direct(addr) });
 }
 
-fn ld_r_imm(asm: &mut ModelAsm, dst: Reg8, imm: u8) {
+pub(crate) fn ld_r_imm(asm: &mut ModelAsm, dst: Reg8, imm: u8) {
     asm.i(Instr::Ld8RegFromImm { dst, imm });
 }
 
-fn ld16(asm: &mut ModelAsm, dst: Reg16Data, imm: u16) {
+pub(crate) fn ld16(asm: &mut ModelAsm, dst: Reg16Data, imm: u16) {
     asm.i(Instr::Ld16Imm { dst, imm });
 }
 
-fn ld_rr(asm: &mut ModelAsm, dst: Reg8, src: Reg8) {
+pub(crate) fn ld_rr(asm: &mut ModelAsm, dst: Reg8, src: Reg8) {
     asm.i(Instr::Ld8Reg { dst, src });
 }
 
 /// `dst32(addr, n bytes) = 0`
-fn zero_mem(asm: &mut ModelAsm, addr: u16, n: u16) {
+pub(crate) fn zero_mem(asm: &mut ModelAsm, addr: u16, n: u16) {
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -422,7 +422,7 @@ fn zero_mem(asm: &mut ModelAsm, addr: u16, n: u16) {
 }
 
 /// Byte-wise `dst += src` over `n` bytes (both fixed addresses); uses A and B.
-fn mem_add(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
+pub(crate) fn mem_add(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
     for k in 0..n {
         a_from(asm, src + k);
         ld_rr(asm, Reg8::B, Reg8::A);
@@ -441,7 +441,7 @@ fn mem_add(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
 }
 
 /// Byte-wise copy of `n` bytes between fixed addresses; uses A.
-fn mem_copy(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
+pub(crate) fn mem_copy(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
     for k in 0..n {
         a_from(asm, src + k);
         a_to(asm, dst + k);
@@ -449,7 +449,7 @@ fn mem_copy(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
 }
 
 /// `dst = src0 - src1` over `n` bytes into `dst`; leaves borrow in carry.
-fn mem_sub_into(asm: &mut ModelAsm, dst: u16, src0: u16, src1: u16, n: u16) {
+pub(crate) fn mem_sub_into(asm: &mut ModelAsm, dst: u16, src0: u16, src1: u16, n: u16) {
     for k in 0..n {
         a_from(asm, src1 + k);
         ld_rr(asm, Reg8::B, Reg8::A);
@@ -469,7 +469,7 @@ fn mem_sub_into(asm: &mut ModelAsm, dst: u16, src0: u16, src1: u16, n: u16) {
 
 /// Logical shift right by one over `n` bytes at `addr` (little-endian),
 /// walking with HL. All scratch lives in one page, so `dec l` is safe.
-fn mem_shr1(asm: &mut ModelAsm, addr: u16, n: u16) {
+pub(crate) fn mem_shr1(asm: &mut ModelAsm, addr: u16, n: u16) {
     ld16(asm, Reg16Data::HL, addr + n - 1);
     asm.i(Instr::Srl {
         target: CbTarget::HlIndirect,
@@ -485,7 +485,7 @@ fn mem_shr1(asm: &mut ModelAsm, addr: u16, n: u16) {
 }
 
 /// Shift left by one over `n` bytes at `addr` (little-endian).
-fn mem_shl1(asm: &mut ModelAsm, addr: u16, n: u16) {
+pub(crate) fn mem_shl1(asm: &mut ModelAsm, addr: u16, n: u16) {
     ld16(asm, Reg16Data::HL, addr);
     asm.i(Instr::Sla {
         target: CbTarget::HlIndirect,
@@ -501,7 +501,7 @@ fn mem_shl1(asm: &mut ModelAsm, addr: u16, n: u16) {
 }
 
 /// Load a 16-bit LE value into DE via a pointer variable, advancing it by 2.
-fn load_de_via_ptr(asm: &mut ModelAsm, ptr: u16) {
+pub(crate) fn load_de_via_ptr(asm: &mut ModelAsm, ptr: u16) {
     a_from(asm, ptr);
     ld_rr(asm, Reg8::L, Reg8::A);
     a_from(asm, ptr + 1);
@@ -521,7 +521,7 @@ fn load_de_via_ptr(asm: &mut ModelAsm, ptr: u16) {
 }
 
 /// DE = -DE (two's complement).
-fn negate_de(asm: &mut ModelAsm) {
+pub(crate) fn negate_de(asm: &mut ModelAsm) {
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -537,7 +537,7 @@ fn negate_de(asm: &mut ModelAsm) {
 }
 
 /// SIGN = (DE < 0) as 0/1 and DE = |DE| (used on i16 accumulators).
-fn abs_de_store_sign(asm: &mut ModelAsm) {
+pub(crate) fn abs_de_store_sign(asm: &mut ModelAsm) {
     let pos = asm.fresh("absde");
     ld_r_imm(asm, Reg8::A, 0);
     a_to(asm, SIGN);
@@ -557,7 +557,7 @@ fn abs_de_store_sign(asm: &mut ModelAsm) {
 // ---------------------------------------------------------------------------
 
 /// `mul16x8`: A (multiplier) x DE (multiplicand) -> C:HL (24-bit).
-fn emit_mul16x8(asm: &mut ModelAsm) {
+pub(crate) fn emit_mul16x8(asm: &mut ModelAsm) {
     asm.label("mul16x8");
     ld16(asm, Reg16Data::HL, 0);
     ld_r_imm(asm, Reg8::C, 0);
@@ -580,7 +580,7 @@ fn emit_mul16x8(asm: &mut ModelAsm) {
 }
 
 /// `mul16`: BC x DE -> MUL_R (u32 LE). Preserves DE; clobbers A, BC, HL.
-fn emit_mul16(asm: &mut ModelAsm) {
+pub(crate) fn emit_mul16(asm: &mut ModelAsm) {
     asm.label("mul16");
     asm.i(Instr::Push {
         src: Reg16Stack::BC,
@@ -710,7 +710,7 @@ fn emit_udiv_norm(asm: &mut ModelAsm) {
 }
 
 /// `udiv254`: DIV_NUM (u32) / 254 -> DE = min(q, 65535).
-fn emit_udiv254(asm: &mut ModelAsm) {
+pub(crate) fn emit_udiv254(asm: &mut ModelAsm) {
     asm.label("udiv254");
     a_from(asm, DIV_NUM + 3);
     asm.i(Instr::OrA {
@@ -941,7 +941,7 @@ fn emit_norm_quant(asm: &mut ModelAsm) {
 
 /// `up_epilogue`: A = row count, DE = scale-table pointer. For each row:
 /// ACT[row] = GELU_LUT[127 + clamp(round_half_away(scale*acc / 256), -127, 127)].
-fn emit_up_epilogue(asm: &mut ModelAsm) {
+pub(crate) fn emit_up_epilogue(asm: &mut ModelAsm) {
     asm.label("up_epilogue");
     a_to(asm, ROWCNT);
     ld_rr(asm, Reg8::A, Reg8::E);
@@ -1383,7 +1383,7 @@ fn emit_argmax(asm: &mut ModelAsm) {
 }
 
 /// `copy_bytes`: HL = src, DE = dst, B = count (0 means 256).
-fn emit_copy_bytes(asm: &mut ModelAsm) {
+pub(crate) fn emit_copy_bytes(asm: &mut ModelAsm) {
     asm.label("copy_bytes");
     asm.i(Instr::LdAFromReg16Addr {
         src: Reg16Addr::Hli,
@@ -1587,7 +1587,7 @@ fn chunk_epilogue() -> Result<Vec<u8>, ModelRomError> {
 
 /// Pack one matvec's rows into as few bank chunks as fit; returns the chunk
 /// byte bodies (each a complete callable program at `CHUNK_ENTRY`).
-fn build_matvec_chunks(layer: &LoweredLayer) -> Result<Vec<Vec<u8>>, ModelRomError> {
+pub(crate) fn build_matvec_chunks(layer: &LoweredLayer) -> Result<Vec<Vec<u8>>, ModelRomError> {
     let prologue = chunk_prologue()?;
     let epilogue = chunk_epilogue()?;
     let overhead = prologue.len() + epilogue.len();
@@ -1944,14 +1944,14 @@ fn build_model_rom(
 }
 
 /// `HL=src, DE=dst, B=count` copy call (count 0 = 256 bytes).
-fn emit_copy_call(asm: &mut ModelAsm, src: u16, dst: u16, count: u8) {
+pub(crate) fn emit_copy_call(asm: &mut ModelAsm, src: u16, dst: u16, count: u8) {
     ld16(asm, Reg16Data::HL, src);
     ld16(asm, Reg16Data::DE, dst);
     ld_r_imm(asm, Reg8::B, count);
     asm.call("copy_bytes");
 }
 
-fn smallest_rom_size(bank_count: usize) -> Result<RomSize, ModelRomError> {
+pub(crate) fn smallest_rom_size(bank_count: usize) -> Result<RomSize, ModelRomError> {
     for size in [
         RomSize::Kib32,
         RomSize::Kib64,

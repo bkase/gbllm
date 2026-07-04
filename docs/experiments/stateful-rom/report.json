@@ -1,0 +1,376 @@
+{
+  "schema": "stateful_rom_bringup.v1",
+  "bead": "bd-x5l2s",
+  "upstream_beads": [
+    "bd-29ai4",
+    "bd-59qiq",
+    "bd-2gc6p"
+  ],
+  "git_sha": "4d9944810750dce9b1407d67bac564d58a861221",
+  "checkpoint": {
+    "export_dir": "experiments/S5/state-ab/checkpoint-export",
+    "manifest_schema": "f_s5_state_checkpoint_export.v1",
+    "manifest_sha256": "15661ac2cf6f295c9c36a8878a8d3423052af226f2829ad33f3c44935348a351",
+    "trainer_git_sha": "5669f79e6b22a893d0670971cbf673eceb4b6628",
+    "tensors_verified_sha256": 22
+  },
+  "int_semantics_divergences": [
+    "Residual stream is i24 Q19.5 (resolution 1/32, range +/-262143.97) with mod-2^24 wrapping adds (trainer: f32). i24 replaces the dense bring-up's i16 Q11.5 because this checkpoint's residual measurably reaches |x| ~ 2,600 real (8.4e4 raw at 1/32), which no 16-bit split of range/resolution can hold without wrapping (measured: Q13.3 and Q12.4 both wrap tens of thousands of times over 120k val positions). Embedding rows are quantized to Q19.5 at lowering time (round-half-even).",
+    "State slots are saturating-i24 integers in units of (ACT_RANGE/QMAX)/256 real, so the in-projection delta m = scale_raw * acc accumulates exactly; the trainer carries f32 state. Saturation at +/-(2^23 - 1) is canonical and counted (measured max |h| ~ 1.8e5, 45x inside the bound).",
+    "The per-token decay multiply is sign(h) * ((|h| * decay_raw + 128) >> 8) (round-half-away on the Q8.8 product); the trainer multiplies f32 state by decay_raw/256 exactly. Rounding error is at most 0.5 state units (~1.2e-4 real) per slot per token; adding 8 fractional state bits was measured to change val bpc by < 1e-4, so the narrower exact-delta format is pinned.",
+    "The state out-projection epilogue quantizes y = clamp(round_half_away(scale_raw * acc2 / 65536), -127, 127) onto the activation grid via integer multiply (trainer: f32 matvec then Int8 fake-quant with round-ties-even). acc2 is the i32 dot product of ternary out-projection rows with the i24 state (measured max |acc2| ~ 1.6e6, structural bound 2^29).",
+    "The state residual add applies y through a 255-entry i16 LUT y_resid[p] = round_ties_even(p * 256 / 127) on the Q19.5 grid (trainer adds the unquantized f32 fake-quant output).",
+    "RMS norm: integer sum of squares over 64 i24 lanes (u64 accumulator, 7 bytes on device), mean = floor(sum/64), epsilon = +1 raw mean unit, rms = floor(isqrt48(mean+1)); norm output and Int8 activation fake-quant collapse into one rounded division q = clamp(round_half_away(|x|*127 / (8*rms)), 0, 127) * sign(x) (trainer: f32 divide, clamp to +/-8, round-ties-even quantization).",
+    "GELU is a 255-entry LUT indexed by the pre-activation value quantized to the same [-8,8]/127 grid (round-half-away on the Q8.8 scale product); the trainer applies tanh-approximate GELU to the unquantized f32 matvec output before fake-quant.",
+    "Up/down epilogues apply the Q8.8 row scale as an integer multiply with round-half-away rounding (round-ties-even in the trainer's f32 path).",
+    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * min(65535, round_half_away(|m| / 127)) before the residual add (identical formula to the dense Q11.5 epilogue because the fractional bits are unchanged); the trainer adds unquantized f32 deltas. The 65535 clamp is canonical and counted.",
+    "The final norm output is activation-quantized to the [-8,8]/127 grid before the tied head; tied-head weights are the embedding quantized per-tensor to i8 (scale = max|emb|/127, round-ties-even); logits are integer dot products in i32 (i24 on device).",
+    "Integer rounding is round-half-away-from-zero throughout the runtime path; the trainer/Burn rounds ties to even. Because the recurrence carries state across tokens, per-token rounding differences accumulate: fidelity (bpc delta, argmax agreement) is therefore measured over long sequential streams, not per-context."
+  ],
+  "fidelity": {
+    "val_chars_total": 1042415,
+    "val_norm_tokens_sha256": "d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "val_sha_matches_s5_report": true,
+    "eval_lanes": 8,
+    "eval_positions": 1042400,
+    "f32_port_val_bpc": 3.1994203607379137,
+    "committed_arm_b_val_bpc": 3.1994192302929005,
+    "f32_port_delta_vs_committed": 1.1304450131532917e-6,
+    "f32_port_reproduces_committed_within_1e3": true,
+    "int_val_bpc": 3.2991432622757535,
+    "argmax_agreement": 0.7393476592478895,
+    "int_stats": {
+      "max_abs_matvec_acc": 3909,
+      "max_abs_in_acc": 676,
+      "max_abs_state_delta": 132756,
+      "max_abs_state": 198698,
+      "state_clamp_events": 0,
+      "max_abs_out_acc": 1655822,
+      "max_abs_out_scale_product": 196103945,
+      "y_saturation_events": 28150691,
+      "max_abs_scale_product": 7875792,
+      "max_abs_down_delta": 62014,
+      "down_delta_clamp_events": 0,
+      "max_abs_residual": 83896,
+      "residual_i24_wrap_events": 0,
+      "max_abs_logit": 3348,
+      "max_norm_sumsq": 7083778527,
+      "min_norm_rms_raw": 29,
+      "matvec_acc_fits_i16": true,
+      "state_fits_i24": true,
+      "out_acc_fits_i32": true,
+      "residual_fits_i24": true,
+      "logits_fit_i24": true
+    }
+  },
+  "one_token_gate": {
+    "rom": {
+      "rom_bytes": 1048576,
+      "bank_count": 38,
+      "driver_bytes": 13515,
+      "weight_code_bytes": 461974,
+      "weight_chunk_count": 34,
+      "table_bytes": 35840,
+      "token_start_pc": 340,
+      "token_end_pc": 853
+    },
+    "cases": 16,
+    "all_byte_exact": true,
+    "runs": [
+      {
+        "input_id": 75,
+        "state_from_position": 0,
+        "state_is_zero": true,
+        "host_argmax": 73,
+        "rom_argmax": 73,
+        "byte_exact": true,
+        "m_cycles": 3530238,
+        "mismatches": []
+      },
+      {
+        "input_id": 75,
+        "state_from_position": 1,
+        "state_is_zero": false,
+        "host_argmax": 73,
+        "rom_argmax": 73,
+        "byte_exact": true,
+        "m_cycles": 3531405,
+        "mismatches": []
+      },
+      {
+        "input_id": 43,
+        "state_from_position": 3,
+        "state_is_zero": false,
+        "host_argmax": 30,
+        "rom_argmax": 30,
+        "byte_exact": true,
+        "m_cycles": 3532885,
+        "mismatches": []
+      },
+      {
+        "input_id": 28,
+        "state_from_position": 7,
+        "state_is_zero": false,
+        "host_argmax": 30,
+        "rom_argmax": 30,
+        "byte_exact": true,
+        "m_cycles": 3535685,
+        "mismatches": []
+      },
+      {
+        "input_id": 43,
+        "state_from_position": 15,
+        "state_is_zero": false,
+        "host_argmax": 40,
+        "rom_argmax": 40,
+        "byte_exact": true,
+        "m_cycles": 3531027,
+        "mismatches": []
+      },
+      {
+        "input_id": 33,
+        "state_from_position": 31,
+        "state_is_zero": false,
+        "host_argmax": 50,
+        "rom_argmax": 50,
+        "byte_exact": true,
+        "m_cycles": 3534020,
+        "mismatches": []
+      },
+      {
+        "input_id": 29,
+        "state_from_position": 63,
+        "state_is_zero": false,
+        "host_argmax": 30,
+        "rom_argmax": 30,
+        "byte_exact": true,
+        "m_cycles": 3532774,
+        "mismatches": []
+      },
+      {
+        "input_id": 18,
+        "state_from_position": 127,
+        "state_is_zero": false,
+        "host_argmax": 37,
+        "rom_argmax": 37,
+        "byte_exact": true,
+        "m_cycles": 3533194,
+        "mismatches": []
+      },
+      {
+        "input_id": 47,
+        "state_from_position": 255,
+        "state_is_zero": false,
+        "host_argmax": 30,
+        "rom_argmax": 30,
+        "byte_exact": true,
+        "m_cycles": 3536022,
+        "mismatches": []
+      },
+      {
+        "input_id": 26,
+        "state_from_position": 511,
+        "state_is_zero": false,
+        "host_argmax": 43,
+        "rom_argmax": 43,
+        "byte_exact": true,
+        "m_cycles": 3532910,
+        "mismatches": []
+      },
+      {
+        "input_id": 48,
+        "state_from_position": 1023,
+        "state_is_zero": false,
+        "host_argmax": 33,
+        "rom_argmax": 33,
+        "byte_exact": true,
+        "m_cycles": 3535631,
+        "mismatches": []
+      },
+      {
+        "input_id": 39,
+        "state_from_position": 2047,
+        "state_is_zero": false,
+        "host_argmax": 62,
+        "rom_argmax": 62,
+        "byte_exact": true,
+        "m_cycles": 3530614,
+        "mismatches": []
+      },
+      {
+        "input_id": 26,
+        "state_from_position": 4095,
+        "state_is_zero": false,
+        "host_argmax": 43,
+        "rom_argmax": 43,
+        "byte_exact": true,
+        "m_cycles": 3534369,
+        "mismatches": []
+      },
+      {
+        "input_id": 40,
+        "state_from_position": 8191,
+        "state_is_zero": false,
+        "host_argmax": 39,
+        "rom_argmax": 39,
+        "byte_exact": true,
+        "m_cycles": 3534027,
+        "mismatches": []
+      },
+      {
+        "input_id": 62,
+        "state_from_position": 12287,
+        "state_is_zero": false,
+        "host_argmax": 45,
+        "rom_argmax": 45,
+        "byte_exact": true,
+        "m_cycles": 3529365,
+        "mismatches": []
+      },
+      {
+        "input_id": 39,
+        "state_from_position": 16383,
+        "state_is_zero": false,
+        "host_argmax": 29,
+        "rom_argmax": 29,
+        "byte_exact": true,
+        "m_cycles": 3533188,
+        "mismatches": []
+      }
+    ],
+    "mean_m_cycles": 3532959,
+    "seconds_per_token_dmg": 3.3692922592163086
+  },
+  "multi_token": {
+    "rom": {
+      "rom_bytes": 1048576,
+      "bank_count": 38,
+      "driver_bytes": 13556,
+      "weight_code_bytes": 461974,
+      "weight_chunk_count": 34,
+      "table_bytes": 35840,
+      "token_start_pc": 356,
+      "token_boundary_pc": 886,
+      "token_end_pc": 894,
+      "n_tokens": 256
+    },
+    "seeds": [
+      19,
+      26,
+      62,
+      75
+    ],
+    "all_sequences_match": true,
+    "all_health_checks_pass": true,
+    "mean_m_cycles_per_token": 3532115,
+    "seconds_per_token_dmg": 3.3684873580932617,
+    "runs": [
+      {
+        "seed_id": 19,
+        "n_tokens": 256,
+        "host_sequence_sha256": "732b0efb366ce795f0d4c2e54caa043613b6f0b220ff9b3803e33b15a886d5ec",
+        "rom_sequence_sha256": "732b0efb366ce795f0d4c2e54caa043613b6f0b220ff9b3803e33b15a886d5ec",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3526316,
+          "median": 3532866,
+          "max": 3537218,
+          "mean": 3532363,
+          "max_over_min": 1.0030916117557247,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_19_T.txt"
+      },
+      {
+        "seed_id": 26,
+        "n_tokens": 256,
+        "host_sequence_sha256": "ed0cc7ec7d059d55de07e2e78be9aaab1a89742551b2db2110a67d31a66c6f31",
+        "rom_sequence_sha256": "ed0cc7ec7d059d55de07e2e78be9aaab1a89742551b2db2110a67d31a66c6f31",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3526462,
+          "median": 3532755,
+          "max": 3537258,
+          "mean": 3532024,
+          "max_over_min": 1.003061425303888,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_26_a.txt"
+      },
+      {
+        "seed_id": 62,
+        "n_tokens": 256,
+        "host_sequence_sha256": "dbe63a4e7e52a163c84a2baf78959c9cf81b18a590177f04d694e937dc1093d4",
+        "rom_sequence_sha256": "dbe63a4e7e52a163c84a2baf78959c9cf81b18a590177f04d694e937dc1093d4",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3526458,
+          "median": 3532755,
+          "max": 3537446,
+          "mean": 3532014,
+          "max_over_min": 1.0031158743419033,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_62_space.txt"
+      },
+      {
+        "seed_id": 75,
+        "n_tokens": 256,
+        "host_sequence_sha256": "f451429a60dd3779bb53808314bcb93f235e8bbf7b423b17abdcc71d670233e9",
+        "rom_sequence_sha256": "f451429a60dd3779bb53808314bcb93f235e8bbf7b423b17abdcc71d670233e9",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3526430,
+          "median": 3532793,
+          "max": 3538032,
+          "mean": 3532060,
+          "max_over_min": 1.0032900128458526,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_75_newline.txt"
+      }
+    ]
+  },
+  "caveats": [
+    "Stateful model: per-token integer/f32 rounding differences accumulate through the carried state, so fidelity deltas are structurally larger than the dense bring-up's per-context numbers; the deployment-relevant fact is the integer path's own val bpc laid against the committed stateless arm A (3.6651 bpc/char).",
+    "The f32 reference is a scalar port of the trainer's batched Burn forward (sequential f32 summation, f64 log-softmax); the S5 report's own scalar-kernel parity check bounds the batched-vs-scalar difference at ~2e-6 per state-block output.",
+    "Greedy argmax generation with a deterministic recurrence: unlike the bigram ROM, the state makes repeated inputs produce different outputs, so cycles are not structural; degenerate loops can still appear if the state itself converges.",
+    "ROM runs with interrupts disabled and SP repurposed inside weight chunks (bake-off convention); production kernels pay yield/safe-point overhead on top."
+  ]
+}

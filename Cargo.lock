@@ -2298,6 +2298,7 @@ dependencies = [
  "gbf-abi",
  "gbf-artifact",
  "gbf-codegen",
+ "gbf-data",
  "gbf-emu",
  "gbf-foundation",
  "gbf-hw",
