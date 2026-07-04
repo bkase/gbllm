@@ -1,0 +1,372 @@
+{
+  "bead": "bd-29ai4",
+  "git_sha": "5669f79e6b22a893d0670971cbf673eceb4b6628",
+  "layers": [
+    {
+      "down_scales": "block0_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block0_down.ternary",
+      "index": 0,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block0_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block0_up.ternary"
+    },
+    {
+      "down_scales": "block1_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block1_down.ternary",
+      "index": 1,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block1_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block1_up.ternary"
+    },
+    {
+      "down_scales": "block2_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block2_down.ternary",
+      "index": 2,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block2_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block2_up.ternary"
+    },
+    {
+      "down_scales": "block3_down.scales",
+      "down_shape": [
+        64,
+        128
+      ],
+      "down_ternary": "block3_down.ternary",
+      "index": 3,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block3_up.scales",
+      "up_shape": [
+        128,
+        64
+      ],
+      "up_ternary": "block3_up.ternary"
+    }
+  ],
+  "numeric_convention": {
+    "activation_fake_quant": {
+      "format": "Int8_symmetric",
+      "quant_steps": 127,
+      "range_hi": 8.0,
+      "range_lo": -8.0
+    },
+    "block_forward": "x' = x + Down( gelu( Up( actq( rms_norm(x) ) ) ) ); logits = rms_norm(x_final) @ embedding^T",
+    "embedding_dtype": "f32_le",
+    "norm": {
+      "affine_bias": 0.0,
+      "affine_scale": 1.0,
+      "clip_hi": 8.0,
+      "clip_lo": -8.0,
+      "epsilon": 9.999999747378752e-6,
+      "kind": "tile_rms_then_affine_clip(full_vector)"
+    },
+    "weight_encoding": "Ternary2 {-1,0,+1}",
+    "weight_scale": "per_output_row Q8.8 (u16 raw, f32 = raw/256)"
+  },
+  "recurrence_semantics": {
+    "initial_state": "all slots zero at stream start; state persists across tokens (no reset within a document stream)",
+    "integer_note": "decay values {0.5,0.75,0.875,0.9375} are exactly {128,192,224,240}/256, so h*decay is an exact Q8.8 multiply (raw*decay_raw >> 8); the ternary matvecs and Int8 activation grid follow the same numeric convention as the S6 dense export.",
+    "per_token": [
+      "n_t   = clip( x_t / sqrt(mean(x_t^2) + 1e-5), -8, 8 )            # full-vector RMS norm over d_model",
+      "a_t   = actq8(n_t)                                               # Int8 symmetric fake-quant, range [-8, 8], 127 steps",
+      "delta = TernaryMatVec(input_to_state, a_t)                       # {-1,0,+1} weights, per-output-row Q8.8 scale",
+      "h_t[s] = decay[s] * h_{t-1}[s] + delta[s]                        # decay[s] read from state_decay Q8.8 (exact)",
+      "y_t   = actq8( TernaryMatVec(state_to_output, h_t) )",
+      "x'_t  = x_t + y_t                                                # residual around the state block (composer-owned)"
+    ],
+    "then": "x'_t feeds the same 4-block pre-norm residual FFN stack as the S6 dense export (block_forward identical), then logits = rms_norm(x_final) @ embedding^T"
+  },
+  "schema": "f_s5_state_checkpoint_export.v1",
+  "seed": 0,
+  "tensors": [
+    {
+      "dtype": "f32_le",
+      "file": "tensors/embedding.f32.bin",
+      "layout": "row_major",
+      "name": "embedding",
+      "role": "token_embedding_and_tied_head",
+      "sha256": "7c59f4a183a87e07aba3cfddb17f4a497b3820aa0f3488144da365537e1e4df4",
+      "shape": [
+        80,
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/state_input_to_state.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "state_input_to_state.ternary",
+      "role": "linear_state_input_projection_ternary_weights",
+      "sha256": "4ea88a3938efad29d8502aafc8716ba667da632e907f93e99dacca5f5d6a9bb0",
+      "shape": [
+        64,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/state_input_to_state.scales.q8_8_u16le.bin",
+      "name": "state_input_to_state.scales",
+      "role": "linear_state_input_projection_per_output_row_scale",
+      "sha256": "cc14f305249d35cd3231d85ccbae03476f18d5e329a0e27fc814ee4f36603b9b",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/state_state_to_output.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "state_state_to_output.ternary",
+      "role": "linear_state_output_projection_ternary_weights",
+      "sha256": "b2cde681fafe186c982e48faa46bb5c06c62f8e14b82015df67e75a62c1d449f",
+      "shape": [
+        64,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/state_state_to_output.scales.q8_8_u16le.bin",
+      "name": "state_state_to_output.scales",
+      "role": "linear_state_output_projection_per_output_row_scale",
+      "sha256": "e5f3a8196bf303b959f6cc600e82894c85261271361087f79b78878822b0285d",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256, exact for MT4 rates)",
+      "file": "tensors/state_decay.q8_8_u16le.bin",
+      "name": "state_decay",
+      "role": "linear_state_per_slot_decay",
+      "sha256": "7b898ba225281d6a531c035b4f9ff30f4e70f9bb680d44dbbbffe0a5b158e689",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block0_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block0_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "a444a1c60c9927eb3c854b1ca50066e052d9cfbb52a933d9575c35489b23602d",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_up.scales.q8_8_u16le.bin",
+      "name": "block0_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "d27d7694fbea91fd21f107ae262cff689cde96bcdcf453faa6e25c319325275c",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block0_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block0_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "4242e5603d25650aafac39710170e5030c92669a61c28c7d8caf89854c77f319",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_down.scales.q8_8_u16le.bin",
+      "name": "block0_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "6202a17fb8dd06f779d05208064458af16eac270ccaca95f4b0d8ba2996ee1a8",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block1_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block1_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "2c7d7c7d58cd3622b00c30ee3b725d82575a37264eef9fbb13298fc2c4200db2",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_up.scales.q8_8_u16le.bin",
+      "name": "block1_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "8a1bf39d27c767f99cf545d9a8d6680882cf9ff64cfdba50885583f0c99d4493",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block1_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block1_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "41b4cf6d51431d52432b726cd476a6b09666038693c842ae660736576de30670",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_down.scales.q8_8_u16le.bin",
+      "name": "block1_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "2e2344fd61b535636b71c9ab6676a52c0fe61e00d9f95cd6e8f2b45c9fdb63f0",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block2_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block2_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "609b1e10e559b246e4654da53429f98b28ce512d37dcbecd1619a150864ece88",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_up.scales.q8_8_u16le.bin",
+      "name": "block2_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "7777b83f29f525a29dba4ff77b52756c75c5aad287e95a43d243ceec73dc3e52",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block2_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block2_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "9b1c37aa8973de68c3eb868508f5833f7d1c969387a083df0c1836cd046d4e8f",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_down.scales.q8_8_u16le.bin",
+      "name": "block2_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "8db991f90d9b2d68e466f4e922007f6d594bc2c44f39f7767a1b35ba784a37e2",
+      "shape": [
+        64
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block3_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block3_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "aae82fc29ffa808c516543ea049f3cd296bf60fa43718a8ab900775f7a7ef671",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_up.scales.q8_8_u16le.bin",
+      "name": "block3_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "e9bf17eeb72917682c7a92809383224e036a1441dee630df4e97625a9413c21e",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block3_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block3_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "64c4916937e29d64ba699c9f516a12240176c891b4b6902ca5e82dcc71079671",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_down.scales.q8_8_u16le.bin",
+      "name": "block3_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "be64860396e9353bae922da099b419ec8a2fae9d040c599eee5e22d64c16d04e",
+      "shape": [
+        64
+      ]
+    }
+  ],
+  "topology": {
+    "d_ff": 128,
+    "d_model": 64,
+    "family": "linear_state_multi_timescale_then_dense_ffn",
+    "lexical": "charset_v1 (80 ids; ids 0..75 printable incl. newline, 76 reserved, 77 <bos>, 78 <eos>, 79 <unk>)",
+    "moe": false,
+    "n_blocks": 4,
+    "sequence_state_kind": "linear_state_multi_timescale",
+    "sequence_state_params": {
+      "band_layout": "state_slots partitioned into 4 equal contiguous bands in declaration order; slot s uses decay_rates[s / (state_slots/4)] (gbf_model::sequence::DecayPolicy::decay_for_slot)",
+      "decay_policy": "MultiTimescale",
+      "decay_rates_by_band": [
+        0.5,
+        0.75,
+        0.875,
+        0.9375
+      ],
+      "state_bytes_per_layer": 256,
+      "state_slots": 64
+    },
+    "tied_head": true,
+    "vocab": 80
+  }
+}

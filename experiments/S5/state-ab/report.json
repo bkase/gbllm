@@ -1,0 +1,232 @@
+{
+  "arm_b_export": {
+    "exported": true,
+    "manifest": "experiments/S5/state-ab/checkpoint-export/manifest.json",
+    "n_tensors": 22
+  },
+  "arms": [
+    {
+      "arm": "A",
+      "config": {
+        "d_ff": 128,
+        "d_model": 64,
+        "decay_rates_by_band": null,
+        "lanes": 512,
+        "lr": 0.01,
+        "n_blocks": 4,
+        "qat_recipe": "warmup Off then Hard, act Int8 fake-quant when hard (identical to s2_gap_and_export)",
+        "seq_len": 1,
+        "sequence_state_kind": "stateless_bigram_context",
+        "state_slots": null,
+        "steps": 40000,
+        "tbptt": null,
+        "tied_head": true,
+        "tokens_per_step": 512,
+        "vocab": 80,
+        "warmup_frac_hardness_off": 0.25
+      },
+      "description": "stateless bigram-context dense FFN (s2 topology, charset-80)",
+      "measurement": {
+        "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
+        "eval_lanes": 8,
+        "eval_pairs": 1042400,
+        "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling, as in gap.json)",
+        "fp_val_bits_per_raw_byte": 3.644132079511615,
+        "fp_val_bpc_per_normalized_char": 3.665670044469785,
+        "gap_bpc_per_normalized_char": -0.0006180438887715134,
+        "state_block_scalar_parity_max_abs_diff": null,
+        "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
+        "ternary_val_bits_per_raw_byte": 3.643517666993768,
+        "ternary_val_bpc_per_normalized_char": 3.6650520005810137
+      },
+      "sample": {
+        "greedy_continuation": " the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the",
+        "prompt_normalized": "The children walked down to the river in the morning, and",
+        "sample_path": "experiments/S5/state-ab/sample_arm_A.txt"
+      },
+      "status": "ok",
+      "training": {
+        "final_logged_train_loss_bpc": 3.5915538287437503,
+        "steps_per_second": 61.75243189012897,
+        "train_wall_clock_seconds": 647.747769208
+      }
+    },
+    {
+      "arm": "B",
+      "config": {
+        "d_ff": 128,
+        "d_model": 64,
+        "decay_rates_by_band": [
+          0.5,
+          0.75,
+          0.875,
+          0.9375
+        ],
+        "lanes": 4,
+        "lr": 0.01,
+        "n_blocks": 4,
+        "qat_recipe": "warmup Off then Hard, act Int8 fake-quant when hard (identical to s2_gap_and_export)",
+        "seq_len": 128,
+        "sequence_state_kind": "linear_state_multi_timescale",
+        "state_slots": 64,
+        "steps": 40000,
+        "tbptt": "state carried across chunks detached; lane reset to zero state on stream wrap",
+        "tied_head": true,
+        "tokens_per_step": 512,
+        "vocab": 80,
+        "warmup_frac_hardness_off": 0.25
+      },
+      "description": "LinearState multi-timescale (MT4) + residual, then the same FFN stack; truncated BPTT",
+      "measurement": {
+        "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
+        "eval_lanes": 8,
+        "eval_pairs": 1042400,
+        "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling, as in gap.json)",
+        "fp_val_bits_per_raw_byte": 3.1338149331998357,
+        "fp_val_bpc_per_normalized_char": 3.1523367635682056,
+        "gap_bpc_per_normalized_char": 0.04708246672469496,
+        "state_block_scalar_parity_max_abs_diff": 1.9073486328125e-6,
+        "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
+        "ternary_val_bits_per_raw_byte": 3.180620762773298,
+        "ternary_val_bpc_per_normalized_char": 3.1994192302929005
+      },
+      "sample": {
+        "greedy_continuation": " the come the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the care the",
+        "prompt_normalized": "The children walked down to the river in the morning, and",
+        "sample_path": "experiments/S5/state-ab/sample_arm_B.txt"
+      },
+      "status": "ok",
+      "training": {
+        "final_logged_train_loss_bpc": 2.9696855156982065,
+        "steps_per_second": 45.96246583103884,
+        "train_wall_clock_seconds": 870.275327417
+      }
+    },
+    {
+      "arm": "C",
+      "config": {
+        "d_ff": 128,
+        "d_model": 64,
+        "decay_rates_by_band": [
+          0.5,
+          0.75,
+          0.875,
+          0.9375
+        ],
+        "lanes": 2,
+        "lr": 0.01,
+        "n_blocks": 4,
+        "qat_recipe": "warmup Off then Hard, act Int8 fake-quant when hard (identical to s2_gap_and_export)",
+        "seq_len": 256,
+        "sequence_state_kind": "linear_state_multi_timescale",
+        "state_slots": 64,
+        "steps": 40000,
+        "tbptt": "state carried across chunks detached; lane reset to zero state on stream wrap",
+        "tied_head": true,
+        "tokens_per_step": 512,
+        "vocab": 80,
+        "warmup_frac_hardness_off": 0.25
+      },
+      "description": "arm B with doubled BPTT context budget (capacity probe), matched tokens/step",
+      "measurement": {
+        "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
+        "eval_lanes": 8,
+        "eval_pairs": 1042400,
+        "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling, as in gap.json)",
+        "fp_val_bits_per_raw_byte": 3.149913061227226,
+        "fp_val_bpc_per_normalized_char": 3.1685300365875393,
+        "gap_bpc_per_normalized_char": 0.008835884025915508,
+        "state_block_scalar_parity_max_abs_diff": 2.384185791015625e-6,
+        "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
+        "ternary_val_bits_per_raw_byte": 3.158697029243731,
+        "ternary_val_bpc_per_normalized_char": 3.177365920613455
+      },
+      "sample": {
+        "greedy_continuation": " the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the",
+        "prompt_normalized": "The children walked down to the river in the morning, and",
+        "sample_path": "experiments/S5/state-ab/sample_arm_C.txt"
+      },
+      "status": "ok",
+      "training": {
+        "final_logged_train_loss_bpc": 2.8586770254696368,
+        "steps_per_second": 39.68584102875483,
+        "train_wall_clock_seconds": 1007.9161475
+      }
+    }
+  ],
+  "backend": "burn_ndarray_autodiff",
+  "beads": [
+    "bd-29ai4",
+    "bd-2nrnq"
+  ],
+  "caveats": [
+    "d64-class toy capacity chosen deliberately to isolate the sequence-state question; absolute bpc is not a production-quality claim.",
+    "The stateful arms' recurrence is a batched Burn re-implementation of the LinearStateBlock semantics (the committed LinearStateBurnQat adapter is single-sequence); parity against the canonical scalar QAT kernels is measured and recorded per stateful arm (state_block_scalar_parity_max_abs_diff).",
+    "Eval scores within-lane adjacent pairs only (lane-first tokens are unscored), so bits-per-raw-byte re-expression uses the stream-level chars-per-raw-byte ratio; KN-5 scored every token under reset-context windows (chunk 128). The KN numbers are copied verbatim, not re-run.",
+    "Arm A trains on iid pair samples (as s2) while stateful arms train on sequential TBPTT lanes; steps and tokens-per-step are matched, but the data-order exposure necessarily differs between a stateless and a stateful trainer.",
+    "The fp reference is the SOFT same-scale ternary relaxation (calibrated STE ceiling), matching the gap.json methodology."
+  ],
+  "corpus": {
+    "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
+    "train_bytes_trimmed_at_utf8_boundary": 0,
+    "train_cap_bytes": 67108864,
+    "train_chars_normalized": 66398220,
+    "train_norm_tokens_sha256": "2b69988479556e60134abb742287888c18613b34ff0a7bc06c065bb70fea3536",
+    "train_prefix_raw_sha256": "f2881247c3614a5d0a455fd6eca7f2a8b4fbd503d2524e062830f5757dc3d61e",
+    "train_raw_bytes_used": 67108864,
+    "train_unk_count": 70570,
+    "val_book_ids_used": [
+      1017,
+      1233,
+      1475,
+      2105,
+      2156,
+      3440
+    ],
+    "val_bytes_trimmed_at_utf8_boundary": 0,
+    "val_chars_normalized": 1042415,
+    "val_norm_tokens_sha256": "d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "val_raw_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "val_raw_bytes_used": 1048576,
+    "val_source": "corpus/gutenberg/splits.json val-split book bodies, same assembly as s2/s4",
+    "val_unk_count": 1491
+  },
+  "git_sha": "5669f79e6b22a893d0670971cbf673eceb4b6628",
+  "kn5_reference": {
+    "corpus_val_sha_normalized": "sha256:d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "runs": [
+      {
+        "bpc_kn5_val_per_normalized_char": 2.3401938363934067,
+        "kn5_bits_per_raw_val_byte": 2.326443822826417,
+        "train_cap_bytes": 67108864
+      },
+      {
+        "bpc_kn5_val_per_normalized_char": 2.285119636343881,
+        "kn5_bits_per_raw_val_byte": 2.271693216056258,
+        "train_cap_bytes": 268435456
+      },
+      {
+        "bpc_kn5_val_per_normalized_char": 2.2717607451448383,
+        "kn5_bits_per_raw_val_byte": 2.258412816190869,
+        "train_cap_bytes": 489614571
+      }
+    ],
+    "source": "experiments/S4/baseline/s4_baseline_gutenberg_run_meta.json (copied verbatim)",
+    "val_raw_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70"
+  },
+  "lexical": {
+    "spec": "charset_v1 via gbf_data::charset_v1::normalize_raw (case-preserving, accent-stripped, quote/dash-folded, whitespace-collapsed, unmappable -> <unk> id 79)",
+    "vocab": 80
+  },
+  "purpose": "LinearState multi-timescale (MT4) A/B vs a stateless bigram-context baseline at matched d64 capacity, both migrated to the charset_v1 80-token vocabulary, laid against the KN-5 baseline",
+  "schema": "s5_state_ab.v1",
+  "seed": 0,
+  "total_wall_clock_seconds": 2665.673742375,
+  "verdict": {
+    "a_hard_bpc_per_normalized_char": 3.6650520005810137,
+    "b_hard_bpc_per_normalized_char": 3.1994192302929005,
+    "b_materially_beats_a": true,
+    "delta_b_minus_a_bpc_per_normalized_char": -0.4656327702881131,
+    "material_threshold_bpc": 0.02
+  }
+}
