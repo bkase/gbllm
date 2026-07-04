@@ -7,5 +7,6 @@ pub mod kernel_bakeoff;
 pub mod multi_token;
 pub mod one_token;
 pub mod reports;
+pub mod sampling;
 pub mod stateful;
 pub mod workload;

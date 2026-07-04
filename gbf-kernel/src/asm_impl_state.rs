@@ -34,6 +34,14 @@
 //! banks 1..=N V3-style weights-as-code matvec chunks (state in-projection
 //! first, then the 8 FFN matvecs in execution order); then the state
 //! out-projection weight-table bank, the embedding bank, and the head bank.
+//!
+//! Decode: argmax is the default (planv0 v0 decode pin). The **sampling
+//! variant** ([`build_state_multi_token_sampling_rom`]) additionally emits
+//! the integer top-k/temperature sampler pinned in [`crate::decode`]
+//! (exp2 LUT in bank 0, XorShift16 state at [`S_RNG_ADDR`], candidate
+//! tables at [`S_SAMP_USED`]/[`S_SAMP_IDS`]/[`S_SAMP_WTS`]) and feeds the
+//! sampled id back instead of the argmax; argmax is still computed and
+//! dumped for debugging.
 
 use std::collections::BTreeMap;
 
@@ -98,8 +106,21 @@ pub const S_ARGMAX_ADDR: u16 = 0xD100;
 pub const S_DONE_ADDR: u16 = 0xD101;
 /// Multi-token loop counter.
 pub const S_TOKEN_IDX_ADDR: u16 = 0xD102;
+/// Sampled id for the current token (sampling variant only; argmax is
+/// still computed and dumped at [`S_ARGMAX_ADDR`]).
+pub const S_SAMPLED_ADDR: u16 = 0xD103;
+/// XorShift16 RNG state (2 bytes LE; the host pokes the seed before
+/// running the sampling variant; seed 0 is canonicalized to 1 on entry,
+/// mirroring `gbf_kernel::decode::XorShift16::new`).
+pub const S_RNG_ADDR: u16 = 0xD104;
 /// Input context id; the host pokes this before running.
 pub const S_INPUT_ADDR: u16 = 0xD110;
+/// Top-k used flags, one byte per charset id (80 bytes; sampling variant).
+pub const S_SAMP_USED: u16 = 0xD120;
+/// Selected candidate ids in selection order (up to 8; sampling variant).
+pub const S_SAMP_IDS: u16 = 0xD170;
+/// Selected candidate exp-LUT weights, same order (sampling variant).
+pub const S_SAMP_WTS: u16 = 0xD178;
 /// State in-projection accumulator dump (i16 LE x 64).
 pub const S_DUMP_INACC: u16 = 0xD180;
 /// Multi-token output ring (page-aligned, max 256 tokens).
@@ -135,6 +156,18 @@ const XP2: u16 = 0xC490; // 2 bytes secondary pointer
 const CNT2: u16 = 0xC492; // 1 byte inner counter
 const YPTR: u16 = 0xC494; // 2 bytes y dump pointer
 const SC2: u16 = 0xC496; // 2 bytes out-epilogue scale
+
+// sampling-decode scratch (0xC4A0..0xC4C2; sampling variant only)
+const SMP_M: u16 = 0xC4A0; // 3 bytes max logit (hi byte sign-flipped)
+const SMP_BEST: u16 = 0xC4A4; // 3 bytes pass best (hi byte sign-flipped)
+const SMP_BESTID: u16 = 0xC4A7; // 1 byte
+const SMP_D: u16 = 0xC4A8; // 3 bytes d = max - best (u24)
+const SMP_P: u16 = 0xC4B0; // 5 bytes d * scale product
+const SMP_TOT: u16 = 0xC4B8; // 2 bytes weight total
+const SMP_THR: u16 = 0xC4BA; // 2 bytes draw threshold
+const SMP_CUM: u16 = 0xC4BC; // 2 bytes cumulative weight
+const SMP_PASS: u16 = 0xC4BE; // 1 byte pass counter
+const SMP_RT: u16 = 0xC4C0; // 2 bytes rng shift temp
 
 /// A fully assembled stateful one-token ROM plus the facts the runner needs.
 #[derive(Debug, Clone)]
@@ -253,6 +286,19 @@ fn neg_mem(asm: &mut ModelAsm, addr: u16, n: u16) {
             });
         }
         a_to(asm, addr + k);
+    }
+}
+
+/// Byte-wise `dst ^= src` over `n` bytes (both fixed addresses).
+fn xor_mem(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
+    for k in 0..n {
+        a_from(asm, src + k);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, dst + k);
+        asm.i(Instr::XorA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        a_to(asm, dst + k);
     }
 }
 
@@ -1459,6 +1505,362 @@ fn emit_argmax80(asm: &mut ModelAsm) {
     asm.i(Instr::Ret { cond: None });
 }
 
+/// `rng_step`: advance the XorShift16 state at [`S_RNG_ADDR`] by one step
+/// of the pinned (7, 9, 8) triple: `x ^= x << 7; x ^= x >> 9; x ^= x << 8`
+/// (byte-serial shifts on the 2-byte LE state; cycle cost is irrelevant
+/// next to the matvecs).
+fn emit_rng_step(asm: &mut ModelAsm) {
+    asm.label("rng_step");
+    mem_copy(asm, SMP_RT, S_RNG_ADDR, 2);
+    for _ in 0..7 {
+        mem_shl1(asm, SMP_RT, 2);
+    }
+    xor_mem(asm, S_RNG_ADDR, SMP_RT, 2);
+    mem_copy(asm, SMP_RT, S_RNG_ADDR, 2);
+    for _ in 0..9 {
+        mem_shr1(asm, SMP_RT, 2);
+    }
+    xor_mem(asm, S_RNG_ADDR, SMP_RT, 2);
+    // x ^= x << 8  is  hi ^= lo.
+    a_from(asm, S_RNG_ADDR);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, S_RNG_ADDR + 1);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    a_to(asm, S_RNG_ADDR + 1);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `smp_weight`: SMP_D (u24 logit deficit) -> A = exp-LUT weight.
+/// `u = min(255, (d * scale_q16 + 0x8000) >> 16)`, `w = exp_lut[u]` —
+/// the same mul16/mul16x8 + round-half-up shape as the deployed
+/// state-out epilogue. Mirrors `gbf_kernel::decode` exactly.
+fn emit_smp_weight(asm: &mut ModelAsm, scale_q16: u16) {
+    asm.label("smp_weight");
+    // SMP_P = lo16(d) * scale (u32) with a fifth zero byte.
+    a_from(asm, SMP_D);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, SMP_D + 1);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    ld16(asm, Reg16Data::DE, scale_q16);
+    asm.call("mul16"); // MUL_R = BC * DE, DE preserved
+    mem_copy(asm, SMP_P, crate::asm_impl_model::MUL_R, 4);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, SMP_P + 4);
+    // += (hi8(d) * scale) << 16
+    a_from(asm, SMP_D + 2);
+    asm.call("mul16x8"); // C:HL = hi8 * scale
+    a_from(asm, SMP_P + 2);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::L),
+    });
+    a_to(asm, SMP_P + 2);
+    a_from(asm, SMP_P + 3);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::H),
+    });
+    a_to(asm, SMP_P + 3);
+    a_from(asm, SMP_P + 4);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    a_to(asm, SMP_P + 4);
+    // round-half-up: += 0x8000
+    a_from(asm, SMP_P + 1);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, SMP_P + 1);
+    carry_ripple(asm, SMP_P + 2, 3);
+    // u = min(255, P >> 16)
+    a_from(asm, SMP_P + 3);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_P + 4);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "smw_sat");
+    a_from(asm, SMP_P + 2);
+    asm.jr(None, "smw_lut");
+    asm.label("smw_sat");
+    ld_r_imm(asm, Reg8::A, 255);
+    asm.label("smw_lut");
+    // A = exp_lut[u]
+    ld_rr(asm, Reg8::B, Reg8::A);
+    asm.ld16_label(Reg16Data::HL, "exp_lut", 0);
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::L),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `sample80`: the integer top-k/temperature sampling epilogue. Must run
+/// right after `argmax80` (candidate 0 = the argmax with LUT weight
+/// `exp_lut[0]`); later passes re-scan the 80 i24 logits skipping used
+/// ids (first-unused-then-strictly-greater, so ties go to lower ids),
+/// weigh each candidate through `smp_weight`, then draw one XorShift16
+/// value, form `threshold = (r * total) >> 16`, and pick the first
+/// candidate whose cumulative weight strictly exceeds it. Byte-exact
+/// mirror of `gbf_kernel::decode::sample_topk`.
+fn emit_sample80(asm: &mut ModelAsm, k: u8) {
+    let used_lo = (S_SAMP_USED & 0xFF) as u8;
+    let used_hi = (S_SAMP_USED >> 8) as u8;
+    let ids_lo = (S_SAMP_IDS & 0xFF) as u8;
+    let wts_lo = (S_SAMP_WTS & 0xFF) as u8;
+    let logits_hi = (S_LOGITS_BASE >> 8) as u8;
+    use crate::asm_impl_model::ARG_CAND;
+
+    asm.label("sample80");
+    // clear the 80 used flags
+    ld16(asm, Reg16Data::HL, S_SAMP_USED);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ld_r_imm(asm, Reg8::B, STATE_VOCAB as u8);
+    asm.label("s80_clr");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "s80_clr");
+
+    // candidate 0 = argmax (d = 0 -> u = 0 -> w = exp_lut[0])
+    mem_copy(asm, SMP_M, crate::asm_impl_model::ARG_BEST, 3);
+    a_from(asm, S_ARGMAX_ADDR);
+    a_to(asm, S_SAMP_IDS);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(used_lo),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, used_hi);
+    ld_r_imm(asm, Reg8::A, 1);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.ld16_label(Reg16Data::HL, "exp_lut", 0);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    a_to(asm, S_SAMP_WTS);
+    a_to(asm, SMP_TOT);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, SMP_TOT + 1);
+    ld_r_imm(asm, Reg8::A, 1);
+    a_to(asm, SMP_PASS);
+
+    // passes 1..k
+    asm.label("s80_pass");
+    a_from(asm, SMP_PASS);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(k),
+    });
+    asm.jp(Some(Cond::Z), "s80_draw");
+    ld_r_imm(asm, Reg8::A, 0xFF);
+    a_to(asm, SMP_BESTID);
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("s80_scan");
+    // skip used ids
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(used_lo),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, used_hi);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::NZ), "s80_next");
+    // load logit id C (3 bytes at S_LOGITS_BASE + 3*C), sign-flip hi
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, logits_hi);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_CAND);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_CAND + 1);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::XorA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, ARG_CAND + 2);
+    // first unused candidate is taken unconditionally
+    a_from(asm, SMP_BESTID);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0xFF),
+    });
+    asm.jr(Some(Cond::Z), "s80_take");
+    // 3-byte unsigned compare: take iff CAND > BEST
+    for kb in [2u16, 1, 0] {
+        a_from(asm, ARG_CAND + kb);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, SMP_BEST + kb);
+        asm.i(Instr::CpA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        asm.jr(Some(Cond::C), "s80_take");
+        if kb > 0 {
+            asm.jp(Some(Cond::NZ), "s80_next");
+        } else {
+            asm.jp(None, "s80_next");
+        }
+    }
+    asm.label("s80_take");
+    mem_copy(asm, SMP_BEST, ARG_CAND, 3);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    a_to(asm, SMP_BESTID);
+    asm.label("s80_next");
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(STATE_VOCAB as u8),
+    });
+    asm.jp(Some(Cond::NZ), "s80_scan");
+    // commit the pass winner: mark used, record id
+    a_from(asm, SMP_BESTID);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(used_lo),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, used_hi);
+    ld_r_imm(asm, Reg8::A, 1);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    a_from(asm, SMP_PASS);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(ids_lo),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, used_hi);
+    a_from(asm, SMP_BESTID);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    // d = M - best (u24; candidates are visited in descending order)
+    mem_sub_into(asm, SMP_D, SMP_M, SMP_BEST, 3);
+    asm.call("smp_weight"); // A = w
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, SMP_PASS);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(wts_lo),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, used_hi);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    // total += w
+    a_from(asm, SMP_TOT);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    a_to(asm, SMP_TOT);
+    a_from(asm, SMP_TOT + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, SMP_TOT + 1);
+    a_from(asm, SMP_PASS);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, SMP_PASS);
+    asm.jp(None, "s80_pass");
+
+    // draw: r = rng_step(); threshold = (r * total) >> 16
+    asm.label("s80_draw");
+    asm.call("rng_step");
+    a_from(asm, S_RNG_ADDR);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, S_RNG_ADDR + 1);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_TOT);
+    ld_rr(asm, Reg8::E, Reg8::A);
+    a_from(asm, SMP_TOT + 1);
+    ld_rr(asm, Reg8::D, Reg8::A);
+    asm.call("mul16"); // MUL_R = r * total (u32)
+    mem_copy(asm, SMP_THR, crate::asm_impl_model::MUL_R + 2, 2);
+    zero_mem(asm, SMP_CUM, 2);
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("s80_walk");
+    // cum += wts[j]
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(wts_lo),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, used_hi);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_CUM);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    a_to(asm, SMP_CUM);
+    a_from(asm, SMP_CUM + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, SMP_CUM + 1);
+    // borrow on threshold - cum  <=>  cum > threshold  ->  pick
+    a_from(asm, SMP_CUM);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_THR);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    a_from(asm, SMP_CUM + 1);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_THR + 1);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::C), "s80_pick");
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(k),
+    });
+    asm.jp(Some(Cond::NZ), "s80_walk");
+    // structurally unreachable (threshold < total); defensively pick last
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.label("s80_pick");
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(ids_lo),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, used_hi);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    a_to(asm, S_SAMPLED_ADDR);
+    asm.i(Instr::Ret { cond: None });
+}
+
 // ---------------------------------------------------------------------------
 // top-level build
 // ---------------------------------------------------------------------------
@@ -1470,7 +1872,7 @@ fn emit_argmax80(asm: &mut ModelAsm) {
 pub fn build_state_one_token_rom(
     model: &IntStateLoweredModel,
 ) -> Result<StateOneTokenRom, ModelRomError> {
-    let built = build_state_model_rom(model, None)?;
+    let built = build_state_model_rom(model, None, None)?;
     Ok(StateOneTokenRom {
         token_start_pc: built.labels["token_start"],
         token_end_pc: built.labels["token_end"],
@@ -1495,7 +1897,41 @@ pub fn build_state_multi_token_rom(
     if n_tokens == 0 || n_tokens > 256 {
         return Err(ModelRomError::BadTokenCount { n_tokens });
     }
-    let built = build_state_model_rom(model, Some(n_tokens))?;
+    let built = build_state_model_rom(model, Some(n_tokens), None)?;
+    Ok(StateMultiTokenRom {
+        token_start_pc: built.labels["token_start"],
+        token_boundary_pc: built.labels["token_boundary"],
+        token_end_pc: built.labels["token_end"],
+        n_tokens,
+        rom: built.rom,
+        rom_size: built.rom_size,
+        bank_count: built.bank_count,
+        driver_bytes: built.driver_bytes,
+        weight_code_bytes: built.weight_code_bytes,
+        weight_chunk_count: built.weight_chunk_count,
+        table_bytes: built.table_bytes,
+    })
+}
+
+/// Assemble the stateful multi-token **sampling** generation ROM: identical
+/// forward pass and WRAM layout to [`build_state_multi_token_rom`] (argmax
+/// is still computed and dumped), but each token is decoded by the integer
+/// top-k/temperature sampler pinned in [`crate::decode`] and the sampled id
+/// is fed back. The host must poke a nonzero XorShift16 seed at
+/// [`S_RNG_ADDR`] (2 bytes LE) before running; seed 0 is canonicalized to 1
+/// on entry, mirroring `decode::XorShift16::new`. The output ring receives
+/// the sampled ids, which must be byte-identical to
+/// `decode::sample_topk` driven by the host integer evaluator with the
+/// same seed.
+pub fn build_state_multi_token_sampling_rom(
+    model: &IntStateLoweredModel,
+    n_tokens: u16,
+    sampler: &crate::decode::SamplerConfig,
+) -> Result<StateMultiTokenRom, ModelRomError> {
+    if n_tokens == 0 || n_tokens > 256 {
+        return Err(ModelRomError::BadTokenCount { n_tokens });
+    }
+    let built = build_state_model_rom(model, Some(n_tokens), Some(sampler))?;
     Ok(StateMultiTokenRom {
         token_start_pc: built.labels["token_start"],
         token_boundary_pc: built.labels["token_boundary"],
@@ -1525,6 +1961,7 @@ struct BuiltStateRom {
 fn build_state_model_rom(
     model: &IntStateLoweredModel,
     loop_tokens: Option<u16>,
+    sampler: Option<&crate::decode::SamplerConfig>,
 ) -> Result<BuiltStateRom, ModelRomError> {
     // 1. Weight chunks: state in-projection first, then the 8 FFN matvecs.
     let mut per_matvec_chunks: Vec<Vec<Vec<u8>>> = Vec::new();
@@ -1574,6 +2011,19 @@ fn build_state_model_rom(
             dst: IncDec8Target::Reg(Reg8::B),
         });
         asm.jr(Some(Cond::NZ), "zs_loop");
+    }
+    if sampler.is_some() {
+        // Canonicalize the host-poked RNG seed: 0 -> 1 (decode contract).
+        a_from(&mut asm, S_RNG_ADDR);
+        ld_rr(&mut asm, Reg8::B, Reg8::A);
+        a_from(&mut asm, S_RNG_ADDR + 1);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        asm.jr(Some(Cond::NZ), "rng_seed_ok");
+        ld_r_imm(&mut asm, Reg8::A, 1);
+        a_to(&mut asm, S_RNG_ADDR);
+        asm.label("rng_seed_ok");
     }
     asm.label("token_start");
     a_from(&mut asm, S_INPUT_ADDR);
@@ -1654,11 +2104,17 @@ fn build_state_model_rom(
     a_to(&mut asm, MBC5_ROMB0);
     asm.call("head80");
     asm.call("argmax80");
+    let picked_addr = if sampler.is_some() {
+        asm.call("sample80");
+        S_SAMPLED_ADDR
+    } else {
+        S_ARGMAX_ADDR
+    };
     if let Some(n_tokens) = loop_tokens {
         a_from(&mut asm, S_TOKEN_IDX_ADDR);
         ld_rr(&mut asm, Reg8::L, Reg8::A);
         ld_r_imm(&mut asm, Reg8::H, (S_OUT_BASE >> 8) as u8);
-        a_from(&mut asm, S_ARGMAX_ADDR);
+        a_from(&mut asm, picked_addr);
         asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
         a_to(&mut asm, S_INPUT_ADDR);
         a_from(&mut asm, S_TOKEN_IDX_ADDR);
@@ -1693,6 +2149,11 @@ fn build_state_model_rom(
     emit_down_epilogue24(&mut asm);
     emit_head80(&mut asm);
     emit_argmax80(&mut asm);
+    if let Some(cfg) = sampler {
+        emit_rng_step(&mut asm);
+        emit_smp_weight(&mut asm, cfg.scale_q16());
+        emit_sample80(&mut asm, cfg.k());
+    }
 
     // bank-0 data: GELU LUT, y LUT, state scale/decay tables, block scales
     asm.label("gelu_lut");
@@ -1717,6 +2178,10 @@ fn build_state_model_rom(
     asm.bytes(so_bytes);
     asm.label("decay_tab");
     asm.bytes(model.decay_u8.clone());
+    if sampler.is_some() {
+        asm.label("exp_lut");
+        asm.bytes(crate::decode::build_exp2_lut().to_vec());
+    }
     for (block, (up, down)) in model.blocks.iter().enumerate() {
         asm.label(&format!("scales_up_{block}"));
         let mut up_bytes = Vec::with_capacity(up.layer.rows() * 2);
@@ -1872,6 +2337,29 @@ mod tests {
         assert!(matches!(
             build_state_multi_token_rom(&lowered, 257),
             Err(ModelRomError::BadTokenCount { n_tokens: 257 })
+        ));
+    }
+
+    #[test]
+    fn state_sampling_rom_builds_and_shares_the_argmax_layout() {
+        let ck = synthetic_state_checkpoint(11);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let cfg = crate::decode::SamplerConfig::new(8, 2253).expect("valid sampler");
+        let rom = build_state_multi_token_sampling_rom(&lowered, 16, &cfg).expect("builds");
+        let argmax = build_state_multi_token_rom(&lowered, 16).expect("builds");
+        assert_eq!(rom.n_tokens, 16);
+        assert_eq!(rom.weight_chunk_count, argmax.weight_chunk_count);
+        assert_eq!(rom.table_bytes, argmax.table_bytes);
+        assert!(
+            rom.driver_bytes > argmax.driver_bytes + 256,
+            "sampling driver must carry the sampler routines and the 256-byte exp LUT \
+             ({} vs {})",
+            rom.driver_bytes,
+            argmax.driver_bytes
+        );
+        assert!(matches!(
+            build_state_multi_token_sampling_rom(&lowered, 0, &cfg),
+            Err(ModelRomError::BadTokenCount { n_tokens: 0 })
         ));
     }
 }

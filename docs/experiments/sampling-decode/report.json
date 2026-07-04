@@ -1,0 +1,245 @@
+{
+  "schema": "sampling_decode_bringup.v1",
+  "bead": "bd-2mjkd",
+  "upstream_beads": [
+    "bd-x5l2s",
+    "bd-29ai4",
+    "bd-a4du"
+  ],
+  "git_sha": "8dbb5b806725271913eedbb5921eb4fae8794515",
+  "checkpoint": {
+    "export_dir": "experiments/S5/state-ab/checkpoint-export",
+    "manifest_schema": "f_s5_state_checkpoint_export.v1",
+    "manifest_sha256": "15661ac2cf6f295c9c36a8878a8d3423052af226f2829ad33f3c44935348a351",
+    "trainer_git_sha": "5669f79e6b22a893d0670971cbf673eceb4b6628",
+    "tensors_verified_sha256": 22
+  },
+  "design": {
+    "rng": "XorShift16 (planv0 RngSpec::XorShift16), shift triple (7,9,8), full period 65535, seed 0 canonicalized to 1, one draw per token",
+    "rng_shifts": [
+      7,
+      9,
+      8
+    ],
+    "exp_lut": "256 x u8, lut[u] = round_ties_even(255 * 2^(-u/16)); zero for u >= 144",
+    "exp_lut_alpha": 16,
+    "exp_lut_sha256": "ea328cd5a436b04eb1f97a829eec3931dd2cb01a03c35bdf412279c860bc4678",
+    "lut_index_rule": "u = min(255, (d * scale_q16 + 0x8000) >> 16), d = max_logit - logit in raw i24 logit units (round-half-up Q16 multiply)",
+    "threshold_rule": "threshold = (r * total_weight) >> 16 (truncating); pick the first candidate in selection order whose cumulative weight strictly exceeds it",
+    "selection_rule": "top-k by k partial scans; pass 0 is the deployed argmax rule; later passes skip used ids; ties go to the lower id",
+    "temperature_rule": "scale_q16 = round_ties_even(65536 * 16 * logit_step / (T * ln 2)) folded at build time",
+    "logit_dequant_step": 0.00632128565330205
+  },
+  "gate": {
+    "setting": {
+      "top_k": 8,
+      "scale_q16": 11953,
+      "requested_temperature": 0.8,
+      "effective_temperature": 0.8000238770447308
+    },
+    "rom_bytes": 1048576,
+    "driver_bytes": 14549,
+    "n_tokens": 256,
+    "combos": 5,
+    "all_sequences_match": true,
+    "all_health_checks_pass": true,
+    "mean_m_cycles_per_token": 3581482,
+    "seconds_per_token_dmg": 3.415567398071289,
+    "runs": [
+      {
+        "seed_id": 19,
+        "rng_seed": 48879,
+        "n_tokens": 256,
+        "host_sequence_sha256": "3d52ed20337239f6eed540f821dafce61a7aa892d711de19fde8b79227d33089",
+        "rom_sequence_sha256": "3d52ed20337239f6eed540f821dafce61a7aa892d711de19fde8b79227d33089",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "sampled_id_matches_first_and_last": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3574845,
+          "median": 3581832,
+          "max": 3588895,
+          "mean": 3581455,
+          "max_over_min": 1.0039302403320982,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_rom_seed_19_rng_beef.txt"
+      },
+      {
+        "seed_id": 26,
+        "rng_seed": 4660,
+        "n_tokens": 256,
+        "host_sequence_sha256": "2fe187ca1441fbf41eb68aab4201bc96359ef911c6a305142e84619dbd4c824d",
+        "rom_sequence_sha256": "2fe187ca1441fbf41eb68aab4201bc96359ef911c6a305142e84619dbd4c824d",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "sampled_id_matches_first_and_last": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3575253,
+          "median": 3581601,
+          "max": 3587904,
+          "mean": 3581470,
+          "max_over_min": 1.0035384908424663,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_rom_seed_26_rng_1234.txt"
+      },
+      {
+        "seed_id": 62,
+        "rng_seed": 49374,
+        "n_tokens": 256,
+        "host_sequence_sha256": "4dc750595a9a62c0c6c5ff567825e27f3341d98e25c832832ad78892b89a7258",
+        "rom_sequence_sha256": "4dc750595a9a62c0c6c5ff567825e27f3341d98e25c832832ad78892b89a7258",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "sampled_id_matches_first_and_last": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3575299,
+          "median": 3581660,
+          "max": 3588968,
+          "mean": 3581512,
+          "max_over_min": 1.003823176746896,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_rom_seed_62_rng_c0de.txt"
+      },
+      {
+        "seed_id": 75,
+        "rng_seed": 1,
+        "n_tokens": 256,
+        "host_sequence_sha256": "bf41ebac6bfefb352b9759917c5eaf2b8cf365cd99247aa1eca064f28c63afb8",
+        "rom_sequence_sha256": "bf41ebac6bfefb352b9759917c5eaf2b8cf365cd99247aa1eca064f28c63afb8",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "sampled_id_matches_first_and_last": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3574955,
+          "median": 3581966,
+          "max": 3588671,
+          "mean": 3581592,
+          "max_over_min": 1.003836691650664,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_rom_seed_75_rng_0001.txt"
+      },
+      {
+        "seed_id": 19,
+        "rng_seed": 0,
+        "n_tokens": 256,
+        "host_sequence_sha256": "32da864a395d0cde0eab00a951847b11cf5817ea2c5d57dd1906a4b770f96a53",
+        "rom_sequence_sha256": "32da864a395d0cde0eab00a951847b11cf5817ea2c5d57dd1906a4b770f96a53",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "sampled_id_matches_first_and_last": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 3575403,
+          "median": 3581697,
+          "max": 3587245,
+          "mean": 3581384,
+          "max_over_min": 1.0033120741913568,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_rom_seed_19_rng_0001.txt"
+      }
+    ]
+  },
+  "cycle_cost": {
+    "argmax_mean_m_cycles_per_token": 3532363,
+    "sampling_mean_m_cycles_per_token": 3581482,
+    "extra_m_cycles_per_token": 49119,
+    "extra_fraction": 0.013905422517447951
+  },
+  "samples": [
+    {
+      "file": "sample_T1p00_k8_seed_19.txt",
+      "setting": {
+        "top_k": 8,
+        "scale_q16": 9563,
+        "requested_temperature": 1.0,
+        "effective_temperature": 0.9999671026158806
+      },
+      "seed_id": 19,
+      "seed_char": "T",
+      "rng_seed": 24301,
+      "n_chars": 512,
+      "provenance": "host+rom-first-256-verified",
+      "sequence_sha256": "594ca2f821e44a9306c5da3ce18ac2d2264ba70375de3019519507aa2b31218c"
+    },
+    {
+      "file": "sample_T0p80_k8_seed_19.txt",
+      "setting": {
+        "top_k": 8,
+        "scale_q16": 11953,
+        "requested_temperature": 0.8,
+        "effective_temperature": 0.8000238770447308
+      },
+      "seed_id": 19,
+      "seed_char": "T",
+      "rng_seed": 24301,
+      "n_chars": 512,
+      "provenance": "host",
+      "sequence_sha256": "827834e450f18fea5a8a27fcd6297b4d434723c393718bff467106903787417e"
+    },
+    {
+      "file": "sample_T0p60_k4_seed_19.txt",
+      "setting": {
+        "top_k": 4,
+        "scale_q16": 15938,
+        "requested_temperature": 0.6,
+        "effective_temperature": 0.5999928097826369
+      },
+      "seed_id": 19,
+      "seed_char": "T",
+      "rng_seed": 24301,
+      "n_chars": 512,
+      "provenance": "host",
+      "sequence_sha256": "67dcb99a1486343ce45ec4f26e7eeba66f8b2b95d56492826fc27ee01a961400"
+    }
+  ],
+  "caveats": [
+    "The output ring caps on-device runs at 256 tokens, so 512-char samples are host-generated; the ROM-verified sample's first 256 ids are byte-identical to an on-device run with the same (seed, rng_seed), and tokens 257..512 come from the same host evaluator that produced those verified ids.",
+    "The scaled-multiply draw makes each candidate's probability deviate from weight/total by at most total/65536 (~3% relative at total ~2040); this is deterministic and identical on host and device.",
+    "Successive XorShift16 values are a fixed permutation of 1..=65535, not independent draws; adequate for qualitative decoding variety, not for statistical workloads.",
+    "Sample quality must be judged honestly: sampling escapes greedy argmax loops, but the model itself is a 4-block d64 bring-up checkpoint (~3.3 bpc), so text is English-like at best, not coherent prose."
+  ]
+}

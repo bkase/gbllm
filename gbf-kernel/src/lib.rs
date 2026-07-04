@@ -12,6 +12,7 @@ pub mod asm_impl_state;
 pub mod autotune;
 pub mod calibration;
 pub mod compat;
+pub mod decode;
 pub mod model_ref;
 pub mod ref_impl;
 pub mod signature;
