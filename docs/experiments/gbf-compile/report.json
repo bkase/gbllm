@@ -1,0 +1,416 @@
+{
+  "schema": "gbf_compile_gate.v1",
+  "bead": "bd-1skgm",
+  "git_sha": "fbf116c73f9b5a69bec7cd2ce652cb738fcf0cea",
+  "build_report": {
+    "schema": "gbf_compile_build_report.v1",
+    "bead": "bd-1skgm",
+    "checkpoint": {
+      "schema": "f_s6_dense_checkpoint_export.v1",
+      "trainer_git_sha": "71f3f68b65c13d8ec63e1619151c33db5be820b6",
+      "manifest_sha256": "acefecbe5c22c22d54dcea03315d83f7571744686647cdf12691162b1fa4d14d",
+      "tensors_verified_sha256": 17,
+      "sequence_state_kind": "stateless_bigram_context",
+      "sequence_semantics_placeholder": "linear_state(4 bytes/layer) placeholder for stateless_bigram_context"
+    },
+    "artifact": {
+      "semantic_hash": "sha256:b4de5b85c6e85c6d14b4ba116c6cf8d4b20681bc801b0d641d3a7d693cfc9225",
+      "tensor_count": 17
+    },
+    "program": {
+      "d_model": 64,
+      "d_ff": 128,
+      "n_blocks": 4,
+      "vocab": 256,
+      "ops": [
+        "embed_lookup",
+        "block0.norm_quant",
+        "block0.up.matvec",
+        "block0.up.scale_epilogue",
+        "block0.gelu",
+        "block0.down.matvec",
+        "block0.down.scale_epilogue_residual_add",
+        "block1.norm_quant",
+        "block1.up.matvec",
+        "block1.up.scale_epilogue",
+        "block1.gelu",
+        "block1.down.matvec",
+        "block1.down.scale_epilogue_residual_add",
+        "block2.norm_quant",
+        "block2.up.matvec",
+        "block2.up.scale_epilogue",
+        "block2.gelu",
+        "block2.down.matvec",
+        "block2.down.scale_epilogue_residual_add",
+        "block3.norm_quant",
+        "block3.up.matvec",
+        "block3.up.scale_epilogue",
+        "block3.gelu",
+        "block3.down.matvec",
+        "block3.down.scale_epilogue_residual_add",
+        "final.norm_quant",
+        "head.tied_matvec",
+        "head.argmax"
+      ],
+      "weight_zero_permille": 69,
+      "max_scale_raw": 1345
+    },
+    "legalization": {
+      "checks": [
+        {
+          "name": "dims_match_backend_contract",
+          "bound": "d_model=64, d_ff=128, n_blocks=4, vocab=256",
+          "observed": "d_model=64, d_ff=128, n_blocks=4, vocab=256",
+          "ok": true
+        },
+        {
+          "name": "matvec_i16_accumulator",
+          "bound": "fan_in * 127 <= 32767 (fan_in <= 258)",
+          "observed": "max fan_in 128 -> bound 16256",
+          "ok": true
+        },
+        {
+          "name": "activation_grid",
+          "bound": "qmax 127, range 8.0 on every norm/gelu op",
+          "observed": "all ops on the [-8,8]/127 grid",
+          "ok": true
+        },
+        {
+          "name": "down_epilogue_u32",
+          "bound": "max_scale * max_acc * 2 + 127 < 2^32",
+          "observed": "max_scale 1345 -> 43728767 (< 4294967296)",
+          "ok": true
+        },
+        {
+          "name": "head_logits_i24",
+          "bound": "d_model * 127^2 < 8388608",
+          "observed": "1032256",
+          "ok": true
+        },
+        {
+          "name": "embedding_q11_5",
+          "bound": "max|emb| * 32 <= 32767",
+          "observed": "max|emb| 5.8053117 -> 185.8",
+          "ok": true
+        }
+      ]
+    },
+    "kernel_plan": [
+      {
+        "op": "embed_lookup",
+        "kernel": "EmbeddingTableQ11_5Banked",
+        "rationale": "banked data table proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block0.norm_quant",
+        "kernel": "IntNormQuantFullVector",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block0.up.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block0.up.scale_epilogue",
+        "kernel": "ScaleEpilogueQ8_8",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block0.gelu",
+        "kernel": "GeluLut255",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block0.down.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block0.down.scale_epilogue_residual_add",
+        "kernel": "ScaleEpilogueQ8_8ResidualAdd",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block1.norm_quant",
+        "kernel": "IntNormQuantFullVector",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block1.up.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block1.up.scale_epilogue",
+        "kernel": "ScaleEpilogueQ8_8",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block1.gelu",
+        "kernel": "GeluLut255",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block1.down.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block1.down.scale_epilogue_residual_add",
+        "kernel": "ScaleEpilogueQ8_8ResidualAdd",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block2.norm_quant",
+        "kernel": "IntNormQuantFullVector",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block2.up.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block2.up.scale_epilogue",
+        "kernel": "ScaleEpilogueQ8_8",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block2.gelu",
+        "kernel": "GeluLut255",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block2.down.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block2.down.scale_epilogue_residual_add",
+        "kernel": "ScaleEpilogueQ8_8ResidualAdd",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block3.norm_quant",
+        "kernel": "IntNormQuantFullVector",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block3.up.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block3.up.scale_epilogue",
+        "kernel": "ScaleEpilogueQ8_8",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block3.gelu",
+        "kernel": "GeluLut255",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "block3.down.matvec",
+        "kernel": "V3WeightsAsCodeBanked",
+        "rationale": "kernel bake-off (bd-rzq5n): V3 weights-as-code won M-cycles/MAC over V1/V2; byte-exact under the one-token and multi-token gates"
+      },
+      {
+        "op": "block3.down.scale_epilogue_residual_add",
+        "kernel": "ScaleEpilogueQ8_8ResidualAdd",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "final.norm_quant",
+        "kernel": "IntNormQuantFullVector",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "head.tied_matvec",
+        "kernel": "TiedHeadLaneMajorI8ProductLut",
+        "rationale": "banked data table proven byte-exact by the one-token bring-up (bd-59qiq)"
+      },
+      {
+        "op": "head.argmax",
+        "kernel": "ArgmaxI24LowestIndex",
+        "rationale": "bank-0 integer routine proven byte-exact by the one-token bring-up (bd-59qiq)"
+      }
+    ],
+    "rom": {
+      "rom_bytes": 1048576,
+      "bank_count": 34,
+      "driver_bytes": 8215,
+      "weight_code_bytes": 413125,
+      "weight_chunk_count": 30,
+      "table_bytes": 49152,
+      "token_start_pc": 347,
+      "token_boundary_pc": 811,
+      "token_end_pc": 819,
+      "n_tokens": 256
+    },
+    "stage_coverage": {
+      "real_dataflow": [
+        "import_checkpoint_export (sha256-verified -> ArtifactCore)",
+        "lower_infer (narrow DenseBigramProgram IR; not GbInferIR — see module doc)",
+        "lower_quant (v0 integer numeric contract via gbf-kernel model_ref)",
+        "legalize (device-bound checks with observed values)",
+        "kernel_select (V3 weights-as-code family per bake-off bd-rzq5n)",
+        "rom_backend (gbf-kernel asm_impl_model banked MBC5 builder)"
+      ],
+      "not_wired": [
+        "validate (Stage 0 artifact-view validation)",
+        "storage_plan",
+        "window",
+        "overlay_plan",
+        "arena",
+        "schedule / schedule_cost",
+        "stage_cache (run_compiled_build_stage_cache_pipeline)"
+      ],
+      "notes": [
+        "The lowering-middle IR is a narrow model-class IR, not the Stage 3 GbInferIR; constructing GbInferIR would require fabricating Stage 0-2 products that have no real producer for a checkpoint export today.",
+        "ROM section assembly reuses the gbf-kernel model-ROM builder proven byte-exact by the one-token/multi-token gates; gbf-codegen owns selection/orchestration."
+      ]
+    }
+  },
+  "seeds": [
+    10,
+    32,
+    84,
+    101
+  ],
+  "all_sequences_match": true,
+  "all_health_checks_pass": true,
+  "committed_evidence_file": "docs/experiments/multi-token/report.json",
+  "committed_evidence_checks": [
+    {
+      "seed": 10,
+      "committed_sha256": "98a78051865776937de080caa6bedab036b4578b26a5ced17a6277e0749f4d9f",
+      "compiled_sha256": "98a78051865776937de080caa6bedab036b4578b26a5ced17a6277e0749f4d9f",
+      "matches": true
+    },
+    {
+      "seed": 32,
+      "committed_sha256": "c9754a2d34d9409b765a7012ecc9a8940690e1b98993952ce1902f9e411f710e",
+      "compiled_sha256": "c9754a2d34d9409b765a7012ecc9a8940690e1b98993952ce1902f9e411f710e",
+      "matches": true
+    },
+    {
+      "seed": 84,
+      "committed_sha256": "9eb8a547601068691a4784435efe9e5f2dea3d95edd15e54096bc98a96d5ebc5",
+      "compiled_sha256": "9eb8a547601068691a4784435efe9e5f2dea3d95edd15e54096bc98a96d5ebc5",
+      "matches": true
+    },
+    {
+      "seed": 101,
+      "committed_sha256": "17212acb9cd5cd31c4a362f41b90d2d9e6b83e58cba2eecc50e4a88125c543a4",
+      "compiled_sha256": "17212acb9cd5cd31c4a362f41b90d2d9e6b83e58cba2eecc50e4a88125c543a4",
+      "matches": true
+    }
+  ],
+  "all_match_committed_evidence": true,
+  "mean_m_cycles_per_token": 2731307,
+  "seconds_per_token_dmg": 2.6047773361206055,
+  "runs": [
+    {
+      "seed": 10,
+      "n_tokens": 256,
+      "host_sequence_sha256": "98a78051865776937de080caa6bedab036b4578b26a5ced17a6277e0749f4d9f",
+      "rom_sequence_sha256": "98a78051865776937de080caa6bedab036b4578b26a5ced17a6277e0749f4d9f",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2729311,
+        "median": 2729315,
+        "max": 2729315,
+        "mean": 2729314,
+        "max_over_min": 1.0000014655713474,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x0A.txt"
+    },
+    {
+      "seed": 32,
+      "n_tokens": 256,
+      "host_sequence_sha256": "c9754a2d34d9409b765a7012ecc9a8940690e1b98993952ce1902f9e411f710e",
+      "rom_sequence_sha256": "c9754a2d34d9409b765a7012ecc9a8940690e1b98993952ce1902f9e411f710e",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2730552,
+        "median": 2731716,
+        "max": 2733644,
+        "mean": 2731977,
+        "max_over_min": 1.0011323717695177,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x20.txt"
+    },
+    {
+      "seed": 84,
+      "n_tokens": 256,
+      "host_sequence_sha256": "9eb8a547601068691a4784435efe9e5f2dea3d95edd15e54096bc98a96d5ebc5",
+      "rom_sequence_sha256": "9eb8a547601068691a4784435efe9e5f2dea3d95edd15e54096bc98a96d5ebc5",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2730039,
+        "median": 2731716,
+        "max": 2733644,
+        "mean": 2731968,
+        "max_over_min": 1.0013204939563134,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x54.txt"
+    },
+    {
+      "seed": 101,
+      "n_tokens": 256,
+      "host_sequence_sha256": "17212acb9cd5cd31c4a362f41b90d2d9e6b83e58cba2eecc50e4a88125c543a4",
+      "rom_sequence_sha256": "17212acb9cd5cd31c4a362f41b90d2d9e6b83e58cba2eecc50e4a88125c543a4",
+      "sequences_match": true,
+      "first_divergence_index": null,
+      "first_token_checkpoints_byte_exact": true,
+      "last_token_checkpoints_byte_exact": true,
+      "checkpoint_mismatches": [],
+      "cycles": {
+        "min": 2730552,
+        "median": 2731716,
+        "max": 2733644,
+        "mean": 2731972,
+        "max_over_min": 1.0011323717695177,
+        "stable_within_5pct": true
+      },
+      "sp_home_every_token": true,
+      "sp_violation_tokens": [],
+      "wram_untouched_regions_ok": true,
+      "wram_violations": [],
+      "done_flag_set": true,
+      "sample_file": "sample_seed_0x65.txt"
+    }
+  ]
+}

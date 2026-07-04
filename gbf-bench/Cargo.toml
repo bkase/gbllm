@@ -20,3 +20,7 @@ gbf-workload = { path = "../gbf-workload" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+gbf-codegen = { path = "../gbf-codegen", features = ["test-infra"] }
+tempfile.workspace = true

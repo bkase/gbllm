@@ -2,6 +2,7 @@
 
 pub mod autotune;
 pub mod calibration;
+pub mod compile_gate;
 pub mod kernel_bakeoff;
 pub mod multi_token;
 pub mod one_token;

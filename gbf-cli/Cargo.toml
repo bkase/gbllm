@@ -14,7 +14,10 @@ gbf-policy = { path = "../gbf-policy" }
 gbf-report = { path = "../gbf-report" }
 
 [features]
-default = ["phase-a"]
+default = ["phase-a", "compile"]
+# `gbf compile`: checkpoint export -> model ROM through the gbf-codegen
+# pipeline (bd-1skgm). Needs no experiment-crate features.
+compile = []
 phase-a = ["gbf-experiments/phase-a"]
 ablation = ["gbf-experiments/ablation"]
 s2-full = ["gbf-experiments/s2-full"]
@@ -43,6 +46,7 @@ assert_cmd.workspace = true
 bzip2.workspace = true
 flate2.workspace = true
 gbf-artifact = { path = "../gbf-artifact" }
+gbf-codegen = { path = "../gbf-codegen", features = ["test-infra"] }
 predicates.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -25,6 +25,21 @@ struct GbfCli {
 
 #[derive(Debug, Subcommand)]
 enum GbfCommand {
+    /// Compile a trained checkpoint export into a bootable model ROM
+    /// (`rom.gb` + `build_report.json`) through the gbf-codegen pipeline.
+    #[cfg(feature = "compile")]
+    Compile {
+        /// Checkpoint export directory (`f_s6_dense_checkpoint_export.v1`
+        /// bundle: `manifest.json` + `tensors/`).
+        #[arg(long)]
+        checkpoint_export: PathBuf,
+        /// Output directory for `rom.gb` and `build_report.json`.
+        #[arg(long)]
+        out: PathBuf,
+        /// On-device generation steps compiled into the ROM loop (1..=256).
+        #[arg(long, default_value_t = 256)]
+        tokens: u16,
+    },
     /// S1 First Pulse experiment workflows.
     #[cfg(any(
         feature = "phase-a",
@@ -85,6 +100,12 @@ fn main() -> ExitCode {
             #[cfg(feature = "s4")]
             let s4_logging = s4_logging(&cli);
             match cli.command {
+                #[cfg(feature = "compile")]
+                GbfCommand::Compile {
+                    checkpoint_export,
+                    out,
+                    tokens,
+                } => exit_code(run_compile(&checkpoint_export, &out, tokens)),
                 #[cfg(any(
                     feature = "phase-a",
                     feature = "ablation",
@@ -208,6 +229,35 @@ fn s4_logging(cli: &GbfCli) -> gbf_experiments::s4::cli::S4CliLogging {
         log_file: cli.log_file.clone(),
         capture_events: cli.capture_events.clone(),
     }
+}
+
+#[cfg(feature = "compile")]
+fn run_compile(
+    checkpoint_export: &std::path::Path,
+    out: &std::path::Path,
+    tokens: u16,
+) -> Result<(), gbf_codegen::compile::CompileError> {
+    use gbf_codegen::compile::{CompileOptions, compile_checkpoint_export, write_build_outputs};
+
+    let compiled =
+        compile_checkpoint_export(checkpoint_export, &CompileOptions { n_tokens: tokens })?;
+    let outputs = write_build_outputs(&compiled, out)?;
+    let rom = &compiled.report.rom;
+    println!(
+        "compiled {} -> {} ({} bytes, {} banks, {} weight chunks, {}-token loop)",
+        checkpoint_export.display(),
+        outputs.rom_path.display(),
+        rom.rom_bytes,
+        rom.bank_count,
+        rom.weight_chunk_count,
+        rom.n_tokens
+    );
+    println!(
+        "artifact {} | build report {}",
+        compiled.report.artifact.semantic_hash,
+        outputs.report_path.display()
+    );
+    Ok(())
 }
 
 fn exit_code<E: std::fmt::Display>(result: Result<(), E>) -> ExitCode {

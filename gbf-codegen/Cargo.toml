@@ -12,6 +12,7 @@ gbf-asm = { path = "../gbf-asm" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
 gbf-ir = { path = "../gbf-ir" }
+gbf-kernel = { path = "../gbf-kernel" }
 gbf-policy = { path = "../gbf-policy" }
 gbf-report = { path = "../gbf-report" }
 gbf-runtime = { path = "../gbf-runtime" }

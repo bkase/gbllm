@@ -2309,6 +2309,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -2344,6 +2345,7 @@ dependencies = [
  "gbf-foundation",
  "gbf-hw",
  "gbf-ir",
+ "gbf-kernel",
  "gbf-policy",
  "gbf-report",
  "gbf-runtime",
