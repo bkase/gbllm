@@ -170,7 +170,6 @@ fn simulate_chunked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gbf_foundation::Hash256;
     use gbf_policy::{InferOpTag, ReductionSiteId};
     use gbf_report::report_schemas::f_b6_f_b7_common::AccumulatorDomain;
     use gbf_report::report_schemas::quant_graph_v1::DeterminismClassTag;
