@@ -107,3 +107,8 @@ required-features = ["s5-default"]
 name = "s2_gap_and_export"
 path = "src/bin/s2_gap_and_export.rs"
 required-features = ["s7"]
+
+[[bin]]
+name = "s4_kn5_baseline_gutenberg"
+path = "src/bin/s4_kn5_baseline_gutenberg.rs"
+required-features = ["s4"]

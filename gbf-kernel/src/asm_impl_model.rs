@@ -1,0 +1,1873 @@
+//! One-token forward-pass ROM builder for the dense bigram bring-up
+//! (bd-59qiq).
+//!
+//! Builds a banked MBC5 ROM that computes the canonical integer semantics of
+//! [`crate::model_ref::IntLoweredModel::forward`] for one input byte poked
+//! into WRAM by the host, and leaves every semantic checkpoint (per-block
+//! residuals, final norm output, i24 logits, argmax) in WRAM for byte-exact
+//! comparison against the host evaluator.
+//!
+//! Layout:
+//! - **Bank 0**: driver + integer routines (mul16, isqrt32, dividers, norm,
+//!   epilogues, head, argmax) + GELU LUT + per-row scale tables.
+//! - **Banks 1..=N**: V3-style weights-as-code matvec chunks (straight-line
+//!   add/sub over `u8` zero-point-128 activations walked with `SP`, i16
+//!   accumulators seeded with `-128 * sum(row)`), each chunk `call`ed at
+//!   `0x4000` after an MBC5 `ROMB0` bank switch.
+//! - **Next 2 banks**: Q11.5 embedding table (residual init rows).
+//! - **Last bank**: lane-major transposed i8 tied-head table.
+//!
+//! The existing bake-off builders in [`crate::asm_impl`] are untouched; this
+//! module carries its own small two-pass assembler because the driver needs
+//! `call label` and label-address immediates, which the bake-off `FlatAsm`
+//! does not.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use gbf_asm::encoder::{EncodeError, EncodedSection, encode_instr};
+use gbf_asm::isa::{
+    AluSrc8, BitIndex, CbTarget, Cond, DirectAddr, Instr, Reg8, Reg16Addr, Reg16Data, Reg16Stack,
+};
+use gbf_asm::layout::{AddressSpace, BankIndex, LayoutPlan, PlacedSection};
+use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, RomAssemblyError, RomSize, assemble_rom};
+use gbf_asm::section::SectionId;
+
+use crate::model_ref::{D_FF, D_MODEL, IntLoweredModel, LoweredLayer, N_BLOCKS, VOCAB};
+
+// ---------------------------------------------------------------------------
+// WRAM map (all one-token addresses; the runner reads these)
+// ---------------------------------------------------------------------------
+
+/// Matvec input activations, `u8` zero point 128 (up to 128 lanes).
+pub const ACT_BASE: u16 = 0xC000;
+/// |x| buffer for the norm (u16 LE x 64).
+pub const ABSX_BASE: u16 = 0xC080;
+/// Matvec raw accumulator outputs (i16 LE, up to 128 rows).
+pub const ACC_BASE: u16 = 0xC100;
+/// Residual vector x (i16 Q11.5 LE x 64).
+pub const X_BASE: u16 = 0xC200;
+/// i24 LE logits x 256.
+pub const LOGITS_BASE: u16 = 0xC300;
+/// Head per-lane product LUT pages (lo / hi / sign-extension).
+pub const LUT_LO_PAGE: u16 = 0xC700;
+/// Per-block residual dumps (4 x 128 bytes).
+pub const XDUMP_BASE: u16 = 0xCA00;
+/// Final norm output dump (u8 zp128 x 64).
+pub const QDUMP_BASE: u16 = 0xCC00;
+/// Argmax byte.
+pub const ARGMAX_ADDR: u16 = 0xCC40;
+/// Done flag (1 when the token is complete).
+pub const DONE_ADDR: u16 = 0xCC41;
+/// Input context byte; the host pokes this before running.
+pub const INPUT_ADDR: u16 = 0xCC50;
+/// Block-0 debug dumps for mismatch localization.
+pub const DUMP_NORM0: u16 = 0xCC80;
+pub const DUMP_UPACC0: u16 = 0xCD00;
+pub const DUMP_GELU0: u16 = 0xCE00;
+pub const DUMP_DOWNACC0: u16 = 0xCF00;
+/// Stack top (grows down; well above every buffer).
+pub const MODEL_STACK_TOP: u16 = 0xDFF0;
+
+// scratch (0xC28x..0xC2Dx, single page so pointer walks never carry)
+const SPSAVE: u16 = 0xC280;
+const MUL_R: u16 = 0xC284; // u32
+const NORM_SS: u16 = 0xC288; // 5 bytes
+const NORM_R: u16 = 0xC290; // u16
+const NORM_D: u16 = 0xC294; // u32 (8r)
+const NORM_D2: u16 = 0xC298; // u32 (16r)
+const DIV_NUM: u16 = 0xC29C; // u32
+const DIV_T1: u16 = 0xC2A0; // u32
+const DIV_T2: u16 = 0xC2A4; // u32
+const ISQ_REM: u16 = 0xC2A8; // u32
+const ISQ_T1: u16 = 0xC2AC; // u32
+const ISQ_ROOT: u16 = 0xC2B0; // u32
+const ISQ_IN: u16 = 0xC2B4; // u32 (input)
+const LANE: u16 = 0xC2C0;
+const ROWCNT: u16 = 0xC2C1;
+const SIGN: u16 = 0xC2C2;
+const PTR: u16 = 0xC2C4;
+const APTR: u16 = 0xC2C6;
+const OPTR: u16 = 0xC2C8;
+const IPTR: u16 = 0xC2CA;
+const SPTR: u16 = 0xC2CC;
+const XPTR: u16 = 0xC2CE;
+const ARG_BEST: u16 = 0xC2D0; // 3 bytes (hi byte sign-flipped)
+const ARG_CAND: u16 = 0xC2D4; // 3 bytes
+
+/// MBC5 low ROM bank register.
+const MBC5_ROMB0: u16 = 0x2000;
+/// Banked chunk entry point (all switchable-bank code starts here).
+const CHUNK_ENTRY: u16 = 0x4000;
+/// Per-bank code budget for weight chunks.
+const BANK_BYTES: usize = 0x4000;
+
+const DRIVER_SECTION_ID: u32 = 0xB59A_0000;
+
+// ---------------------------------------------------------------------------
+// public result type
+// ---------------------------------------------------------------------------
+
+/// A fully assembled one-token ROM plus the facts the runner needs.
+#[derive(Debug, Clone)]
+pub struct OneTokenRom {
+    pub rom: Vec<u8>,
+    /// PC at which the measured token region begins (right after `di`/stack).
+    pub token_start_pc: u16,
+    /// PC of the spin loop reached when the token is complete.
+    pub token_end_pc: u16,
+    pub rom_size: RomSize,
+    pub bank_count: u16,
+    /// Bank-0 driver + routine + table bytes.
+    pub driver_bytes: usize,
+    /// Total straight-line weight-code bytes across all chunks.
+    pub weight_code_bytes: usize,
+    pub weight_chunk_count: usize,
+    /// Banked data table bytes (embedding + head).
+    pub table_bytes: usize,
+}
+
+#[derive(Debug)]
+pub enum ModelRomError {
+    Encode(EncodeError),
+    RomAssembly(RomAssemblyError),
+    DuplicateLabel { name: String },
+    UndefinedLabel { name: String },
+    JrOutOfRange { label: String, offset: i32 },
+    RowTooLargeForBank { row_bytes: usize },
+    DriverOverflowsBank0 { bytes: usize },
+    TooManyBanks { banks: usize },
+}
+
+impl fmt::Display for ModelRomError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Encode(error) => write!(f, "{error}"),
+            Self::RomAssembly(error) => write!(f, "{error}"),
+            Self::DuplicateLabel { name } => write!(f, "duplicate label {name}"),
+            Self::UndefinedLabel { name } => write!(f, "undefined label {name}"),
+            Self::JrOutOfRange { label, offset } => {
+                write!(f, "jr to {label} out of range ({offset})")
+            }
+            Self::RowTooLargeForBank { row_bytes } => {
+                write!(
+                    f,
+                    "one matvec row needs {row_bytes} bytes, exceeding a bank"
+                )
+            }
+            Self::DriverOverflowsBank0 { bytes } => {
+                write!(f, "bank-0 driver needs {bytes} bytes past 0x0150..0x4000")
+            }
+            Self::TooManyBanks { banks } => write!(f, "model needs {banks} ROM banks (> 512)"),
+        }
+    }
+}
+
+impl std::error::Error for ModelRomError {}
+
+impl From<EncodeError> for ModelRomError {
+    fn from(error: EncodeError) -> Self {
+        Self::Encode(error)
+    }
+}
+
+impl From<RomAssemblyError> for ModelRomError {
+    fn from(error: RomAssemblyError) -> Self {
+        Self::RomAssembly(error)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// small two-pass assembler with call/label-immediate support
+// ---------------------------------------------------------------------------
+
+enum ModelOp {
+    Instr(Instr),
+    Label(String),
+    Jp {
+        cond: Option<Cond>,
+        label: String,
+    },
+    Jr {
+        cond: Option<Cond>,
+        label: String,
+    },
+    CallLabel {
+        label: String,
+    },
+    /// `ld rr, label + off`
+    Ld16Label {
+        dst: Reg16Data,
+        label: String,
+        off: i32,
+    },
+    Bytes(Vec<u8>),
+}
+
+struct ModelAsm {
+    start: u16,
+    ops: Vec<ModelOp>,
+    unique: u32,
+}
+
+impl ModelAsm {
+    fn new(start: u16) -> Self {
+        Self {
+            start,
+            ops: Vec::new(),
+            unique: 0,
+        }
+    }
+
+    fn i(&mut self, instr: Instr) {
+        self.ops.push(ModelOp::Instr(instr));
+    }
+
+    fn label(&mut self, name: &str) {
+        self.ops.push(ModelOp::Label(name.to_owned()));
+    }
+
+    fn fresh(&mut self, prefix: &str) -> String {
+        self.unique += 1;
+        format!("{prefix}_{}", self.unique)
+    }
+
+    fn jp(&mut self, cond: Option<Cond>, label: &str) {
+        self.ops.push(ModelOp::Jp {
+            cond,
+            label: label.to_owned(),
+        });
+    }
+
+    fn jr(&mut self, cond: Option<Cond>, label: &str) {
+        self.ops.push(ModelOp::Jr {
+            cond,
+            label: label.to_owned(),
+        });
+    }
+
+    fn call(&mut self, label: &str) {
+        self.ops.push(ModelOp::CallLabel {
+            label: label.to_owned(),
+        });
+    }
+
+    fn ld16_label(&mut self, dst: Reg16Data, label: &str, off: i32) {
+        self.ops.push(ModelOp::Ld16Label {
+            dst,
+            label: label.to_owned(),
+            off,
+        });
+    }
+
+    fn bytes(&mut self, bytes: Vec<u8>) {
+        self.ops.push(ModelOp::Bytes(bytes));
+    }
+
+    fn op_len(op: &ModelOp) -> u16 {
+        match op {
+            ModelOp::Instr(instr) => u16::from(instr.byte_len()),
+            ModelOp::Jp { .. } | ModelOp::CallLabel { .. } | ModelOp::Ld16Label { .. } => 3,
+            ModelOp::Jr { .. } => 2,
+            ModelOp::Bytes(bytes) => bytes.len() as u16,
+            ModelOp::Label(_) => 0,
+        }
+    }
+
+    fn finish(self) -> Result<(Vec<u8>, BTreeMap<String, u16>), ModelRomError> {
+        let mut labels = BTreeMap::new();
+        let mut pc = self.start;
+        for op in &self.ops {
+            if let ModelOp::Label(name) = op
+                && labels.insert(name.clone(), pc).is_some()
+            {
+                return Err(ModelRomError::DuplicateLabel { name: name.clone() });
+            }
+            pc = pc.wrapping_add(Self::op_len(op));
+        }
+
+        let resolve = |label: &String| -> Result<u16, ModelRomError> {
+            labels
+                .get(label)
+                .copied()
+                .ok_or_else(|| ModelRomError::UndefinedLabel {
+                    name: label.clone(),
+                })
+        };
+
+        let mut bytes = Vec::new();
+        let mut pc = self.start;
+        for op in &self.ops {
+            pc = pc.wrapping_add(Self::op_len(op));
+            match op {
+                ModelOp::Instr(instr) => bytes.extend_from_slice(&encode_instr(instr)?),
+                ModelOp::Label(_) => {}
+                ModelOp::Jp { cond, label } => {
+                    let addr = resolve(label)?;
+                    bytes.extend_from_slice(&encode_instr(&Instr::JpAbs { cond: *cond, addr })?);
+                }
+                ModelOp::CallLabel { label } => {
+                    let addr = resolve(label)?;
+                    bytes.extend_from_slice(&encode_instr(&Instr::Call { cond: None, addr })?);
+                }
+                ModelOp::Ld16Label { dst, label, off } => {
+                    let addr = i32::from(resolve(label)?) + off;
+                    let addr = u16::try_from(addr).map_err(|_| ModelRomError::JrOutOfRange {
+                        label: label.clone(),
+                        offset: *off,
+                    })?;
+                    bytes.extend_from_slice(&encode_instr(&Instr::Ld16Imm {
+                        dst: *dst,
+                        imm: addr,
+                    })?);
+                }
+                ModelOp::Jr { cond, label } => {
+                    let addr = resolve(label)?;
+                    let offset = i32::from(addr) - i32::from(pc);
+                    let offset = i8::try_from(offset).map_err(|_| ModelRomError::JrOutOfRange {
+                        label: label.clone(),
+                        offset,
+                    })?;
+                    bytes.extend_from_slice(&encode_instr(&Instr::JrRel {
+                        cond: *cond,
+                        off: offset,
+                    })?);
+                }
+                ModelOp::Bytes(data) => bytes.extend_from_slice(data),
+            }
+        }
+        Ok((bytes, labels))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tiny emit helpers
+// ---------------------------------------------------------------------------
+
+fn direct(addr: u16) -> DirectAddr {
+    DirectAddr::new(addr).expect("one-token WRAM/MBC addresses stay below high memory")
+}
+
+fn a_from(asm: &mut ModelAsm, addr: u16) {
+    asm.i(Instr::LdAFromDirect { addr: direct(addr) });
+}
+
+fn a_to(asm: &mut ModelAsm, addr: u16) {
+    asm.i(Instr::LdDirectFromA { addr: direct(addr) });
+}
+
+fn ld_r_imm(asm: &mut ModelAsm, dst: Reg8, imm: u8) {
+    asm.i(Instr::Ld8RegFromImm { dst, imm });
+}
+
+fn ld16(asm: &mut ModelAsm, dst: Reg16Data, imm: u16) {
+    asm.i(Instr::Ld16Imm { dst, imm });
+}
+
+fn ld_rr(asm: &mut ModelAsm, dst: Reg8, src: Reg8) {
+    asm.i(Instr::Ld8Reg { dst, src });
+}
+
+/// `dst32(addr, n bytes) = 0`
+fn zero_mem(asm: &mut ModelAsm, addr: u16, n: u16) {
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    for k in 0..n {
+        a_to(asm, addr + k);
+    }
+}
+
+/// Byte-wise `dst += src` over `n` bytes (both fixed addresses); uses A and B.
+fn mem_add(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
+    for k in 0..n {
+        a_from(asm, src + k);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, dst + k);
+        if k == 0 {
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::B),
+            });
+        } else {
+            asm.i(Instr::AdcA {
+                src: AluSrc8::Reg(Reg8::B),
+            });
+        }
+        a_to(asm, dst + k);
+    }
+}
+
+/// Byte-wise copy of `n` bytes between fixed addresses; uses A.
+fn mem_copy(asm: &mut ModelAsm, dst: u16, src: u16, n: u16) {
+    for k in 0..n {
+        a_from(asm, src + k);
+        a_to(asm, dst + k);
+    }
+}
+
+/// `dst = src0 - src1` over `n` bytes into `dst`; leaves borrow in carry.
+fn mem_sub_into(asm: &mut ModelAsm, dst: u16, src0: u16, src1: u16, n: u16) {
+    for k in 0..n {
+        a_from(asm, src1 + k);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, src0 + k);
+        if k == 0 {
+            asm.i(Instr::SubA {
+                src: AluSrc8::Reg(Reg8::B),
+            });
+        } else {
+            asm.i(Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::B),
+            });
+        }
+        a_to(asm, dst + k);
+    }
+}
+
+/// Logical shift right by one over `n` bytes at `addr` (little-endian),
+/// walking with HL. All scratch lives in one page, so `dec l` is safe.
+fn mem_shr1(asm: &mut ModelAsm, addr: u16, n: u16) {
+    ld16(asm, Reg16Data::HL, addr + n - 1);
+    asm.i(Instr::Srl {
+        target: CbTarget::HlIndirect,
+    });
+    for _ in 1..n {
+        asm.i(Instr::Dec8 {
+            dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::L),
+        });
+        asm.i(Instr::Rr {
+            target: CbTarget::HlIndirect,
+        });
+    }
+}
+
+/// Shift left by one over `n` bytes at `addr` (little-endian).
+fn mem_shl1(asm: &mut ModelAsm, addr: u16, n: u16) {
+    ld16(asm, Reg16Data::HL, addr);
+    asm.i(Instr::Sla {
+        target: CbTarget::HlIndirect,
+    });
+    for _ in 1..n {
+        asm.i(Instr::Inc8 {
+            dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::L),
+        });
+        asm.i(Instr::Rl {
+            target: CbTarget::HlIndirect,
+        });
+    }
+}
+
+/// Load a 16-bit LE value into DE via a pointer variable, advancing it by 2.
+fn load_de_via_ptr(asm: &mut ModelAsm, ptr: u16) {
+    a_from(asm, ptr);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, ptr + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, ptr);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, ptr + 1);
+}
+
+/// DE = -DE (two's complement).
+fn negate_de(asm: &mut ModelAsm) {
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_r_imm(asm, Reg8::A, 0);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::D),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+}
+
+/// SIGN = (DE < 0) as 0/1 and DE = |DE| (used on i16 accumulators).
+fn abs_de_store_sign(asm: &mut ModelAsm) {
+    let pos = asm.fresh("absde");
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, SIGN);
+    asm.i(Instr::Bit {
+        bit: BitIndex::new(7).expect("bit 7"),
+        target: CbTarget::Reg(Reg8::D),
+    });
+    asm.jr(Some(Cond::Z), &pos);
+    ld_r_imm(asm, Reg8::A, 1);
+    a_to(asm, SIGN);
+    negate_de(asm);
+    asm.label(&pos);
+}
+
+// ---------------------------------------------------------------------------
+// routines
+// ---------------------------------------------------------------------------
+
+/// `mul16x8`: A (multiplier) x DE (multiplicand) -> C:HL (24-bit).
+fn emit_mul16x8(asm: &mut ModelAsm) {
+    asm.label("mul16x8");
+    ld16(asm, Reg16Data::HL, 0);
+    ld_r_imm(asm, Reg8::C, 0);
+    for step in 0..8 {
+        let skip = format!("m8s_{step}");
+        asm.i(Instr::AddHl { src: Reg16Data::HL });
+        asm.i(Instr::Rl {
+            target: CbTarget::Reg(Reg8::C),
+        });
+        asm.i(Instr::Rla);
+        asm.jr(Some(Cond::NC), &skip);
+        asm.i(Instr::AddHl { src: Reg16Data::DE });
+        asm.jr(Some(Cond::NC), &skip);
+        asm.i(Instr::Inc8 {
+            dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::C),
+        });
+        asm.label(&skip);
+    }
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `mul16`: BC x DE -> MUL_R (u32 LE). Preserves DE; clobbers A, BC, HL.
+fn emit_mul16(asm: &mut ModelAsm) {
+    asm.label("mul16");
+    asm.i(Instr::Push {
+        src: Reg16Stack::BC,
+    });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.call("mul16x8");
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, MUL_R + 1);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, MUL_R + 2);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    a_to(asm, MUL_R + 3);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, MUL_R);
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::BC,
+    });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.call("mul16x8");
+    // MUL_R += C:HL at byte offset 0
+    a_from(asm, MUL_R);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::L),
+    });
+    a_to(asm, MUL_R);
+    a_from(asm, MUL_R + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::H),
+    });
+    a_to(asm, MUL_R + 1);
+    a_from(asm, MUL_R + 2);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    a_to(asm, MUL_R + 2);
+    a_from(asm, MUL_R + 3);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, MUL_R + 3);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `isqrt32`: ISQ_IN (u32) -> NORM_R (u16) floor square root. Unrolled 16
+/// iterations of the classic shifting algorithm.
+fn emit_isqrt32(asm: &mut ModelAsm) {
+    asm.label("isqrt32");
+    mem_copy(asm, ISQ_REM, ISQ_IN, 4);
+    zero_mem(asm, ISQ_ROOT, 4);
+    for iter in 0..16u16 {
+        let p = 30 - 2 * iter;
+        let kb = p / 8;
+        let mask = 1u8 << (p % 8);
+        let no = format!("isq_no_{iter}");
+        let done = format!("isq_dn_{iter}");
+        // ISQ_T1 = ISQ_ROOT with bit OR'd into byte kb (bit and root never
+        // overlap in this algorithm)
+        mem_copy(asm, ISQ_T1, ISQ_ROOT, 4);
+        a_from(asm, ISQ_T1 + kb);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Imm(mask),
+        });
+        a_to(asm, ISQ_T1 + kb);
+        // trial subtract REM - T1 -> T1 (borrow in carry)
+        mem_sub_into(asm, ISQ_T1, ISQ_REM, ISQ_T1, 4);
+        asm.jr(Some(Cond::C), &no);
+        // accepted: REM = T1; shift root, then OR the bit at position p
+        mem_copy(asm, ISQ_REM, ISQ_T1, 4);
+        mem_shr1(asm, ISQ_ROOT, 4);
+        a_from(asm, ISQ_ROOT + kb);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Imm(mask),
+        });
+        a_to(asm, ISQ_ROOT + kb);
+        asm.jr(None, &done);
+        asm.label(&no);
+        mem_shr1(asm, ISQ_ROOT, 4);
+        asm.label(&done);
+    }
+    mem_copy(asm, NORM_R, ISQ_ROOT, 2);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `udiv_norm`: DIV_NUM (u32) / NORM_D2 (u32, nonzero) -> A = min(q, 255).
+fn emit_udiv_norm(asm: &mut ModelAsm) {
+    asm.label("udiv_norm");
+    // DIV_T1 = NORM_D2 << 8
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, DIV_T1);
+    a_from(asm, NORM_D2);
+    a_to(asm, DIV_T1 + 1);
+    a_from(asm, NORM_D2 + 1);
+    a_to(asm, DIV_T1 + 2);
+    a_from(asm, NORM_D2 + 2);
+    a_to(asm, DIV_T1 + 3);
+    // clamp check: NUM >= T1 -> 255
+    mem_sub_into(asm, DIV_T2, DIV_NUM, DIV_T1, 4);
+    asm.jr(Some(Cond::C), "udnorm_go");
+    ld_r_imm(asm, Reg8::A, 255);
+    asm.i(Instr::Ret { cond: None });
+    asm.label("udnorm_go");
+    ld_r_imm(asm, Reg8::C, 0);
+    for iter in 0..8u16 {
+        let no = format!("udn_no_{iter}");
+        let rot = format!("udn_rot_{iter}");
+        mem_shr1(asm, DIV_T1, 4);
+        mem_sub_into(asm, DIV_T2, DIV_NUM, DIV_T1, 4);
+        asm.jr(Some(Cond::C), &no);
+        mem_copy(asm, DIV_NUM, DIV_T2, 4);
+        asm.i(Instr::Scf);
+        asm.jr(None, &rot);
+        asm.label(&no);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Reg(Reg8::A),
+        }); // carry := 0
+        asm.label(&rot);
+        asm.i(Instr::Rl {
+            target: CbTarget::Reg(Reg8::C),
+        });
+    }
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `udiv254`: DIV_NUM (u32) / 254 -> DE = min(q, 65535).
+fn emit_udiv254(asm: &mut ModelAsm) {
+    asm.label("udiv254");
+    a_from(asm, DIV_NUM + 3);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::NZ), "ud254_clamp");
+    a_from(asm, DIV_NUM + 2);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(254),
+    });
+    asm.jr(Some(Cond::C), "ud254_go");
+    asm.label("ud254_clamp");
+    ld16(asm, Reg16Data::DE, 0xFFFF);
+    asm.i(Instr::Ret { cond: None });
+    asm.label("ud254_go");
+    // DIV_T1 = 254 << 15 = 0x007F0000
+    zero_mem(asm, DIV_T1, 4);
+    ld_r_imm(asm, Reg8::A, 0x7F);
+    a_to(asm, DIV_T1 + 2);
+    ld16(asm, Reg16Data::DE, 0);
+    for iter in 0..16u16 {
+        let no = format!("ud254_no_{iter}");
+        let rot = format!("ud254_rot_{iter}");
+        mem_sub_into(asm, DIV_T2, DIV_NUM, DIV_T1, 4);
+        asm.jr(Some(Cond::C), &no);
+        mem_copy(asm, DIV_NUM, DIV_T2, 4);
+        asm.i(Instr::Scf);
+        asm.jr(None, &rot);
+        asm.label(&no);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Reg(Reg8::A),
+        });
+        asm.label(&rot);
+        asm.i(Instr::Rl {
+            target: CbTarget::Reg(Reg8::E),
+        });
+        asm.i(Instr::Rl {
+            target: CbTarget::Reg(Reg8::D),
+        });
+        mem_shr1(asm, DIV_T1, 4);
+    }
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `norm_quant`: X (i16 Q8.8 x 64) -> ACT (u8 zp128 x 64), canonical
+/// integer norm+activation-quant.
+fn emit_norm_quant(asm: &mut ModelAsm) {
+    asm.label("norm_quant");
+    zero_mem(asm, NORM_SS, 5);
+    // pass 1: abs + square accumulate
+    ld_r_imm(asm, Reg8::A, 64);
+    a_to(asm, LANE);
+    ld_r_imm(asm, Reg8::A, (X_BASE & 0xFF) as u8);
+    a_to(asm, PTR);
+    ld_r_imm(asm, Reg8::A, (X_BASE >> 8) as u8);
+    a_to(asm, PTR + 1);
+    ld_r_imm(asm, Reg8::A, (ABSX_BASE & 0xFF) as u8);
+    a_to(asm, APTR);
+    ld_r_imm(asm, Reg8::A, (ABSX_BASE >> 8) as u8);
+    a_to(asm, APTR + 1);
+    asm.label("nq_p1");
+    load_de_via_ptr(asm, PTR);
+    {
+        let pos = asm.fresh("nq_abs");
+        asm.i(Instr::Bit {
+            bit: BitIndex::new(7).expect("bit 7"),
+            target: CbTarget::Reg(Reg8::D),
+        });
+        asm.jr(Some(Cond::Z), &pos);
+        negate_de(asm);
+        asm.label(&pos);
+    }
+    // store |x| to ABSX via APTR
+    a_from(asm, APTR);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, APTR + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, APTR);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, APTR + 1);
+    // square
+    ld_rr(asm, Reg8::B, Reg8::D);
+    ld_rr(asm, Reg8::C, Reg8::E);
+    asm.call("mul16");
+    // NORM_SS(5) += MUL_R(4)
+    mem_add(asm, NORM_SS, MUL_R, 4);
+    a_from(asm, NORM_SS + 4);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, NORM_SS + 4);
+    a_from(asm, LANE);
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, LANE);
+    asm.jp(Some(Cond::NZ), "nq_p1");
+
+    // mean = SS >> 6, ISQ_IN = mean + 1
+    ld_r_imm(asm, Reg8::B, 6);
+    asm.label("nq_shr");
+    asm.i(Instr::Push {
+        src: Reg16Stack::BC,
+    });
+    mem_shr1(asm, NORM_SS, 5);
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::BC,
+    });
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "nq_shr");
+    a_from(asm, NORM_SS);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(1),
+    });
+    a_to(asm, ISQ_IN);
+    for k in 1..4u16 {
+        a_from(asm, NORM_SS + k);
+        asm.i(Instr::AdcA {
+            src: AluSrc8::Imm(0),
+        });
+        a_to(asm, ISQ_IN + k);
+    }
+    asm.call("isqrt32");
+    // NORM_D = r << 3; NORM_D2 = r << 4
+    mem_copy(asm, NORM_D, NORM_R, 2);
+    zero_mem(asm, NORM_D + 2, 2);
+    for _ in 0..3 {
+        mem_shl1(asm, NORM_D, 4);
+    }
+    mem_copy(asm, NORM_D2, NORM_D, 4);
+    mem_shl1(asm, NORM_D2, 4);
+
+    // pass 2: per-lane rounded division + sign + zero point
+    ld_r_imm(asm, Reg8::A, 64);
+    a_to(asm, LANE);
+    ld_r_imm(asm, Reg8::A, (X_BASE & 0xFF) as u8);
+    a_to(asm, PTR);
+    ld_r_imm(asm, Reg8::A, (X_BASE >> 8) as u8);
+    a_to(asm, PTR + 1);
+    ld_r_imm(asm, Reg8::A, (ABSX_BASE & 0xFF) as u8);
+    a_to(asm, APTR);
+    ld_r_imm(asm, Reg8::A, (ABSX_BASE >> 8) as u8);
+    a_to(asm, APTR + 1);
+    ld_r_imm(asm, Reg8::A, (ACT_BASE & 0xFF) as u8);
+    a_to(asm, OPTR);
+    ld_r_imm(asm, Reg8::A, (ACT_BASE >> 8) as u8);
+    a_to(asm, OPTR + 1);
+    asm.label("nq_p2");
+    // BC = |x| from ABSX
+    load_de_via_ptr(asm, APTR);
+    ld_rr(asm, Reg8::B, Reg8::D);
+    ld_rr(asm, Reg8::C, Reg8::E);
+    ld16(asm, Reg16Data::DE, 254);
+    asm.call("mul16");
+    // DIV_NUM = MUL_R + NORM_D
+    mem_copy(asm, DIV_NUM, MUL_R, 4);
+    mem_add(asm, DIV_NUM, NORM_D, 4);
+    asm.call("udiv_norm");
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(128),
+    });
+    asm.jr(Some(Cond::C), "nq_qok");
+    ld_r_imm(asm, Reg8::A, 127);
+    asm.label("nq_qok");
+    ld_rr(asm, Reg8::B, Reg8::A);
+    // sign from X hi byte (PTR walks 2 bytes per lane)
+    a_from(asm, PTR);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, PTR + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::Inc16 { dst: Reg16Data::HL });
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, PTR);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, PTR + 1);
+    asm.i(Instr::Bit {
+        bit: BitIndex::new(7).expect("bit 7"),
+        target: CbTarget::Reg(Reg8::D),
+    });
+    asm.jr(Some(Cond::Z), "nq_pos");
+    ld_r_imm(asm, Reg8::A, 128);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jr(None, "nq_store");
+    asm.label("nq_pos");
+    ld_r_imm(asm, Reg8::A, 128);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.label("nq_store");
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, OPTR);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, OPTR + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, OPTR);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, OPTR + 1);
+    a_from(asm, LANE);
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, LANE);
+    asm.jp(Some(Cond::NZ), "nq_p2");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `up_epilogue`: A = row count, DE = scale-table pointer. For each row:
+/// ACT[row] = GELU_LUT[127 + clamp(round_half_away(scale*acc / 256), -127, 127)].
+fn emit_up_epilogue(asm: &mut ModelAsm) {
+    asm.label("up_epilogue");
+    a_to(asm, ROWCNT);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    a_to(asm, SPTR);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    a_to(asm, SPTR + 1);
+    ld_r_imm(asm, Reg8::A, (ACC_BASE & 0xFF) as u8);
+    a_to(asm, IPTR);
+    ld_r_imm(asm, Reg8::A, (ACC_BASE >> 8) as u8);
+    a_to(asm, IPTR + 1);
+    ld_r_imm(asm, Reg8::A, (ACT_BASE & 0xFF) as u8);
+    a_to(asm, OPTR);
+    ld_r_imm(asm, Reg8::A, (ACT_BASE >> 8) as u8);
+    a_to(asm, OPTR + 1);
+    asm.label("upe_loop");
+    load_de_via_ptr(asm, IPTR);
+    abs_de_store_sign(asm);
+    ld_rr(asm, Reg8::B, Reg8::D);
+    ld_rr(asm, Reg8::C, Reg8::E);
+    load_de_via_ptr(asm, SPTR);
+    asm.call("mul16");
+    // p = min(127, (MUL_R + 128) >> 8)
+    a_from(asm, MUL_R);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(128),
+    });
+    a_from(asm, MUL_R + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    a_from(asm, MUL_R + 2);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    a_from(asm, MUL_R + 3);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::D),
+    });
+    asm.jr(Some(Cond::NZ), "upe_clamp");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(128),
+    });
+    asm.jr(Some(Cond::C), "upe_pok");
+    asm.label("upe_clamp");
+    ld_r_imm(asm, Reg8::E, 127);
+    asm.label("upe_pok");
+    // HL = gelu_center +/- E
+    asm.ld16_label(Reg16Data::HL, "gelu_lut", 127);
+    a_from(asm, SIGN);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "upe_plus");
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.jr(None, "upe_fetch");
+    asm.label("upe_plus");
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.label("upe_fetch");
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::C });
+    a_from(asm, OPTR);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, OPTR + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, OPTR);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, OPTR + 1);
+    a_from(asm, ROWCNT);
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, ROWCNT);
+    asm.jp(Some(Cond::NZ), "upe_loop");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `down_epilogue`: DE = scale-table pointer; 64 rows. X[row] += (mod 2^16)
+/// sign(m) * min(65535, (|m|*2 + 127) / 254) with m = scale * acc
+/// (Q11.5 residual delta).
+fn emit_down_epilogue(asm: &mut ModelAsm) {
+    asm.label("down_epilogue");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    a_to(asm, SPTR);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    a_to(asm, SPTR + 1);
+    ld_r_imm(asm, Reg8::A, 64);
+    a_to(asm, ROWCNT);
+    ld_r_imm(asm, Reg8::A, (ACC_BASE & 0xFF) as u8);
+    a_to(asm, IPTR);
+    ld_r_imm(asm, Reg8::A, (ACC_BASE >> 8) as u8);
+    a_to(asm, IPTR + 1);
+    ld_r_imm(asm, Reg8::A, (X_BASE & 0xFF) as u8);
+    a_to(asm, XPTR);
+    ld_r_imm(asm, Reg8::A, (X_BASE >> 8) as u8);
+    a_to(asm, XPTR + 1);
+    asm.label("dne_loop");
+    load_de_via_ptr(asm, IPTR);
+    abs_de_store_sign(asm);
+    ld_rr(asm, Reg8::B, Reg8::D);
+    ld_rr(asm, Reg8::C, Reg8::E);
+    load_de_via_ptr(asm, SPTR);
+    asm.call("mul16");
+    // DIV_NUM = (MUL_R << 1) + 127 (Q11.5 residual grid: delta = m/127)
+    mem_copy(asm, DIV_NUM, MUL_R, 4);
+    mem_shl1(asm, DIV_NUM, 4);
+    a_from(asm, DIV_NUM);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(127),
+    });
+    a_to(asm, DIV_NUM);
+    for k in 1..4u16 {
+        a_from(asm, DIV_NUM + k);
+        asm.i(Instr::AdcA {
+            src: AluSrc8::Imm(0),
+        });
+        a_to(asm, DIV_NUM + k);
+    }
+    asm.call("udiv254");
+    a_from(asm, SIGN);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "dne_add");
+    negate_de(asm);
+    asm.label("dne_add");
+    // X[row] += DE (16-bit wrapping)
+    a_from(asm, XPTR);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, XPTR + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::D),
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, XPTR);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, XPTR + 1);
+    a_from(asm, ROWCNT);
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, ROWCNT);
+    asm.jp(Some(Cond::NZ), "dne_loop");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `head`: with the head bank mapped, accumulate all 64 lanes into the i24
+/// logits via per-lane product LUTs. Expects ACT to hold the final norm
+/// output and LOGITS zeroed.
+fn emit_head(asm: &mut ModelAsm) {
+    asm.label("head");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, LANE);
+    asm.label("hd_lane");
+    // q = ACT[lane] - 128
+    a_from(asm, LANE);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (ACT_BASE >> 8) as u8);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(128),
+    });
+    a_to(asm, SIGN); // q byte
+    ld_rr(asm, Reg8::C, Reg8::A);
+    ld_r_imm(asm, Reg8::B, 0);
+    asm.i(Instr::Bit {
+        bit: BitIndex::new(7).expect("bit 7"),
+        target: CbTarget::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "hd_qpos");
+    ld_r_imm(asm, Reg8::B, 0xFF);
+    asm.label("hd_qpos");
+    // ascending half: entries 0..=127
+    ld16(asm, Reg16Data::DE, 0);
+    ld16(asm, Reg16Data::HL, LUT_LO_PAGE);
+    asm.label("hd_asc");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::H),
+    });
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::L),
+    });
+    // P += q (sign-extended)
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::NZ), "hd_asc");
+    // descending half: entries 255 down to 128 (P starts at 0, P -= q first)
+    ld16(asm, Reg16Data::DE, 0);
+    ld_r_imm(asm, Reg8::L, 0xFF);
+    asm.label("hd_desc");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::Z), "hd_desc_done");
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::L),
+    });
+    asm.jr(None, "hd_desc");
+    asm.label("hd_desc_done");
+    // sign-extension page: entry 0 = 0; 1..=127 = sx_pos (B); 128..=255 = sx_neg
+    a_from(asm, SIGN);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.jr(Some(Cond::Z), "hd_sx");
+    asm.i(Instr::Cpl);
+    asm.label("hd_sx");
+    ld_rr(asm, Reg8::C, Reg8::A); // C = sx_neg (B stays sx_pos)
+    ld16(asm, Reg16Data::HL, LUT_LO_PAGE + 0x200);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.label("hd_fillp");
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::NZ), "hd_fillp");
+    asm.label("hd_filln");
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::NZ), "hd_filln");
+    // inner accumulate: D = head page (0x40 + lane), E = 0, HL = LOGITS
+    a_from(asm, LANE);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(0x40),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_r_imm(asm, Reg8::E, 0);
+    ld16(asm, Reg16Data::HL, LOGITS_BASE);
+    asm.label("hd_acc");
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    ld_r_imm(asm, Reg8::B, (LUT_LO_PAGE >> 8) as u8);
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+    asm.i(Instr::AddA {
+        src: AluSrc8::HlIndirect,
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+    });
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+    asm.i(Instr::AdcA {
+        src: AluSrc8::HlIndirect,
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+    });
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+    asm.i(Instr::AdcA {
+        src: AluSrc8::HlIndirect,
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::E),
+    });
+    asm.jr(Some(Cond::NZ), "hd_acc");
+    a_from(asm, LANE);
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, LANE);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(D_MODEL as u8),
+    });
+    asm.jp(Some(Cond::NZ), "hd_lane");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `argmax`: scan the 256 i24 logits, strict-greater update (lowest index
+/// wins ties), signed compare via a sign-flipped top byte.
+fn emit_argmax(asm: &mut ModelAsm) {
+    asm.label("argmax");
+    ld16(asm, Reg16Data::HL, LOGITS_BASE);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_BEST);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_BEST + 1);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::XorA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, ARG_BEST + 2);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, ARGMAX_ADDR);
+    ld_r_imm(asm, Reg8::C, 1);
+    asm.label("am_loop");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_CAND);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_CAND + 1);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::XorA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, ARG_CAND + 2);
+    // candidate > best ? (unsigned compare of transformed 3-byte values)
+    for k in [2u16, 1, 0] {
+        a_from(asm, ARG_CAND + k);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, ARG_BEST + k);
+        asm.i(Instr::CpA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        asm.jr(Some(Cond::C), "am_upd");
+        if k > 0 {
+            asm.jr(Some(Cond::NZ), "am_next");
+        } else {
+            asm.jr(None, "am_next");
+        }
+    }
+    asm.label("am_upd");
+    mem_copy(asm, ARG_BEST, ARG_CAND, 3);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    a_to(asm, ARGMAX_ADDR);
+    asm.label("am_next");
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::C),
+    });
+    asm.jp(Some(Cond::NZ), "am_loop");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `copy_bytes`: HL = src, DE = dst, B = count (0 means 256).
+fn emit_copy_bytes(asm: &mut ModelAsm) {
+    asm.label("copy_bytes");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "copy_bytes");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `emb_copy`: A = input byte. Selects the right embedding bank and copies
+/// the 128-byte residual-grid row into X.
+fn emit_emb_copy(asm: &mut ModelAsm, emb_bank_first: u8) {
+    asm.label("emb_copy");
+    ld_rr(asm, Reg8::B, Reg8::A);
+    asm.i(Instr::Rlca);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(1),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(emb_bank_first),
+    });
+    a_to(asm, MBC5_ROMB0);
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x7F),
+    });
+    asm.i(Instr::Srl {
+        target: CbTarget::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((CHUNK_ENTRY >> 8) as u8),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(1),
+    });
+    asm.i(Instr::Rrca);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld16(asm, Reg16Data::DE, X_BASE);
+    ld_r_imm(asm, Reg8::B, 128);
+    asm.jp(None, "copy_bytes");
+}
+
+// ---------------------------------------------------------------------------
+// weight chunk codegen (V3-style straight-line code, banked)
+// ---------------------------------------------------------------------------
+
+/// One matvec row as raw encoded bytes (no labels; purely straight-line).
+fn encode_row(layer: &LoweredLayer, row: usize, acc_out: u16) -> Result<Vec<u8>, ModelRomError> {
+    let mut bytes = Vec::new();
+    let mut push = |instr: Instr| -> Result<(), ModelRomError> {
+        bytes.extend_from_slice(&encode_instr(&instr)?);
+        Ok(())
+    };
+    push(Instr::Ld16Imm {
+        dst: Reg16Data::DE,
+        imm: layer.biases[row] as u16,
+    })?;
+    push(Instr::Ld16Imm {
+        dst: Reg16Data::BC,
+        imm: 0,
+    })?;
+    push(Instr::Ld16Imm {
+        dst: Reg16Data::SP,
+        imm: ACT_BASE,
+    })?;
+
+    let row_weights = layer.layer.row(row);
+    let mut pending_skip: u16 = 0;
+    for pair in row_weights.chunks_exact(2) {
+        if pair[0] == 0 && pair[1] == 0 {
+            pending_skip += 2;
+            continue;
+        }
+        while pending_skip > 0 {
+            let chunk = pending_skip.min(126);
+            if chunk == 2 {
+                push(Instr::Pop {
+                    dst: Reg16Stack::HL,
+                })?;
+            } else {
+                push(Instr::AddSp { off: chunk as i8 })?;
+            }
+            pending_skip -= chunk;
+        }
+        push(Instr::Pop {
+            dst: Reg16Stack::HL,
+        })?;
+        for (weight, reg) in [(pair[0], Reg8::L), (pair[1], Reg8::H)] {
+            match weight {
+                1 => {
+                    push(Instr::Ld8Reg {
+                        dst: Reg8::A,
+                        src: reg,
+                    })?;
+                    // DE += A (branchless idiom from the bake-off)
+                    push(Instr::AddA {
+                        src: AluSrc8::Reg(Reg8::E),
+                    })?;
+                    push(Instr::Ld8Reg {
+                        dst: Reg8::E,
+                        src: Reg8::A,
+                    })?;
+                    push(Instr::AdcA {
+                        src: AluSrc8::Reg(Reg8::D),
+                    })?;
+                    push(Instr::SubA {
+                        src: AluSrc8::Reg(Reg8::E),
+                    })?;
+                    push(Instr::Ld8Reg {
+                        dst: Reg8::D,
+                        src: Reg8::A,
+                    })?;
+                }
+                -1 => {
+                    push(Instr::Ld8Reg {
+                        dst: Reg8::A,
+                        src: reg,
+                    })?;
+                    // BC += A; combined as P - N at row end
+                    push(Instr::AddA {
+                        src: AluSrc8::Reg(Reg8::C),
+                    })?;
+                    push(Instr::Ld8Reg {
+                        dst: Reg8::C,
+                        src: Reg8::A,
+                    })?;
+                    push(Instr::AdcA {
+                        src: AluSrc8::Reg(Reg8::B),
+                    })?;
+                    push(Instr::SubA {
+                        src: AluSrc8::Reg(Reg8::C),
+                    })?;
+                    push(Instr::Ld8Reg {
+                        dst: Reg8::B,
+                        src: Reg8::A,
+                    })?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // y = P - N -> ACC (i16 LE at a static address)
+    push(Instr::Ld8Reg {
+        dst: Reg8::A,
+        src: Reg8::E,
+    })?;
+    push(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::C),
+    })?;
+    push(Instr::LdDirectFromA {
+        addr: direct(acc_out),
+    })?;
+    push(Instr::Ld8Reg {
+        dst: Reg8::A,
+        src: Reg8::D,
+    })?;
+    push(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    })?;
+    push(Instr::LdDirectFromA {
+        addr: direct(acc_out + 1),
+    })?;
+    Ok(bytes)
+}
+
+fn chunk_prologue() -> Result<Vec<u8>, ModelRomError> {
+    Ok(encode_instr(&Instr::LdDirectFromSp { addr: SPSAVE })?)
+}
+
+fn chunk_epilogue() -> Result<Vec<u8>, ModelRomError> {
+    let mut bytes = Vec::new();
+    for instr in [
+        Instr::LdAFromDirect {
+            addr: direct(SPSAVE),
+        },
+        Instr::Ld8Reg {
+            dst: Reg8::L,
+            src: Reg8::A,
+        },
+        Instr::LdAFromDirect {
+            addr: direct(SPSAVE + 1),
+        },
+        Instr::Ld8Reg {
+            dst: Reg8::H,
+            src: Reg8::A,
+        },
+        Instr::LdSpFromHl,
+        Instr::Ret { cond: None },
+    ] {
+        bytes.extend_from_slice(&encode_instr(&instr)?);
+    }
+    Ok(bytes)
+}
+
+/// Pack one matvec's rows into as few bank chunks as fit; returns the chunk
+/// byte bodies (each a complete callable program at `CHUNK_ENTRY`).
+fn build_matvec_chunks(layer: &LoweredLayer) -> Result<Vec<Vec<u8>>, ModelRomError> {
+    let prologue = chunk_prologue()?;
+    let epilogue = chunk_epilogue()?;
+    let overhead = prologue.len() + epilogue.len();
+
+    let mut chunks = Vec::new();
+    let mut current: Vec<u8> = prologue.clone();
+    for row in 0..layer.layer.rows() {
+        let acc_out = ACC_BASE + 2 * row as u16;
+        let row_bytes = encode_row(layer, row, acc_out)?;
+        if row_bytes.len() + overhead > BANK_BYTES {
+            return Err(ModelRomError::RowTooLargeForBank {
+                row_bytes: row_bytes.len(),
+            });
+        }
+        if current.len() + row_bytes.len() + epilogue.len() > BANK_BYTES {
+            current.extend_from_slice(&epilogue);
+            chunks.push(std::mem::replace(&mut current, prologue.clone()));
+        }
+        current.extend_from_slice(&row_bytes);
+    }
+    current.extend_from_slice(&epilogue);
+    chunks.push(current);
+    Ok(chunks)
+}
+
+// ---------------------------------------------------------------------------
+// top-level build
+// ---------------------------------------------------------------------------
+
+/// Assemble the complete one-token ROM for a lowered model.
+pub fn build_one_token_rom(model: &IntLoweredModel) -> Result<OneTokenRom, ModelRomError> {
+    // 1. Weight chunks for all eight matvecs, in execution order.
+    let mut per_matvec_chunks: Vec<Vec<Vec<u8>>> = Vec::new();
+    for (up, down) in &model.blocks {
+        per_matvec_chunks.push(build_matvec_chunks(up)?);
+        per_matvec_chunks.push(build_matvec_chunks(down)?);
+    }
+    let weight_chunk_count: usize = per_matvec_chunks.iter().map(Vec::len).sum();
+    let weight_code_bytes: usize = per_matvec_chunks
+        .iter()
+        .flat_map(|chunks| chunks.iter().map(Vec::len))
+        .sum();
+
+    // Bank numbering: chunks occupy banks 1..=weight_chunk_count, then two
+    // embedding banks, then the head bank.
+    let emb_bank_first = 1 + weight_chunk_count;
+    let head_bank = emb_bank_first + 2;
+    let bank_count = head_bank + 1;
+    if bank_count > 512 {
+        return Err(ModelRomError::TooManyBanks { banks: bank_count });
+    }
+    let emb_bank_first_u8 = u8::try_from(emb_bank_first)
+        .map_err(|_| ModelRomError::TooManyBanks { banks: bank_count })?;
+    let head_bank_u8 =
+        u8::try_from(head_bank).map_err(|_| ModelRomError::TooManyBanks { banks: bank_count })?;
+
+    // 2. Bank-0 driver.
+    let mut asm = ModelAsm::new(ENTRY_POINT);
+    asm.i(Instr::Di);
+    ld16(&mut asm, Reg16Data::SP, MODEL_STACK_TOP);
+    asm.label("token_start");
+    a_from(&mut asm, INPUT_ADDR);
+    asm.call("emb_copy");
+
+    let mut chunk_iter = per_matvec_chunks.iter();
+    let mut next_bank: u8 = 1;
+    let call_chunks = |asm: &mut ModelAsm, chunks: &Vec<Vec<u8>>, next_bank: &mut u8| {
+        for _ in chunks {
+            ld_r_imm(asm, Reg8::A, *next_bank);
+            a_to(asm, MBC5_ROMB0);
+            asm.i(Instr::Call {
+                cond: None,
+                addr: CHUNK_ENTRY,
+            });
+            *next_bank += 1;
+        }
+    };
+
+    for block in 0..N_BLOCKS {
+        asm.call("norm_quant");
+        if block == 0 {
+            emit_copy_call(&mut asm, ACT_BASE, DUMP_NORM0, 64);
+        }
+        let up_chunks = chunk_iter.next().expect("up chunks exist");
+        call_chunks(&mut asm, up_chunks, &mut next_bank);
+        if block == 0 {
+            emit_copy_call(&mut asm, ACC_BASE, DUMP_UPACC0, 0); // 256 bytes
+        }
+        asm.ld16_label(Reg16Data::DE, &format!("scales_up_{block}"), 0);
+        ld_r_imm(&mut asm, Reg8::A, D_FF as u8);
+        asm.call("up_epilogue");
+        if block == 0 {
+            emit_copy_call(&mut asm, ACT_BASE, DUMP_GELU0, 128);
+        }
+        let down_chunks = chunk_iter.next().expect("down chunks exist");
+        call_chunks(&mut asm, down_chunks, &mut next_bank);
+        if block == 0 {
+            emit_copy_call(&mut asm, ACC_BASE, DUMP_DOWNACC0, 128);
+        }
+        asm.ld16_label(Reg16Data::DE, &format!("scales_down_{block}"), 0);
+        asm.call("down_epilogue");
+        emit_copy_call(&mut asm, X_BASE, XDUMP_BASE + 128 * block as u16, 128);
+    }
+
+    asm.call("norm_quant");
+    emit_copy_call(&mut asm, ACT_BASE, QDUMP_BASE, 64);
+
+    // zero the 768-byte logits buffer
+    ld16(&mut asm, Reg16Data::HL, LOGITS_BASE);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ld_r_imm(&mut asm, Reg8::C, 3);
+    asm.label("zl_outer");
+    ld_r_imm(&mut asm, Reg8::B, 0);
+    asm.label("zl_inner");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "zl_inner");
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "zl_outer");
+
+    // head bank + head + argmax + done
+    ld_r_imm(&mut asm, Reg8::A, head_bank_u8);
+    a_to(&mut asm, MBC5_ROMB0);
+    asm.call("head");
+    asm.call("argmax");
+    ld_r_imm(&mut asm, Reg8::A, 1);
+    a_to(&mut asm, DONE_ADDR);
+    asm.label("token_end");
+    asm.jr(None, "token_end");
+
+    // routines
+    emit_copy_bytes(&mut asm);
+    emit_emb_copy(&mut asm, emb_bank_first_u8);
+    emit_mul16x8(&mut asm);
+    emit_mul16(&mut asm);
+    emit_isqrt32(&mut asm);
+    emit_udiv_norm(&mut asm);
+    emit_udiv254(&mut asm);
+    emit_norm_quant(&mut asm);
+    emit_up_epilogue(&mut asm);
+    emit_down_epilogue(&mut asm);
+    emit_head(&mut asm);
+    emit_argmax(&mut asm);
+
+    // bank-0 data: GELU LUT + scale tables
+    asm.label("gelu_lut");
+    asm.bytes(model.gelu_lut.to_vec());
+    for (block, (up, down)) in model.blocks.iter().enumerate() {
+        asm.label(&format!("scales_up_{block}"));
+        let mut up_bytes = Vec::with_capacity(up.layer.rows() * 2);
+        for row in 0..up.layer.rows() {
+            up_bytes.extend_from_slice(&up.layer.scale_raw(row).to_le_bytes());
+        }
+        asm.bytes(up_bytes);
+        asm.label(&format!("scales_down_{block}"));
+        let mut down_bytes = Vec::with_capacity(down.layer.rows() * 2);
+        for row in 0..down.layer.rows() {
+            down_bytes.extend_from_slice(&down.layer.scale_raw(row).to_le_bytes());
+        }
+        asm.bytes(down_bytes);
+    }
+
+    let (driver, labels) = asm.finish()?;
+    let driver_bytes = driver.len();
+    if usize::from(ENTRY_POINT) + driver_bytes > usize::from(CHUNK_ENTRY) {
+        return Err(ModelRomError::DriverOverflowsBank0 {
+            bytes: driver_bytes,
+        });
+    }
+    let token_start_pc = labels["token_start"];
+    let token_end_pc = labels["token_end"];
+
+    // 3. Banked data tables.
+    let mut emb_lo = Vec::with_capacity(BANK_BYTES);
+    let mut emb_hi = Vec::with_capacity(BANK_BYTES);
+    for byte in 0..VOCAB {
+        let dst = if byte < 128 { &mut emb_lo } else { &mut emb_hi };
+        for &v in model.emb_resid_row(byte as u8) {
+            dst.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    let mut head_t = Vec::with_capacity(BANK_BYTES);
+    for lane in 0..D_MODEL {
+        for byte in 0..VOCAB {
+            head_t.push(model.head_i8_row(byte as u8)[lane] as u8);
+        }
+    }
+    let table_bytes = emb_lo.len() + emb_hi.len() + head_t.len();
+
+    // 4. Assemble the ROM image.
+    let rom_size = smallest_rom_size(bank_count)?;
+    let mut pairs: Vec<(EncodedSection, PlacedSection)> = Vec::new();
+    let mut section_seq: u32 = 0;
+    let mut push_section = |pairs: &mut Vec<(EncodedSection, PlacedSection)>,
+                            bank: usize,
+                            cpu_start: u16,
+                            bytes: Vec<u8>| {
+        let id = SectionId::new(DRIVER_SECTION_ID + section_seq);
+        section_seq += 1;
+        let size = u16::try_from(bytes.len()).expect("sections fit one bank");
+        let placed = PlacedSection {
+            id,
+            space: if bank == 0 {
+                AddressSpace::Rom0
+            } else {
+                AddressSpace::RomX
+            },
+            bank: BankIndex::Rom(bank as u16),
+            cpu_start,
+            final_size: size,
+            estimated_size: size,
+            alignment_padding: BTreeMap::new(),
+        };
+        pairs.push((
+            EncodedSection {
+                id,
+                bytes,
+                item_spans: Vec::new(),
+            },
+            placed,
+        ));
+    };
+
+    push_section(&mut pairs, 0, ENTRY_POINT, driver);
+    let mut bank = 1usize;
+    for chunks in &per_matvec_chunks {
+        for chunk in chunks {
+            push_section(&mut pairs, bank, CHUNK_ENTRY, chunk.clone());
+            bank += 1;
+        }
+    }
+    debug_assert_eq!(bank, emb_bank_first);
+    push_section(&mut pairs, emb_bank_first, CHUNK_ENTRY, emb_lo);
+    push_section(&mut pairs, emb_bank_first + 1, CHUNK_ENTRY, emb_hi);
+    push_section(&mut pairs, head_bank, CHUNK_ENTRY, head_t);
+
+    let layout = LayoutPlan {
+        sections: pairs.iter().map(|(_, placed)| placed.clone()).collect(),
+        bank_count: rom_size.bank_count(),
+        free_bytes_per_bank: BTreeMap::new(),
+        reserved_ranges: Vec::new(),
+    };
+    let mut header = CartridgeHeader::new("GBF1TOKEN")?;
+    header.rom_size = rom_size;
+    let rom = assemble_rom(&pairs, &layout, &header)?;
+
+    Ok(OneTokenRom {
+        rom,
+        token_start_pc,
+        token_end_pc,
+        rom_size,
+        bank_count: bank_count as u16,
+        driver_bytes,
+        weight_code_bytes,
+        weight_chunk_count,
+        table_bytes,
+    })
+}
+
+/// `HL=src, DE=dst, B=count` copy call (count 0 = 256 bytes).
+fn emit_copy_call(asm: &mut ModelAsm, src: u16, dst: u16, count: u8) {
+    ld16(asm, Reg16Data::HL, src);
+    ld16(asm, Reg16Data::DE, dst);
+    ld_r_imm(asm, Reg8::B, count);
+    asm.call("copy_bytes");
+}
+
+fn smallest_rom_size(bank_count: usize) -> Result<RomSize, ModelRomError> {
+    for size in [
+        RomSize::Kib32,
+        RomSize::Kib64,
+        RomSize::Kib128,
+        RomSize::Kib256,
+        RomSize::Kib512,
+        RomSize::Mib1,
+        RomSize::Mib2,
+        RomSize::Mib4,
+        RomSize::Mib8,
+    ] {
+        if usize::from(size.bank_count()) >= bank_count {
+            return Ok(size);
+        }
+    }
+    Err(ModelRomError::TooManyBanks { banks: bank_count })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_ref::synthetic_checkpoint;
+
+    #[test]
+    fn one_token_rom_builds_from_synthetic_checkpoint() {
+        let ck = synthetic_checkpoint(11);
+        let lowered = IntLoweredModel::lower(&ck).expect("lowers");
+        let rom = build_one_token_rom(&lowered).expect("builds");
+        assert_eq!(rom.rom.len(), rom.rom_size.bytes());
+        assert!(rom.token_end_pc > rom.token_start_pc);
+        assert!(rom.weight_chunk_count >= 8, "at least one chunk per matvec");
+        assert_eq!(rom.table_bytes, 2 * BANK_BYTES + BANK_BYTES);
+        // header says MBC5 + the chosen ROM size
+        assert_eq!(rom.rom[0x0147], 0x19);
+    }
+
+    #[test]
+    fn matvec_chunks_stay_within_banks() {
+        let ck = synthetic_checkpoint(5);
+        let lowered = IntLoweredModel::lower(&ck).expect("lowers");
+        for (up, down) in &lowered.blocks {
+            for layer in [up, down] {
+                let chunks = build_matvec_chunks(layer).expect("chunks");
+                for chunk in &chunks {
+                    assert!(chunk.len() <= BANK_BYTES);
+                }
+            }
+        }
+    }
+}

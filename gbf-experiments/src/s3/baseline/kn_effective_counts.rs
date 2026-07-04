@@ -287,35 +287,43 @@ fn key_from_window<const K: usize>(window: &[u8]) -> NgramKey<K> {
     NgramKey::new(tokens)
 }
 
-fn context_total<const K: usize>(
-    table: &BTreeMap<NgramKey<K>, u64>,
+/// Inclusive key range covering exactly the entries whose context equals
+/// `context`. `NgramKey` orders lexicographically over its token tuple, so all
+/// keys sharing a `K - 1` context prefix are contiguous between target
+/// `u8::MIN` and target `u8::MAX`. Iterating this range visits the same
+/// entries as filtering the whole table on `key.context() == context`, in the
+/// same order.
+fn context_key_range<const K: usize>(
     context: &[u8],
-) -> Result<u64, BaselineError> {
+) -> Result<(NgramKey<K>, NgramKey<K>), BaselineError> {
     if context.len() != K - 1 {
         return Err(BaselineError::InvalidOrder {
             order: context.len() + 1,
         });
     }
-    Ok(table
-        .iter()
-        .filter(|(key, _)| key.context() == context)
-        .map(|(_, count)| *count)
-        .sum())
+    Ok((
+        key_from_context_target::<K>(context, u8::MIN)?,
+        key_from_context_target::<K>(context, u8::MAX)?,
+    ))
+}
+
+fn context_total<const K: usize>(
+    table: &BTreeMap<NgramKey<K>, u64>,
+    context: &[u8],
+) -> Result<u64, BaselineError> {
+    let (low, high) = context_key_range::<K>(context)?;
+    Ok(table.range(low..=high).map(|(_, count)| *count).sum())
 }
 
 fn context_count_buckets<const K: usize>(
     table: &BTreeMap<NgramKey<K>, u64>,
     context: &[u8],
 ) -> Result<(u64, u64, u64), BaselineError> {
-    if context.len() != K - 1 {
-        return Err(BaselineError::InvalidOrder {
-            order: context.len() + 1,
-        });
-    }
+    let (low, high) = context_key_range::<K>(context)?;
     let mut n1 = 0;
     let mut n2 = 0;
     let mut n3p = 0;
-    for (key, count) in table.iter().filter(|(key, _)| key.context() == context) {
+    for (key, count) in table.range(low..=high) {
         debug_assert_eq!(key.context(), context);
         match *count {
             1 => n1 += 1,

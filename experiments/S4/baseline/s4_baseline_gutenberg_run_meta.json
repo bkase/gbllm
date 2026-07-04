@@ -1,0 +1,219 @@
+{
+  "bead": "bd-2nca",
+  "caveats": [
+    "bpc_kn5 is bits per normalized charset_v1 token, not per raw byte; charset_v1 normalization (whitespace collapse, accent strip, quote/dash folding, unmappable -> <unk>) removes some information, which mildly favors the KN side in per-char terms.",
+    "kn5_bits_per_raw_val_byte re-expresses the same total val bits over the raw byte count of the normalization input and is the number to lay next to byte-level neural bpc (gap.json, S7 runs).",
+    "Each run fits on a front prefix of the committed train stream (train_cap_bytes / train_bytes_used recorded per run); a run whose train_bytes_used equals train_bin_total_bytes covers the full committed stream. The 64 MiB run's train prefix is byte-identical (same sha256) to the dense trainer's capped train stream in gap.json.",
+    "Wall-clock and git_sha make this file non-byte-deterministic across reruns; the per-cap s4_baseline_gutenberg.v1 reports themselves are deterministic and self-hashed."
+  ],
+  "corpus": {
+    "gutenberg_manifest_self_hash": "sha256:d9ad57862d5f01748e012ea8e779ac7cabfcf608218fe8569b70e6b3bfd2dcd9",
+    "tinystories_manifest_self_hash": "sha256:48c615400b27269441c0ce6e59402fefbd1de34831182b8a474f0d8ebf8a9f97",
+    "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
+    "train_bin_sha256": "09d7fd4eb5adbd7a71695ce95a56e6ef00f8cdc8177ba8bd7f18f27362121a83",
+    "train_bin_total_bytes": 489614571
+  },
+  "git_sha": "5669f79e6b22a893d0670971cbf673eceb4b6628",
+  "kn_variant": {
+    "discounts": "per-order D-rule d_1/d_2/d_3+ fit from count-of-counts (values recorded per run)",
+    "effective_counts": "orders 2..4 left-continuation counts, order 5 raw counts, unigram = left-continuation distribution",
+    "family": "interpolated modified Kneser-Ney (Chen-Goodman), inherited unchanged from F-S3",
+    "max_order": 5,
+    "scoring": "reset-context windowed bpc, chunk_size = 128, no <bos>/<eos>, contexts do not cross chunk resets",
+    "vocab": "charset_v1 (80 ids; case-preserving, accent-stripped, quote/dash-folded, whitespace-collapsed, unmappable -> <unk>)"
+  },
+  "neural_reference": {
+    "dense_fp_val_bpc": 3.6732583512812016,
+    "dense_ternary_val_bpc": 3.668715736717984,
+    "source": "experiments/S2/gap/gap.json (copied verbatim, bits per raw byte on the same val stream)",
+    "train_cap_bytes": 67108864,
+    "val_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70"
+  },
+  "primary": {
+    "artifact_path": "experiments/S4/baseline/s4_baseline_gutenberg.v1.json",
+    "baseline_gutenberg_self_hash": "sha256:a068422c042c7ace5f2da1c109b30624a38adead59e3a0d80e3dcc701bcc05b4",
+    "pointer_copy_path": "experiments/S4/baseline/baseline_gutenberg.json",
+    "source_report_path": "experiments/S4/baseline/s4_baseline_gutenberg.v1.train-cap-466MiB.json",
+    "train_cap_bytes": 489614571
+  },
+  "runs": [
+    {
+      "baseline_gutenberg_self_hash": "sha256:826a6f7014cee92261195cb02b204c310607adbb4753701aafa6da8f9b5741aa",
+      "bpc_kn3_val_per_normalized_char": 4.237675529172399,
+      "bpc_kn5_val_per_normalized_char": 2.3401938363934067,
+      "bpc_unigram_val_per_normalized_char": 5.823255548628301,
+      "corpus_train_sha_normalized": "sha256:2b69988479556e60134abb742287888c18613b34ff0a7bc06c065bb70fea3536",
+      "counts_blob_sha256": "sha256:8a61abe3bac860a6634aea1ac8379fd5a6e0aae2de61bf9eda805cb15c909f90",
+      "counts_summary": {
+        "c2_unique_count": 3437,
+        "c3_unique_count": 46773,
+        "c4_unique_count": 303649,
+        "c5_unique_count": 1135975,
+        "train_chars": 66398220,
+        "val_chars": 1042415
+      },
+      "fit_and_score_wall_clock_seconds": 25.040222459,
+      "kn3_bits_per_raw_val_byte": 4.212776695959326,
+      "kn5_bits_per_raw_val_byte": 2.326443822826417,
+      "kn_discounts_by_order": {
+        "2": {
+          "d_1": 0.42576204523107175,
+          "d_2": 0.9764213844102314,
+          "d_3p": 1.755464790863021,
+          "y_k": 0.4257620452310718
+        },
+        "3": {
+          "d_1": 0.4899028241724871,
+          "d_2": 0.962082645915262,
+          "d_3p": 1.607829361192452,
+          "y_k": 0.4899028241724871
+        },
+        "4": {
+          "d_1": 0.5483372195967431,
+          "d_2": 1.1155636431527771,
+          "d_3p": 1.580390002613225,
+          "y_k": 0.548337219596743
+        },
+        "5": {
+          "d_1": 0.5788384168540102,
+          "d_2": 1.0869897638695214,
+          "d_3p": 1.4790113915401115,
+          "y_k": 0.5788384168540102
+        }
+      },
+      "report_path": "experiments/S4/baseline/s4_baseline_gutenberg.v1.train-cap-64MiB.json",
+      "train_bytes_trimmed_at_utf8_boundary": 0,
+      "train_bytes_used": 67108864,
+      "train_cap_bytes": 67108864,
+      "train_chars_normalized": 66398220,
+      "train_prefix_raw_sha256": "f2881247c3614a5d0a455fd6eca7f2a8b4fbd503d2524e062830f5757dc3d61e",
+      "train_unk_count": 70570
+    },
+    {
+      "baseline_gutenberg_self_hash": "sha256:dfcad470ef19a9ac2f9730d356ca4b3cd66fbd6cab271b9f0d8d927445cb7d1f",
+      "bpc_kn3_val_per_normalized_char": 4.440300141104104,
+      "bpc_kn5_val_per_normalized_char": 2.285119636343881,
+      "bpc_unigram_val_per_normalized_char": 6.008576488825385,
+      "corpus_train_sha_normalized": "sha256:95248297d0e6d237818eb6f4b9113ac4ce453fff9232a749cd9b2b658e89ab8e",
+      "counts_blob_sha256": "sha256:12e88996bda12bf1015f7239b5872c555305a59eecf2d8492da6fc999bd24e35",
+      "counts_summary": {
+        "c2_unique_count": 4475,
+        "c3_unique_count": 73762,
+        "c4_unique_count": 607406,
+        "c5_unique_count": 2715582,
+        "train_chars": 264959371,
+        "val_chars": 1042415
+      },
+      "fit_and_score_wall_clock_seconds": 97.026345042,
+      "kn3_bits_per_raw_val_byte": 4.414210769261393,
+      "kn5_bits_per_raw_val_byte": 2.271693216056258,
+      "kn_discounts_by_order": {
+        "2": {
+          "d_1": 0.44999999999999996,
+          "d_2": 1.0063049853372434,
+          "d_3p": 1.5729083665338646,
+          "y_k": 0.45
+        },
+        "3": {
+          "d_1": 0.4927727382842991,
+          "d_2": 1.0316089978696579,
+          "d_3p": 1.4731390397036717,
+          "y_k": 0.49277273828429924
+        },
+        "4": {
+          "d_1": 0.5288463088562119,
+          "d_2": 1.0449684292512176,
+          "d_3p": 1.52790487473886,
+          "y_k": 0.5288463088562118
+        },
+        "5": {
+          "d_1": 0.5661849365842229,
+          "d_2": 1.0901303424516318,
+          "d_3p": 1.5070928170772135,
+          "y_k": 0.5661849365842228
+        }
+      },
+      "report_path": "experiments/S4/baseline/s4_baseline_gutenberg.v1.train-cap-256MiB.json",
+      "train_bytes_trimmed_at_utf8_boundary": 0,
+      "train_bytes_used": 268435456,
+      "train_cap_bytes": 268435456,
+      "train_chars_normalized": 264959371,
+      "train_prefix_raw_sha256": "f81fe6d97cbfdbd72dc878b6602076c7bfee31f6ea36f0f751babf048c4eeb37",
+      "train_unk_count": 747379
+    },
+    {
+      "baseline_gutenberg_self_hash": "sha256:a068422c042c7ace5f2da1c109b30624a38adead59e3a0d80e3dcc701bcc05b4",
+      "bpc_kn3_val_per_normalized_char": 4.533413314802925,
+      "bpc_kn5_val_per_normalized_char": 2.2717607451448383,
+      "bpc_unigram_val_per_normalized_char": 6.043754495199905,
+      "corpus_train_sha_normalized": "sha256:b454d0513e78cf44b929ddfedaaa6b5b57095e34459ace966e27654be5c31cb5",
+      "counts_blob_sha256": "sha256:8c88b8ca3882cc47f10d30e5655218a8d725f47f4d4e095130efeafeb636f68f",
+      "counts_summary": {
+        "c2_unique_count": 4722,
+        "c3_unique_count": 86213,
+        "c4_unique_count": 770919,
+        "c5_unique_count": 3759337,
+        "train_chars": 479815500,
+        "val_chars": 1042415
+      },
+      "fit_and_score_wall_clock_seconds": 170.641309666,
+      "kn3_bits_per_raw_val_byte": 4.506776848364154,
+      "kn5_bits_per_raw_val_byte": 2.258412816190869,
+      "kn_discounts_by_order": {
+        "2": {
+          "d_1": 0.43424317617866004,
+          "d_2": 1.0553306342780027,
+          "d_3p": 1.76730969342832,
+          "y_k": 0.43424317617866004
+        },
+        "3": {
+          "d_1": 0.4919706629595897,
+          "d_2": 1.0109523546879582,
+          "d_3p": 1.526720352038221,
+          "y_k": 0.4919706629595897
+        },
+        "4": {
+          "d_1": 0.526659679073415,
+          "d_2": 1.0578645849346293,
+          "d_3p": 1.5119975148917189,
+          "y_k": 0.5266596790734149
+        },
+        "5": {
+          "d_1": 0.5597193677272887,
+          "d_2": 1.0858677729664374,
+          "d_3p": 1.5157967419799088,
+          "y_k": 0.5597193677272886
+        }
+      },
+      "report_path": "experiments/S4/baseline/s4_baseline_gutenberg.v1.train-cap-466MiB.json",
+      "train_bytes_trimmed_at_utf8_boundary": 0,
+      "train_bytes_used": 489614571,
+      "train_cap_bytes": 489614571,
+      "train_chars_normalized": 479815500,
+      "train_prefix_raw_sha256": "09d7fd4eb5adbd7a71695ce95a56e6ef00f8cdc8177ba8bd7f18f27362121a83",
+      "train_unk_count": 1825831
+    }
+  ],
+  "schema": "s4_baseline_gutenberg_run_meta.v1",
+  "total_wall_clock_seconds": 293.764219458,
+  "val_stream": {
+    "corpus_val_sha_normalized": "sha256:d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "matches_s2_gap_val_stream": true,
+    "s2_gap_val_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "source": "corpus/gutenberg/splits.json val-split book bodies (book-level held out), assembled with the same logic and 1 MiB cap as s2_gap_and_export.rs",
+    "val_book_ids_used": [
+      1017,
+      1233,
+      1475,
+      2105,
+      2156,
+      3440
+    ],
+    "val_bytes_trimmed_at_utf8_boundary": 0,
+    "val_cap_bytes": 1048576,
+    "val_chars_normalized": 1042415,
+    "val_raw_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "val_raw_bytes_used": 1048576,
+    "val_unk_count": 1491
+  }
+}

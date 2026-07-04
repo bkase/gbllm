@@ -1,0 +1,225 @@
+{
+  "schema": "one_token_bringup.v1",
+  "bead": "bd-59qiq",
+  "git_sha": "5669f79e6b22a893d0670971cbf673eceb4b6628",
+  "checkpoint": {
+    "export_dir": "experiments/S6/checkpoint-export",
+    "manifest_schema": "f_s6_dense_checkpoint_export.v1",
+    "trainer_git_sha": "71f3f68b65c13d8ec63e1619151c33db5be820b6",
+    "tensors_verified_sha256": 17,
+    "weight_zero_permille": 69
+  },
+  "int_semantics_divergences": [
+    "Residual stream is i16 Q11.5 (resolution 1/32, range +/-1023.97) with mod-2^16 wrapping adds (trainer: f32). Q11.5 replaces the v0 Q8.8 default because the trained checkpoint's residual measurably reaches |x| = 564.4 (exhaustive over all 256 bigram contexts), which Q8.8 cannot represent; the widening is in format, not device register width. Embedding rows are quantized to Q11.5 at lowering time (round-half-even).",
+    "RMS norm: integer sum of squares over 64 lanes, mean = floor(sum/64), epsilon = +1 raw mean unit (scale-dependent: ~9.8e-4 at Q11.5 vs trainer 1e-5; both are negligible against real mean-square values), rms = floor(isqrt(mean+1)) in the residual scale; norm output and Int8 activation fake-quant collapse into one rounded division q = clamp(round_half_away(|x|*127 / (8*rms)), 0, 127) * sign(x) (trainer: f32 divide, clamp to +/-8, then round-half-even quantization).",
+    "GELU is a 255-entry LUT indexed by the pre-activation value quantized to the same [-8,8]/127 grid (round-half-away on the Q8.8 scale product); the trainer applies tanh-approximate GELU to the unquantized f32 matvec output before fake-quant. Pre-GELU values are clamped to +/-8 by the grid (trainer clamps after GELU; both saturate identically for |h| >= 8 up to LUT rounding).",
+    "Up/down epilogues apply the Q8.8 row scale as an integer multiply with round-half-away rounding (round-half-even in the trainer's f32 path). Scale values themselves are identical: the trainer fake-quantizes scales to the Q8.8 grid.",
+    "Down-projection output is quantized to the Q11.5 residual grid (round-half-away of scale*acc*8*32/(127*256) = scale*acc/127, magnitude clamped at 65535 raw) before the residual add; the trainer adds unquantized f32 deltas.",
+    "The final norm output is activation-quantized to the [-8,8]/127 grid before the tied head (the trainer feeds the unquantized f32 normed vector to the head).",
+    "Tied-head weights are the embedding quantized per-tensor to i8 (scale = max|emb|/127, round-half-even); logits are integer dot products in i32 (i24 on device). This reduction structurally exceeds i16 (64*127*127 = 1,032,256), so it is honestly widened past the v0 i16 accumulator target; the artifact contract's I32 canonical semantics still hold.",
+    "Integer rounding is round-half-away-from-zero throughout the runtime path; the trainer/Burn rounds ties to even."
+  ],
+  "fidelity": {
+    "val_bytes_used": 1048576,
+    "val_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "val_sha_matches_gap_json": true,
+    "eval_pairs": 262144,
+    "f32_port_val_bpc": 3.6686975763985834,
+    "gap_json_ternary_val_bpc": 3.668715736717984,
+    "int_val_bpc": 3.672763896892881,
+    "argmax_agreement_weighted": 0.7350082397460938,
+    "argmax_agreement_contexts": 198,
+    "disagreement_margin_bits_median": 0.2230264137082868,
+    "disagreement_margin_bits_max": 0.5815448873499149,
+    "int_stats": {
+      "max_abs_matvec_acc": 2166,
+      "max_abs_scale_product": 2161415,
+      "max_abs_down_delta": 17019,
+      "max_abs_residual": 18034,
+      "max_abs_logit": 10273,
+      "max_norm_sumsq": 332487945,
+      "min_norm_rms_raw": 10,
+      "down_delta_clamp_events": 0,
+      "residual_wrap_events": 0,
+      "matvec_acc_fits_i16": true,
+      "logits_fit_i24": true
+    }
+  },
+  "rom_gate": {
+    "rom": {
+      "rom_bytes": 1048576,
+      "bank_count": 34,
+      "driver_bytes": 8183,
+      "weight_code_bytes": 413125,
+      "weight_chunk_count": 30,
+      "table_bytes": 49152,
+      "token_start_pc": 340,
+      "token_end_pc": 787
+    },
+    "inputs": [
+      0,
+      10,
+      32,
+      44,
+      46,
+      65,
+      69,
+      84,
+      97,
+      101,
+      104,
+      110,
+      115,
+      116,
+      122,
+      255
+    ],
+    "all_byte_exact": true,
+    "runs": [
+      {
+        "input_byte": 0,
+        "host_argmax": 10,
+        "rom_argmax": 10,
+        "byte_exact": true,
+        "m_cycles": 2735245,
+        "mismatches": []
+      },
+      {
+        "input_byte": 10,
+        "host_argmax": 10,
+        "rom_argmax": 10,
+        "byte_exact": true,
+        "m_cycles": 2729289,
+        "mismatches": []
+      },
+      {
+        "input_byte": 32,
+        "host_argmax": 97,
+        "rom_argmax": 97,
+        "byte_exact": true,
+        "m_cycles": 2733618,
+        "mismatches": []
+      },
+      {
+        "input_byte": 44,
+        "host_argmax": 32,
+        "rom_argmax": 32,
+        "byte_exact": true,
+        "m_cycles": 2729675,
+        "mismatches": []
+      },
+      {
+        "input_byte": 46,
+        "host_argmax": 32,
+        "rom_argmax": 32,
+        "byte_exact": true,
+        "m_cycles": 2733484,
+        "mismatches": []
+      },
+      {
+        "input_byte": 65,
+        "host_argmax": 110,
+        "rom_argmax": 110,
+        "byte_exact": true,
+        "m_cycles": 2732853,
+        "mismatches": []
+      },
+      {
+        "input_byte": 69,
+        "host_argmax": 110,
+        "rom_argmax": 110,
+        "byte_exact": true,
+        "m_cycles": 2735549,
+        "mismatches": []
+      },
+      {
+        "input_byte": 84,
+        "host_argmax": 104,
+        "rom_argmax": 104,
+        "byte_exact": true,
+        "m_cycles": 2731167,
+        "mismatches": []
+      },
+      {
+        "input_byte": 97,
+        "host_argmax": 110,
+        "rom_argmax": 110,
+        "byte_exact": true,
+        "m_cycles": 2731690,
+        "mismatches": []
+      },
+      {
+        "input_byte": 101,
+        "host_argmax": 32,
+        "rom_argmax": 32,
+        "byte_exact": true,
+        "m_cycles": 2732304,
+        "mismatches": []
+      },
+      {
+        "input_byte": 104,
+        "host_argmax": 101,
+        "rom_argmax": 101,
+        "byte_exact": true,
+        "m_cycles": 2730013,
+        "mismatches": []
+      },
+      {
+        "input_byte": 110,
+        "host_argmax": 32,
+        "rom_argmax": 32,
+        "byte_exact": true,
+        "m_cycles": 2730526,
+        "mismatches": []
+      },
+      {
+        "input_byte": 115,
+        "host_argmax": 32,
+        "rom_argmax": 32,
+        "byte_exact": true,
+        "m_cycles": 2731856,
+        "mismatches": []
+      },
+      {
+        "input_byte": 116,
+        "host_argmax": 104,
+        "rom_argmax": 104,
+        "byte_exact": true,
+        "m_cycles": 2730246,
+        "mismatches": []
+      },
+      {
+        "input_byte": 122,
+        "host_argmax": 101,
+        "rom_argmax": 101,
+        "byte_exact": true,
+        "m_cycles": 2736685,
+        "mismatches": []
+      },
+      {
+        "input_byte": 255,
+        "host_argmax": 65,
+        "rom_argmax": 65,
+        "byte_exact": true,
+        "m_cycles": 2729491,
+        "mismatches": []
+      }
+    ],
+    "mean_m_cycles": 2732105,
+    "seconds_per_token_dmg": 2.6055383682250977
+  },
+  "projection": {
+    "model_matvec_macs": 81920,
+    "model_zero_permille": 69,
+    "bakeoff_v3_m_cycles_per_mac_x1000": 7828,
+    "bakeoff_sparsity_permille": 0,
+    "projected_matvec_floor_m_cycles": 641269,
+    "measured_m_cycles_per_token": 2732105,
+    "note": "The bake-off projection covers ternary matvec MACs only. The measured token additionally pays the integer RMS norms (multiplies + divisions), Q8.8 scale epilogues, the GELU LUT requantization, the 16,384-MAC i8 tied head (per-lane product-LUT multiplies, not ternary add/sub), argmax, and bank-switch orchestration; the model's real zero fraction (~7%) is also far below the 40% sparsity headline used in the bake-off projections."
+  },
+  "caveats": [
+    "Bigram-context model: the entire forward pass depends only on the previous byte, so all val positions collapse onto 256 distinct contexts; fidelity numbers aggregate per-context results over the val pair stream.",
+    "The f32 reference is a scalar port of the trainer's Burn forward pass (sequential f32 summation, f64 log-softmax); ulp-level differences from the Burn ndarray implementation are possible and bounded by the bpc comparison against the committed gap.json number.",
+    "ROM runs with interrupts disabled and SP repurposed inside weight chunks (bake-off convention); production kernels pay yield/safe-point overhead on top."
+  ]
+}
