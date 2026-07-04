@@ -103,6 +103,10 @@ files = {
 target_by_prefix = {
     "stage4.": "gbf_codegen::s4",
     "stage5.": "gbf_codegen::s5",
+    # Production self-checks log under the compiler's own namespace; only
+    # gbf-verify's independent verifier owns the gbf_verify target (P7 audit).
+    "range_cert.verifies.": "gbf_codegen::range_cert_self_check",
+    "range_cert.renorm_recurrence_verifies": "gbf_codegen::range_cert_self_check",
     "range_cert.": "gbf_verify::range_cert",
 }
 

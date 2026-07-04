@@ -7,7 +7,7 @@
 //! use std::borrow::Cow;
 //!
 //! use gbf_artifact::{HintBundle, TargetDataLoweringArtifact};
-//! use gbf_codegen::stages::validate::{
+//! use gbf_codegen::validate::{
 //!     ImportedArtifactView, ValidatedInputHashes, ValidatedInputs,
 //! };
 //! use gbf_hw::target::TargetProfile;

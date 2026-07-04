@@ -1109,6 +1109,17 @@ This block amends, but does not retract, the sizing and numeric commitments abov
 - **Row scales:** the artifact carries per-output-row Q8.8 scales (unchanged). The deployed epilogue prefers **`ScaleFormat::Pow2` (shift-only)**; a Q8.8 software multiply per output element is an acceptable fallback at larger fan-ins where it amortizes (measured decision, per profile — owner: kernel-epilogue microbenchmark under F-H2). No per-MAC multiplies exist in any case.
 - **Decode:** v0 ships **`DecodeMode::Argmax` only** (matching the exported S3 `DecodeCapabilitySet`). `TopKTemperature` stays out of `DecodeCapabilitySet` until an exp-LUT + integer sampling design exists with the same oracle/ROM agreement obligations.
 
+**4. Deferral register (F-A6 pattern, generalized).** The gbf-migrate deferral discipline ("the cost of carrying unused scaffolding is paid every day") now applies to the following subsystems. Each keeps its type names and boundary as design intent but must not be extended before its named trigger fires:
+
+| Subsystem | Status | Reopening trigger |
+| --- | --- | --- |
+| `FeasibilityRefinementLoop` (F-B16 controller) | implemented, **no consumer**; module marked deferred | a wired `gbf compile` pipeline (bd-1skgm) **and** evidence from real builds that humans spend time hand-repairing budget busts; until then `RepairProposal`s are report-only diagnostics |
+| `SchedulePack` multiversioning by `RuntimeMode` + `ModeSwitchPolicy`/`DriftTrigger` | design only | a second runtime mode with a measured need on a real workload |
+| `RuntimeDriftMonitor` / automatic mode demotion | design only | sustained multi-token generation exists (bd-2gc6p) and shows measured drift |
+| `RiskPolicy` cycle/switch quantiles + confidence gates | schema only | calibration bundles exist with sample counts > 1 (Epic E production beads) |
+| `ServiceLevelObjective` p95/p99 fields | schema only | superseded for v0 by the single 10 s/char latency gate (bd-3l3tl) |
+| `ReferenceProgram` / `ReferenceEvalGraph` denotational interpreter | partially built (S3 opset) | the artifact must outlive the Burn dependency, or a second model family lands. **Precondition alignment:** for v0/v1 the operative denotational truth is the pinned trainer checkpoint plus recorded golden observations at semantic checkpoints (`ReferenceObservationCache`), exactly as the oracle test plan (line ~2715) already assumes; the "`ReferenceProgram` is the sole source of meaning" phrasing earlier in this document is aspirational until this row's trigger fires. |
+
 ## The compiler pipeline
 
 This remains a real staged compiler. The revised pipeline presents a **validation envelope**, a **transform pipeline**, and a **reporting envelope** so the stage story stays honest without losing rigor. Internally, validation and reporting are implemented as first-class passes, but architecturally they bracket the transform pipeline.

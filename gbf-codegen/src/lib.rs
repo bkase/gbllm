@@ -9,11 +9,9 @@ pub mod legalize;
 pub mod lower_asm;
 pub mod lower_infer;
 pub mod lower_quant;
-pub mod observe;
 pub mod overlay_plan;
 pub mod place;
 pub mod policy;
-pub mod range;
 pub mod reachability;
 pub mod refinement_loop;
 pub mod report;
@@ -26,42 +24,11 @@ pub mod schedule;
 pub mod schedule_cost;
 pub mod sram_page_plan;
 pub mod stage_cache;
-pub mod storage;
 pub mod storage_plan;
 #[cfg(any(test, feature = "test-infra"))]
 pub mod storage_plan_test_infra;
 pub mod validate;
 pub mod window;
-
-pub mod stages {
-    pub mod budget {
-        pub use crate::budget::*;
-    }
-
-    pub mod policy {
-        pub use crate::policy::*;
-    }
-
-    pub mod validate {
-        pub use crate::validate::*;
-    }
-
-    pub mod window {
-        pub use crate::window::*;
-    }
-
-    pub mod overlay_plan {
-        pub use crate::overlay_plan::*;
-    }
-
-    pub mod schedule {
-        pub use crate::schedule::*;
-    }
-
-    pub mod schedule_cost {
-        pub use crate::schedule_cost::*;
-    }
-}
 
 #[cfg(test)]
 mod tests {

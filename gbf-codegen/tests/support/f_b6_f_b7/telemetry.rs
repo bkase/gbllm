@@ -13,7 +13,11 @@ use tracing_subscriber::registry::LookupSpan;
 
 pub const STAGE4_TRACE_TARGET: &str = "gbf_codegen::s4";
 pub const STAGE5_TRACE_TARGET: &str = "gbf_codegen::s5";
+/// Target for gbf-verify's independent verifier events.
 pub const RANGE_CERT_TRACE_TARGET: &str = "gbf_verify::range_cert";
+/// Target for the compiler's own certificate self-check events (P7 audit:
+/// production self-validation must not log under the verifier's namespace).
+pub const RANGE_CERT_SELF_CHECK_TRACE_TARGET: &str = "gbf_codegen::range_cert_self_check";
 
 pub const STAGE4_EVENT_NAMES: &[&str] = &[
     "stage4.observation_plan.identity_bind",

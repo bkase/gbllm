@@ -2623,16 +2623,6 @@ pub fn verifies(
     verifies_impl(cert, plan, facts, determinism)
 }
 
-#[must_use]
-pub fn verifies_with_determinism(
-    cert: &AccumulatorCertificate,
-    plan: &ReductionPlan,
-    facts: &ReductionSiteFacts,
-    determinism: DeterminismClass,
-) -> bool {
-    verifies_impl(cert, plan, facts, determinism)
-}
-
 fn verifies_impl(
     cert: &AccumulatorCertificate,
     plan: &ReductionPlan,
@@ -2667,7 +2657,7 @@ fn verifies_impl(
             if ok {
                 record_range_construction_event(RANGE_CERT_VERIFIES_SINGLE_I16_EVENT);
                 tracing::info!(
-                    target: "gbf_verify::range_cert",
+                    target: "gbf_codegen::range_cert_self_check",
                     event = %RANGE_CERT_VERIFIES_SINGLE_I16_EVENT,
                     site = facts.site.0.as_str(),
                     slack = *slack,
@@ -2714,7 +2704,7 @@ fn verifies_impl(
             if ok {
                 record_range_construction_event(RANGE_CERT_VERIFIES_CHUNKED_I16_EVENT);
                 tracing::info!(
-                    target: "gbf_verify::range_cert",
+                    target: "gbf_codegen::range_cert_self_check",
                     event = %RANGE_CERT_VERIFIES_CHUNKED_I16_EVENT,
                     site = facts.site.0.as_str(),
                     slack = *slack,
@@ -2737,7 +2727,7 @@ fn verifies_impl(
             if determinism == DeterminismClass::BitExact {
                 record_range_construction_event(RANGE_CERT_REJECTS_BITEXACT_RENORM_LOOP_EVENT);
                 tracing::info!(
-                    target: "gbf_verify::range_cert",
+                    target: "gbf_codegen::range_cert_self_check",
                     event = %RANGE_CERT_REJECTS_BITEXACT_RENORM_LOOP_EVENT,
                     site = facts.site.0.as_str(),
                     tile_len = *tile_len as u64,
@@ -2775,7 +2765,7 @@ fn verifies_impl(
             if ok {
                 record_range_construction_event(RANGE_CERT_VERIFIES_RENORM_LOOP_EVENT);
                 tracing::info!(
-                    target: "gbf_verify::range_cert",
+                    target: "gbf_codegen::range_cert_self_check",
                     event = %RANGE_CERT_VERIFIES_RENORM_LOOP_EVENT,
                     site = facts.site.0.as_str(),
                     slack = *slack,
@@ -2791,7 +2781,7 @@ fn verifies_impl(
         } => {
             record_range_construction_event(RANGE_CERT_VERIFIES_FAILED_EVENT);
             tracing::info!(
-                target: "gbf_verify::range_cert",
+                target: "gbf_codegen::range_cert_self_check",
                 event = %RANGE_CERT_VERIFIES_FAILED_EVENT,
                 site = site.0.as_str(),
                 proof_state = ?proof_state,
@@ -2847,7 +2837,7 @@ pub fn renorm_recurrence_verifies(
 
     record_range_construction_event(RANGE_CERT_RENORM_RECURRENCE_VERIFIES_EVENT);
     tracing::info!(
-        target: "gbf_verify::range_cert",
+        target: "gbf_codegen::range_cert_self_check",
         event = %RANGE_CERT_RENORM_RECURRENCE_VERIFIES_EVENT,
         site = facts.site.0.as_str(),
         scale = recurrence.output_scale_q16_16,
@@ -2879,7 +2869,7 @@ pub fn choose_plan(
     let chosen = attempts
         .iter()
         .find(|attempt| {
-            verifies_with_determinism(
+            verifies(
                 &attempt.certificate,
                 &attempt.plan,
                 &binding.facts,
@@ -4869,7 +4859,7 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(
-                target: "gbf_verify::range_cert",
+                target: "gbf_codegen::range_cert_self_check",
                 event = RANGE_CERT_VERIFIES_FAILED_EVENT,
                 site = "dense.matmul.0",
                 proof_state = "SumExceedsI16Envelope",
@@ -4885,7 +4875,7 @@ mod tests {
         let payload: Value = serde_json::from_str(&line).expect("ndjson is JSON");
 
         assert_eq!(payload["event"], RANGE_CERT_VERIFIES_FAILED_EVENT);
-        assert_eq!(payload["target"], "gbf_verify::range_cert");
+        assert_eq!(payload["target"], "gbf_codegen::range_cert_self_check");
         assert_eq!(payload["fields"]["outcome"], "failed");
         assert_eq!(payload["fields"]["compact_checkpoint_id"], 0);
         assert_eq!(payload["fields"]["runtime_probe_id"], 0);
@@ -6338,7 +6328,7 @@ mod tests {
         let cert =
             construct_accumulator_certificate(&plan, &facts, DeterminismClass::Deterministic);
 
-        assert!(verifies_with_determinism(
+        assert!(verifies(
             &cert,
             &plan,
             &facts,
@@ -6385,12 +6375,7 @@ mod tests {
         };
         let cert = construct_accumulator_certificate(&plan, &facts, DeterminismClass::BitExact);
 
-        assert!(!verifies_with_determinism(
-            &cert,
-            &plan,
-            &facts,
-            DeterminismClass::BitExact
-        ));
+        assert!(!verifies(&cert, &plan, &facts, DeterminismClass::BitExact));
         assert!(matches!(
             cert,
             AccumulatorCertificate::Failed {

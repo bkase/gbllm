@@ -4,6 +4,14 @@
 //! module owns the RFC F-B16 controller contract: only the loop applies policy
 //! deltas, every proposal is recorded, and accepted deltas restart the wrapped
 //! stage sequence from Stage 5.
+//!
+//! **DEFERRED (F-A6 pattern, 2026-07-04 review Action 10):** this controller
+//! has no production consumer — the stages it claims to wrap are not yet
+//! connected by dataflow (owner: bd-1skgm), and at registered model sizes the
+//! whole knob lattice is exhaustively enumerable. Do not extend this module.
+//! Reopening trigger: a wired `gbf compile` pipeline (bd-1skgm) plus evidence
+//! from real builds that humans spend time hand-repairing budget busts; until
+//! then compile failures carry `RepairProposal`s as report-only diagnostics.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;

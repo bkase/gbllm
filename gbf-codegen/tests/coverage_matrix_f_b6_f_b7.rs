@@ -11,9 +11,9 @@ use gbf_foundation::LayerId;
 use serde_json::Value;
 use support::f_b6_f_b7::{
     F_B6_F_B7_COMMON_EVENT_FIELDS, Fb6Fb7NdjsonSink, GbInferIRFixture,
-    ObservationPlanInputsFixture, RANGE_CERT_TRACE_TARGET, RANGE_CERT_VERIFY_EVENT_NAMES,
-    RangePlanInputsFixture, STAGE4_EVENT_NAMES, STAGE4_TRACE_TARGET, STAGE5_EVENT_NAMES,
-    STAGE5_TRACE_TARGET, StaticBudgetReductionSiteFactsFixture, abi_probe_id,
+    ObservationPlanInputsFixture, RANGE_CERT_SELF_CHECK_TRACE_TARGET, RANGE_CERT_TRACE_TARGET,
+    RANGE_CERT_VERIFY_EVENT_NAMES, RangePlanInputsFixture, STAGE4_EVENT_NAMES, STAGE4_TRACE_TARGET,
+    STAGE5_EVENT_NAMES, STAGE5_TRACE_TARGET, StaticBudgetReductionSiteFactsFixture, abi_probe_id,
     build_stage4_inputs_for, build_stage5_inputs_for, canonical_json_bytes, ck_id,
     closed_event_names, is_closed_event_name, policy_probe_id, timestamp_string, to_abi,
 };
@@ -1038,6 +1038,10 @@ fn target_for_event(event: &str) -> &'static str {
         STAGE4_TRACE_TARGET
     } else if event.starts_with("stage5.") {
         STAGE5_TRACE_TARGET
+    } else if event.starts_with("range_cert.verifies.")
+        || event == "range_cert.renorm_recurrence_verifies"
+    {
+        RANGE_CERT_SELF_CHECK_TRACE_TARGET
     } else if event.starts_with("range_cert.") {
         RANGE_CERT_TRACE_TARGET
     } else {
