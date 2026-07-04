@@ -1094,6 +1094,21 @@ The profile is the source of truth for safe dimension caps; `ModelTopologyConfig
 
 **8. Constant rename.** `BYTE_LEVEL_TIED_VOCAB_LIMIT` → `CHARSET_V1_VOCAB_TIE_DEFAULT_LIMIT`. The model is **not** byte-level; the locked-in v1 charset (Tier 2 — "Accelerando voice") is curated 80-token. The constant value is unchanged at 256; only the name is corrected.
 
+### Session amendment 2026-07-04 — measured kernel costs, quality-first UX budget, pinned v0 deployed numeric contract
+
+This block amends, but does not retract, the sizing and numeric commitments above. It is grounded in the first measured kernel evidence (`docs/experiments/kernel-bakeoff/`, bd-rzq5n): three ternary matvec strategies were built through the `gbf-asm` eDSL, byte-verified against an exact host reference, and cycle-measured in gameroy.
+
+**1. Measured cycles/MAC replaces guesses.** At 40% weight zeros: interpreted `Ternary2` decode ≈ 28.4 M-cycles/MAC; threaded per-byte pattern dispatch ≈ 10.3; **weights-as-code (straight-line add/sub generated from the weights, zeros skipped) ≈ 5.4**, scaling down to ≈ 1.4 at 90% zeros. Weights-as-code costs ≈ 4.4 bytes/weight at 40% zeros (ROM code instead of packed data); dispatch keeps weights as 0.25 B/w data plus ~2.5 KiB of shared handlers. Consequence: the compiler needs a **weights-as-code lowering** for hot matvecs as a first-class strategy; generated weight-code is simultaneously "derived data" and "compile product," so the `TargetDataLoweringArtifact`-vs-compile-product boundary must treat kernel-form selection as part of the lowering profile.
+
+**2. Quality-first UX budget (bkase, 2026-07-04).** Generation as slow as **~10 seconds per character is acceptable**; the goal is the smartest model that fits, not an interactive one. At 70% CPU that is ~7.34M M-cycles/token ≈ **~1.36M matvec MACs/token** under weights-as-code. The dense frontier is roughly `d_model=192, d_ff=384, 7 blocks` (~1.31M MACs/token, ~9.6 s/char floor, ~5.8 MiB of weight-code). The binding constraint is now **capacity per ROM byte**, not cycles; mixed lowerings (weights-as-code for hot layers, dispatch data for cold bulk) and top-1 MoE (stores k experts, spends one expert of cycles) are the levers. The S7 dense-vs-MoE verdict was pinned at matched deployed **bytes**; the decision-relevant comparison is now matched **cycles/token** under the ROM ceiling (bd-3771m).
+
+**3. Pinned v0 deployed numeric contract** (validated end-to-end by the bake-off kernels; typed enforcement owner: the `QuantSpec` v0 profile bead):
+
+- **Activations:** stored as raw `u8` at **zero point 128** (logical i8, `x = u − 128`). Per-row zero-point corrections `−128 · Σw_row` are build-time constants folded into accumulator seeds, so no on-device sign extension exists on the hot path.
+- **Accumulators:** canonical artifact semantics remain `Accumulator::I32` with `CanonicalIntegerThenScale` (unchanged). The on-device target is **i16, proven per reduction by `RangePlan`** from exported activation ranges; `ChunkedI16` renorm remains the escape hatch for reductions the proof rejects (plausible at `d_ff ≥ 384` fan-ins with wide ranges).
+- **Row scales:** the artifact carries per-output-row Q8.8 scales (unchanged). The deployed epilogue prefers **`ScaleFormat::Pow2` (shift-only)**; a Q8.8 software multiply per output element is an acceptable fallback at larger fan-ins where it amortizes (measured decision, per profile — owner: kernel-epilogue microbenchmark under F-H2). No per-MAC multiplies exist in any case.
+- **Decode:** v0 ships **`DecodeMode::Argmax` only** (matching the exported S3 `DecodeCapabilitySet`). `TopKTemperature` stays out of `DecodeCapabilitySet` until an exp-LUT + integer sampling design exists with the same oracle/ROM agreement obligations.
+
 ## The compiler pipeline
 
 This remains a real staged compiler. The revised pipeline presents a **validation envelope**, a **transform pipeline**, and a **reporting envelope** so the stage story stays honest without losing rigor. Internally, validation and reporting are implemented as first-class passes, but architecturally they bracket the transform pipeline.
