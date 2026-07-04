@@ -1,0 +1,115 @@
+{
+  "arm": "A1",
+  "config": {
+    "d_ff": 256,
+    "d_model": 128,
+    "decay_rates_by_band": [
+      0.5,
+      0.75,
+      0.875,
+      0.9375
+    ],
+    "extra": null,
+    "lanes": 4,
+    "lr": 0.01,
+    "n_blocks": 4,
+    "n_experts_per_block": 1,
+    "qat_recipe": "warmup Off then Hard, act Int8 fake-quant when hard (identical to s5_state_ab)",
+    "router": null,
+    "router_aux_weight": null,
+    "seq_len": 128,
+    "sequence_state_kind": "linear_state_multi_timescale",
+    "state_slots": 128,
+    "steps": 40000,
+    "tbptt": "state carried across chunks detached; lane reset to zero state on stream wrap",
+    "tied_head": true,
+    "tokens_per_step": 512,
+    "vocab": 80,
+    "warmup_frac_hardness_off": 0.25
+  },
+  "corpus": {
+    "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
+    "train_bytes_trimmed_at_utf8_boundary": 0,
+    "train_cap_bytes": 67108864,
+    "train_chars_normalized": 66398220,
+    "train_norm_tokens_sha256": "2b69988479556e60134abb742287888c18613b34ff0a7bc06c065bb70fea3536",
+    "train_prefix_raw_sha256": "f2881247c3614a5d0a455fd6eca7f2a8b4fbd503d2524e062830f5757dc3d61e",
+    "train_raw_bytes_used": 67108864,
+    "train_unk_count": 70570,
+    "val_book_ids_used": [
+      1017,
+      1233,
+      1475,
+      2105,
+      2156,
+      3440
+    ],
+    "val_bytes_trimmed_at_utf8_boundary": 0,
+    "val_chars_normalized": 1042415,
+    "val_norm_tokens_sha256": "d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "val_raw_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "val_raw_bytes_used": 1048576,
+    "val_source": "corpus/gutenberg/splits.json val-split book bodies, same assembly as s2/s4/s5",
+    "val_unk_count": 1491
+  },
+  "deployment": {
+    "constants": {
+      "cpu_fraction": 0.7,
+      "rom_budget_bytes": 7340032,
+      "source": "docs/experiments/kernel-bakeoff/kernel_bakeoff.json @ 40% zeros",
+      "v2_bytes_per_weight": 0.25,
+      "v2_cy_per_mac": 10.261,
+      "v2_shared_code_bytes": 2699.0,
+      "v3_bytes_per_weight": 4.40087890625,
+      "v3_cy_per_mac": 5.385
+    },
+    "decay_bytes_q8_8": 256,
+    "embedding_bytes_f32": 40960,
+    "macs_per_token": 305152,
+    "router_bytes_int8_assumed": 0,
+    "scale_bytes_q8_8": 3584,
+    "stored_ternary_weights": 294912,
+    "v2_dispatch_data": {
+      "cycles_per_token": 3131165,
+      "fits_rom_budget_7mib": true,
+      "rom_bytes": 121227,
+      "rom_mib": 0.11561107635498047,
+      "s_per_char_at_70pct_cpu": 4.265873325892857
+    },
+    "v3_weights_as_code": {
+      "cycles_per_token": 1643244,
+      "fits_rom_budget_7mib": true,
+      "rom_bytes": 1342672,
+      "rom_mib": 1.2804718017578125,
+      "s_per_char_at_70pct_cpu": 2.2387416294642857
+    }
+  },
+  "description": "dense d128/ff256/4blk + LinearState MT4 slots128 (~4x S5 arm-B per-token MACs)",
+  "git_sha": "4d9944810750dce9b1407d67bac564d58a861221",
+  "measurement": {
+    "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
+    "eval_lanes": 8,
+    "eval_pairs": 1042400,
+    "eval_wall_clock_seconds": 103.4393445,
+    "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling)",
+    "fp_val_bits_per_raw_byte": 2.978342656484289,
+    "fp_val_bpc_per_normalized_char": 2.9959455968742486,
+    "gap_bpc_per_normalized_char": 0.012956092030278477,
+    "state_block_scalar_parity_max_abs_diff": 2.086162567138672e-6,
+    "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
+    "ternary_val_bits_per_raw_byte": 2.99122262386266,
+    "ternary_val_bpc_per_normalized_char": 3.008901688904527
+  },
+  "sample": {
+    "greedy_continuation": " the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the seess and the",
+    "prompt_normalized": "The children walked down to the river in the morning, and",
+    "sample_path": "experiments/S8/sweep/sample_A1.txt"
+  },
+  "status": "ok",
+  "training": {
+    "expert_usage_fraction_last_log_window_per_block": null,
+    "final_logged_train_ce_bpc": 2.760918144188928,
+    "steps_per_second": 19.99534351356577,
+    "train_wall_clock_seconds": 2000.465757083
+  }
+}

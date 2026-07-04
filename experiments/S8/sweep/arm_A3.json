@@ -1,0 +1,140 @@
+{
+  "arm": "A3",
+  "config": {
+    "d_ff": 256,
+    "d_model": 128,
+    "decay_rates_by_band": [
+      0.5,
+      0.75,
+      0.875,
+      0.9375
+    ],
+    "extra": null,
+    "lanes": 4,
+    "lr": 0.01,
+    "n_blocks": 4,
+    "n_experts_per_block": 4,
+    "qat_recipe": "warmup Off then Hard, act Int8 fake-quant when hard (identical to s5_state_ab)",
+    "router": "simplified fp linear top-1 router [n_experts, d_model] over the quantized normed block input; HOST argmax hard dispatch (stop-gradient provenance); gradients reach routing probabilities via top-1 prob output scaling + Switch load-balance P_e term; NOT the gbf-model Top1RouterQat low-rank core",
+    "router_aux_weight": 0.01,
+    "seq_len": 128,
+    "sequence_state_kind": "linear_state_multi_timescale",
+    "state_slots": 128,
+    "steps": 40000,
+    "tbptt": "state carried across chunks detached; lane reset to zero state on stream wrap",
+    "tied_head": true,
+    "tokens_per_step": 512,
+    "vocab": 80,
+    "warmup_frac_hardness_off": 0.25
+  },
+  "corpus": {
+    "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
+    "train_bytes_trimmed_at_utf8_boundary": 0,
+    "train_cap_bytes": 67108864,
+    "train_chars_normalized": 66398220,
+    "train_norm_tokens_sha256": "2b69988479556e60134abb742287888c18613b34ff0a7bc06c065bb70fea3536",
+    "train_prefix_raw_sha256": "f2881247c3614a5d0a455fd6eca7f2a8b4fbd503d2524e062830f5757dc3d61e",
+    "train_raw_bytes_used": 67108864,
+    "train_unk_count": 70570,
+    "val_book_ids_used": [
+      1017,
+      1233,
+      1475,
+      2105,
+      2156,
+      3440
+    ],
+    "val_bytes_trimmed_at_utf8_boundary": 0,
+    "val_chars_normalized": 1042415,
+    "val_norm_tokens_sha256": "d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "val_raw_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "val_raw_bytes_used": 1048576,
+    "val_source": "corpus/gutenberg/splits.json val-split book bodies, same assembly as s2/s4/s5",
+    "val_unk_count": 1491
+  },
+  "deployment": {
+    "constants": {
+      "cpu_fraction": 0.7,
+      "rom_budget_bytes": 7340032,
+      "source": "docs/experiments/kernel-bakeoff/kernel_bakeoff.json @ 40% zeros",
+      "v2_bytes_per_weight": 0.25,
+      "v2_cy_per_mac": 10.261,
+      "v2_shared_code_bytes": 2699.0,
+      "v3_bytes_per_weight": 4.40087890625,
+      "v3_cy_per_mac": 5.385
+    },
+    "decay_bytes_q8_8": 256,
+    "embedding_bytes_f32": 40960,
+    "macs_per_token": 307200,
+    "router_bytes_int8_assumed": 2048,
+    "scale_bytes_q8_8": 12800,
+    "stored_ternary_weights": 1081344,
+    "v2_dispatch_data": {
+      "cycles_per_token": 3152179,
+      "fits_rom_budget_7mib": true,
+      "rom_bytes": 329099,
+      "rom_mib": 0.31385326385498047,
+      "s_per_char_at_70pct_cpu": 4.294503348214286
+    },
+    "v3_weights_as_code": {
+      "cycles_per_token": 1654272,
+      "fits_rom_budget_7mib": true,
+      "rom_bytes": 4814928,
+      "rom_mib": 4.5918731689453125,
+      "s_per_char_at_70pct_cpu": 2.253766741071429
+    }
+  },
+  "description": "top-1 MoE d128/4blk, 4 experts of ff256 per block + LinearState MT4 slots128 (per-token MACs ~= A1, stored FFN params ~= 4x A1)",
+  "git_sha": "4d9944810750dce9b1407d67bac564d58a861221",
+  "measurement": {
+    "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
+    "eval_lanes": 8,
+    "eval_pairs": 1042400,
+    "eval_wall_clock_seconds": 118.973721875,
+    "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling)",
+    "fp_val_bits_per_raw_byte": 3.163777932538722,
+    "fp_val_bpc_per_normalized_char": 3.182476853642477,
+    "gap_bpc_per_normalized_char": -0.0015144541575971004,
+    "state_block_scalar_parity_max_abs_diff": 7.62939453125e-6,
+    "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
+    "ternary_val_bits_per_raw_byte": 3.162272376688987,
+    "ternary_val_bpc_per_normalized_char": 3.18096239948488
+  },
+  "sample": {
+    "greedy_continuation": " the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the",
+    "prompt_normalized": "The children walked down to the river in the morning, and",
+    "sample_path": "experiments/S8/sweep/sample_A3.txt"
+  },
+  "status": "ok",
+  "training": {
+    "expert_usage_fraction_last_log_window_per_block": [
+      [
+        0.22294140625,
+        0.45053515625,
+        0.223796875,
+        0.1027265625
+      ],
+      [
+        0.31102734375,
+        0.27101171875,
+        0.162859375,
+        0.2551015625
+      ],
+      [
+        0.35316796875,
+        0.37078515625,
+        0.1905390625,
+        0.0855078125
+      ],
+      [
+        0.02412890625,
+        0.24416015625,
+        7.8125e-6,
+        0.731703125
+      ]
+    ],
+    "final_logged_train_ce_bpc": 2.9691610461772506,
+    "steps_per_second": 14.802609787782036,
+    "train_wall_clock_seconds": 2702.226200208
+  }
+}

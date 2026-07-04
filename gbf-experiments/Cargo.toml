@@ -117,3 +117,8 @@ required-features = ["s4"]
 name = "s5_state_ab"
 path = "src/bin/s5_state_ab.rs"
 required-features = ["s7"]
+
+[[bin]]
+name = "s8_matched_cycles"
+path = "src/bin/s8_matched_cycles.rs"
+required-features = ["s7"]
