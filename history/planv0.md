@@ -466,11 +466,12 @@ pub struct InteractionBundle {
 
 The first deployed `LexicalSpec` is fixed at the values below. This is part of `ArtifactCore`'s identity hash, so the values are not to be churned without a new artifact lineage.
 
-- **Charset (76 printable + `\n` = 77 + 2 control = 79 tokens; round to 80 with `<unk>` fallback)**:
+- **Charset (75 printable + `\n` = 76, + 1 reserved pad + 3 control = 80 tokens exactly)** — corrected 2026-07-04; the original text ("76 printable + `\n` = 77 + 2 control = 79; controls at IDs 80–82") double-counted newline, miscounted the three control tokens as two, and assigned control IDs outside an 80-token vocab. The implementation in `gbf-artifact::lexical` is the authority and was already consistent: printable IDs 0–75 (62 alphanumeric + 13 punctuation + newline), `RESERVED_ID = 76` (padding, rejected on input), `BOS_ID = 77`, `EOS_ID = 78`, `UNK_ID = 79`, `VOCAB_SIZE = 80`; cardinality is compile-time enforced by `CHARSET_V1: [Char; VOCAB_SIZE]`:
     - `A`–`Z` (26), `a`–`z` (26), `0`–`9` (10) — case-preserving
     - punctuation: ` ` (space) `.` `,` `!` `?` `-` `'` `:` `;` `(` `)` `"` `/` (13)
     - newline `\n` (1)
-    - control tokens: `<bos>`, `<eos>`, `<unk>` (assigned at IDs 80, 81, 82; never appear as printable bytes)
+    - reserved id 76 (padding slot; never produced, rejected on input)
+    - control tokens: `<bos>` = 77, `<eos>` = 78, `<unk>` = 79 (never appear as printable bytes)
 - **Normalization** (deterministic, hashed into `LexicalSpec`):
     1. NFC unicode normalize, then strip combining accents (`café` → `cafe`).
     2. Preserve case as-is. Mixed case is load-bearing for proper-noun signal.
@@ -2986,7 +2987,7 @@ That order gives you a functioning compiler-runtime-verification loop before you
 7. The harness uses symbols and `SemanticCheckpointId`s derived from canonical model paths, not magic addresses or incidental pass-local numbering.
 8. The compiler owns yield insertion and coroutine legality.
 9. Shared model/compiler contracts live in `gbf-artifact`; shared live-execution contracts live in `gbf-abi`; training internals do not leak into codegen.
-10. No escape hatches like `Raw(Vec<u8>)` allowed to dirty our code.
+10. `Raw(Vec<u8>)` is never a general-purpose authoring mechanism; it is legal only as an audited escape hatch for the enumerated cases in the Assembly eDSL section (cartridge header bytes, tiny frozen micro-blobs, test fixtures). (Reworded 2026-07-04: the old absolute phrasing contradicted the eDSL section.)
 11. `gbf-hw`, `gbf-artifact`, `gbf-abi`, `gbf-ir`, and `gbf-asm` are `no_std + alloc` capable where practical.
 12. `unsafe` is forbidden by default and isolated to tiny audited islands when unavoidable.
 13. Harness, trace, and oracle contracts use stable `SemanticCheckpointId`s, not raw addresses.
