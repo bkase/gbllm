@@ -8,6 +8,7 @@
 
 pub mod asm_impl;
 pub mod asm_impl_model;
+pub mod asm_impl_shell;
 pub mod asm_impl_state;
 pub mod autotune;
 pub mod calibration;

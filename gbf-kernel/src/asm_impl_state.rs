@@ -1947,23 +1947,37 @@ pub fn build_state_multi_token_sampling_rom(
     })
 }
 
-struct BuiltStateRom {
-    rom: Vec<u8>,
-    rom_size: RomSize,
-    bank_count: u16,
-    driver_bytes: usize,
-    weight_code_bytes: usize,
-    weight_chunk_count: usize,
-    table_bytes: usize,
-    labels: BTreeMap<String, u16>,
+pub(crate) struct BuiltStateRom {
+    pub(crate) rom: Vec<u8>,
+    pub(crate) rom_size: RomSize,
+    pub(crate) bank_count: u16,
+    pub(crate) driver_bytes: usize,
+    pub(crate) weight_code_bytes: usize,
+    pub(crate) weight_chunk_count: usize,
+    pub(crate) table_bytes: usize,
+    pub(crate) labels: BTreeMap<String, u16>,
 }
 
-fn build_state_model_rom(
+/// Weight-chunk plan and bank numbering shared by every stateful ROM
+/// variant (one-token, multi-token, sampling, interactive shell).
+pub(crate) struct StateRomPlan {
+    pub(crate) per_matvec_chunks: Vec<Vec<Vec<u8>>>,
+    pub(crate) weight_chunk_count: usize,
+    pub(crate) weight_code_bytes: usize,
+    pub(crate) state_bank: usize,
+    pub(crate) emb_bank: usize,
+    pub(crate) head_bank: usize,
+    /// Total banks including `extra_banks` appended after the head bank.
+    pub(crate) bank_count: usize,
+}
+
+/// Build the weight chunks and assign banks: chunks 1..=W, then the state
+/// weight-table bank, the embedding bank, the head bank, and finally
+/// `extra_banks` variant-owned banks (the shell's UI bank, for example).
+pub(crate) fn plan_state_rom(
     model: &IntStateLoweredModel,
-    loop_tokens: Option<u16>,
-    sampler: Option<&crate::decode::SamplerConfig>,
-) -> Result<BuiltStateRom, ModelRomError> {
-    // 1. Weight chunks: state in-projection first, then the 8 FFN matvecs.
+    extra_banks: usize,
+) -> Result<StateRomPlan, ModelRomError> {
     let mut per_matvec_chunks: Vec<Vec<Vec<u8>>> = Vec::new();
     per_matvec_chunks.push(build_matvec_chunks(&model.state_in)?);
     for (up, down) in &model.blocks {
@@ -1976,60 +1990,37 @@ fn build_state_model_rom(
         .flat_map(|chunks| chunks.iter().map(Vec::len))
         .sum();
 
-    // Bank numbering: chunks 1..=W, then the state weight-table bank, the
-    // embedding bank, and the head bank.
     let state_bank = 1 + weight_chunk_count;
     let emb_bank = state_bank + 1;
     let head_bank = emb_bank + 1;
-    let bank_count = head_bank + 1;
+    let bank_count = head_bank + 1 + extra_banks;
     if bank_count > 256 {
         // driver bank immediates are u8
         return Err(ModelRomError::TooManyBanks { banks: bank_count });
     }
-    let state_bank_u8 = state_bank as u8;
-    let emb_bank_u8 = emb_bank as u8;
-    let head_bank_u8 = head_bank as u8;
+    Ok(StateRomPlan {
+        per_matvec_chunks,
+        weight_chunk_count,
+        weight_code_bytes,
+        state_bank,
+        emb_bank,
+        head_bank,
+        bank_count,
+    })
+}
 
-    // 2. Bank-0 driver.
-    let mut asm = ModelAsm::new(ENTRY_POINT);
-    asm.i(Instr::Di);
-    ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
-    if loop_tokens.is_some() {
-        asm.i(Instr::XorA {
-            src: AluSrc8::Reg(Reg8::A),
-        });
-        a_to(&mut asm, S_TOKEN_IDX_ADDR);
-        a_to(&mut asm, S_DONE_ADDR);
-        // Zero the persistent state once (trained initial-state contract).
-        ld16(&mut asm, Reg16Data::HL, S_STATE_BASE);
-        ld_r_imm(&mut asm, Reg8::B, 0);
-        asm.label("zs_loop");
-        asm.i(Instr::LdReg16AddrFromA {
-            dst: Reg16Addr::Hli,
-        });
-        asm.i(Instr::Dec8 {
-            dst: IncDec8Target::Reg(Reg8::B),
-        });
-        asm.jr(Some(Cond::NZ), "zs_loop");
-    }
-    if sampler.is_some() {
-        // Canonicalize the host-poked RNG seed: 0 -> 1 (decode contract).
-        a_from(&mut asm, S_RNG_ADDR);
-        ld_rr(&mut asm, Reg8::B, Reg8::A);
-        a_from(&mut asm, S_RNG_ADDR + 1);
-        asm.i(Instr::OrA {
-            src: AluSrc8::Reg(Reg8::B),
-        });
-        asm.jr(Some(Cond::NZ), "rng_seed_ok");
-        ld_r_imm(&mut asm, Reg8::A, 1);
-        a_to(&mut asm, S_RNG_ADDR);
-        asm.label("rng_seed_ok");
-    }
-    asm.label("token_start");
-    a_from(&mut asm, S_INPUT_ADDR);
+/// Emit the per-token forward pass (embedding copy through `argmax80`),
+/// leaving the argmax at [`S_ARGMAX_ADDR`] and the i24 logits at
+/// [`S_LOGITS_BASE`]. The caller owns the surrounding labels and any decode
+/// epilogue (`sample80`) or loop control.
+pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
+    let state_bank_u8 = plan.state_bank as u8;
+    let head_bank_u8 = plan.head_bank as u8;
+
+    a_from(asm, S_INPUT_ADDR);
     asm.call("emb_copy24");
 
-    let mut chunk_iter = per_matvec_chunks.iter();
+    let mut chunk_iter = plan.per_matvec_chunks.iter();
     let mut next_bank: u8 = 1;
     let call_chunks = |asm: &mut ModelAsm, chunks: &Vec<Vec<u8>>, next_bank: &mut u8| {
         for _ in chunks {
@@ -2045,13 +2036,13 @@ fn build_state_model_rom(
 
     // --- state stage ---
     asm.call("norm24");
-    emit_copy_call(&mut asm, S_ACT_BASE, S_DUMP_SNORM, 64);
+    emit_copy_call(asm, S_ACT_BASE, S_DUMP_SNORM, 64);
     let in_chunks = chunk_iter.next().expect("state in-proj chunks exist");
-    call_chunks(&mut asm, in_chunks, &mut next_bank);
-    emit_copy_call(&mut asm, S_ACC_BASE, S_DUMP_INACC, 128);
+    call_chunks(asm, in_chunks, &mut next_bank);
+    emit_copy_call(asm, S_ACC_BASE, S_DUMP_INACC, 128);
     asm.call("state_update");
-    ld_r_imm(&mut asm, Reg8::A, state_bank_u8);
-    a_to(&mut asm, MBC5_ROMB0);
+    ld_r_imm(asm, Reg8::A, state_bank_u8);
+    a_to(asm, MBC5_ROMB0);
     asm.call("state_out_mv");
     asm.call("state_out_ep");
 
@@ -2059,100 +2050,82 @@ fn build_state_model_rom(
     for block in 0..crate::model_ref::N_BLOCKS {
         asm.call("norm24");
         if block == 0 {
-            emit_copy_call(&mut asm, S_ACT_BASE, S_DUMP_NORM0, 64);
+            emit_copy_call(asm, S_ACT_BASE, S_DUMP_NORM0, 64);
         }
         let up_chunks = chunk_iter.next().expect("up chunks exist");
-        call_chunks(&mut asm, up_chunks, &mut next_bank);
+        call_chunks(asm, up_chunks, &mut next_bank);
         if block == 0 {
-            emit_copy_call(&mut asm, S_ACC_BASE, S_DUMP_UPACC0, 0); // 256 bytes
+            emit_copy_call(asm, S_ACC_BASE, S_DUMP_UPACC0, 0); // 256 bytes
         }
         asm.ld16_label(Reg16Data::DE, &format!("scales_up_{block}"), 0);
-        ld_r_imm(&mut asm, Reg8::A, D_FF as u8);
+        ld_r_imm(asm, Reg8::A, D_FF as u8);
         asm.call("up_epilogue");
         if block == 0 {
-            emit_copy_call(&mut asm, S_ACT_BASE, S_DUMP_GELU0, 128);
+            emit_copy_call(asm, S_ACT_BASE, S_DUMP_GELU0, 128);
         }
         let down_chunks = chunk_iter.next().expect("down chunks exist");
-        call_chunks(&mut asm, down_chunks, &mut next_bank);
+        call_chunks(asm, down_chunks, &mut next_bank);
         if block == 0 {
-            emit_copy_call(&mut asm, S_ACC_BASE, S_DUMP_DOWNACC0, 128);
+            emit_copy_call(asm, S_ACC_BASE, S_DUMP_DOWNACC0, 128);
         }
         asm.ld16_label(Reg16Data::DE, &format!("scales_down_{block}"), 0);
         asm.call("down_ep24");
-        emit_copy_call(&mut asm, S_X_BASE, S_XDUMP_BASE + 192 * block as u16, 192);
+        emit_copy_call(asm, S_X_BASE, S_XDUMP_BASE + 192 * block as u16, 192);
     }
 
     asm.call("norm24");
-    emit_copy_call(&mut asm, S_ACT_BASE, S_QDUMP_BASE, 64);
+    emit_copy_call(asm, S_ACT_BASE, S_QDUMP_BASE, 64);
 
     // zero the 240-byte logits buffer
-    ld16(&mut asm, Reg16Data::HL, S_LOGITS_BASE);
+    ld16(asm, Reg16Data::HL, S_LOGITS_BASE);
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    ld_r_imm(&mut asm, Reg8::B, 240);
-    asm.label("zl80");
+    ld_r_imm(asm, Reg8::B, 240);
+    let zl = asm.fresh("zl80");
+    asm.label(&zl);
     asm.i(Instr::LdReg16AddrFromA {
         dst: Reg16Addr::Hli,
     });
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::B),
     });
-    asm.jr(Some(Cond::NZ), "zl80");
+    asm.jr(Some(Cond::NZ), &zl);
 
-    ld_r_imm(&mut asm, Reg8::A, head_bank_u8);
-    a_to(&mut asm, MBC5_ROMB0);
+    ld_r_imm(asm, Reg8::A, head_bank_u8);
+    a_to(asm, MBC5_ROMB0);
     asm.call("head80");
     asm.call("argmax80");
-    let picked_addr = if sampler.is_some() {
-        asm.call("sample80");
-        S_SAMPLED_ADDR
-    } else {
-        S_ARGMAX_ADDR
-    };
-    if let Some(n_tokens) = loop_tokens {
-        a_from(&mut asm, S_TOKEN_IDX_ADDR);
-        ld_rr(&mut asm, Reg8::L, Reg8::A);
-        ld_r_imm(&mut asm, Reg8::H, (S_OUT_BASE >> 8) as u8);
-        a_from(&mut asm, picked_addr);
-        asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
-        a_to(&mut asm, S_INPUT_ADDR);
-        a_from(&mut asm, S_TOKEN_IDX_ADDR);
-        asm.i(Instr::Inc8 {
-            dst: IncDec8Target::Reg(Reg8::A),
-        });
-        a_to(&mut asm, S_TOKEN_IDX_ADDR);
-        asm.i(Instr::CpA {
-            src: AluSrc8::Imm((n_tokens & 0xFF) as u8),
-        });
-        asm.label("token_boundary");
-        asm.jp(Some(Cond::NZ), "token_start");
-    }
-    ld_r_imm(&mut asm, Reg8::A, 1);
-    a_to(&mut asm, S_DONE_ADDR);
-    asm.label("token_end");
-    asm.jr(None, "token_end");
+}
 
-    // routines
-    emit_copy_bytes(&mut asm);
-    emit_emb_copy24(&mut asm, emb_bank_u8);
-    emit_mul16x8(&mut asm);
-    emit_mul16(&mut asm);
-    emit_isqrt48(&mut asm);
-    emit_udiv_norm5(&mut asm);
-    emit_udiv254(&mut asm);
-    emit_norm_quant24(&mut asm);
-    emit_state_update(&mut asm);
-    emit_state_out_matvec(&mut asm);
-    emit_state_out_epilogue(&mut asm);
-    emit_up_epilogue(&mut asm);
-    emit_down_epilogue24(&mut asm);
-    emit_head80(&mut asm);
-    emit_argmax80(&mut asm);
+/// Emit every shared routine body plus the bank-0 data tables (GELU/y LUTs,
+/// state scale/decay tables, per-block scales, and — when a sampler config
+/// is present — the exp2 LUT and the sampler routines).
+pub(crate) fn emit_state_routines_and_tables(
+    asm: &mut ModelAsm,
+    model: &IntStateLoweredModel,
+    emb_bank_u8: u8,
+    sampler: Option<&crate::decode::SamplerConfig>,
+) {
+    emit_copy_bytes(asm);
+    emit_emb_copy24(asm, emb_bank_u8);
+    emit_mul16x8(asm);
+    emit_mul16(asm);
+    emit_isqrt48(asm);
+    emit_udiv_norm5(asm);
+    emit_udiv254(asm);
+    emit_norm_quant24(asm);
+    emit_state_update(asm);
+    emit_state_out_matvec(asm);
+    emit_state_out_epilogue(asm);
+    emit_up_epilogue(asm);
+    emit_down_epilogue24(asm);
+    emit_head80(asm);
+    emit_argmax80(asm);
     if let Some(cfg) = sampler {
-        emit_rng_step(&mut asm);
-        emit_smp_weight(&mut asm, cfg.scale_q16());
-        emit_sample80(&mut asm, cfg.k());
+        emit_rng_step(asm);
+        emit_smp_weight(asm, cfg.scale_q16());
+        emit_sample80(asm, cfg.k());
     }
 
     // bank-0 data: GELU LUT, y LUT, state scale/decay tables, block scales
@@ -2196,16 +2169,20 @@ fn build_state_model_rom(
         }
         asm.bytes(down_bytes);
     }
+}
 
-    let (driver, labels) = asm.finish()?;
-    let driver_bytes = driver.len();
-    if usize::from(ENTRY_POINT) + driver_bytes > usize::from(CHUNK_ENTRY) {
-        return Err(ModelRomError::DriverOverflowsBank0 {
-            bytes: driver_bytes,
-        });
-    }
-
-    // 3. Banked data tables.
+/// Assemble the banked ROM image: bank-0 driver, weight chunk banks, the
+/// state/embedding/head table banks, and any `extra_bank_payloads` (each
+/// placed at [`CHUNK_ENTRY`] in the banks after the head bank). Returns the
+/// ROM bytes, size, and the model table byte count.
+pub(crate) fn assemble_state_rom(
+    title: &str,
+    driver: Vec<u8>,
+    plan: &StateRomPlan,
+    model: &IntStateLoweredModel,
+    extra_bank_payloads: &[Vec<u8>],
+) -> Result<(Vec<u8>, RomSize, usize), ModelRomError> {
+    // Banked data tables.
     // State out-projection weight table: row-major [D_MODEL][STATE_SLOTS] i8.
     let mut state_table = Vec::with_capacity(D_MODEL * STATE_SLOTS);
     for row in 0..D_MODEL {
@@ -2229,8 +2206,7 @@ fn build_state_model_rom(
     }
     let table_bytes = state_table.len() + emb_table.len() + head_table.len();
 
-    // 4. Assemble the ROM image.
-    let rom_size = smallest_rom_size(bank_count)?;
+    let rom_size = smallest_rom_size(plan.bank_count)?;
     let mut pairs: Vec<(EncodedSection, PlacedSection)> = Vec::new();
     let mut section_seq: u32 = 0;
     let mut push_section = |pairs: &mut Vec<(EncodedSection, PlacedSection)>,
@@ -2265,16 +2241,24 @@ fn build_state_model_rom(
 
     push_section(&mut pairs, 0, ENTRY_POINT, driver);
     let mut bank = 1usize;
-    for chunks in &per_matvec_chunks {
+    for chunks in &plan.per_matvec_chunks {
         for chunk in chunks {
             push_section(&mut pairs, bank, CHUNK_ENTRY, chunk.clone());
             bank += 1;
         }
     }
-    debug_assert_eq!(bank, state_bank);
-    push_section(&mut pairs, state_bank, CHUNK_ENTRY, state_table);
-    push_section(&mut pairs, emb_bank, CHUNK_ENTRY, emb_table);
-    push_section(&mut pairs, head_bank, CHUNK_ENTRY, head_table);
+    debug_assert_eq!(bank, plan.state_bank);
+    push_section(&mut pairs, plan.state_bank, CHUNK_ENTRY, state_table);
+    push_section(&mut pairs, plan.emb_bank, CHUNK_ENTRY, emb_table);
+    push_section(&mut pairs, plan.head_bank, CHUNK_ENTRY, head_table);
+    for (k, payload) in extra_bank_payloads.iter().enumerate() {
+        push_section(
+            &mut pairs,
+            plan.head_bank + 1 + k,
+            CHUNK_ENTRY,
+            payload.clone(),
+        );
+    }
 
     let layout = LayoutPlan {
         sections: pairs.iter().map(|(_, placed)| placed.clone()).collect(),
@@ -2282,17 +2266,106 @@ fn build_state_model_rom(
         free_bytes_per_bank: BTreeMap::new(),
         reserved_ranges: Vec::new(),
     };
-    let mut header = CartridgeHeader::new("GBFSTATE")?;
+    let mut header = CartridgeHeader::new(title)?;
     header.rom_size = rom_size;
     let rom = assemble_rom(&pairs, &layout, &header)?;
+    Ok((rom, rom_size, table_bytes))
+}
+
+fn build_state_model_rom(
+    model: &IntStateLoweredModel,
+    loop_tokens: Option<u16>,
+    sampler: Option<&crate::decode::SamplerConfig>,
+) -> Result<BuiltStateRom, ModelRomError> {
+    let plan = plan_state_rom(model, 0)?;
+    let emb_bank_u8 = plan.emb_bank as u8;
+
+    // Bank-0 driver.
+    let mut asm = ModelAsm::new(ENTRY_POINT);
+    asm.i(Instr::Di);
+    ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
+    if loop_tokens.is_some() {
+        asm.i(Instr::XorA {
+            src: AluSrc8::Reg(Reg8::A),
+        });
+        a_to(&mut asm, S_TOKEN_IDX_ADDR);
+        a_to(&mut asm, S_DONE_ADDR);
+        // Zero the persistent state once (trained initial-state contract).
+        ld16(&mut asm, Reg16Data::HL, S_STATE_BASE);
+        ld_r_imm(&mut asm, Reg8::B, 0);
+        asm.label("zs_loop");
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+        asm.i(Instr::Dec8 {
+            dst: IncDec8Target::Reg(Reg8::B),
+        });
+        asm.jr(Some(Cond::NZ), "zs_loop");
+    }
+    if sampler.is_some() {
+        // Canonicalize the host-poked RNG seed: 0 -> 1 (decode contract).
+        a_from(&mut asm, S_RNG_ADDR);
+        ld_rr(&mut asm, Reg8::B, Reg8::A);
+        a_from(&mut asm, S_RNG_ADDR + 1);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        asm.jr(Some(Cond::NZ), "rng_seed_ok");
+        ld_r_imm(&mut asm, Reg8::A, 1);
+        a_to(&mut asm, S_RNG_ADDR);
+        asm.label("rng_seed_ok");
+    }
+    asm.label("token_start");
+    emit_state_forward_body(&mut asm, &plan);
+    let picked_addr = if sampler.is_some() {
+        asm.call("sample80");
+        S_SAMPLED_ADDR
+    } else {
+        S_ARGMAX_ADDR
+    };
+    if let Some(n_tokens) = loop_tokens {
+        a_from(&mut asm, S_TOKEN_IDX_ADDR);
+        ld_rr(&mut asm, Reg8::L, Reg8::A);
+        ld_r_imm(&mut asm, Reg8::H, (S_OUT_BASE >> 8) as u8);
+        a_from(&mut asm, picked_addr);
+        asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+        a_to(&mut asm, S_INPUT_ADDR);
+        a_from(&mut asm, S_TOKEN_IDX_ADDR);
+        asm.i(Instr::Inc8 {
+            dst: IncDec8Target::Reg(Reg8::A),
+        });
+        a_to(&mut asm, S_TOKEN_IDX_ADDR);
+        asm.i(Instr::CpA {
+            src: AluSrc8::Imm((n_tokens & 0xFF) as u8),
+        });
+        asm.label("token_boundary");
+        asm.jp(Some(Cond::NZ), "token_start");
+    }
+    ld_r_imm(&mut asm, Reg8::A, 1);
+    a_to(&mut asm, S_DONE_ADDR);
+    asm.label("token_end");
+    asm.jr(None, "token_end");
+
+    // routines + bank-0 tables
+    emit_state_routines_and_tables(&mut asm, model, emb_bank_u8, sampler);
+
+    let (driver, labels) = asm.finish()?;
+    let driver_bytes = driver.len();
+    if usize::from(ENTRY_POINT) + driver_bytes > usize::from(CHUNK_ENTRY) {
+        return Err(ModelRomError::DriverOverflowsBank0 {
+            bytes: driver_bytes,
+        });
+    }
+
+    let (rom, rom_size, table_bytes) = assemble_state_rom("GBFSTATE", driver, &plan, model, &[])?;
 
     Ok(BuiltStateRom {
         rom,
         rom_size,
-        bank_count: bank_count as u16,
+        bank_count: plan.bank_count as u16,
         driver_bytes,
-        weight_code_bytes,
-        weight_chunk_count,
+        weight_code_bytes: plan.weight_code_bytes,
+        weight_chunk_count: plan.weight_chunk_count,
         table_bytes,
         labels,
     })

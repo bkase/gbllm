@@ -8,5 +8,6 @@ pub mod multi_token;
 pub mod one_token;
 pub mod reports;
 pub mod sampling;
+pub mod shell;
 pub mod stateful;
 pub mod workload;

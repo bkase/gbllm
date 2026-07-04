@@ -177,6 +177,7 @@ pub enum ModelRomError {
     DriverOverflowsBank0 { bytes: usize },
     TooManyBanks { banks: usize },
     BadTokenCount { n_tokens: u16 },
+    UiBankOverflow { bytes: usize },
 }
 
 impl fmt::Display for ModelRomError {
@@ -201,6 +202,12 @@ impl fmt::Display for ModelRomError {
             Self::TooManyBanks { banks } => write!(f, "model needs {banks} ROM banks (> 512)"),
             Self::BadTokenCount { n_tokens } => {
                 write!(f, "n_tokens {n_tokens} outside the ring capacity 1..=256")
+            }
+            Self::UiBankOverflow { bytes } => {
+                write!(
+                    f,
+                    "shell UI bank needs {bytes} bytes, exceeding one ROM bank"
+                )
             }
         }
     }
