@@ -1,0 +1,135 @@
+{
+  "schema": "latency_gate.v1",
+  "bead": "bd-3l3tl",
+  "upstream_beads": [
+    "bd-2gc6p",
+    "bd-1kbv1",
+    "bd-pp43d",
+    "bd-3771m"
+  ],
+  "git_sha": "807d93e6d51a5984fe1b0c63658a73f8df6173a9",
+  "budget_s_per_char": 30.0,
+  "budget_provenance": "bd-3771m comment 2026-07-04 15:15 UTC (bkase budget revision 2, planv0 2026-07-04 quality-first amendment): up to 30 s/char is acceptable; optimize for model quality",
+  "token_char_equivalence": "charset_v1 is a character vocabulary: one generated token renders exactly one char, so seconds/token == seconds/char",
+  "rows": [
+    {
+      "role": "gate",
+      "model": "d192/ff384/6blk/slots192 distilled student (deployed demo model)",
+      "checkpoint": {
+        "export_dir": "experiments/S8/sweep/checkpoint-export-CUSTOM_distill",
+        "manifest_schema": "f_s5_state_checkpoint_export.v1",
+        "manifest_sha256": "a7d0480d7663ab455b843a2ac132baa0f4561da8f0a9c768de082114b7285016",
+        "trainer_git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
+        "tensors_verified_sha256": 30
+      },
+      "macs_per_token": 973824,
+      "sampler": {
+        "top_k": 8,
+        "scale_q16": 14434,
+        "requested_temperature": 0.8,
+        "effective_temperature": 0.7999800619732749
+      },
+      "prompt": "The machines dreamed",
+      "rng_seed": 24301,
+      "session_gates_pass": true,
+      "sequences_match_host": true,
+      "n_tokens_generated": 181,
+      "min_required_tokens": 128,
+      "enough_tokens": true,
+      "warmup_mean_m_cycles_per_char": 22729747,
+      "warmup_s_per_prompt_char": 21.67677593231201,
+      "tokens": {
+        "n_tokens": 181,
+        "min_m_cycles": 52755,
+        "p50_m_cycles": 22770135,
+        "p95_m_cycles": 22787692,
+        "max_m_cycles": 22787700,
+        "mean_m_cycles": 22649374,
+        "p50_s_per_char": 21.715292930603027,
+        "p95_s_per_char": 21.732036590576172,
+        "max_s_per_char": 21.732044219970703,
+        "mean_s_per_char": 21.600126266479492,
+        "first_boundary_m_cycles": 52755
+      },
+      "idle_poll": {
+        "n_frames": 294,
+        "min_m_cycles_per_frame": 17399,
+        "max_m_cycles_per_frame": 17717,
+        "mean_m_cycles_per_frame": 17556.003401360544,
+        "measured_hz": 59.72748899779423,
+        "expected_hz": 59.72750056960583,
+        "tolerance_hz": 0.1,
+        "within_tolerance": true
+      },
+      "budget_s_per_char": 30.0,
+      "p50_within_budget": true,
+      "p95_within_budget": true,
+      "max_within_budget": true,
+      "row_pass": true
+    },
+    {
+      "role": "reference",
+      "model": "d64/ff128/4blk/slots64 arm-B v0 bring-up checkpoint",
+      "checkpoint": {
+        "export_dir": "experiments/S5/state-ab/checkpoint-export",
+        "manifest_schema": "f_s5_state_checkpoint_export.v1",
+        "manifest_sha256": "15661ac2cf6f295c9c36a8878a8d3423052af226f2829ad33f3c44935348a351",
+        "trainer_git_sha": "5669f79e6b22a893d0670971cbf673eceb4b6628",
+        "tensors_verified_sha256": 22
+      },
+      "macs_per_token": 78848,
+      "sampler": {
+        "top_k": 8,
+        "scale_q16": 11953,
+        "requested_temperature": 0.8,
+        "effective_temperature": 0.8000238770447308
+      },
+      "prompt": "The machines dreamed",
+      "rng_seed": 24301,
+      "session_gates_pass": true,
+      "sequences_match_host": true,
+      "n_tokens_generated": 200,
+      "min_required_tokens": 128,
+      "enough_tokens": true,
+      "warmup_mean_m_cycles_per_char": 3567373,
+      "warmup_s_per_prompt_char": 3.4021120071411133,
+      "tokens": {
+        "n_tokens": 200,
+        "min_m_cycles": 52753,
+        "p50_m_cycles": 3598980,
+        "p95_m_cycles": 3598997,
+        "max_m_cycles": 3616545,
+        "mean_m_cycles": 3582039,
+        "p50_s_per_char": 3.4322547912597656,
+        "p95_s_per_char": 3.4322710037231445,
+        "max_s_per_char": 3.4490060806274414,
+        "mean_s_per_char": 3.4160985946655273,
+        "first_boundary_m_cycles": 52753
+      },
+      "idle_poll": {
+        "n_frames": 294,
+        "min_m_cycles_per_frame": 17399,
+        "max_m_cycles_per_frame": 17717,
+        "mean_m_cycles_per_frame": 17556.003401360544,
+        "measured_hz": 59.72748899779423,
+        "expected_hz": 59.72750056960583,
+        "tolerance_hz": 0.1,
+        "within_tolerance": true
+      },
+      "budget_s_per_char": 30.0,
+      "p50_within_budget": true,
+      "p95_within_budget": true,
+      "max_within_budget": true,
+      "row_pass": true
+    }
+  ],
+  "gate_pass": true,
+  "quick_mode": false,
+  "caveats": [
+    "All timing is DMG M-cycle-accurate emulated time (gbf-emu headless), interrupts disabled, SP repurposed inside weight chunks; production kernels pay yield/safe-point overhead on top of these numbers.",
+    "Token-boundary deltas include the VBlank-aligned transcript render, i.e. they are the real UI cadence a player sees, not bare forward-pass time.",
+    "The first token boundary samples from the prompt-warmup logits (no forward pass), so its delta is structurally small; it is included in the percentile set and reported separately per row.",
+    "The reference row (arm-B) is recorded for context only and is not asserted by this gate.",
+    "The original bead title targeted <= 10 s/char at 70% CPU; the governing budget was revised to 30 s/char (bd-3771m comment 2026-07-04 15:15 UTC, quality-first). This gate asserts the revised budget against 100%-CPU sustained measurements (harder than the 70%-CPU formulation: no reserve is subtracted from the measured numbers)."
+  ]
+}

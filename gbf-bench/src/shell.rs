@@ -254,6 +254,13 @@ pub struct ShellSessionResult {
     /// boundaries (the real UI update cadence, VBlank waits included).
     pub warm_boundary_m_cycles: Vec<u64>,
     pub token_boundary_m_cycles: Vec<u64>,
+    /// M-cycle deltas between consecutive idle-loop trap hits while the
+    /// typing script runs (the keyboard-phase joypad poll cadence; one idle
+    /// iteration per PPU frame).
+    pub idle_frame_m_cycles: Vec<u64>,
+    /// Framebuffer sha256 captured at the mid-generation token boundary
+    /// (only when the session was run with `capture_mid_generation`).
+    pub fb_sha256_mid_generation: Option<String>,
     #[serde(skip)]
     pub rom_sequence: Vec<u8>,
     #[serde(skip)]
@@ -365,6 +372,24 @@ pub fn run_shell_session(
     prompt_ids: &[u8],
     rng_seed: u16,
 ) -> Result<ShellSessionResult, OneTokenError> {
+    run_shell_session_observed(rom, lowered, cfg, prompt_ids, rng_seed, false)
+}
+
+/// [`run_shell_session`] with an additional deterministic mid-generation
+/// framebuffer capture (taken at the token boundary halfway through the
+/// expected sequence; the PPU keeps rendering the static BG during compute,
+/// so the capture shows the transcript filled to that point). The extra
+/// screenshot is appended to `framebuffers` as
+/// `screenshot_3_mid_generation.pgm` and the final capture is renamed
+/// `screenshot_4_generation_done.pgm`.
+pub fn run_shell_session_observed(
+    rom: &ShellRom,
+    lowered: &IntStateLoweredModel,
+    cfg: &SamplerConfig,
+    prompt_ids: &[u8],
+    rng_seed: u16,
+    capture_mid_generation: bool,
+) -> Result<ShellSessionResult, OneTokenError> {
     assert!(
         !prompt_ids.is_empty() && prompt_ids.len() <= usize::from(SHELL_PROMPT_CAP),
         "prompt must fit the prompt row"
@@ -432,9 +457,14 @@ pub fn run_shell_session(
 
     // --- gate 2: prompt entry ---
     let script = typing_script(prompt_ids);
+    let mut idle_frame_deltas = Vec::with_capacity(script.len());
+    let mut prev_idle = emu.m_cycle_count_floor().0;
     for frame in &script {
         emu.set_joypad(*frame);
         step_run_to(&mut emu, rom.idle_pc, frame_budget, "idle frame")?;
+        let now = emu.m_cycle_count_floor().0;
+        idle_frame_deltas.push(now.saturating_sub(prev_idle));
+        prev_idle = now;
     }
     let mut prompt_row_expect = vec![SHELL_SPACE_ID; usize::from(TRANSCRIPT_COLS)];
     prompt_row_expect[..prompt_ids.len()].copy_from_slice(prompt_ids);
@@ -474,7 +504,9 @@ pub fn run_shell_session(
         prev_cycles = now;
     }
     let mut token_deltas = Vec::with_capacity(n_expected);
-    for _ in 0..n_expected {
+    let mid_capture_index = capture_mid_generation.then_some(n_expected / 2);
+    let mut fb_mid: Option<Framebuffer> = None;
+    for i in 0..n_expected {
         step_run_to(
             &mut emu,
             rom.token_boundary_pc,
@@ -484,6 +516,9 @@ pub fn run_shell_session(
         let now = emu.m_cycle_count_floor().0;
         token_deltas.push(now.saturating_sub(prev_cycles));
         prev_cycles = now;
+        if mid_capture_index == Some(i) {
+            fb_mid = Some(emu.framebuffer());
+        }
     }
     step_run_to(&mut emu, rom.gen_done_pc, token_budget, "generation done")?;
 
@@ -543,6 +578,32 @@ pub fn run_shell_session(
     settle_frames(&mut emu, rom.idle_pc, frame_budget)?;
     let fb_done = emu.framebuffer();
 
+    let fb_sha256_mid_generation = fb_mid.as_ref().map(fb_hash);
+    let framebuffers = match fb_mid {
+        Some(mid) => vec![
+            ("screenshot_1_boot.pgm".to_string(), fb_boot.clone()),
+            (
+                "screenshot_2_prompt_typed.pgm".to_string(),
+                fb_typed.clone(),
+            ),
+            ("screenshot_3_mid_generation.pgm".to_string(), mid),
+            (
+                "screenshot_4_generation_done.pgm".to_string(),
+                fb_done.clone(),
+            ),
+        ],
+        None => vec![
+            ("screenshot_1_boot.pgm".to_string(), fb_boot.clone()),
+            (
+                "screenshot_2_prompt_typed.pgm".to_string(),
+                fb_typed.clone(),
+            ),
+            (
+                "screenshot_3_generation_done.pgm".to_string(),
+                fb_done.clone(),
+            ),
+        ],
+    };
     Ok(ShellSessionResult {
         prompt_ids: prompt_ids.to_vec(),
         rng_seed,
@@ -563,12 +624,10 @@ pub fn run_shell_session(
         fb_sha256_after_generation: fb_hash(&fb_done),
         warm_boundary_m_cycles: warm_deltas,
         token_boundary_m_cycles: token_deltas,
+        idle_frame_m_cycles: idle_frame_deltas,
+        fb_sha256_mid_generation,
         rom_sequence,
-        framebuffers: vec![
-            ("screenshot_1_boot.pgm".to_string(), fb_boot),
-            ("screenshot_2_prompt_typed.pgm".to_string(), fb_typed),
-            ("screenshot_3_generation_done.pgm".to_string(), fb_done),
-        ],
+        framebuffers,
     })
 }
 
@@ -1053,5 +1112,36 @@ mod tests {
         assert_eq!(result.warm_boundary_m_cycles.len(), 1);
         assert_eq!(result.token_boundary_m_cycles.len(), 3);
         assert!(result.token_boundary_m_cycles.iter().all(|&c| c > 0));
+        // No mid capture requested: 3 screenshots, no mid hash, and the
+        // typing frames were measured at the idle-loop poll cadence.
+        assert!(result.fb_sha256_mid_generation.is_none());
+        assert_eq!(result.framebuffers.len(), 3);
+        assert_eq!(result.idle_frame_m_cycles.len(), result.typing_frames);
+        assert!(result.idle_frame_m_cycles.iter().all(|&c| c > 0));
+    }
+
+    /// The observed variant with mid capture: same gates, plus a fourth
+    /// deterministic mid-generation screenshot.
+    #[test]
+    fn shell_session_observed_captures_mid_generation() {
+        let ck = synthetic_state_checkpoint(21);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let cfg = SamplerConfig::new(8, 2253).expect("valid sampler");
+        let font = synthetic_font_tiles();
+        let rom = build_state_shell_rom(&lowered, &cfg, 3, &font).expect("builds");
+        let result =
+            run_shell_session_observed(&rom, &lowered, &cfg, &[0], 0xBEEF, true).expect("runs");
+        let rerun =
+            run_shell_session_observed(&rom, &lowered, &cfg, &[0], 0xBEEF, true).expect("reruns");
+        assert!(result.all_gates_pass());
+        assert_eq!(result.framebuffers.len(), 4);
+        assert_eq!(result.framebuffers[2].0, "screenshot_3_mid_generation.pgm");
+        assert_eq!(result.framebuffers[3].0, "screenshot_4_generation_done.pgm");
+        let mid = result
+            .fb_sha256_mid_generation
+            .as_deref()
+            .expect("mid hash present");
+        assert_eq!(Some(mid), rerun.fb_sha256_mid_generation.as_deref());
+        assert_eq!(result.rom_sequence, rerun.rom_sequence);
     }
 }
