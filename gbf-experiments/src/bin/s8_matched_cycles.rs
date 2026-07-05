@@ -31,6 +31,18 @@
 //!     packed Ternary2 data + 2699 B shared handler code), projected
 //!     M-cycles/token and s/char at 70% CPU.
 //!
+//! Persistence (added after the first overnight scale run lost its weights):
+//!
+//!   * every measured arm exports its final hardened student as canonical
+//!     tensors (same `f_s5_state_checkpoint_export.v1` format family the ROM
+//!     pipeline consumes, parameterized for the arm topology) into
+//!     `<out-dir>/checkpoint-export-<arm>/`, with per-tensor sha256 in the
+//!     manifest and an immediate reload + probe-inference verification;
+//!   * the distill phase saves the fp teacher's raw f32 weights (plus its
+//!     trained Q8.8 scales/thresholds for exactness) into
+//!     `<out-dir>/teacher-<arm>/` and `--load-teacher <dir>` reuses a saved
+//!     teacher instead of retraining it.
+//!
 //! Evaluation is identical to s5_state_ab: lane-parallel full-val bpc in both
 //! Soft (fp STE ceiling) and Hard (deployable ternary) semantics, re-expressed
 //! per raw val byte with the same total-bits-over-raw-byte-count method as the
@@ -49,8 +61,8 @@ use gbf_data::charset_v1::normalize_raw;
 use gbf_foundation::sha256;
 use gbf_model::qat::{
     ActFakeQuant, ActivationForwardMode, ActivationQuantFormat, ActivationRange,
-    ActivationRangeMode, MatrixShape, QatHardnessControl, QuantHardness, TernaryLinearQat,
-    TernaryThreshold,
+    ActivationRangeMode, MatrixShape, Q8_8Scale, QatHardnessControl, QuantHardness,
+    TernaryLinearQat, TernaryThreshold,
 };
 use gbf_model::sequence::DecayPolicy;
 use gbf_train::adapter::burn::{
@@ -128,6 +140,11 @@ struct Args {
     /// Teacher width multiplier over the student spec (dense fp teacher).
     #[arg(long, default_value_t = 2)]
     teacher_mult: usize,
+    /// Load a saved fp teacher checkpoint (dir with manifest.json written by
+    /// a previous distill run's teacher save) instead of training one.
+    /// Relative paths resolve against --repo-root. Empty = train a teacher.
+    #[arg(long, default_value = "")]
+    load_teacher: String,
     /// Distillation temperature.
     #[arg(long, default_value_t = 2.0)]
     distill_temperature: f64,
@@ -1107,6 +1124,680 @@ fn state_block_parity(
 }
 
 // ---------------------------------------------------------------------------
+// checkpoint export (canonical tensors, S5/S6-export-compatible layout) +
+// fp teacher persistence
+// ---------------------------------------------------------------------------
+
+fn write_bin(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()).into())
+}
+
+fn f32_le_bytes(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+fn f32_from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err("f32 tensor byte length is not a multiple of 4".into());
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+fn u16_from_le_bytes(bytes: &[u8]) -> Result<Vec<u16>, Box<dyn std::error::Error>> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err("u16 tensor byte length is not a multiple of 2".into());
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect())
+}
+
+/// Q8.8-encode the per-slot decays, checking exactness (all MT4 rates are
+/// /256-exact).
+fn decay_q8_8_bytes(decay_slots: &[f32]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::with_capacity(decay_slots.len() * 2);
+    for (slot, &d) in decay_slots.iter().enumerate() {
+        let raw = (d * 256.0) as u16;
+        let back = f32::from(raw) / 256.0;
+        if (back - d).abs() > f32::EPSILON {
+            return Err(format!("decay slot {slot} value {d} is not Q8.8-exact").into());
+        }
+        bytes.extend_from_slice(&raw.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+/// Every ternary matrix in the snapshot as (file base name, role prefix,
+/// core), in canonical order: state pair first, then blocks (and experts).
+fn snapshot_core_entries(snapshot: &ArmSnapshot) -> Vec<(String, String, &TernaryLinearQat)> {
+    let mut entries = vec![
+        (
+            "state_input_to_state".to_string(),
+            "linear_state_input_projection".to_string(),
+            &snapshot.state_cores.0,
+        ),
+        (
+            "state_state_to_output".to_string(),
+            "linear_state_output_projection".to_string(),
+            &snapshot.state_cores.1,
+        ),
+    ];
+    let moe = snapshot.spec.is_moe();
+    for (layer, block) in snapshot.blocks.iter().enumerate() {
+        for (expert, (up, down)) in block.experts.iter().enumerate() {
+            let stem = if moe {
+                format!("block{layer}_expert{expert}")
+            } else {
+                format!("block{layer}")
+            };
+            entries.push((format!("{stem}_up"), "up_projection".to_string(), up));
+            entries.push((format!("{stem}_down"), "down_projection".to_string(), down));
+        }
+    }
+    entries
+}
+
+fn export_ternary_pair(
+    export_dir: &Path,
+    tensor_index: &mut Vec<serde_json::Value>,
+    base: &str,
+    role: &str,
+    core: &TernaryLinearQat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let export = core.export_canonical();
+    let shape = export.shape();
+    let i8_bytes: Vec<u8> = export
+        .ternary_values()
+        .iter()
+        .map(|v| v.as_i8() as u8)
+        .collect();
+    let mut scale_bytes = Vec::with_capacity(export.scales().len() * 2);
+    for s in export.scales() {
+        scale_bytes.extend_from_slice(&s.raw().to_le_bytes());
+    }
+    let tern_file = format!("tensors/{base}.ternary.i8.bin");
+    let scale_file = format!("tensors/{base}.scales.q8_8_u16le.bin");
+    write_bin(&export_dir.join(&tern_file), &i8_bytes)?;
+    write_bin(&export_dir.join(&scale_file), &scale_bytes)?;
+    tensor_index.push(json!({
+        "name": format!("{base}.ternary"),
+        "role": format!("{role}_ternary_weights"),
+        "dtype": "i8 (values in {-1,0,1})",
+        "shape": [shape.output_rows(), shape.input_cols()],
+        "layout": "row_major",
+        "file": tern_file,
+        "sha256": sha256(&i8_bytes).to_hex()
+    }));
+    tensor_index.push(json!({
+        "name": format!("{base}.scales"),
+        "role": format!("{role}_per_output_row_scale"),
+        "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+        "shape": [shape.output_rows()],
+        "file": scale_file,
+        "sha256": sha256(&scale_bytes).to_hex()
+    }));
+    Ok(())
+}
+
+/// Canonical tensor export of a hardened snapshot, same format family as the
+/// S5 `f_s5_state_checkpoint_export.v1` export the ROM pipeline consumes,
+/// parameterized for the arm topology. MoE arms additionally export every
+/// expert plus the fp router per block under a v1 MoE schema name.
+#[allow(clippy::too_many_lines)]
+fn export_checkpoint(
+    export_dir: &Path,
+    snapshot: &ArmSnapshot,
+    decay_slots: &[f32],
+    git_sha: &str,
+    seed: u64,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let spec = &snapshot.spec;
+    let tensors_dir = export_dir.join("tensors");
+    fs::create_dir_all(&tensors_dir)?;
+
+    let embed_bytes = f32_le_bytes(&snapshot.embedding);
+    write_bin(&tensors_dir.join("embedding.f32.bin"), &embed_bytes)?;
+    let mut tensor_index = vec![json!({
+        "name": "embedding",
+        "role": "token_embedding_and_tied_head",
+        "dtype": "f32_le",
+        "shape": [VOCAB, spec.d_model],
+        "layout": "row_major",
+        "file": "tensors/embedding.f32.bin",
+        "sha256": sha256(&embed_bytes).to_hex()
+    })];
+
+    for (base, role, core) in snapshot_core_entries(snapshot) {
+        export_ternary_pair(export_dir, &mut tensor_index, &base, &role, core)?;
+    }
+
+    let decay_bytes = decay_q8_8_bytes(decay_slots)?;
+    write_bin(
+        &tensors_dir.join("state_decay.q8_8_u16le.bin"),
+        &decay_bytes,
+    )?;
+    tensor_index.push(json!({
+        "name": "state_decay",
+        "role": "linear_state_per_slot_decay",
+        "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256, exact for MT4 rates)",
+        "shape": [spec.state_slots],
+        "file": "tensors/state_decay.q8_8_u16le.bin",
+        "sha256": sha256(&decay_bytes).to_hex()
+    }));
+
+    let mut layers = Vec::new();
+    for (layer, block) in snapshot.blocks.iter().enumerate() {
+        if let Some(router) = &block.router {
+            let router_bytes = f32_le_bytes(router);
+            let router_file = format!("tensors/block{layer}_router.f32.bin");
+            write_bin(&export_dir.join(&router_file), &router_bytes)?;
+            tensor_index.push(json!({
+                "name": format!("block{layer}_router"),
+                "role": "top1_router_fp_weights",
+                "dtype": "f32_le",
+                "shape": [spec.n_experts, spec.d_model],
+                "layout": "row_major",
+                "file": router_file,
+                "sha256": sha256(&router_bytes).to_hex()
+            }));
+            layers.push(json!({
+                "index": layer,
+                "kind": "prenorm_residual_top1_moe_ffn",
+                "n_experts": spec.n_experts,
+                "router": format!("block{layer}_router"),
+                "experts": (0..spec.n_experts).map(|e| json!({
+                    "up_ternary": format!("block{layer}_expert{e}_up.ternary"),
+                    "up_scales": format!("block{layer}_expert{e}_up.scales"),
+                    "down_ternary": format!("block{layer}_expert{e}_down.ternary"),
+                    "down_scales": format!("block{layer}_expert{e}_down.scales"),
+                })).collect::<Vec<_>>(),
+                "up_shape": [spec.d_ff, spec.d_model],
+                "down_shape": [spec.d_model, spec.d_ff]
+            }));
+        } else {
+            layers.push(json!({
+                "index": layer,
+                "kind": "prenorm_residual_ffn",
+                "up_ternary": format!("block{layer}_up.ternary"),
+                "up_scales": format!("block{layer}_up.scales"),
+                "down_ternary": format!("block{layer}_down.ternary"),
+                "down_scales": format!("block{layer}_down.scales"),
+                "up_shape": [spec.d_ff, spec.d_model],
+                "down_shape": [spec.d_model, spec.d_ff]
+            }));
+        }
+    }
+
+    let (schema, family) = if spec.is_moe() {
+        (
+            "f_s8_moe_state_checkpoint_export.v1",
+            "linear_state_multi_timescale_then_top1_moe_ffn",
+        )
+    } else {
+        (
+            "f_s5_state_checkpoint_export.v1",
+            "linear_state_multi_timescale_then_dense_ffn",
+        )
+    };
+    let manifest = json!({
+        "schema": schema,
+        "bead": "bd-3771m",
+        "git_sha": git_sha,
+        "seed": seed,
+        "topology": {
+            "family": family,
+            "moe": spec.is_moe(),
+            "n_experts_per_block": spec.n_experts,
+            "d_model": spec.d_model,
+            "d_ff": spec.d_ff,
+            "n_blocks": spec.n_blocks,
+            "vocab": VOCAB,
+            "lexical": "charset_v1 (80 ids; ids 0..75 printable incl. newline, 76 reserved, 77 <bos>, 78 <eos>, 79 <unk>)",
+            "tied_head": true,
+            "sequence_state_kind": "linear_state_multi_timescale",
+            "sequence_state_params": {
+                "state_slots": spec.state_slots,
+                "state_bytes_per_layer": spec.state_slots * 4,
+                "decay_policy": "MultiTimescale",
+                "decay_rates_by_band": MT4_DECAYS,
+                "band_layout": "state_slots partitioned into 4 equal contiguous bands in declaration order; slot s uses decay_rates[s / (state_slots/4)] (gbf_model::sequence::DecayPolicy::decay_for_slot)"
+            }
+        },
+        "recurrence_semantics": {
+            "per_token": [
+                "n_t   = clip( x_t / sqrt(mean(x_t^2) + 1e-5), -8, 8 )            # full-vector RMS norm over d_model",
+                "a_t   = actq8(n_t)                                               # Int8 symmetric fake-quant, range [-8, 8], 127 steps",
+                "delta = TernaryMatVec(input_to_state, a_t)                       # {-1,0,+1} weights, per-output-row Q8.8 scale",
+                "h_t[s] = decay[s] * h_{t-1}[s] + delta[s]                        # decay[s] read from state_decay Q8.8 (exact)",
+                "y_t   = actq8( TernaryMatVec(state_to_output, h_t) )",
+                "x'_t  = x_t + y_t                                                # residual around the state block (composer-owned)"
+            ],
+            "integer_note": "decay values {0.5,0.75,0.875,0.9375} are exactly {128,192,224,240}/256, so h*decay is an exact Q8.8 multiply (raw*decay_raw >> 8); the ternary matvecs and Int8 activation grid follow the same numeric convention as the S6 dense export.",
+            "initial_state": "all slots zero at stream start; state persists across tokens (no reset within a document stream)",
+            "then": format!("x'_t feeds the same {}-block pre-norm residual FFN stack as the S6 dense export (block_forward identical), then logits = rms_norm(x_final) @ embedding^T", spec.n_blocks)
+        },
+        "numeric_convention": {
+            "weight_encoding": "Ternary2 {-1,0,+1}",
+            "weight_scale": "per_output_row Q8.8 (u16 raw, f32 = raw/256)",
+            "embedding_dtype": "f32_le",
+            "norm": {"kind": "tile_rms_then_affine_clip(full_vector)", "epsilon": NORM_EPS, "clip_lo": -NORM_CLIP, "clip_hi": NORM_CLIP, "affine_scale": 1.0, "affine_bias": 0.0},
+            "activation_fake_quant": {"format": "Int8_symmetric", "range_lo": -ACT_RANGE, "range_hi": ACT_RANGE, "quant_steps": 127},
+            "block_forward": "x' = x + Down( gelu( Up( actq( rms_norm(x) ) ) ) ); logits = rms_norm(x_final) @ embedding^T"
+        },
+        "layers": layers,
+        "tensors": tensor_index
+    });
+    fs::write(
+        export_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+
+    Ok(json!({
+        "exported": true,
+        "schema": schema,
+        "n_tensors": tensor_index.len(),
+    }))
+}
+
+/// Reload one exported ternary matrix from its raw bytes, check exact symbol
+/// and scale agreement with the in-memory core, then rebuild a hard core from
+/// the exported data alone and compare hard inference on a deterministic
+/// probe input. Returns the probe max-abs-diff.
+fn verify_core_reload(
+    core: &TernaryLinearQat,
+    tern_bytes: &[u8],
+    scale_bytes: &[u8],
+) -> Result<f64, Box<dyn std::error::Error>> {
+    let export = core.export_canonical();
+    let shape = export.shape();
+    if tern_bytes.len() != shape.weight_len() {
+        return Err(format!(
+            "ternary byte count {} != weight count {}",
+            tern_bytes.len(),
+            shape.weight_len()
+        )
+        .into());
+    }
+    for (i, (b, v)) in tern_bytes.iter().zip(export.ternary_values()).enumerate() {
+        if *b as i8 != v.as_i8() {
+            return Err(format!("ternary symbol mismatch at index {i}").into());
+        }
+    }
+    let scales: Vec<Q8_8Scale> = u16_from_le_bytes(scale_bytes)?
+        .into_iter()
+        .map(Q8_8Scale::from_raw)
+        .collect();
+    if scales.len() != shape.output_rows() {
+        return Err(format!(
+            "scale count {} != output rows {}",
+            scales.len(),
+            shape.output_rows()
+        )
+        .into());
+    }
+    for (i, (s, e)) in scales.iter().zip(export.scales()).enumerate() {
+        if s.raw() != e.raw() {
+            return Err(format!("scale raw mismatch at row {i}").into());
+        }
+    }
+
+    let weights: Vec<f32> = tern_bytes.iter().map(|&b| f32::from(b as i8)).collect();
+    let thresholds = vec![TernaryThreshold::new(0.0)?; shape.output_rows()];
+    let mut rebuilt = TernaryLinearQat::new(shape, weights, None, thresholds, scales)?;
+    rebuilt.set_hardness(QuantHardness::Hard);
+    let mut orig = core.clone();
+    orig.set_hardness(QuantHardness::Hard);
+    let probe = init_weights(
+        0xf00d_5eed,
+        shape.input_cols() as u64,
+        shape.input_cols(),
+        1.0,
+    );
+    let a = orig.inference_forward(&probe)?;
+    let b = rebuilt.inference_forward(&probe)?;
+    let mut max_diff = 0.0_f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        max_diff = max_diff.max((f64::from(*x) - f64::from(*y)).abs());
+    }
+    Ok(max_diff)
+}
+
+/// Verify an on-disk checkpoint export against its manifest (sha256 of every
+/// tensor file) and against the in-memory snapshot (bitwise embedding/decay,
+/// exact ternary+scale reload, hard-inference probe parity per matrix).
+fn verify_export(
+    export_dir: &Path,
+    snapshot: &ArmSnapshot,
+    decay_slots: &[f32],
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(export_dir.join("manifest.json"))?)?;
+    let tensors = manifest["tensors"]
+        .as_array()
+        .ok_or("manifest missing tensors array")?;
+    let mut hashed = 0usize;
+    for entry in tensors {
+        let file = entry["file"].as_str().ok_or("tensor entry missing file")?;
+        let bytes = fs::read(export_dir.join(file)).map_err(|e| format!("re-read {file}: {e}"))?;
+        let expect = entry["sha256"]
+            .as_str()
+            .ok_or("tensor entry missing sha256")?;
+        let actual = sha256(&bytes).to_hex();
+        if actual != expect {
+            return Err(
+                format!("sha256 mismatch for {file}: manifest {expect} != file {actual}").into(),
+            );
+        }
+        hashed += 1;
+    }
+
+    let emb = fs::read(export_dir.join("tensors/embedding.f32.bin"))?;
+    if emb != f32_le_bytes(&snapshot.embedding) {
+        return Err("embedding bytes do not round-trip bitwise".into());
+    }
+    let decay = fs::read(export_dir.join("tensors/state_decay.q8_8_u16le.bin"))?;
+    if decay != decay_q8_8_bytes(decay_slots)? {
+        return Err("decay bytes do not round-trip".into());
+    }
+    for (layer, block) in snapshot.blocks.iter().enumerate() {
+        if let Some(router) = &block.router {
+            let bytes = fs::read(export_dir.join(format!("tensors/block{layer}_router.f32.bin")))?;
+            if bytes != f32_le_bytes(router) {
+                return Err(format!("block{layer} router bytes do not round-trip").into());
+            }
+        }
+    }
+
+    let mut max_probe_diff = 0.0_f64;
+    for (base, _role, core) in snapshot_core_entries(snapshot) {
+        let tern = fs::read(export_dir.join(format!("tensors/{base}.ternary.i8.bin")))?;
+        let scales = fs::read(export_dir.join(format!("tensors/{base}.scales.q8_8_u16le.bin")))?;
+        let diff = verify_core_reload(core, &tern, &scales).map_err(|e| format!("{base}: {e}"))?;
+        max_probe_diff = max_probe_diff.max(diff);
+    }
+    if max_probe_diff > 1.0e-4 {
+        return Err(format!("reload probe max abs diff {max_probe_diff:.3e} exceeds 1e-4").into());
+    }
+    Ok(json!({
+        "verified": true,
+        "tensors_sha256_checked": hashed,
+        "reload_probe_max_abs_diff": max_probe_diff,
+        "method": "re-read every tensor file and check manifest sha256; bitwise embedding/decay/router round-trip; per-matrix exact ternary symbol + Q8.8 scale raw agreement; rebuild hard cores from exported bytes alone and compare hard inference_forward on a deterministic probe input",
+    }))
+}
+
+// --- fp teacher persistence -------------------------------------------------
+
+const TEACHER_SCHEMA: &str = "s8_fp_teacher_checkpoint.v1";
+
+/// Save the fp teacher: raw f32 weights per matrix plus the trained Q8.8
+/// scales and thresholds (unused at hardness Off but kept for exactness),
+/// with per-tensor sha256 in the manifest.
+fn save_teacher(
+    dir: &Path,
+    snapshot: &ArmSnapshot,
+    training_json: serde_json::Value,
+    eval_json: serde_json::Value,
+    git_sha: &str,
+    seed: u64,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let spec = &snapshot.spec;
+    if spec.is_moe() {
+        return Err("teacher save supports dense teachers only".into());
+    }
+    let tensors_dir = dir.join("tensors");
+    fs::create_dir_all(&tensors_dir)?;
+
+    let embed_bytes = f32_le_bytes(&snapshot.embedding);
+    write_bin(&tensors_dir.join("embedding.f32.bin"), &embed_bytes)?;
+    let mut tensor_index = vec![json!({
+        "name": "embedding",
+        "role": "token_embedding_and_tied_head",
+        "dtype": "f32_le",
+        "shape": [VOCAB, spec.d_model],
+        "layout": "row_major",
+        "file": "tensors/embedding.f32.bin",
+        "sha256": sha256(&embed_bytes).to_hex()
+    })];
+
+    for (base, role, core) in snapshot_core_entries(snapshot) {
+        let shape = core.shape();
+        let w_bytes = f32_le_bytes(core.full_precision_weights());
+        let thr_values: Vec<f32> = core.thresholds().iter().map(|t| t.value()).collect();
+        let thr_bytes = f32_le_bytes(&thr_values);
+        let mut scale_bytes = Vec::with_capacity(core.scales().len() * 2);
+        for s in core.scales() {
+            scale_bytes.extend_from_slice(&s.raw().to_le_bytes());
+        }
+        let w_file = format!("tensors/{base}.weights.f32.bin");
+        let thr_file = format!("tensors/{base}.thresholds.f32.bin");
+        let scale_file = format!("tensors/{base}.scales.q8_8_u16le.bin");
+        write_bin(&dir.join(&w_file), &w_bytes)?;
+        write_bin(&dir.join(&thr_file), &thr_bytes)?;
+        write_bin(&dir.join(&scale_file), &scale_bytes)?;
+        tensor_index.push(json!({
+            "name": format!("{base}.weights"),
+            "role": format!("{role}_full_precision_weights"),
+            "dtype": "f32_le",
+            "shape": [shape.output_rows(), shape.input_cols()],
+            "layout": "row_major",
+            "file": w_file,
+            "sha256": sha256(&w_bytes).to_hex()
+        }));
+        tensor_index.push(json!({
+            "name": format!("{base}.thresholds"),
+            "role": format!("{role}_ternary_thresholds_trained"),
+            "dtype": "f32_le",
+            "shape": [shape.output_rows()],
+            "file": thr_file,
+            "sha256": sha256(&thr_bytes).to_hex()
+        }));
+        tensor_index.push(json!({
+            "name": format!("{base}.scales"),
+            "role": format!("{role}_per_output_row_scale_trained"),
+            "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+            "shape": [shape.output_rows()],
+            "file": scale_file,
+            "sha256": sha256(&scale_bytes).to_hex()
+        }));
+    }
+
+    let manifest = json!({
+        "schema": TEACHER_SCHEMA,
+        "bead": "bd-3771m",
+        "git_sha": git_sha,
+        "seed": seed,
+        "topology": {
+            "family": "linear_state_multi_timescale_then_dense_ffn",
+            "description": spec.description,
+            "d_model": spec.d_model,
+            "d_ff": spec.d_ff,
+            "n_blocks": spec.n_blocks,
+            "state_slots": spec.state_slots,
+            "vocab": VOCAB,
+            "tied_head": true,
+            "decay_rates_by_band": MT4_DECAYS,
+        },
+        "forward_semantics": "genuine full-precision teacher: QAT hardness Off (plain fp linear layers; thresholds/scales saved but unused at Off) + activation fake-quant passthrough; block/state composition identical to the student (see the student checkpoint-export manifest recurrence_semantics)",
+        "training": training_json,
+        "eval": eval_json,
+        "tensors": tensor_index,
+    });
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    Ok(json!({ "saved": true, "n_tensors": tensor_index.len() }))
+}
+
+/// Load a saved fp teacher: verify every tensor sha256 against the manifest
+/// and reconstruct the exact trained cores (weights + thresholds + scales).
+fn load_teacher(
+    dir: &Path,
+) -> Result<(ArmSnapshot, serde_json::Value), Box<dyn std::error::Error>> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("manifest.json")).map_err(|e| {
+            format!(
+                "read teacher manifest {}: {e}",
+                dir.join("manifest.json").display()
+            )
+        })?)?;
+    if manifest["schema"] != TEACHER_SCHEMA {
+        return Err(format!(
+            "teacher manifest schema {} != {TEACHER_SCHEMA}",
+            manifest["schema"]
+        )
+        .into());
+    }
+    let topo = &manifest["topology"];
+    let get = |key: &str| -> Result<usize, Box<dyn std::error::Error>> {
+        topo[key]
+            .as_u64()
+            .map(|v| v as usize)
+            .ok_or_else(|| format!("teacher manifest topology missing {key}").into())
+    };
+    let (d_model, d_ff, n_blocks, state_slots) = (
+        get("d_model")?,
+        get("d_ff")?,
+        get("n_blocks")?,
+        get("state_slots")?,
+    );
+    if get("vocab")? != VOCAB {
+        return Err("teacher vocab != 80 (charset_v1)".into());
+    }
+    if !state_slots.is_multiple_of(MT4_DECAYS.len()) {
+        return Err("teacher state_slots not divisible by 4".into());
+    }
+    let spec = ArmSpec {
+        name: "TEACHER_LOADED".into(),
+        description: topo["description"]
+            .as_str()
+            .unwrap_or("loaded fp teacher")
+            .to_string(),
+        d_model,
+        d_ff,
+        n_blocks,
+        state_slots,
+        n_experts: 1,
+    };
+
+    // sha-verify and slurp every tensor file, keyed by tensor name.
+    let mut by_name = std::collections::HashMap::new();
+    for entry in manifest["tensors"]
+        .as_array()
+        .ok_or("teacher manifest missing tensors")?
+    {
+        let name = entry["name"].as_str().ok_or("tensor entry missing name")?;
+        let file = entry["file"].as_str().ok_or("tensor entry missing file")?;
+        let bytes = fs::read(dir.join(file)).map_err(|e| format!("read {file}: {e}"))?;
+        let expect = entry["sha256"]
+            .as_str()
+            .ok_or("tensor entry missing sha256")?;
+        let actual = sha256(&bytes).to_hex();
+        if actual != expect {
+            return Err(format!("teacher sha256 mismatch for {file}").into());
+        }
+        by_name.insert(name.to_string(), bytes);
+    }
+    let take = |name: &str| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        by_name
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("teacher manifest missing tensor {name}").into())
+    };
+
+    let embedding = f32_from_le_bytes(&take("embedding")?)?;
+    if embedding.len() != VOCAB * d_model {
+        return Err("teacher embedding length mismatch".into());
+    }
+
+    let load_core = |base: &str,
+                     out_rows: usize,
+                     in_cols: usize|
+     -> Result<TernaryLinearQat, Box<dyn std::error::Error>> {
+        let shape = MatrixShape::new(out_rows, in_cols)?;
+        let weights = f32_from_le_bytes(&take(&format!("{base}.weights"))?)?;
+        if weights.len() != shape.weight_len() {
+            return Err(format!("{base}: weight length mismatch").into());
+        }
+        let thresholds = f32_from_le_bytes(&take(&format!("{base}.thresholds"))?)?
+            .into_iter()
+            .map(TernaryThreshold::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let scales = u16_from_le_bytes(&take(&format!("{base}.scales"))?)?
+            .into_iter()
+            .map(Q8_8Scale::from_raw)
+            .collect::<Vec<_>>();
+        Ok(TernaryLinearQat::new(
+            shape, weights, None, thresholds, scales,
+        )?)
+    };
+
+    let state_cores = (
+        load_core("state_input_to_state", state_slots, d_model)?,
+        load_core("state_state_to_output", d_model, state_slots)?,
+    );
+    let mut blocks = Vec::with_capacity(n_blocks);
+    for layer in 0..n_blocks {
+        blocks.push(SnapBlock {
+            experts: vec![(
+                load_core(&format!("block{layer}_up"), d_ff, d_model)?,
+                load_core(&format!("block{layer}_down"), d_model, d_ff)?,
+            )],
+            router: None,
+        });
+    }
+    Ok((
+        ArmSnapshot {
+            spec,
+            embedding,
+            state_cores,
+            blocks,
+        },
+        manifest,
+    ))
+}
+
+/// Bitwise agreement between a just-saved teacher and its reload.
+fn teacher_roundtrip_equal(a: &ArmSnapshot, b: &ArmSnapshot) -> bool {
+    if a.embedding.len() != b.embedding.len()
+        || a.embedding
+            .iter()
+            .zip(b.embedding.iter())
+            .any(|(x, y)| x.to_bits() != y.to_bits())
+    {
+        return false;
+    }
+    let ea = snapshot_core_entries(a);
+    let eb = snapshot_core_entries(b);
+    if ea.len() != eb.len() {
+        return false;
+    }
+    ea.iter().zip(eb.iter()).all(|((na, _, ca), (nb, _, cb))| {
+        na == nb
+            && ca.shape() == cb.shape()
+            && ca
+                .full_precision_weights()
+                .iter()
+                .zip(cb.full_precision_weights().iter())
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+            && ca
+                .scales()
+                .iter()
+                .zip(cb.scales().iter())
+                .all(|(x, y)| x.raw() == y.raw())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // training
 // ---------------------------------------------------------------------------
 
@@ -1528,6 +2219,40 @@ fn measure_arm(
     )?;
     println!("[{label}] sample -> {}", sample_path.display());
 
+    // Canonical tensor export of the final hardened checkpoint + verification
+    // by reload. An export failure must not discard the measured numbers, so
+    // it is recorded in the arm json instead of propagated.
+    let export_dir = out_dir.join(format!("checkpoint-export-{label}"));
+    let checkpoint_export = match export_checkpoint(
+        &export_dir,
+        &outcome.snapshot,
+        decay_slots,
+        &data.git_sha,
+        args.seed,
+    )
+    .and_then(|mut info| {
+        let verification = verify_export(&export_dir, &outcome.snapshot, decay_slots)?;
+        info["manifest"] = json!(format!(
+            "{}/checkpoint-export-{label}/manifest.json",
+            args.out_dir
+        ));
+        info["verification"] = verification;
+        Ok(info)
+    }) {
+        Ok(info) => {
+            println!(
+                "[{label}] checkpoint export -> {} ({} tensors, sha256 + reload verified)",
+                export_dir.display(),
+                info["n_tensors"]
+            );
+            info
+        }
+        Err(err) => {
+            eprintln!("[{label}] checkpoint export FAILED (arm json still written): {err}");
+            json!({ "exported": false, "error": err.to_string() })
+        }
+    };
+
     Ok(json!({
         "arm": label,
         "description": spec.description,
@@ -1578,6 +2303,7 @@ fn measure_arm(
             "eval_wall_clock_seconds": eval_wall,
         },
         "deployment": spec.deployment_json(),
+        "checkpoint_export": checkpoint_export,
         "sample": {
             "prompt_normalized": data.prompt_text,
             "greedy_continuation": sample,
@@ -1633,6 +2359,7 @@ fn phase_arm(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn phase_distill(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let student_spec = ArmSpec::resolve(args)?;
     let data = load_data(args)?;
@@ -1641,56 +2368,162 @@ fn phase_distill(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = args.repo_root.join(&args.out_dir);
     fs::create_dir_all(&out_dir)?;
 
-    // --- fp teacher: dense, teacher_mult x width, same block count ---
-    let teacher_spec = ArmSpec {
-        name: format!("{}_teacher", student_spec.name),
-        description: format!(
-            "fp dense teacher for {}: {}x width, QAT hardness Off + act passthrough for all steps",
-            student_spec.name, args.teacher_mult
-        ),
-        d_model: student_spec.d_model * args.teacher_mult,
-        d_ff: student_spec.d_ff * args.teacher_mult,
-        n_blocks: student_spec.n_blocks,
-        state_slots: student_spec.state_slots * args.teacher_mult,
-        n_experts: 1,
+    // --- fp teacher: loaded from a saved checkpoint, or trained fresh
+    // (dense, teacher_mult x width, same block count) and saved ---
+    let (teacher_snapshot, teacher_decay, teacher_json) = if args.load_teacher.is_empty() {
+        let teacher_spec = ArmSpec {
+            name: format!("{}_teacher", student_spec.name),
+            description: format!(
+                "fp dense teacher for {}: {}x width, QAT hardness Off + act passthrough for all steps",
+                student_spec.name, args.teacher_mult
+            ),
+            d_model: student_spec.d_model * args.teacher_mult,
+            d_ff: student_spec.d_ff * args.teacher_mult,
+            n_blocks: student_spec.n_blocks,
+            state_slots: student_spec.state_slots * args.teacher_mult,
+            n_experts: 1,
+        };
+        let teacher_decay = mt4_decay_per_slot(teacher_spec.state_slots);
+        println!(
+            "[distill] training fp teacher {} for {} steps",
+            teacher_spec.description, args.teacher_steps
+        );
+        let teacher_outcome = train_arm(
+            args,
+            &teacher_spec,
+            args.teacher_steps,
+            true,
+            None,
+            &data.train_ids,
+            &teacher_decay,
+            &device,
+            &plain_device,
+        )?;
+        // Teacher reference eval: fp semantics (hardness Off, act passthrough).
+        let (t_bits, t_pairs) = eval_bpc_lanes(
+            &teacher_outcome.snapshot,
+            &teacher_decay,
+            QuantHardness::Off,
+            false,
+            &data.val_ids,
+            args.eval_pairs,
+            args.eval_lanes,
+            args.eval_chunk,
+            &plain_device,
+        )?;
+        let t_bpc = t_bits / t_pairs as f64;
+        let t_bpb = t_bpc * data.chars_per_raw_byte;
+        println!("[distill] teacher fp val: {t_bpc:.6} bpc/char = {t_bpb:.6} bits/raw-byte");
+
+        // Persist the teacher so future distillation runs can skip this phase.
+        // A save failure must not abort the run (the student phase can still
+        // proceed on the in-memory teacher).
+        let teacher_dir = out_dir.join(format!("teacher-{}", student_spec.name));
+        let training_json = json!({
+            "steps": args.teacher_steps,
+            "steps_per_second": teacher_outcome.steps_per_second,
+            "train_wall_clock_seconds": teacher_outcome.train_wall_seconds,
+            "final_logged_train_ce_bpc": teacher_outcome.final_train_loss_bpc,
+            "tokens_per_step": teacher_outcome.tokens_per_step,
+            "seq_len": args.seq_len,
+            "lanes": args.lanes,
+            "lr": args.lr,
+            "train_cap_bytes": args.train_cap_bytes,
+        });
+        let eval_json = json!({
+            "fp_val_bpc_per_normalized_char": t_bpc,
+            "fp_val_bits_per_raw_byte": t_bpb,
+            "eval_pairs": t_pairs,
+            "semantics": "hardness Off + activation fake-quant passthrough (genuine fp)",
+        });
+        let saved_to = match save_teacher(
+            &teacher_dir,
+            &teacher_outcome.snapshot,
+            training_json,
+            eval_json,
+            &data.git_sha,
+            args.seed,
+        )
+        .and_then(|info| {
+            let (reloaded, _) = load_teacher(&teacher_dir)?;
+            if !teacher_roundtrip_equal(&teacher_outcome.snapshot, &reloaded) {
+                return Err("saved teacher does not reload bitwise-identically".into());
+            }
+            Ok(info)
+        }) {
+            Ok(info) => {
+                println!(
+                    "[distill] teacher saved -> {} ({} tensors, reload-verified bitwise)",
+                    teacher_dir.display(),
+                    info["n_tensors"]
+                );
+                json!(teacher_dir.display().to_string())
+            }
+            Err(err) => {
+                eprintln!(
+                    "[distill] teacher save FAILED (continuing with in-memory teacher): {err}"
+                );
+                json!(null)
+            }
+        };
+        let teacher_json = json!({
+            "source": "trained_this_run",
+            "saved_to": saved_to,
+            "description": teacher_spec.description,
+            "d_model": teacher_spec.d_model,
+            "d_ff": teacher_spec.d_ff,
+            "n_blocks": teacher_spec.n_blocks,
+            "state_slots": teacher_spec.state_slots,
+            "steps": args.teacher_steps,
+            "train_wall_clock_seconds": teacher_outcome.train_wall_seconds,
+            "steps_per_second": teacher_outcome.steps_per_second,
+            "fp_val_bpc_per_normalized_char": t_bpc,
+            "fp_val_bits_per_raw_byte": t_bpb,
+            "eval_pairs": t_pairs,
+        });
+        (teacher_outcome.snapshot, teacher_decay, teacher_json)
+    } else {
+        let load_path = PathBuf::from(&args.load_teacher);
+        let teacher_dir = if load_path.is_absolute() {
+            load_path
+        } else {
+            args.repo_root.join(load_path)
+        };
+        println!(
+            "[distill] loading saved fp teacher from {} (skipping teacher training)",
+            teacher_dir.display()
+        );
+        let (snapshot, manifest) = load_teacher(&teacher_dir)?;
+        let teacher_decay = mt4_decay_per_slot(snapshot.spec.state_slots);
+        println!(
+            "[distill] teacher loaded: d_model={} d_ff={} n_blocks={} slots={} | stored fp val {} bits/raw-byte",
+            snapshot.spec.d_model,
+            snapshot.spec.d_ff,
+            snapshot.spec.n_blocks,
+            snapshot.spec.state_slots,
+            manifest["eval"]["fp_val_bits_per_raw_byte"]
+        );
+        let teacher_json = json!({
+            "source": "loaded",
+            "loaded_from": args.load_teacher,
+            "description": snapshot.spec.description,
+            "d_model": snapshot.spec.d_model,
+            "d_ff": snapshot.spec.d_ff,
+            "n_blocks": snapshot.spec.n_blocks,
+            "state_slots": snapshot.spec.state_slots,
+            "steps": manifest["training"]["steps"],
+            "fp_val_bpc_per_normalized_char": manifest["eval"]["fp_val_bpc_per_normalized_char"],
+            "fp_val_bits_per_raw_byte": manifest["eval"]["fp_val_bits_per_raw_byte"],
+            "eval_pairs": manifest["eval"]["eval_pairs"],
+        });
+        (snapshot, teacher_decay, teacher_json)
     };
-    let teacher_decay = mt4_decay_per_slot(teacher_spec.state_slots);
-    println!(
-        "[distill] training fp teacher {} for {} steps",
-        teacher_spec.description, args.teacher_steps
-    );
-    let teacher_outcome = train_arm(
-        args,
-        &teacher_spec,
-        args.teacher_steps,
-        true,
-        None,
-        &data.train_ids,
-        &teacher_decay,
-        &device,
-        &plain_device,
-    )?;
-    // Teacher reference eval: fp semantics (hardness Off, act passthrough).
-    let (t_bits, t_pairs) = eval_bpc_lanes(
-        &teacher_outcome.snapshot,
-        &teacher_decay,
-        QuantHardness::Off,
-        false,
-        &data.val_ids,
-        args.eval_pairs,
-        args.eval_lanes,
-        args.eval_chunk,
-        &plain_device,
-    )?;
-    let t_bpc = t_bits / t_pairs as f64;
-    let t_bpb = t_bpc * data.chars_per_raw_byte;
-    println!("[distill] teacher fp val: {t_bpc:.6} bpc/char = {t_bpb:.6} bits/raw-byte");
 
     // --- distilled student (identical spec + steps to the Phase-A arm) ---
-    let teacher_layers =
-        PlainLayers::build(&teacher_outcome.snapshot, QuantHardness::Off, &plain_device)?;
+    let teacher_spec = teacher_snapshot.spec.clone();
+    let teacher_layers = PlainLayers::build(&teacher_snapshot, QuantHardness::Off, &plain_device)?;
     let teacher_embed = float_tensor_from_vec::<Plain, 2>(
-        teacher_outcome.snapshot.embedding.clone(),
+        teacher_snapshot.embedding.clone(),
         [VOCAB, teacher_spec.d_model],
         &plain_device,
     )?;
@@ -1725,19 +2558,7 @@ fn phase_distill(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         &label,
         json!({
             "distillation": {
-                "teacher": {
-                    "description": teacher_spec.description,
-                    "d_model": teacher_spec.d_model,
-                    "d_ff": teacher_spec.d_ff,
-                    "n_blocks": teacher_spec.n_blocks,
-                    "state_slots": teacher_spec.state_slots,
-                    "steps": args.teacher_steps,
-                    "train_wall_clock_seconds": teacher_outcome.train_wall_seconds,
-                    "steps_per_second": teacher_outcome.steps_per_second,
-                    "fp_val_bpc_per_normalized_char": t_bpc,
-                    "fp_val_bits_per_raw_byte": t_bpb,
-                    "eval_pairs": t_pairs,
-                },
+                "teacher": teacher_json,
                 "temperature": args.distill_temperature,
                 "weight": args.distill_weight,
                 "loss": "CE + weight * T^2 * softCE(softmax(teacher/T) || softmax(student/T)), teacher logits recomputed per step on the training batch with per-lane teacher state carry",
