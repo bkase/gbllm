@@ -1,0 +1,500 @@
+{
+  "schema": "d192_real_bringup.v1",
+  "bead": "bd-pp43d",
+  "checkpoint_bead": "bd-3771m",
+  "git_sha": "530a2218070e7476cf564e785561672bdbf7633b",
+  "export_dir": "experiments/S8/sweep/checkpoint-export-CUSTOM_distill",
+  "options": {
+    "multi_token_tokens": 128,
+    "multi_token_seeds": [
+      19,
+      26,
+      62,
+      75
+    ],
+    "fidelity_positions_per_lane": 0,
+    "sample_chars": 512,
+    "shell_gen_tokens": 200,
+    "quick_mode": false
+  },
+  "committed": {
+    "arm_json": "experiments/S8/sweep/arm_CUSTOM_distill.json",
+    "arm": "CUSTOM_distill",
+    "ternary_val_bpc_per_normalized_char": 2.7785516189415222,
+    "ternary_val_bits_per_raw_byte": 2.7622259958829183,
+    "eval_pairs": 1042400,
+    "eval_lanes": 8,
+    "val_norm_tokens_sha256": "d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "val_raw_bytes_used": 1048576,
+    "val_chars_normalized": 1042415
+  },
+  "phases": [
+    {
+      "phase": "committed-provenance",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "load-real-checkpoint",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "integer-lowering",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "wram-layout",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "one-token-gate",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "multi-token-gate",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "fidelity",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "cycles",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "shell-session-gate",
+      "status": "pass",
+      "error": null
+    },
+    {
+      "phase": "samples",
+      "status": "pass",
+      "error": null
+    }
+  ],
+  "all_gates_pass": true,
+  "checkpoint": {
+    "export_dir": "experiments/S8/sweep/checkpoint-export-CUSTOM_distill",
+    "manifest_schema": "f_s5_state_checkpoint_export.v1",
+    "manifest_sha256": "a7d0480d7663ab455b843a2ac132baa0f4561da8f0a9c768de082114b7285016",
+    "trainer_git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
+    "tensors_verified_sha256": 30
+  },
+  "topology": {
+    "d_model": 192,
+    "d_ff": 384,
+    "n_blocks": 6,
+    "state_slots": 192,
+    "vocab": 80
+  },
+  "width": {
+    "down_acc_width": "I24",
+    "down_acc_structural_bound": 49137,
+    "i16_bound": 32767,
+    "decision_source": "structural per-row worst case over the actual ternary weights (the f_s5_state_checkpoint_export.v1 manifest declares no measured activation ranges, so lowering never relies on unmeasured statistics)"
+  },
+  "layout": {
+    "wram_bytes_allocated": 7208,
+    "wram_budget_bytes": 8192,
+    "per_block_residual_dumps_kept": false,
+    "out_acc_dump_kept": false,
+    "scratch_overlaid_on_matvec_arena": true,
+    "untouched_regions": [
+      [
+        49728,
+        49792
+      ],
+      [
+        49896,
+        49920
+      ],
+      [
+        50112,
+        50176
+      ],
+      [
+        56512,
+        57088
+      ]
+    ]
+  },
+  "roms": [
+    {
+      "variant": "one-token",
+      "rom_bytes": 8388608,
+      "bank_count": 405,
+      "uses_romb1_9bit_banking": true,
+      "driver_bytes": 12588,
+      "driver_bank_capacity": 16048,
+      "driver_headroom_bytes": 3460,
+      "weight_code_bytes": 6067708,
+      "weight_chunk_count": 392,
+      "table_bytes": 188096
+    },
+    {
+      "variant": "multi-token",
+      "rom_bytes": 8388608,
+      "bank_count": 405,
+      "uses_romb1_9bit_banking": true,
+      "driver_bytes": 12633,
+      "driver_bank_capacity": 16048,
+      "driver_headroom_bytes": 3415,
+      "weight_code_bytes": 6067708,
+      "weight_chunk_count": 392,
+      "table_bytes": 188096
+    }
+  ],
+  "one_token_gate": {
+    "rom": {
+      "rom_bytes": 8388608,
+      "bank_count": 405,
+      "driver_bytes": 12588,
+      "weight_code_bytes": 6067708,
+      "weight_chunk_count": 392,
+      "table_bytes": 188096,
+      "token_start_pc": 340,
+      "token_end_pc": 1179
+    },
+    "cases": 5,
+    "all_byte_exact": true,
+    "runs": [
+      {
+        "input_id": 75,
+        "state_from_position": 0,
+        "state_is_zero": true,
+        "host_argmax": 15,
+        "rom_argmax": 15,
+        "byte_exact": true,
+        "m_cycles": 21877553,
+        "mismatches": []
+      },
+      {
+        "input_id": 75,
+        "state_from_position": 1,
+        "state_is_zero": false,
+        "host_argmax": 15,
+        "rom_argmax": 15,
+        "byte_exact": true,
+        "m_cycles": 21885493,
+        "mismatches": []
+      },
+      {
+        "input_id": 18,
+        "state_from_position": 127,
+        "state_is_zero": false,
+        "host_argmax": 19,
+        "rom_argmax": 19,
+        "byte_exact": true,
+        "m_cycles": 21892794,
+        "mismatches": []
+      },
+      {
+        "input_id": 48,
+        "state_from_position": 1023,
+        "state_is_zero": false,
+        "host_argmax": 26,
+        "rom_argmax": 26,
+        "byte_exact": true,
+        "m_cycles": 21883487,
+        "mismatches": []
+      },
+      {
+        "input_id": 39,
+        "state_from_position": 16383,
+        "state_is_zero": false,
+        "host_argmax": 29,
+        "rom_argmax": 29,
+        "byte_exact": true,
+        "m_cycles": 21882094,
+        "mismatches": []
+      }
+    ],
+    "mean_m_cycles": 21884284,
+    "seconds_per_token_dmg": 20.870479583740234
+  },
+  "multi_token": {
+    "n_tokens": 128,
+    "seeds": [
+      19,
+      26,
+      62,
+      75
+    ],
+    "all_sequences_match": true,
+    "all_health_checks_pass": true,
+    "runs": [
+      {
+        "seed_id": 19,
+        "n_tokens": 128,
+        "host_sequence_sha256": "e9d3adc4a816ee5fd77b0e3414669893e76adfe6bde67a3304c04f6f7d131cfb",
+        "rom_sequence_sha256": "e9d3adc4a816ee5fd77b0e3414669893e76adfe6bde67a3304c04f6f7d131cfb",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 21863646,
+          "median": 21887177,
+          "max": 21897080,
+          "mean": 21886873,
+          "max_over_min": 1.001529205147211,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_19_T.txt"
+      },
+      {
+        "seed_id": 26,
+        "n_tokens": 128,
+        "host_sequence_sha256": "d1096712dddf1edc0623e8c3486c127eb07b7a2ec91f7489c325a11f9aed0acd",
+        "rom_sequence_sha256": "d1096712dddf1edc0623e8c3486c127eb07b7a2ec91f7489c325a11f9aed0acd",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 21860097,
+          "median": 21886615,
+          "max": 21898661,
+          "mean": 21886473,
+          "max_over_min": 1.001764127579123,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_26_a.txt"
+      },
+      {
+        "seed_id": 62,
+        "n_tokens": 128,
+        "host_sequence_sha256": "dd759ac912dd7c54eb2c29af2b5d39c1c254f02a2d9ab05c9521cd52b2240f12",
+        "rom_sequence_sha256": "dd759ac912dd7c54eb2c29af2b5d39c1c254f02a2d9ab05c9521cd52b2240f12",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 21871412,
+          "median": 21886559,
+          "max": 21903699,
+          "mean": 21886618,
+          "max_over_min": 1.0014762192765607,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_62_space.txt"
+      },
+      {
+        "seed_id": 75,
+        "n_tokens": 128,
+        "host_sequence_sha256": "5639daa19ab23ace28cad42c83e60a1f1e9b6d02f75fa5aeb14de58c528cee75",
+        "rom_sequence_sha256": "5639daa19ab23ace28cad42c83e60a1f1e9b6d02f75fa5aeb14de58c528cee75",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 21870636,
+          "median": 21886628,
+          "max": 21901603,
+          "mean": 21886585,
+          "max_over_min": 1.0014159167570618,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_75_newline.txt"
+      }
+    ]
+  },
+  "fidelity": {
+    "val_chars_total": 1042415,
+    "val_norm_tokens_sha256": "d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "val_sha_matches_committed": true,
+    "eval_lanes": 8,
+    "eval_positions": 1042400,
+    "committed_eval_pairs": 1042400,
+    "scored_committed_pair_set_exactly": true,
+    "f32_port_val_bpc": 2.778550746677349,
+    "committed_ternary_val_bpc": 2.7785516189415222,
+    "f32_port_delta_vs_committed": 8.72264173334969e-7,
+    "f32_port_tolerance": 0.001,
+    "f32_port_reproduces_committed": true,
+    "int_val_bpc": 4.680271892131726,
+    "int_minus_f32_bpc": 1.9017211454543772,
+    "int_val_bits_per_raw_byte": 4.652772545277112,
+    "f32_port_val_bits_per_raw_byte": 2.7622251287438093,
+    "committed_ternary_val_bits_per_raw_byte": 2.7622259958829183,
+    "argmax_agreement": 0.6377004988488104,
+    "int_stats": {
+      "max_abs_matvec_acc": 1847,
+      "max_abs_in_acc": 1847,
+      "max_abs_state_delta": 216333,
+      "max_abs_state": 493858,
+      "state_clamp_events": 0,
+      "max_abs_out_acc": 11559539,
+      "max_abs_out_scale_product": 382656437,
+      "y_saturation_events": 70241081,
+      "max_abs_scale_product": 39120155,
+      "max_abs_down_delta": 65535,
+      "down_delta_clamp_events": 1040285,
+      "max_abs_residual": 72347,
+      "residual_i24_wrap_events": 0,
+      "max_abs_logit": 5184,
+      "max_norm_sumsq": 5317015629,
+      "min_norm_rms_raw": 72,
+      "matvec_acc_fits_i16": true,
+      "state_fits_i24": true,
+      "out_acc_fits_i32": true,
+      "residual_fits_i24": true,
+      "logits_fit_i24": true
+    }
+  },
+  "cycles": {
+    "macs_per_token": 973824,
+    "one_token_mean_m_cycles": 21884284,
+    "multi_token_mean_m_cycles": 21886637,
+    "seconds_per_token_dmg": 20.87272357940674,
+    "seconds_per_char_dmg": 20.87272357940674,
+    "synthetic_readiness_mean_m_cycles": 19357280,
+    "real_over_synthetic": 1.1306669635403321,
+    "real_ternary_zero_fraction": 0.008470845018696582,
+    "synthetic_ternary_zero_fraction": 0.29986207098023504
+  },
+  "shell": {
+    "sampler": {
+      "top_k": 8,
+      "scale_q16": 14434,
+      "requested_temperature": 0.8,
+      "effective_temperature": 0.7999800619732749
+    },
+    "prompt": "The ",
+    "rom": {
+      "variant": "shell",
+      "rom_bytes": 8388608,
+      "bank_count": 406,
+      "uses_romb1_9bit_banking": true,
+      "driver_bytes": 13761,
+      "driver_bank_capacity": 16048,
+      "driver_headroom_bytes": 2287,
+      "weight_code_bytes": 6067708,
+      "weight_chunk_count": 392,
+      "table_bytes": 188096
+    },
+    "ui_bank_bytes": 1859,
+    "n_gen_tokens": 200,
+    "boot_chrome_ok": true,
+    "prompt_echo_ok": true,
+    "sequences_match": true,
+    "transcript_bg_ok": true,
+    "post_run_chrome_ok": true,
+    "returned_to_idle": true,
+    "all_gates_pass": true,
+    "n_tokens_generated": 112,
+    "determinism_sessions": 2,
+    "determinism_sequences_identical": true,
+    "determinism_framebuffer_hashes_identical": true,
+    "mean_m_cycles_per_token_boundary": 21749064,
+    "seconds_per_token_dmg": 20.74152374267578,
+    "mean_m_cycles_per_warmup_char": 21944970,
+    "fb_sha256_after_boot": "1d4c9086a216cbef1f7fae7181fdd1a171061710213dde42d59de07b16d8fb0c",
+    "fb_sha256_after_typing": "bdf8b2b25af33b2b1f49c7fbbe6b8a336d327b8e3d44054818d494ef6371862e",
+    "fb_sha256_after_generation": "0627102ef771d13f3aeabe18700b30e133a23a1363ccf1df212e13899b9c7f0f"
+  },
+  "samples": [
+    {
+      "file": "sample_T0p80_k8_rng_5eed.txt",
+      "prompt": "The machines dreamed",
+      "setting": {
+        "top_k": 8,
+        "scale_q16": 14434,
+        "requested_temperature": 0.8,
+        "effective_temperature": 0.7999800619732749
+      },
+      "rng_seed": 24301,
+      "n_chars": 512,
+      "rom_verified_prefix_chars": 134,
+      "rom_prefix_matches_host": true,
+      "shell_session_gates_pass": true,
+      "sequence_sha256": "b1c0b1803c2c9c366da54c74d987544b9b156fbb6fb863f3c393f3874e3d08c8"
+    },
+    {
+      "file": "sample_T0p60_k4_rng_beef.txt",
+      "prompt": "In the beginning of",
+      "setting": {
+        "top_k": 4,
+        "scale_q16": 19245,
+        "requested_temperature": 0.6,
+        "effective_temperature": 0.5999954385306443
+      },
+      "rng_seed": 48879,
+      "n_chars": 512,
+      "rom_verified_prefix_chars": 168,
+      "rom_prefix_matches_host": true,
+      "shell_session_gates_pass": true,
+      "sequence_sha256": "b3700a61ac606239c0558316fe272f0ff54fddf7929d0bcb0248a9bc44eb4a4d"
+    },
+    {
+      "file": "sample_T1p00_k8_rng_c0de.txt",
+      "prompt": "Once upon a midnight",
+      "setting": {
+        "top_k": 8,
+        "scale_q16": 11547,
+        "requested_temperature": 1.0,
+        "effective_temperature": 0.9999923975510738
+      },
+      "rng_seed": 49374,
+      "n_chars": 512,
+      "rom_verified_prefix_chars": 169,
+      "rom_prefix_matches_host": true,
+      "shell_session_gates_pass": true,
+      "sequence_sha256": "c8e51d5fcd01f0e7b23350d98b6c47c0997dfe17495e6b4d78cbe76e4221849d"
+    }
+  ],
+  "int_semantics_divergences": [
+    "Residual stream is i24 Q19.5 (resolution 1/32, range +/-262143.97) with mod-2^24 wrapping adds (trainer: f32). i24 replaces the dense bring-up's i16 Q11.5 because the arm-B checkpoint's residual measurably reaches |x| ~ 2,600 real (8.4e4 raw at 1/32), which no 16-bit split of range/resolution can hold without wrapping. Embedding rows are quantized to Q19.5 at lowering time (round-half-even).",
+    "State slots are saturating-i24 integers in units of (ACT_RANGE/QMAX)/256 real, so the in-projection delta m = scale_raw * acc accumulates exactly; the trainer carries f32 state. Saturation at +/-(2^23 - 1) is canonical and counted.",
+    "The per-token decay multiply is sign(h) * ((|h| * decay_raw + 128) >> 8) (round-half-away on the Q8.8 product); the trainer multiplies f32 state by decay_raw/256 exactly. Rounding error is at most 0.5 state units (~1.2e-4 real) per slot per token.",
+    "The state out-projection epilogue quantizes y = clamp(round_half_away(scale_raw * acc2 / 65536), -127, 127) onto the activation grid via integer multiply (trainer: f32 matvec then Int8 fake-quant with round-ties-even). acc2 is the i32 dot product of ternary out-projection rows with the i24 state.",
+    "The state residual add applies y through a 255-entry i16 LUT y_resid[p] = round_ties_even(p * 256 / 127) on the Q19.5 grid (trainer adds the unquantized f32 fake-quant output).",
+    "RMS norm: integer sum of squares over the d_model i24 lanes (u64 accumulator, 7 bytes on device), mean = floor(sum / d_model) (a shift when d_model is a power of two, otherwise shift-then-odd-constant division on device), epsilon = +1 raw mean unit, rms = floor(isqrt48(mean+1)); norm output and Int8 activation fake-quant collapse into one rounded division q = clamp(round_half_away(|x|*127 / (8*rms)), 0, 127) * sign(x) (trainer: f32 divide, clamp to +/-8, round-ties-even quantization).",
+    "GELU is a 255-entry LUT indexed by the pre-activation value quantized to the same [-8,8]/127 grid (round-half-away on the Q8.8 scale product); the trainer applies tanh-approximate GELU to the unquantized f32 matvec output before fake-quant.",
+    "Up/down epilogues apply the Q8.8 row scale as an integer multiply with round-half-away rounding (round-ties-even in the trainer's f32 path).",
+    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * min(65535, round_half_away(|m| / 127)) before the residual add; the trainer adds unquantized f32 deltas. The 65535 clamp is canonical and counted.",
+    "Down-projection matvec accumulators widen from i16 to i24 (3 bytes on device) when the structural per-row worst case over the actual ternary weights exceeds i16 (possible from fan-in 257 up; certain worst-case at the d192 student's fan-in 384). The manifest declares no measured activation ranges, so the width decision uses the exact structural bound, never unmeasured statistics. The value is exact either way; only the carrier width changes.",
+    "The final norm output is activation-quantized to the [-8,8]/127 grid before the tied head; tied-head weights are the embedding quantized per-tensor to i8 (scale = max|emb|/127, round-ties-even); logits are integer dot products in i32 (i24 on device).",
+    "Integer rounding is round-half-away-from-zero throughout the runtime path; the trainer/Burn rounds ties to even. Because the recurrence carries state across tokens, per-token rounding differences accumulate: fidelity (bpc delta, argmax agreement) is therefore measured over long sequential streams, not per-context."
+  ],
+  "caveats": [
+    "All device timing is DMG M-cycle-accurate emulated time (gbf-emu headless), interrupts disabled, SP repurposed inside weight chunks (bake-off convention); production kernels pay yield/safe-point overhead on top.",
+    "Sample provenance: each sample's prefix is byte-verified on-device by a full scripted shell session (typed prompt, START, generation to the transcript stop rule); the remaining chars come from the same host integer evaluator + sampler + RNG that produced the verified prefix. The output ring and transcript cap on-device verification at ~200 tokens.",
+    "Stateful model: per-token integer/f32 rounding differences accumulate through the carried state, so per-position fidelity deltas are structurally larger than dense per-context numbers; the deployment-relevant number is the integer path's own val bpc.",
+    "bits/raw-byte re-expresses bpc/normalized-char via the committed factor val_chars_normalized / val_raw_bytes_used, the same method as the committed arm record."
+  ]
+}

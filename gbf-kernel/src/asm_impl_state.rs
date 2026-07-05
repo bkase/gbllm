@@ -69,6 +69,13 @@ use crate::asm_impl_model::{
 };
 use crate::state_model_ref::{AccWidth, IntStateLoweredModel, StateTopology};
 
+/// Bank-0 driver window capacity in bytes: the driver is assembled at
+/// [`ENTRY_POINT`] and must end before the switchable-bank chunk entry at
+/// [`CHUNK_ENTRY`] (the build fails loudly with
+/// [`ModelRomError::DriverOverflowsBank0`] past this bound). Exposed so
+/// evidence runners can report the real headroom.
+pub const STATE_DRIVER_BANK_CAPACITY: usize = CHUNK_ENTRY as usize - ENTRY_POINT as usize;
+
 // ---------------------------------------------------------------------------
 // fixed WRAM anchors (topology-independent)
 // ---------------------------------------------------------------------------
@@ -125,6 +132,8 @@ const CNT2: u16 = 0xC392; // 1 byte inner counter
 const YPTR: u16 = 0xC394; // 2 bytes y dump pointer
 const SC2: u16 = 0xC396; // 2 bytes out-epilogue scale
 const ROWCNT2: u16 = 0xC398; // 2 bytes 16-bit row counter (d_ff rows)
+const CHUNK_CNT: u16 = 0xC39A; // 1 byte chunk-run loop counter
+const CHUNK_BANK: u16 = 0xC39C; // 2 bytes chunk-run bank number (lo, hi)
 
 // sampling-decode scratch (same fixed page)
 const SMP_M: u16 = 0xC3A0; // 3 bytes max logit (hi byte sign-flipped)
@@ -2653,28 +2662,68 @@ pub(crate) fn plan_state_rom(
 // top-level build
 // ---------------------------------------------------------------------------
 
-/// Emit the chunk-call run for one matvec: consecutive banks starting at
-/// `*next_bank`, writing ROMB1 only when the high bank bit changes within
-/// the run (each run re-establishes it because interleaved routines map
-/// other banks).
+/// Emit the chunk-call run for one matvec: `n_chunks` consecutive banks
+/// starting at `*next_bank`, dispatched through the shared `chunk_run`
+/// loop routine ([`emit_chunk_run`]). The runs used to be unrolled at ~8
+/// driver bytes per chunk; a real d192-scale checkpoint has hundreds of
+/// chunks, which pushed the shell driver past the bank-0 window
+/// ([`ModelRomError::DriverOverflowsBank0`]), so the loop form is the
+/// scaling-correct emission (bd-pp43d).
 fn emit_call_chunks(asm: &mut ModelAsm, n_chunks: usize, next_bank: &mut u16) {
-    let mut cur_hi: Option<u8> = None;
-    for _ in 0..n_chunks {
-        let bank = *next_bank;
-        let hi = (bank >> 8) as u8;
-        if cur_hi != Some(hi) {
-            ld_r_imm(asm, Reg8::A, hi);
-            a_to(asm, MBC5_ROMB1);
-            cur_hi = Some(hi);
-        }
-        ld_r_imm(asm, Reg8::A, (bank & 0xFF) as u8);
-        a_to(asm, MBC5_ROMB0);
-        asm.i(Instr::Call {
-            cond: None,
-            addr: CHUNK_ENTRY,
-        });
-        *next_bank += 1;
+    if n_chunks == 0 {
+        return;
     }
+    assert!(
+        n_chunks <= 255,
+        "one matvec's chunk run must fit the u8 loop counter (got {n_chunks})"
+    );
+    let bank = *next_bank;
+    ld_r_imm(asm, Reg8::A, n_chunks as u8);
+    a_to(asm, CHUNK_CNT);
+    ld_r_imm(asm, Reg8::A, (bank & 0xFF) as u8);
+    a_to(asm, CHUNK_BANK);
+    ld_r_imm(asm, Reg8::A, (bank >> 8) as u8);
+    a_to(asm, CHUNK_BANK + 1);
+    asm.call("chunk_run");
+    *next_bank += n_chunks as u16;
+}
+
+/// `chunk_run`: call [`CHUNK_ENTRY`] in [`CHUNK_CNT`] consecutive banks
+/// starting at the 9-bit bank number in [`CHUNK_BANK`]. Both MBC5 bank
+/// registers are rewritten every iteration; weight chunks clobber all
+/// registers and repurpose SP, so the loop state lives in the fixed
+/// scratch page the chunks never touch.
+fn emit_chunk_run(asm: &mut ModelAsm) {
+    let inc_a = |asm: &mut ModelAsm| {
+        asm.i(Instr::Inc8 {
+            dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+        });
+    };
+    asm.label("chunk_run");
+    a_from(asm, CHUNK_BANK + 1);
+    a_to(asm, MBC5_ROMB1);
+    a_from(asm, CHUNK_BANK);
+    a_to(asm, MBC5_ROMB0);
+    asm.i(Instr::Call {
+        cond: None,
+        addr: CHUNK_ENTRY,
+    });
+    // Advance the 9-bit bank number (lo wrap carries into the ROMB1 bit).
+    a_from(asm, CHUNK_BANK);
+    inc_a(asm);
+    a_to(asm, CHUNK_BANK);
+    asm.jr(Some(Cond::NZ), "chunk_run_nohi");
+    a_from(asm, CHUNK_BANK + 1);
+    inc_a(asm);
+    a_to(asm, CHUNK_BANK + 1);
+    asm.label("chunk_run_nohi");
+    a_from(asm, CHUNK_CNT);
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, CHUNK_CNT);
+    asm.jr(Some(Cond::NZ), "chunk_run");
+    asm.i(Instr::Ret { cond: None });
 }
 
 /// Emit the per-token forward pass (embedding copy through `argmax_v`),
@@ -2784,6 +2833,7 @@ pub(crate) fn emit_state_routines_and_tables(
 ) {
     let l = &plan.layout;
     let t = &l.topology;
+    emit_chunk_run(asm);
     emit_copy_bytes(asm);
     emit_emb_copy24(asm, l, plan.emb_bank0 as u16, plan.emb_stride);
     emit_mul16x8(asm);

@@ -336,7 +336,7 @@ pub struct StateIntStatsReport {
 }
 
 impl StateIntStatsReport {
-    fn from_stats(s: &StateForwardStats) -> Self {
+    pub(crate) fn from_stats(s: &StateForwardStats) -> Self {
         Self {
             max_abs_matvec_acc: s.ffn.max_abs_matvec_acc,
             max_abs_in_acc: s.max_abs_in_acc,
@@ -363,14 +363,14 @@ impl StateIntStatsReport {
     }
 }
 
-fn log_softmax_v(logits: &[f64]) -> Vec<f64> {
+pub(crate) fn log_softmax_v(logits: &[f64]) -> Vec<f64> {
     let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let sum: f64 = logits.iter().map(|l| (l - max).exp()).sum();
     let lse = max + sum.ln();
     logits.iter().map(|l| l - lse).collect()
 }
 
-fn argmax_v(v: &[f64]) -> u8 {
+pub(crate) fn argmax_v(v: &[f64]) -> u8 {
     let mut best = 0usize;
     for i in 1..v.len() {
         if v[i] > v[best] {
