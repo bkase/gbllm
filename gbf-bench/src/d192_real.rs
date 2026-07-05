@@ -330,6 +330,132 @@ pub fn run_d192_real_fidelity(
 }
 
 // ---------------------------------------------------------------------------
+// down-delta magnitude measurement (bd-2vkqt)
+// ---------------------------------------------------------------------------
+
+/// Measured (and structural) distribution of the wide down-projection delta
+/// magnitudes on the REAL checkpoint (`down_delta_probe.v1`): the evidence
+/// base for choosing the delta carrier width from data, not guesses.
+#[derive(Debug, Clone, Serialize)]
+pub struct DownDeltaProbeReport {
+    pub schema: &'static str,
+    pub bead: &'static str,
+    pub export_dir: String,
+    pub git_sha: String,
+    /// Positions scored (int evaluator only, committed lane layout).
+    pub eval_positions: usize,
+    pub eval_lanes: usize,
+    /// Down-projection deltas observed (positions * n_blocks * d_model).
+    pub deltas_recorded: u64,
+    /// Exact max unclamped |delta| (raw Q19.5; 32 raw = 1 real unit).
+    pub max_abs_down_delta_raw: u64,
+    pub max_abs_down_delta_units: f64,
+    /// Histogram-derived quantile upper bounds (raw Q19.5, exact to one
+    /// 32-raw bucket).
+    pub p99_raw: u64,
+    pub p999_raw: u64,
+    pub p9999_raw: u64,
+    /// Deltas at or above the Q11.5-era u16 carrier cap (65536 raw).
+    pub count_at_or_above_65536: u64,
+    /// Deltas that would escape a signed-i24 delta carrier (2^23 raw).
+    pub count_at_or_above_i24: u64,
+    /// Structural worst case from the actual weights/scales (no input can
+    /// exceed this).
+    pub structural_delta_bound_raw: u64,
+    /// The i24 carrier ceiling the structural bound is compared against.
+    pub i24_delta_bound: u64,
+    pub structural_bound_fits_i24: bool,
+    /// Same structural bound for the committed arm-B checkpoint (context for
+    /// the per-checkpoint width decision).
+    pub arm_b_structural_delta_bound_raw: Option<u64>,
+    pub int_stats: StateIntStatsReport,
+}
+
+/// Run the int evaluator over the committed lane layout recording every
+/// unclamped down-delta magnitude. `max_positions_per_lane = 0` scores the
+/// full committed pair set.
+pub fn run_down_delta_probe(
+    repo_root: &Path,
+    max_positions_per_lane: usize,
+) -> Result<DownDeltaProbeReport, OneTokenError> {
+    use gbf_kernel::state_model_ref::DownDeltaProbe;
+
+    let committed = load_committed_provenance(repo_root)?;
+    let bundle = load_state_checkpoint(&repo_root.join(D192_REAL_EXPORT_DIR))?;
+    let ck = bundle.checkpoint;
+    let lowered =
+        IntStateLoweredModel::lower(&ck).map_err(|e| OneTokenError::Model(e.to_string()))?;
+    let (ids, _) = build_val_char_ids(repo_root, committed.val_raw_bytes_used)?;
+
+    let lanes = committed.eval_lanes.max(1);
+    let lane_len = ids.len() / lanes;
+    let pairs_per_lane = if max_positions_per_lane == 0 {
+        lane_len - 1
+    } else {
+        (lane_len - 1).min(max_positions_per_lane)
+    };
+
+    let (probe, stats) = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..lanes)
+            .map(|lane| {
+                let ids = &ids;
+                let lowered = &lowered;
+                scope.spawn(move || {
+                    let base = lane * lane_len;
+                    let mut state = lowered.zero_state();
+                    let mut probe = DownDeltaProbe::new();
+                    let mut stats = StateForwardStats::new();
+                    for t in 0..pairs_per_lane {
+                        let trace =
+                            lowered.forward_probed(ids[base + t], &mut state, Some(&mut probe));
+                        stats.merge(&trace.stats);
+                    }
+                    (probe, stats)
+                })
+            })
+            .collect();
+        let mut probe = DownDeltaProbe::new();
+        let mut stats = StateForwardStats::new();
+        for h in handles {
+            let (p, s) = h.join().expect("probe lane thread");
+            probe.merge(&p);
+            stats.merge(&s);
+        }
+        (probe, stats)
+    });
+
+    let arm_b_bound = load_state_checkpoint(&repo_root.join(crate::stateful::STATE_EXPORT_DIR))
+        .ok()
+        .and_then(|b| IntStateLoweredModel::lower(&b.checkpoint).ok())
+        .map(|l| l.down_delta_structural_bound);
+    let structural = lowered.down_delta_structural_bound;
+    let i24_bound = gbf_kernel::state_model_ref::DOWN_DELTA_WIDE_BOUND;
+
+    #[allow(clippy::cast_precision_loss)]
+    Ok(DownDeltaProbeReport {
+        schema: "down_delta_probe.v1",
+        bead: "bd-2vkqt",
+        export_dir: D192_REAL_EXPORT_DIR.to_string(),
+        git_sha: git_head(repo_root),
+        eval_positions: pairs_per_lane * lanes,
+        eval_lanes: lanes,
+        deltas_recorded: probe.total(),
+        max_abs_down_delta_raw: probe.max_abs(),
+        max_abs_down_delta_units: probe.max_abs() as f64 / 32.0,
+        p99_raw: probe.quantile_upper_bound(0.99),
+        p999_raw: probe.quantile_upper_bound(0.999),
+        p9999_raw: probe.quantile_upper_bound(0.9999),
+        count_at_or_above_65536: probe.count_at_or_above(65536),
+        count_at_or_above_i24: probe.count_at_or_above(1 << 23),
+        structural_delta_bound_raw: structural,
+        i24_delta_bound: i24_bound,
+        structural_bound_fits_i24: structural <= i24_bound,
+        arm_b_structural_delta_bound_raw: arm_b_bound,
+        int_stats: StateIntStatsReport::from_stats(&stats),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // ROM / cycle / sparsity facts
 // ---------------------------------------------------------------------------
 
@@ -545,6 +671,10 @@ pub struct D192RealReport {
     pub schema: &'static str,
     pub bead: &'static str,
     pub checkpoint_bead: &'static str,
+    /// Canonical stateful integer semantics version this run implements
+    /// (`state-int-semantics.v2`: clamp-free i24 down-delta carrier on the
+    /// wide path, bd-2vkqt).
+    pub int_semantics_version: &'static str,
     pub git_sha: String,
     pub export_dir: &'static str,
     pub options: D192RealOptions,
@@ -632,9 +762,10 @@ pub fn run_d192_real_bringup(repo_root: &Path, opts: &D192RealOptions) -> D192Re
 #[allow(clippy::too_many_lines)]
 fn run_phases(repo_root: &Path, opts: &D192RealOptions) -> D192RealReport {
     let mut report = D192RealReport {
-        schema: "d192_real_bringup.v1",
+        schema: "d192_real_bringup.v2",
         bead: "bd-pp43d",
         checkpoint_bead: "bd-3771m",
+        int_semantics_version: gbf_kernel::state_model_ref::STATE_INT_SEMANTICS_VERSION,
         git_sha: git_head(repo_root),
         export_dir: D192_REAL_EXPORT_DIR,
         options: opts.clone(),
@@ -738,6 +869,8 @@ fn run_phases(repo_root: &Path, opts: &D192RealOptions) -> D192RealReport {
         down_acc_width: format!("{:?}", lowered.down_width),
         down_acc_structural_bound: lowered.down_acc_structural_bound,
         i16_bound: 32767,
+        down_delta_structural_bound: lowered.down_delta_structural_bound,
+        i24_delta_bound: gbf_kernel::state_model_ref::DOWN_DELTA_WIDE_BOUND,
         decision_source: "structural per-row worst case over the actual ternary weights \
                           (the f_s5_state_checkpoint_export.v1 manifest declares no measured \
                           activation ranges, so lowering never relies on unmeasured statistics)",
@@ -1127,8 +1260,10 @@ pub fn d192_real_report_to_markdown(r: &D192RealReport) -> String {
         out,
         "The REAL S8 distilled student ({}, `{}`) through the parameterized stateful ROM \
          pipeline that the synthetic d192-readiness gate pre-cleared. Generated by `cargo run \
-         --release -p gbf-bench --bin d192-real`; every number is program output at git `{}`.",
-        r.checkpoint_bead, r.export_dir, r.git_sha
+         --release -p gbf-bench --bin d192-real`; every number is program output at git `{}`. \
+         Canonical integer semantics: `{}` (the v1 run of this evidence clamped the wide \
+         down-delta at 65535 raw and scored int 4.6803 bpc; see `FIDELITY-FIX.md`, bd-2vkqt).",
+        r.checkpoint_bead, r.export_dir, r.git_sha, r.int_semantics_version
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "## Phases");
@@ -1186,6 +1321,13 @@ pub fn d192_real_report_to_markdown(r: &D192RealReport) -> String {
             "- Down-projection accumulators: **{}** — structural per-row bound {} vs i16 bound \
              {}; decision source: {}",
             w.down_acc_width, w.down_acc_structural_bound, w.i16_bound, w.decision_source
+        );
+        let _ = writeln!(
+            out,
+            "- Down-delta carrier: structural per-row delta bound {} vs signed-i24 carrier \
+             bound {} — the wide path carries the Q19.5 delta exactly (clamp-free, proven at \
+             lowering; `DownDeltaEscapesI24` otherwise)",
+            w.down_delta_structural_bound, w.i24_delta_bound
         );
         let _ = writeln!(out);
     }

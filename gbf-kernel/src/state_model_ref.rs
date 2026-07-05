@@ -34,6 +34,27 @@
 //! whenever any row of any block requires it ([`AccWidth`]). This is
 //! conservative: it never relies on unmeasured activation statistics.
 //!
+//! # Integer semantics version
+//!
+//! [`STATE_INT_SEMANTICS_VERSION`] = `state-int-semantics.v2`.
+//!
+//! - **v1** carried the down-projection residual delta in a u16 with a
+//!   canonical clamp at 65535 raw (2047.97 units) on *both* accumulator
+//!   paths — a Q11.5-era carrier width that was never re-proven when the
+//!   residual widened to i24 Q19.5. On the real d192 student the unclamped
+//!   delta reaches 308,033 raw (9,626 units; measured over all 1.2e9 deltas
+//!   of the committed val pair set, bd-2vkqt), so ~0.087% of deltas
+//!   saturated (~1 per position) and cost +1.90 bpc vs the trainer.
+//! - **v2** keeps the u16 delta (with its canonical, counted 65535 clamp)
+//!   on the i16-accumulator path — the committed arm-B lowering and ROM are
+//!   bit-identical — and carries the delta **exactly in a signed i24** on
+//!   the wide i24-accumulator path. Lowering proves the structural per-row
+//!   bound `max_row floor((2*scale_raw*acc_bound + 127)/254)` from the
+//!   actual ternary weights fits [`DOWN_DELTA_WIDE_BOUND`] (else
+//!   [`StateModelError::DownDeltaEscapesI24`]), so the wide path has **no
+//!   reachable clamp**: carrier widths are proven from real checkpoints,
+//!   not assumed.
+//!
 //! Integer recurrence representation (measured on the real arm-B checkpoint
 //! over the val stream, then pinned; the format is topology-independent):
 //! - The state slot `h[s]` is held as a **saturating i24 in an i32 word**,
@@ -74,6 +95,16 @@ pub const STATE_CLAMP: i32 = (1 << 23) - 1;
 const RESID_I24_MIN: i32 = -(1 << 23);
 const RESID_I24_MAX: i32 = (1 << 23) - 1;
 
+/// Version of the canonical stateful integer semantics (see the module docs
+/// for the changelog). Bumped whenever the deployed numeric contract
+/// changes; reproduced in the evidence reports.
+pub const STATE_INT_SEMANTICS_VERSION: &str = "state-int-semantics.v2";
+
+/// Signed-i24 ceiling of the wide-path down-projection delta carrier.
+/// Lowering proves the structural per-row delta bound fits this (it is a
+/// carrier width, not a canonical clamp: v2 has no clamp on the wide path).
+pub const DOWN_DELTA_WIDE_BOUND: u64 = (1 << 23) - 1;
+
 /// Documented places where the canonical integer semantics diverge from the
 /// trainer's f32 semantics. Reproduced verbatim in the evidence report.
 pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 12] = [
@@ -85,8 +116,8 @@ pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 12] = [
     "RMS norm: integer sum of squares over the d_model i24 lanes (u64 accumulator, 7 bytes on device), mean = floor(sum / d_model) (a shift when d_model is a power of two, otherwise shift-then-odd-constant division on device), epsilon = +1 raw mean unit, rms = floor(isqrt48(mean+1)); norm output and Int8 activation fake-quant collapse into one rounded division q = clamp(round_half_away(|x|*127 / (8*rms)), 0, 127) * sign(x) (trainer: f32 divide, clamp to +/-8, round-ties-even quantization).",
     "GELU is a 255-entry LUT indexed by the pre-activation value quantized to the same [-8,8]/127 grid (round-half-away on the Q8.8 scale product); the trainer applies tanh-approximate GELU to the unquantized f32 matvec output before fake-quant.",
     "Up/down epilogues apply the Q8.8 row scale as an integer multiply with round-half-away rounding (round-ties-even in the trainer's f32 path).",
-    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * min(65535, round_half_away(|m| / 127)) before the residual add; the trainer adds unquantized f32 deltas. The 65535 clamp is canonical and counted.",
-    "Down-projection matvec accumulators widen from i16 to i24 (3 bytes on device) when the structural per-row worst case over the actual ternary weights exceeds i16 (possible from fan-in 257 up; certain worst-case at the d192 student's fan-in 384). The manifest declares no measured activation ranges, so the width decision uses the exact structural bound, never unmeasured statistics. The value is exact either way; only the carrier width changes.",
+    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * round_half_away(|m| / 127) before the residual add; the trainer adds unquantized f32 deltas. On the i16-accumulator path the delta is carried in a u16 with a canonical, counted clamp at 65535 raw (2047.97 units; the committed arm-B run measured zero clamp events). On the wide i24-accumulator path (state-int-semantics.v2) the delta is carried EXACTLY in a signed i24 with no clamp: lowering proves the structural per-row bound floor((2*scale_raw*acc_bound + 127)/254) <= 2^23 - 1 from the actual weights (DownDeltaEscapesI24 otherwise). v1 clamped the wide path at 65535 too, which saturated ~0.087% of real d192 deltas (measured max 308,033 raw = 9,626 units over the full committed pair set) and cost +1.90 bpc (bd-2vkqt).",
+    "Down-projection matvec accumulators widen from i16 to i24 (3 bytes on device) when the structural per-row worst case over the actual ternary weights exceeds i16 (possible from fan-in 257 up; certain worst-case at the d192 student's fan-in 384). The manifest declares no measured activation ranges, so the width decision uses the exact structural bound, never unmeasured statistics. The value is exact either way; only the carrier width changes. The wide path also widens the residual-delta carrier from u16 to i24 (see the down-projection delta entry).",
     "The final norm output is activation-quantized to the [-8,8]/127 grid before the tied head; tied-head weights are the embedding quantized per-tensor to i8 (scale = max|emb|/127, round-ties-even); logits are integer dot products in i32 (i24 on device).",
     "Integer rounding is round-half-away-from-zero throughout the runtime path; the trainer/Burn rounds ties to even. Because the recurrence carries state across tokens, per-token rounding differences accumulate: fidelity (bpc delta, argmax agreement) is therefore measured over long sequential streams, not per-context.",
 ];
@@ -206,6 +237,18 @@ pub enum StateModelError {
         scale_raw: u16,
         acc_bound: i64,
     },
+    /// A wide down-projection row's structural delta bound escapes the
+    /// signed-i24 delta carrier (`floor((2*scale*acc_bound + 127)/254)` must
+    /// fit [`DOWN_DELTA_WIDE_BOUND`]); the v2 wide path carries the delta
+    /// exactly, so a checkpoint that structurally exceeds i24 needs a new
+    /// carrier-width bead, not a silent clamp.
+    DownDeltaEscapesI24 {
+        block: usize,
+        row: usize,
+        scale_raw: u16,
+        acc_bound: i64,
+        delta_bound: u64,
+    },
     Model(ModelRefError),
 }
 
@@ -241,6 +284,18 @@ impl fmt::Display for StateModelError {
                 f,
                 "block {block} down row {row}: 2 * scale {scale_raw} * structural acc bound \
                  {acc_bound} + 127 overflows the u32 epilogue numerator"
+            ),
+            Self::DownDeltaEscapesI24 {
+                block,
+                row,
+                scale_raw,
+                acc_bound,
+                delta_bound,
+            } => write!(
+                f,
+                "block {block} down row {row}: structural delta bound {delta_bound} \
+                 (scale {scale_raw}, acc bound {acc_bound}) escapes the signed-i24 delta \
+                 carrier ({DOWN_DELTA_WIDE_BOUND})"
             ),
             Self::Model(e) => write!(f, "{e}"),
         }
@@ -526,6 +581,11 @@ pub struct IntStateLoweredModel {
     pub down_width: AccWidth,
     /// Largest structural |acc| bound over every down row (reported).
     pub down_acc_structural_bound: i64,
+    /// Largest structural delta bound `floor((2*scale*acc_bound + 127)/254)`
+    /// over every down row (raw Q19.5; reported). On the wide path the
+    /// lowering proves this fits [`DOWN_DELTA_WIDE_BOUND`], which is what
+    /// makes the v2 clamp-free i24 delta carrier sound.
+    pub down_delta_structural_bound: u64,
 }
 
 /// Range/overflow observations for the stateful integer evaluator.
@@ -682,22 +742,131 @@ pub(crate) fn int_matvec_i24(
     }
 }
 
-/// Wide down epilogue: identical Q19.5 formula on an i24 accumulator.
-/// `sign(m) * min(65535, (|m|*2 + 127) div 254)` with `m = scale_raw * acc`;
-/// the lowering guarantees `|m|*2 + 127 < 2^32` (device u32 numerator).
-pub(crate) fn int_down_delta_i24(acc: i32, scale_raw: u16, stats: &mut IntForwardStats) -> i32 {
+/// Measurement instrument for the wide down-projection delta: a fixed-width
+/// histogram of the **unclamped** delta magnitude `round_half_away(|m|/127)`
+/// on the Q19.5 grid, recorded *before* any carrier clamp so carrier widths
+/// are chosen from real data (bd-2vkqt). Purely observational: attaching a
+/// probe never changes the canonical integer semantics.
+#[derive(Debug, Clone)]
+pub struct DownDeltaProbe {
+    /// `counts[b]` counts deltas with `|d| in [32b, 32b + 31]` (1 real unit
+    /// per bucket on the Q19.5 grid); the last bucket absorbs everything at
+    /// or above `32 * (BUCKETS - 1)` (~16.7M raw, the u32/254 ceiling).
+    counts: Vec<u64>,
+    max: u64,
+    total: u64,
+}
+
+impl DownDeltaProbe {
+    /// Raw Q19.5 units per histogram bucket.
+    pub const BUCKET_WIDTH: u64 = 32;
+    const BUCKETS: usize = (1 << 19) + 1;
+
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            counts: vec![0; Self::BUCKETS],
+            max: 0,
+            total: 0,
+        }
+    }
+
+    fn record(&mut self, d_abs: u64) {
+        let bucket = usize::try_from(d_abs / Self::BUCKET_WIDTH)
+            .unwrap_or(Self::BUCKETS - 1)
+            .min(Self::BUCKETS - 1);
+        self.counts[bucket] += 1;
+        self.max = self.max.max(d_abs);
+        self.total += 1;
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        for (a, b) in self.counts.iter_mut().zip(other.counts.iter()) {
+            *a += b;
+        }
+        self.max = self.max.max(other.max);
+        self.total += other.total;
+    }
+
+    /// Exact maximum recorded |delta| (raw Q19.5).
+    #[must_use]
+    pub fn max_abs(&self) -> u64 {
+        self.max
+    }
+
+    /// Number of recorded deltas.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// Exact count of deltas with `|d| >= raw`. `raw` must be a multiple of
+    /// [`Self::BUCKET_WIDTH`] so the count is bucket-exact.
+    #[must_use]
+    pub fn count_at_or_above(&self, raw: u64) -> u64 {
+        assert_eq!(
+            raw % Self::BUCKET_WIDTH,
+            0,
+            "threshold must be bucket-aligned"
+        );
+        let from = usize::try_from(raw / Self::BUCKET_WIDTH)
+            .unwrap_or(Self::BUCKETS)
+            .min(Self::BUCKETS);
+        self.counts[from..].iter().sum()
+    }
+
+    /// Upper edge (raw Q19.5) of the bucket containing quantile `q` of the
+    /// recorded magnitudes: at least a fraction `q` of deltas are <= the
+    /// returned value (within one 32-raw bucket; the max is exact).
+    #[must_use]
+    pub fn quantile_upper_bound(&self, q: f64) -> u64 {
+        assert!((0.0..=1.0).contains(&q), "quantile in [0, 1]");
+        if self.total == 0 {
+            return 0;
+        }
+        #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+        let need = (q * self.total as f64).ceil() as u64;
+        let mut cum = 0u64;
+        for (bucket, &c) in self.counts.iter().enumerate() {
+            cum += c;
+            if cum >= need {
+                let edge = (bucket as u64 + 1) * Self::BUCKET_WIDTH - 1;
+                return edge.min(self.max);
+            }
+        }
+        self.max
+    }
+}
+
+impl Default for DownDeltaProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Wide down epilogue (state-int-semantics.v2): exact Q19.5 delta
+/// `sign(m) * ((|m|*2 + 127) div 254)` with `m = scale_raw * acc`, carried
+/// in a signed i24 with **no clamp** — the lowering proves the structural
+/// per-row bound fits [`DOWN_DELTA_WIDE_BOUND`] (and therefore the u32
+/// division numerator), so the assert is unreachable for lowered models.
+pub(crate) fn int_down_delta_i24(
+    acc: i32,
+    scale_raw: u16,
+    stats: &mut IntForwardStats,
+    probe: Option<&mut DownDeltaProbe>,
+) -> i32 {
     let m = i64::from(scale_raw) * i64::from(acc);
     stats.max_abs_scale_product = stats.max_abs_scale_product.max(m.unsigned_abs());
     let num = m.unsigned_abs() * 2 + 127;
-    debug_assert!(
-        num < 1 << 32,
-        "u32 down-epilogue bound (checked at lowering)"
-    );
     let d_abs = num / 254;
-    if d_abs > 65535 {
-        stats.down_delta_clamp_events += 1;
+    if let Some(p) = probe {
+        p.record(d_abs);
     }
-    let d_abs = d_abs.min(65535);
+    assert!(
+        d_abs <= DOWN_DELTA_WIDE_BOUND,
+        "wide down delta {d_abs} escapes the i24 carrier (the lowering's structural \
+         per-row bound proves this cannot happen for lowered models)"
+    );
     stats.max_abs_down_delta = stats.max_abs_down_delta.max(d_abs);
     if m < 0 { -(d_abs as i32) } else { d_abs as i32 }
 }
@@ -773,6 +942,7 @@ impl IntStateLoweredModel {
             AccWidth::I16
         };
         let mut down_acc_structural_bound: i64 = 0;
+        let mut down_delta_structural_bound: u64 = 0;
         for (block, b) in ck.blocks().iter().enumerate() {
             // Up projections have fan-in d_model <= 255: always i16 (the
             // structural bound 128 * 255 = 32640 fits).
@@ -781,14 +951,27 @@ impl IntStateLoweredModel {
                 let (lo, hi) = row_acc_bounds(b.down.row(row));
                 let bound = lo.abs().max(hi);
                 down_acc_structural_bound = down_acc_structural_bound.max(bound);
+                let scale = i64::from(b.down.scale_raw(row));
+                let delta_bound = ((2 * scale * bound + 127) / 254).unsigned_abs();
+                down_delta_structural_bound = down_delta_structural_bound.max(delta_bound);
                 if down_width == AccWidth::I24 {
-                    let scale = i64::from(b.down.scale_raw(row));
                     if 2 * scale * bound + 127 >= 1 << 32 {
                         return Err(StateModelError::DownEpilogueOverflow {
                             block,
                             row,
                             scale_raw: b.down.scale_raw(row),
                             acc_bound: bound,
+                        });
+                    }
+                    // v2 wide path: the delta is carried exactly in a signed
+                    // i24 with no clamp, so the structural bound must fit.
+                    if delta_bound > DOWN_DELTA_WIDE_BOUND {
+                        return Err(StateModelError::DownDeltaEscapesI24 {
+                            block,
+                            row,
+                            scale_raw: b.down.scale_raw(row),
+                            acc_bound: bound,
+                            delta_bound,
                         });
                     }
                 }
@@ -813,6 +996,7 @@ impl IntStateLoweredModel {
             blocks,
             down_width,
             down_acc_structural_bound,
+            down_delta_structural_bound,
         })
     }
 
@@ -845,6 +1029,20 @@ impl IntStateLoweredModel {
     /// start), updated in place exactly as the ROM updates its WRAM copy.
     #[must_use]
     pub fn forward(&self, prev: u8, state: &mut [i32]) -> IntStateForwardTrace {
+        self.forward_probed(prev, state, None)
+    }
+
+    /// [`Self::forward`] with an optional [`DownDeltaProbe`] observing the
+    /// unclamped down-projection delta magnitudes. The returned trace and the
+    /// state update are byte-identical to `forward`'s regardless of the
+    /// probe: probes only record, never steer.
+    #[must_use]
+    pub fn forward_probed(
+        &self,
+        prev: u8,
+        state: &mut [i32],
+        mut probe: Option<&mut DownDeltaProbe>,
+    ) -> IntStateForwardTrace {
         let t = self.topology;
         assert_eq!(state.len(), t.state_slots, "state width");
         let mut stats = StateForwardStats::new();
@@ -990,6 +1188,7 @@ impl IntStateLoweredModel {
                         down_acc24[row],
                         down.layer.scale_raw(row),
                         &mut stats.ffn,
+                        probe.as_deref_mut(),
                     ),
                 };
                 let wide = x[row] + d_raw;
@@ -1293,6 +1492,108 @@ mod tests {
         assert_eq!(lowered.y_resid_lut[127], 0); // p = 0
         assert_eq!(lowered.y_resid_lut[254], 256); // p = 127 -> exactly 8.0 * 32
         assert_eq!(lowered.y_resid_lut[0], -256);
+    }
+
+    #[test]
+    fn wide_down_delta_is_exact_above_the_old_u16_cap() {
+        // v1 clamped here (bd-2vkqt); v2 must carry the exact Q19.5 value.
+        let mut stats = IntForwardStats::new();
+        // m = 500 * 40000 = 20,000,000; delta = (2m + 127) / 254 = 157,480
+        // (round_half_away(m / 127)) — 2.4x the old 65,535 cap.
+        let d = int_down_delta_i24(40000, 500, &mut stats, None);
+        assert_eq!(d, 157_480);
+        assert_eq!(
+            stats.down_delta_clamp_events, 0,
+            "v2 wide path has no clamp"
+        );
+        assert_eq!(stats.max_abs_down_delta, 157_480);
+        let dn = int_down_delta_i24(-40000, 500, &mut stats, None);
+        assert_eq!(dn, -157_480);
+    }
+
+    #[test]
+    fn down_delta_probe_records_unclamped_magnitudes() {
+        let mut stats = IntForwardStats::new();
+        let mut probe = DownDeltaProbe::new();
+        let _ = int_down_delta_i24(40000, 500, &mut stats, Some(&mut probe));
+        let _ = int_down_delta_i24(1, 1, &mut stats, Some(&mut probe));
+        assert_eq!(probe.total(), 2);
+        assert_eq!(probe.max_abs(), 157_480);
+        assert_eq!(probe.count_at_or_above(65536), 1);
+        assert_eq!(probe.count_at_or_above(1 << 23), 0);
+        // p50 falls in the first bucket; the max quantile is exact.
+        assert!(probe.quantile_upper_bound(0.5) < DownDeltaProbe::BUCKET_WIDTH);
+        assert_eq!(probe.quantile_upper_bound(1.0), 157_480);
+        let mut merged = DownDeltaProbe::new();
+        merged.merge(&probe);
+        assert_eq!(merged.total(), 2);
+        assert_eq!(merged.max_abs(), 157_480);
+    }
+
+    #[test]
+    fn lowering_rejects_structural_delta_bounds_past_the_i24_carrier() {
+        // A dense +/-1 fan-in-384 down row at scale 30000: acc bound
+        // 128 * 384 = 49,152; delta bound = (2*30000*49152 + 127)/254 =
+        // 11,611,654 > 2^23 - 1, while the u32 numerator check still passes
+        // (2.95e9 < 2^32). v2 must refuse to lower rather than clamp.
+        let t = StateTopology::D192;
+        let ck = synthetic_state_checkpoint_with(t, 5);
+        let hostile_down = TernaryLayer::new(
+            t.d_model,
+            t.d_ff,
+            vec![1i8; t.d_model * t.d_ff],
+            vec![30000u16; t.d_model],
+        )
+        .expect("valid layer");
+        let blocks: Vec<BlockWeights> = ck
+            .blocks()
+            .iter()
+            .enumerate()
+            .map(|(i, b)| BlockWeights {
+                up: b.up.clone(),
+                down: if i == 0 {
+                    hostile_down.clone()
+                } else {
+                    b.down.clone()
+                },
+            })
+            .collect();
+        let bad = StateCheckpoint::new(
+            t,
+            ck.embedding.clone(),
+            ck.state_in.clone(),
+            ck.state_out.clone(),
+            ck.decay_raw.clone(),
+            blocks,
+        )
+        .expect("shapes are valid");
+        match IntStateLoweredModel::lower(&bad) {
+            Err(StateModelError::DownDeltaEscapesI24 {
+                block: 0,
+                delta_bound,
+                ..
+            }) => {
+                assert!(delta_bound > DOWN_DELTA_WIDE_BOUND);
+            }
+            other => panic!("expected DownDeltaEscapesI24, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowering_reports_the_structural_delta_bound() {
+        let ck = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        // Recompute independently from the raw weights.
+        let mut expected = 0u64;
+        for b in ck.blocks() {
+            for row in 0..b.down.rows() {
+                let (lo, hi) = row_acc_bounds(b.down.row(row));
+                let bound = lo.unsigned_abs().max(hi.unsigned_abs());
+                expected = expected.max((2 * u64::from(b.down.scale_raw(row)) * bound + 127) / 254);
+            }
+        }
+        assert_eq!(lowered.down_delta_structural_bound, expected);
+        assert!(lowered.down_delta_structural_bound <= DOWN_DELTA_WIDE_BOUND);
     }
 
     #[test]

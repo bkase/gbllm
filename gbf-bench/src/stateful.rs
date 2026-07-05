@@ -1425,6 +1425,91 @@ mod tests {
         assert!(report.mean_m_cycles > 0);
     }
 
+    /// The v2 wide down-delta carrier must be byte-exact on-device in the
+    /// region the v1 u16 carrier clamped (bd-2vkqt): boosted down scales
+    /// force real deltas past 65535 raw and the ROM (`udiv254w` + wide
+    /// delta apply) must reproduce the host's exact i24 delta.
+    #[test]
+    fn wide_down_delta_rom_matches_host_above_the_old_u16_cap() {
+        use gbf_kernel::model_ref::{BlockWeights, TernaryLayer};
+        use gbf_kernel::state_model_ref::{
+            StateCheckpoint, StateTopology, synthetic_state_checkpoint_with,
+        };
+
+        let base = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let boost_scales = |layer: &TernaryLayer, factor: u16| -> TernaryLayer {
+            let mut weights = Vec::with_capacity(layer.rows() * layer.cols());
+            for row in 0..layer.rows() {
+                weights.extend_from_slice(layer.row(row));
+            }
+            let scales: Vec<u16> = (0..layer.rows())
+                .map(|row| layer.scale_raw(row) * factor)
+                .collect();
+            TernaryLayer::new(layer.rows(), layer.cols(), weights, scales).expect("valid layer")
+        };
+        let blocks: Vec<BlockWeights> = base
+            .blocks()
+            .iter()
+            .map(|b| BlockWeights {
+                up: b.up.clone(),
+                down: boost_scales(&b.down, 64),
+            })
+            .collect();
+        let t = base.topology();
+        let embedding: Vec<f32> = (0..t.vocab)
+            .flat_map(|id| base.embedding_row(id as u8).to_vec())
+            .collect();
+        let ck = StateCheckpoint::new(
+            t,
+            embedding,
+            base.state_in.clone(),
+            base.state_out.clone(),
+            base.decay_raw().to_vec(),
+            blocks,
+        )
+        .expect("boosted checkpoint is valid");
+
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        assert_eq!(
+            lowered.down_width,
+            gbf_kernel::state_model_ref::AccWidth::I24
+        );
+        assert!(
+            lowered.down_delta_structural_bound > 65535,
+            "boosted scales must make the >u16 delta region reachable"
+        );
+
+        // Drive two tokens on the host and require the clamp region to be
+        // actually exercised (fails loudly if the construction goes stale).
+        let mut state = lowered.zero_state();
+        let t0 = lowered.forward(19, &mut state);
+        let carried = state.clone();
+        let t1 = lowered.forward(t0.argmax, &mut state);
+        let max_delta = t0
+            .stats
+            .ffn
+            .max_abs_down_delta
+            .max(t1.stats.ffn.max_abs_down_delta);
+        assert!(
+            max_delta > 65535,
+            "test construction no longer exceeds the old cap (max delta {max_delta})"
+        );
+
+        let cases = vec![
+            (0usize, 19u8, lowered.zero_state()),
+            (1usize, t0.argmax, carried),
+        ];
+        let report = run_state_rom_gate(&lowered, &cases).expect("gate runs");
+        for run in &report.runs {
+            assert!(
+                run.byte_exact,
+                "input {} (state from pos {}): mismatches {:?}",
+                run.input_id, run.state_from_position, run.mismatches
+            );
+        }
+        assert!(report.all_byte_exact);
+    }
+
     /// Multi-token smoke: the on-device stateful generation loop must
     /// reproduce the host feedback loop byte-exactly and stay healthy.
     #[test]

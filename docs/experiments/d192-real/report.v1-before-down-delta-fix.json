@@ -1,9 +1,8 @@
 {
-  "schema": "d192_real_bringup.v2",
+  "schema": "d192_real_bringup.v1",
   "bead": "bd-pp43d",
   "checkpoint_bead": "bd-3771m",
-  "int_semantics_version": "state-int-semantics.v2",
-  "git_sha": "d710959bcc5120320b54f2c3b3cdde6b734e9afd",
+  "git_sha": "530a2218070e7476cf564e785561672bdbf7633b",
   "export_dir": "experiments/S8/sweep/checkpoint-export-CUSTOM_distill",
   "options": {
     "multi_token_tokens": 128,
@@ -100,8 +99,6 @@
     "down_acc_width": "I24",
     "down_acc_structural_bound": 49137,
     "i16_bound": 32767,
-    "down_delta_structural_bound": 3023076,
-    "i24_delta_bound": 8388607,
     "decision_source": "structural per-row worst case over the actual ternary weights (the f_s5_state_checkpoint_export.v1 manifest declares no measured activation ranges, so lowering never relies on unmeasured statistics)"
   },
   "layout": {
@@ -135,9 +132,9 @@
       "rom_bytes": 8388608,
       "bank_count": 405,
       "uses_romb1_9bit_banking": true,
-      "driver_bytes": 13356,
+      "driver_bytes": 12588,
       "driver_bank_capacity": 16048,
-      "driver_headroom_bytes": 2692,
+      "driver_headroom_bytes": 3460,
       "weight_code_bytes": 6067708,
       "weight_chunk_count": 392,
       "table_bytes": 188096
@@ -147,9 +144,9 @@
       "rom_bytes": 8388608,
       "bank_count": 405,
       "uses_romb1_9bit_banking": true,
-      "driver_bytes": 13401,
+      "driver_bytes": 12633,
       "driver_bank_capacity": 16048,
-      "driver_headroom_bytes": 2647,
+      "driver_headroom_bytes": 3415,
       "weight_code_bytes": 6067708,
       "weight_chunk_count": 392,
       "table_bytes": 188096
@@ -159,7 +156,7 @@
     "rom": {
       "rom_bytes": 8388608,
       "bank_count": 405,
-      "driver_bytes": 13356,
+      "driver_bytes": 12588,
       "weight_code_bytes": 6067708,
       "weight_chunk_count": 392,
       "table_bytes": 188096,
@@ -173,30 +170,30 @@
         "input_id": 75,
         "state_from_position": 0,
         "state_is_zero": true,
-        "host_argmax": 45,
-        "rom_argmax": 45,
+        "host_argmax": 15,
+        "rom_argmax": 15,
         "byte_exact": true,
-        "m_cycles": 22704921,
+        "m_cycles": 21877553,
         "mismatches": []
       },
       {
         "input_id": 75,
         "state_from_position": 1,
         "state_is_zero": false,
-        "host_argmax": 73,
-        "rom_argmax": 73,
+        "host_argmax": 15,
+        "rom_argmax": 15,
         "byte_exact": true,
-        "m_cycles": 22714059,
+        "m_cycles": 21885493,
         "mismatches": []
       },
       {
         "input_id": 18,
         "state_from_position": 127,
         "state_is_zero": false,
-        "host_argmax": 15,
-        "rom_argmax": 15,
+        "host_argmax": 19,
+        "rom_argmax": 19,
         "byte_exact": true,
-        "m_cycles": 22721440,
+        "m_cycles": 21892794,
         "mismatches": []
       },
       {
@@ -206,7 +203,7 @@
         "host_argmax": 26,
         "rom_argmax": 26,
         "byte_exact": true,
-        "m_cycles": 22712443,
+        "m_cycles": 21883487,
         "mismatches": []
       },
       {
@@ -216,12 +213,12 @@
         "host_argmax": 29,
         "rom_argmax": 29,
         "byte_exact": true,
-        "m_cycles": 22711849,
+        "m_cycles": 21882094,
         "mismatches": []
       }
     ],
-    "mean_m_cycles": 22712942,
-    "seconds_per_token_dmg": 21.660749435424805
+    "mean_m_cycles": 21884284,
+    "seconds_per_token_dmg": 20.870479583740234
   },
   "multi_token": {
     "n_tokens": 128,
@@ -237,19 +234,19 @@
       {
         "seed_id": 19,
         "n_tokens": 128,
-        "host_sequence_sha256": "96531cba2108dfad5a4b5a7102baedae3a6fd0ff085fdff50f467bf584c177d8",
-        "rom_sequence_sha256": "96531cba2108dfad5a4b5a7102baedae3a6fd0ff085fdff50f467bf584c177d8",
+        "host_sequence_sha256": "e9d3adc4a816ee5fd77b0e3414669893e76adfe6bde67a3304c04f6f7d131cfb",
+        "rom_sequence_sha256": "e9d3adc4a816ee5fd77b0e3414669893e76adfe6bde67a3304c04f6f7d131cfb",
         "sequences_match": true,
         "first_divergence_index": null,
         "first_token_checkpoints_byte_exact": true,
         "last_token_checkpoints_byte_exact": true,
         "checkpoint_mismatches": [],
         "cycles": {
-          "min": 22701248,
-          "median": 22714791,
-          "max": 22735720,
-          "mean": 22715823,
-          "max_over_min": 1.001518506823942,
+          "min": 21863646,
+          "median": 21887177,
+          "max": 21897080,
+          "mean": 21886873,
+          "max_over_min": 1.001529205147211,
           "stable_within_5pct": true
         },
         "sp_home_every_token": true,
@@ -262,19 +259,19 @@
       {
         "seed_id": 26,
         "n_tokens": 128,
-        "host_sequence_sha256": "92b66b7b89e2d9e7a8f397517c045ebf5cc61cda63d429986452394f7fe6711a",
-        "rom_sequence_sha256": "92b66b7b89e2d9e7a8f397517c045ebf5cc61cda63d429986452394f7fe6711a",
+        "host_sequence_sha256": "d1096712dddf1edc0623e8c3486c127eb07b7a2ec91f7489c325a11f9aed0acd",
+        "rom_sequence_sha256": "d1096712dddf1edc0623e8c3486c127eb07b7a2ec91f7489c325a11f9aed0acd",
         "sequences_match": true,
         "first_divergence_index": null,
         "first_token_checkpoints_byte_exact": true,
         "last_token_checkpoints_byte_exact": true,
         "checkpoint_mismatches": [],
         "cycles": {
-          "min": 22690829,
-          "median": 22714866,
-          "max": 22735768,
-          "mean": 22715400,
-          "max_over_min": 1.0019804917660786,
+          "min": 21860097,
+          "median": 21886615,
+          "max": 21898661,
+          "mean": 21886473,
+          "max_over_min": 1.001764127579123,
           "stable_within_5pct": true
         },
         "sp_home_every_token": true,
@@ -287,19 +284,19 @@
       {
         "seed_id": 62,
         "n_tokens": 128,
-        "host_sequence_sha256": "067434bff308eb08bcdf713450ae4fbca1112b55b4d9881e116bbc07763e1a3b",
-        "rom_sequence_sha256": "067434bff308eb08bcdf713450ae4fbca1112b55b4d9881e116bbc07763e1a3b",
+        "host_sequence_sha256": "dd759ac912dd7c54eb2c29af2b5d39c1c254f02a2d9ab05c9521cd52b2240f12",
+        "rom_sequence_sha256": "dd759ac912dd7c54eb2c29af2b5d39c1c254f02a2d9ab05c9521cd52b2240f12",
         "sequences_match": true,
         "first_divergence_index": null,
         "first_token_checkpoints_byte_exact": true,
         "last_token_checkpoints_byte_exact": true,
         "checkpoint_mismatches": [],
         "cycles": {
-          "min": 22700546,
-          "median": 22714949,
-          "max": 22736191,
-          "mean": 22715710,
-          "max_over_min": 1.0015702265487358,
+          "min": 21871412,
+          "median": 21886559,
+          "max": 21903699,
+          "mean": 21886618,
+          "max_over_min": 1.0014762192765607,
           "stable_within_5pct": true
         },
         "sp_home_every_token": true,
@@ -312,19 +309,19 @@
       {
         "seed_id": 75,
         "n_tokens": 128,
-        "host_sequence_sha256": "a648adc601a08fe6f9163d81a9a001009a829ce5ac044557c839d9d99bbf52ba",
-        "rom_sequence_sha256": "a648adc601a08fe6f9163d81a9a001009a829ce5ac044557c839d9d99bbf52ba",
+        "host_sequence_sha256": "5639daa19ab23ace28cad42c83e60a1f1e9b6d02f75fa5aeb14de58c528cee75",
+        "rom_sequence_sha256": "5639daa19ab23ace28cad42c83e60a1f1e9b6d02f75fa5aeb14de58c528cee75",
         "sequences_match": true,
         "first_divergence_index": null,
         "first_token_checkpoints_byte_exact": true,
         "last_token_checkpoints_byte_exact": true,
         "checkpoint_mismatches": [],
         "cycles": {
-          "min": 22697118,
-          "median": 22714648,
-          "max": 22735755,
-          "mean": 22715090,
-          "max_over_min": 1.0017022866074892,
+          "min": 21870636,
+          "median": 21886628,
+          "max": 21901603,
+          "mean": 21886585,
+          "max_over_min": 1.0014159167570618,
           "stable_within_5pct": true
         },
         "sp_home_every_token": true,
@@ -349,12 +346,12 @@
     "f32_port_delta_vs_committed": 8.72264173334969e-7,
     "f32_port_tolerance": 0.001,
     "f32_port_reproduces_committed": true,
-    "int_val_bpc": 2.9882959604467763,
-    "int_minus_f32_bpc": 0.20974521376942734,
-    "int_val_bits_per_raw_byte": 2.9707379661647093,
+    "int_val_bpc": 4.680271892131726,
+    "int_minus_f32_bpc": 1.9017211454543772,
+    "int_val_bits_per_raw_byte": 4.652772545277112,
     "f32_port_val_bits_per_raw_byte": 2.7622251287438093,
     "committed_ternary_val_bits_per_raw_byte": 2.7622259958829183,
-    "argmax_agreement": 0.7331724865694551,
+    "argmax_agreement": 0.6377004988488104,
     "int_stats": {
       "max_abs_matvec_acc": 1847,
       "max_abs_in_acc": 1847,
@@ -365,12 +362,12 @@
       "max_abs_out_scale_product": 382656437,
       "y_saturation_events": 70241081,
       "max_abs_scale_product": 39120155,
-      "max_abs_down_delta": 308033,
-      "down_delta_clamp_events": 0,
-      "max_abs_residual": 310443,
+      "max_abs_down_delta": 65535,
+      "down_delta_clamp_events": 1040285,
+      "max_abs_residual": 72347,
       "residual_i24_wrap_events": 0,
-      "max_abs_logit": 3754,
-      "max_norm_sumsq": 96440960429,
+      "max_abs_logit": 5184,
+      "max_norm_sumsq": 5317015629,
       "min_norm_rms_raw": 72,
       "matvec_acc_fits_i16": true,
       "state_fits_i24": true,
@@ -381,12 +378,12 @@
   },
   "cycles": {
     "macs_per_token": 973824,
-    "one_token_mean_m_cycles": 22712942,
-    "multi_token_mean_m_cycles": 22715505,
-    "seconds_per_token_dmg": 21.663193702697754,
-    "seconds_per_char_dmg": 21.663193702697754,
+    "one_token_mean_m_cycles": 21884284,
+    "multi_token_mean_m_cycles": 21886637,
+    "seconds_per_token_dmg": 20.87272357940674,
+    "seconds_per_char_dmg": 20.87272357940674,
     "synthetic_readiness_mean_m_cycles": 19357280,
-    "real_over_synthetic": 1.1734864092475803,
+    "real_over_synthetic": 1.1306669635403321,
     "real_ternary_zero_fraction": 0.008470845018696582,
     "synthetic_ternary_zero_fraction": 0.29986207098023504
   },
@@ -403,9 +400,9 @@
       "rom_bytes": 8388608,
       "bank_count": 406,
       "uses_romb1_9bit_banking": true,
-      "driver_bytes": 14529,
+      "driver_bytes": 13761,
       "driver_bank_capacity": 16048,
-      "driver_headroom_bytes": 1519,
+      "driver_headroom_bytes": 2287,
       "weight_code_bytes": 6067708,
       "weight_chunk_count": 392,
       "table_bytes": 188096
@@ -419,16 +416,16 @@
     "post_run_chrome_ok": true,
     "returned_to_idle": true,
     "all_gates_pass": true,
-    "n_tokens_generated": 185,
+    "n_tokens_generated": 112,
     "determinism_sessions": 2,
     "determinism_sequences_identical": true,
     "determinism_framebuffer_hashes_identical": true,
-    "mean_m_cycles_per_token_boundary": 22652365,
-    "seconds_per_token_dmg": 21.602978706359863,
-    "mean_m_cycles_per_warmup_char": 22770101,
+    "mean_m_cycles_per_token_boundary": 21749064,
+    "seconds_per_token_dmg": 20.74152374267578,
+    "mean_m_cycles_per_warmup_char": 21944970,
     "fb_sha256_after_boot": "1d4c9086a216cbef1f7fae7181fdd1a171061710213dde42d59de07b16d8fb0c",
     "fb_sha256_after_typing": "bdf8b2b25af33b2b1f49c7fbbe6b8a336d327b8e3d44054818d494ef6371862e",
-    "fb_sha256_after_generation": "b5cd7c1fb56e670b89bbfc43d34c74771984da2860c9097f7f96e0beb7fa555a"
+    "fb_sha256_after_generation": "0627102ef771d13f3aeabe18700b30e133a23a1363ccf1df212e13899b9c7f0f"
   },
   "samples": [
     {
@@ -442,10 +439,10 @@
       },
       "rng_seed": 24301,
       "n_chars": 512,
-      "rom_verified_prefix_chars": 181,
+      "rom_verified_prefix_chars": 134,
       "rom_prefix_matches_host": true,
       "shell_session_gates_pass": true,
-      "sequence_sha256": "203bd626ec63453b306d9aa779737c321f366e2dbb66f40c9ae2871bc0981bbd"
+      "sequence_sha256": "b1c0b1803c2c9c366da54c74d987544b9b156fbb6fb863f3c393f3874e3d08c8"
     },
     {
       "file": "sample_T0p60_k4_rng_beef.txt",
@@ -458,10 +455,10 @@
       },
       "rng_seed": 48879,
       "n_chars": 512,
-      "rom_verified_prefix_chars": 180,
+      "rom_verified_prefix_chars": 168,
       "rom_prefix_matches_host": true,
       "shell_session_gates_pass": true,
-      "sequence_sha256": "63a860d699cf168ba37cdfa063d2aed5f20e5b10759b1cd1c6a1eb1d68b710d4"
+      "sequence_sha256": "b3700a61ac606239c0558316fe272f0ff54fddf7929d0bcb0248a9bc44eb4a4d"
     },
     {
       "file": "sample_T1p00_k8_rng_c0de.txt",
@@ -474,10 +471,10 @@
       },
       "rng_seed": 49374,
       "n_chars": 512,
-      "rom_verified_prefix_chars": 180,
+      "rom_verified_prefix_chars": 169,
       "rom_prefix_matches_host": true,
       "shell_session_gates_pass": true,
-      "sequence_sha256": "2c47a69251e9d4742a6c3246500304fa269956c8634b242a16488de51a67e3fd"
+      "sequence_sha256": "c8e51d5fcd01f0e7b23350d98b6c47c0997dfe17495e6b4d78cbe76e4221849d"
     }
   ],
   "int_semantics_divergences": [
@@ -489,8 +486,8 @@
     "RMS norm: integer sum of squares over the d_model i24 lanes (u64 accumulator, 7 bytes on device), mean = floor(sum / d_model) (a shift when d_model is a power of two, otherwise shift-then-odd-constant division on device), epsilon = +1 raw mean unit, rms = floor(isqrt48(mean+1)); norm output and Int8 activation fake-quant collapse into one rounded division q = clamp(round_half_away(|x|*127 / (8*rms)), 0, 127) * sign(x) (trainer: f32 divide, clamp to +/-8, round-ties-even quantization).",
     "GELU is a 255-entry LUT indexed by the pre-activation value quantized to the same [-8,8]/127 grid (round-half-away on the Q8.8 scale product); the trainer applies tanh-approximate GELU to the unquantized f32 matvec output before fake-quant.",
     "Up/down epilogues apply the Q8.8 row scale as an integer multiply with round-half-away rounding (round-ties-even in the trainer's f32 path).",
-    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * round_half_away(|m| / 127) before the residual add; the trainer adds unquantized f32 deltas. On the i16-accumulator path the delta is carried in a u16 with a canonical, counted clamp at 65535 raw (2047.97 units; the committed arm-B run measured zero clamp events). On the wide i24-accumulator path (state-int-semantics.v2) the delta is carried EXACTLY in a signed i24 with no clamp: lowering proves the structural per-row bound floor((2*scale_raw*acc_bound + 127)/254) <= 2^23 - 1 from the actual weights (DownDeltaEscapesI24 otherwise). v1 clamped the wide path at 65535 too, which saturated ~0.087% of real d192 deltas (measured max 308,033 raw = 9,626 units over the full committed pair set) and cost +1.90 bpc (bd-2vkqt).",
-    "Down-projection matvec accumulators widen from i16 to i24 (3 bytes on device) when the structural per-row worst case over the actual ternary weights exceeds i16 (possible from fan-in 257 up; certain worst-case at the d192 student's fan-in 384). The manifest declares no measured activation ranges, so the width decision uses the exact structural bound, never unmeasured statistics. The value is exact either way; only the carrier width changes. The wide path also widens the residual-delta carrier from u16 to i24 (see the down-projection delta entry).",
+    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * min(65535, round_half_away(|m| / 127)) before the residual add; the trainer adds unquantized f32 deltas. The 65535 clamp is canonical and counted.",
+    "Down-projection matvec accumulators widen from i16 to i24 (3 bytes on device) when the structural per-row worst case over the actual ternary weights exceeds i16 (possible from fan-in 257 up; certain worst-case at the d192 student's fan-in 384). The manifest declares no measured activation ranges, so the width decision uses the exact structural bound, never unmeasured statistics. The value is exact either way; only the carrier width changes.",
     "The final norm output is activation-quantized to the [-8,8]/127 grid before the tied head; tied-head weights are the embedding quantized per-tensor to i8 (scale = max|emb|/127, round-ties-even); logits are integer dot products in i32 (i24 on device).",
     "Integer rounding is round-half-away-from-zero throughout the runtime path; the trainer/Burn rounds ties to even. Because the recurrence carries state across tokens, per-token rounding differences accumulate: fidelity (bpc delta, argmax agreement) is therefore measured over long sequential streams, not per-context."
   ],

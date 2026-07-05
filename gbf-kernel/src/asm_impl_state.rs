@@ -61,11 +61,11 @@ use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, RomSize, assemble_rom};
 use gbf_asm::section::SectionId;
 
 use crate::asm_impl_model::{
-    BANK_BYTES, CHUNK_ENTRY, DIV_NUM, IPTR, LANE, MBC5_ROMB0, MBC5_ROMB1, MODEL_STACK_TOP,
-    ModelAsm, ModelRomError, OPTR, PTR, ROWCNT, SIGN, SPTR, XPTR, a_from, a_to, abs_de_store_sign,
-    build_matvec_chunks_at, build_matvec_chunks_wide, emit_copy_bytes, emit_mul16, emit_mul16x8,
-    emit_udiv254, ld_r_imm, ld_rr, ld16, load_de_via_ptr, mem_add, mem_copy, mem_shl1, mem_shr1,
-    mem_sub_into, smallest_rom_size, zero_mem,
+    BANK_BYTES, CHUNK_ENTRY, DIV_NUM, DIV_T1, DIV_T2, IPTR, LANE, MBC5_ROMB0, MBC5_ROMB1,
+    MODEL_STACK_TOP, ModelAsm, ModelRomError, OPTR, PTR, ROWCNT, SIGN, SPTR, XPTR, a_from, a_to,
+    abs_de_store_sign, build_matvec_chunks_at, build_matvec_chunks_wide, emit_copy_bytes,
+    emit_mul16, emit_mul16x8, emit_udiv254, ld_r_imm, ld_rr, ld16, load_de_via_ptr, mem_add,
+    mem_copy, mem_shl1, mem_shr1, mem_sub_into, smallest_rom_size, zero_mem,
 };
 use crate::state_model_ref::{AccWidth, IntStateLoweredModel, StateTopology};
 
@@ -1561,10 +1561,58 @@ fn emit_resid_add24(asm: &mut ModelAsm) {
     asm.i(Instr::Ret { cond: None });
 }
 
-/// Shared epilogue tail: DE = |delta| (u16), SIGN live. Sign-extend/negate
-/// into B:DE and add into X[row] (i24 wrapping), advancing XPTR.
-fn emit_delta_apply24(asm: &mut ModelAsm, neg_label: &str, add_label: &str) {
-    ld_r_imm(asm, Reg8::B, 0);
+/// `udiv254w`: DIV_NUM (u32) / 254 -> B:DE (u24 quotient), the wide twin of
+/// `udiv254` for the v2 clamp-free i24 down-delta carrier. The caller must
+/// guarantee DIV_NUM < 254 * 2^23 so the quotient fits a signed i24 — the
+/// lowering's structural per-row delta bound (`DownDeltaEscapesI24`) proves
+/// exactly this for every reachable numerator, so no clamp is emitted.
+fn emit_udiv254w(asm: &mut ModelAsm) {
+    asm.label("udiv254w");
+    // DIV_T1 = 254 << 23 = 0x7F000000
+    zero_mem(asm, DIV_T1, 4);
+    ld_r_imm(asm, Reg8::A, 0x7F);
+    a_to(asm, DIV_T1 + 3);
+    // Quotient accumulates in C:DE during the loop (the mem_* helpers
+    // clobber A/B/H/L but preserve C/D/E), then moves to B:DE for the
+    // shared delta-apply tail.
+    ld_r_imm(asm, Reg8::C, 0);
+    ld16(asm, Reg16Data::DE, 0);
+    for iter in 0..24u16 {
+        let no = format!("ud254w_no_{iter}");
+        let rot = format!("ud254w_rot_{iter}");
+        mem_sub_into(asm, DIV_T2, DIV_NUM, DIV_T1, 4);
+        asm.jr(Some(Cond::C), &no);
+        mem_copy(asm, DIV_NUM, DIV_T2, 4);
+        asm.i(Instr::Scf);
+        asm.jr(None, &rot);
+        asm.label(&no);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Reg(Reg8::A),
+        });
+        asm.label(&rot);
+        asm.i(Instr::Rl {
+            target: CbTarget::Reg(Reg8::E),
+        });
+        asm.i(Instr::Rl {
+            target: CbTarget::Reg(Reg8::D),
+        });
+        asm.i(Instr::Rl {
+            target: CbTarget::Reg(Reg8::C),
+        });
+        mem_shr1(asm, DIV_T1, 4);
+    }
+    ld_rr(asm, Reg8::B, Reg8::C);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// Shared epilogue tail: |delta| in DE (u16, `wide = false`; B is zeroed
+/// here) or B:DE (u24, `wide = true`; B live from `udiv254w`), SIGN live.
+/// Sign-extend/negate into B:DE and add into X[row] (i24 wrapping),
+/// advancing XPTR. The narrow emission is byte-identical to the pre-v2 form.
+fn emit_delta_apply24(asm: &mut ModelAsm, neg_label: &str, add_label: &str, wide: bool) {
+    if !wide {
+        ld_r_imm(asm, Reg8::B, 0);
+    }
     a_from(asm, SIGN);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
@@ -1736,7 +1784,7 @@ fn emit_down_epilogue24(asm: &mut ModelAsm, l: &StateWramLayout) {
     a_to(asm, DIV_NUM);
     carry_ripple(asm, DIV_NUM + 1, 3);
     asm.call("udiv254"); // DE = min(q, 65535)
-    emit_delta_apply24(asm, "d24_neg", "d24_add");
+    emit_delta_apply24(asm, "d24_neg", "d24_add", false);
     a_from(asm, ROWCNT);
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::A),
@@ -1747,9 +1795,11 @@ fn emit_down_epilogue24(asm: &mut ModelAsm, l: &StateWramLayout) {
 }
 
 /// `down_ep24w`: the wide twin of `down_ep24` over **3-byte i24** accs.
-/// m = scale * |acc| via mul16 + mul16x8 (the lowering guarantees
-/// m < 2^31 so the u32 division numerator holds), then the identical
-/// Q19.5 delta formula and residual add.
+/// m = scale * |acc| via mul16 + mul16x8 (the lowering's structural delta
+/// bound guarantees the numerator 2m + 127 < 254 * 2^23 < 2^31), then the
+/// exact Q19.5 delta X[row] (i24) += (mod 2^24) sign(m) * ((|m|*2 + 127) /
+/// 254) carried in a **clamp-free i24** (state-int-semantics.v2; the v1 u16
+/// carrier saturated on the real d192 student, bd-2vkqt).
 fn emit_down_epilogue24_wide(asm: &mut ModelAsm, l: &StateWramLayout) {
     use crate::asm_impl_model::MUL_R;
     asm.label("down_ep24w");
@@ -1796,7 +1846,7 @@ fn emit_down_epilogue24_wide(asm: &mut ModelAsm, l: &StateWramLayout) {
         src: AluSrc8::Reg(Reg8::H),
     });
     a_to(asm, DIV_NUM + 3);
-    // DIV_NUM = (m << 1) + 127 (fits u32 by the lowering bound)
+    // DIV_NUM = (m << 1) + 127 (< 254 * 2^23 by the lowering delta bound)
     mem_shl1(asm, DIV_NUM, 4);
     a_from(asm, DIV_NUM);
     asm.i(Instr::AddA {
@@ -1804,8 +1854,8 @@ fn emit_down_epilogue24_wide(asm: &mut ModelAsm, l: &StateWramLayout) {
     });
     a_to(asm, DIV_NUM);
     carry_ripple(asm, DIV_NUM + 1, 3);
-    asm.call("udiv254"); // DE = min(q, 65535)
-    emit_delta_apply24(asm, "d24w_neg", "d24w_add");
+    asm.call("udiv254w"); // B:DE = q (u24, exact; no clamp)
+    emit_delta_apply24(asm, "d24w_neg", "d24w_add", true);
     a_from(asm, ROWCNT);
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::A),
@@ -2840,7 +2890,14 @@ pub(crate) fn emit_state_routines_and_tables(
     emit_mul16(asm);
     emit_isqrt48(asm);
     emit_udiv_norm5(asm);
-    emit_udiv254(asm);
+    // The 254-division twin matches the down-epilogue delta carrier: u16
+    // quotient (canonical 65535 clamp) on the i16 path, exact u24 quotient
+    // on the wide path (state-int-semantics.v2). Selecting one keeps the
+    // arm-B (i16) driver byte-identical to the pre-v2 emission.
+    match l.down_width {
+        AccWidth::I16 => emit_udiv254(asm),
+        AccWidth::I24 => emit_udiv254w(asm),
+    }
     let odd = (t.d_model >> t.d_model.trailing_zeros()) as u16;
     if odd > 1 {
         emit_udiv16_odd(asm, odd);

@@ -247,6 +247,11 @@ pub struct D192WidthFacts {
     pub down_acc_width: String,
     pub down_acc_structural_bound: i64,
     pub i16_bound: i64,
+    /// Structural per-row worst case of the Q19.5 down delta over the actual
+    /// weights/scales; on the wide path lowering proves it fits the i24
+    /// delta carrier (state-int-semantics.v2, clamp-free).
+    pub down_delta_structural_bound: u64,
+    pub i24_delta_bound: u64,
     pub decision_source: &'static str,
 }
 
@@ -343,6 +348,8 @@ pub fn run_d192_readiness(work_dir: &Path) -> Result<D192ReadinessReport, OneTok
         down_acc_width: format!("{:?}", lowered.down_width),
         down_acc_structural_bound: lowered.down_acc_structural_bound,
         i16_bound: 32767,
+        down_delta_structural_bound: lowered.down_delta_structural_bound,
+        i24_delta_bound: gbf_kernel::state_model_ref::DOWN_DELTA_WIDE_BOUND,
         decision_source: "structural per-row worst case over the actual ternary weights \
                           (the f_s5_state_checkpoint_export.v1 manifest declares no measured \
                           activation ranges, so lowering never relies on unmeasured statistics)",
