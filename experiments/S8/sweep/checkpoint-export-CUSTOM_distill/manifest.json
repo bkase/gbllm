@@ -1,0 +1,493 @@
+{
+  "bead": "bd-3771m",
+  "git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
+  "layers": [
+    {
+      "down_scales": "block0_down.scales",
+      "down_shape": [
+        192,
+        384
+      ],
+      "down_ternary": "block0_down.ternary",
+      "index": 0,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block0_up.scales",
+      "up_shape": [
+        384,
+        192
+      ],
+      "up_ternary": "block0_up.ternary"
+    },
+    {
+      "down_scales": "block1_down.scales",
+      "down_shape": [
+        192,
+        384
+      ],
+      "down_ternary": "block1_down.ternary",
+      "index": 1,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block1_up.scales",
+      "up_shape": [
+        384,
+        192
+      ],
+      "up_ternary": "block1_up.ternary"
+    },
+    {
+      "down_scales": "block2_down.scales",
+      "down_shape": [
+        192,
+        384
+      ],
+      "down_ternary": "block2_down.ternary",
+      "index": 2,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block2_up.scales",
+      "up_shape": [
+        384,
+        192
+      ],
+      "up_ternary": "block2_up.ternary"
+    },
+    {
+      "down_scales": "block3_down.scales",
+      "down_shape": [
+        192,
+        384
+      ],
+      "down_ternary": "block3_down.ternary",
+      "index": 3,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block3_up.scales",
+      "up_shape": [
+        384,
+        192
+      ],
+      "up_ternary": "block3_up.ternary"
+    },
+    {
+      "down_scales": "block4_down.scales",
+      "down_shape": [
+        192,
+        384
+      ],
+      "down_ternary": "block4_down.ternary",
+      "index": 4,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block4_up.scales",
+      "up_shape": [
+        384,
+        192
+      ],
+      "up_ternary": "block4_up.ternary"
+    },
+    {
+      "down_scales": "block5_down.scales",
+      "down_shape": [
+        192,
+        384
+      ],
+      "down_ternary": "block5_down.ternary",
+      "index": 5,
+      "kind": "prenorm_residual_ffn",
+      "up_scales": "block5_up.scales",
+      "up_shape": [
+        384,
+        192
+      ],
+      "up_ternary": "block5_up.ternary"
+    }
+  ],
+  "numeric_convention": {
+    "activation_fake_quant": {
+      "format": "Int8_symmetric",
+      "quant_steps": 127,
+      "range_hi": 8.0,
+      "range_lo": -8.0
+    },
+    "block_forward": "x' = x + Down( gelu( Up( actq( rms_norm(x) ) ) ) ); logits = rms_norm(x_final) @ embedding^T",
+    "embedding_dtype": "f32_le",
+    "norm": {
+      "affine_bias": 0.0,
+      "affine_scale": 1.0,
+      "clip_hi": 8.0,
+      "clip_lo": -8.0,
+      "epsilon": 9.999999747378752e-6,
+      "kind": "tile_rms_then_affine_clip(full_vector)"
+    },
+    "weight_encoding": "Ternary2 {-1,0,+1}",
+    "weight_scale": "per_output_row Q8.8 (u16 raw, f32 = raw/256)"
+  },
+  "recurrence_semantics": {
+    "initial_state": "all slots zero at stream start; state persists across tokens (no reset within a document stream)",
+    "integer_note": "decay values {0.5,0.75,0.875,0.9375} are exactly {128,192,224,240}/256, so h*decay is an exact Q8.8 multiply (raw*decay_raw >> 8); the ternary matvecs and Int8 activation grid follow the same numeric convention as the S6 dense export.",
+    "per_token": [
+      "n_t   = clip( x_t / sqrt(mean(x_t^2) + 1e-5), -8, 8 )            # full-vector RMS norm over d_model",
+      "a_t   = actq8(n_t)                                               # Int8 symmetric fake-quant, range [-8, 8], 127 steps",
+      "delta = TernaryMatVec(input_to_state, a_t)                       # {-1,0,+1} weights, per-output-row Q8.8 scale",
+      "h_t[s] = decay[s] * h_{t-1}[s] + delta[s]                        # decay[s] read from state_decay Q8.8 (exact)",
+      "y_t   = actq8( TernaryMatVec(state_to_output, h_t) )",
+      "x'_t  = x_t + y_t                                                # residual around the state block (composer-owned)"
+    ],
+    "then": "x'_t feeds the same 6-block pre-norm residual FFN stack as the S6 dense export (block_forward identical), then logits = rms_norm(x_final) @ embedding^T"
+  },
+  "schema": "f_s5_state_checkpoint_export.v1",
+  "seed": 0,
+  "tensors": [
+    {
+      "dtype": "f32_le",
+      "file": "tensors/embedding.f32.bin",
+      "layout": "row_major",
+      "name": "embedding",
+      "role": "token_embedding_and_tied_head",
+      "sha256": "d088eec8a50ae6b78788e1922627ec130ce21a4b8dd2079a14471cb2bc4a3f2b",
+      "shape": [
+        80,
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/state_input_to_state.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "state_input_to_state.ternary",
+      "role": "linear_state_input_projection_ternary_weights",
+      "sha256": "39d271f80686c9a5441e0f0a0d8090b00eba910cccbeeb7f9e30769b417eef11",
+      "shape": [
+        192,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/state_input_to_state.scales.q8_8_u16le.bin",
+      "name": "state_input_to_state.scales",
+      "role": "linear_state_input_projection_per_output_row_scale",
+      "sha256": "116d67dfc910c82f5ba74354cb108a860bc3aefd0330018028a5b854110af26d",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/state_state_to_output.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "state_state_to_output.ternary",
+      "role": "linear_state_output_projection_ternary_weights",
+      "sha256": "696ab20a771a42835c1e583fa58b6f403d16334743d8b6748cecae7e7b3fc1b9",
+      "shape": [
+        192,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/state_state_to_output.scales.q8_8_u16le.bin",
+      "name": "state_state_to_output.scales",
+      "role": "linear_state_output_projection_per_output_row_scale",
+      "sha256": "313eabac1204d2648ba629a66a9cc8899d6d8d9b1bce51f32342ad0d5c947b64",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block0_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block0_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "61da7ab01600f41e8e4c31496a12467822b8deb2ce79271cd0346cf17232724b",
+      "shape": [
+        384,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_up.scales.q8_8_u16le.bin",
+      "name": "block0_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "dacf358b655ee89248288f9c01dd04e89752fd743a06444cbe5da5781e8e6df1",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block0_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block0_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "1b491c4075ce294d48edca4db5b1911595640538e00ef2aa207abe5eb9862bb5",
+      "shape": [
+        192,
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_down.scales.q8_8_u16le.bin",
+      "name": "block0_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "594395b0ca69ba9534dbe167b1c20b5152610e0fe538e0ea7fdd353b3fc12891",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block1_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block1_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "520ef99eb1c88a67fb5d980ae8892ac72beda4537fc2c1f6742c2d8a9d9a6135",
+      "shape": [
+        384,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_up.scales.q8_8_u16le.bin",
+      "name": "block1_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "ba40b811de79f0b4b2b1a4b5591961ecfa537a3d50fdd3521d4a6832fa87d7e3",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block1_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block1_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "19b5a37ef15cc08112d3112cc5754728293f27e7208a21288a04def898316c0d",
+      "shape": [
+        192,
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_down.scales.q8_8_u16le.bin",
+      "name": "block1_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "81e599ec04491a1c280558b1eb8d522a6c8f400addbdf5b5f5ec6009e4bf2834",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block2_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block2_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "3465c904b6a09c9865927686a8b08e7d2d99ad918b74bf6ac236a16f7b782ae2",
+      "shape": [
+        384,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_up.scales.q8_8_u16le.bin",
+      "name": "block2_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "8719fedf617c9ae7fe711e40c0a5813341eb3862d01f3de6928e7472f60cb045",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block2_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block2_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "db586397e84c0fedd1d26674e53c8751fbc15514fd3909aaa5b34ac4da4d0c24",
+      "shape": [
+        192,
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_down.scales.q8_8_u16le.bin",
+      "name": "block2_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "b1ef7a776c82f20338219c640dca65625dc38b459a66b45b9547b08fa08cd020",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block3_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block3_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "0832d03a80cec9533ee60af6ebbc4ff1ffc2826cad57a4e55306aaa8ec801cbc",
+      "shape": [
+        384,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_up.scales.q8_8_u16le.bin",
+      "name": "block3_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "37faada7c1784ca8c91c115c3f7dcd16e50809bfd081d683fa054f3f5ddae35e",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block3_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block3_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "798a78e8e2fd05e3c867394930e31e39dd24948e7882abea80891e1ff7aaeb9e",
+      "shape": [
+        192,
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_down.scales.q8_8_u16le.bin",
+      "name": "block3_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "f3e9b25a0284d787a5c183bddc33757b33d12a9b17a5e9b60b3451c8ac386e41",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block4_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block4_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "cc6f6d1f3a2bc2063d9b2bccedf6058229d42ddf0a701f129d7403ecde68024a",
+      "shape": [
+        384,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block4_up.scales.q8_8_u16le.bin",
+      "name": "block4_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "3c948797e351f9bd394086d0c223431e06eb724417c21538b6ff4d18c0508003",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block4_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block4_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "5864a8a81d0fc783f79f29094e2c84d6ac20a1983a0a5999cac0ba4a1fca6e0a",
+      "shape": [
+        192,
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block4_down.scales.q8_8_u16le.bin",
+      "name": "block4_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "3f0c272635fe34b0468cfff11c168e8f4bf7c08f2ea70e8fa47cdeda7314dc59",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block5_up.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block5_up.ternary",
+      "role": "up_projection_ternary_weights",
+      "sha256": "f0608de4a0d19d39d3d0d6179f8ae81238ea080eb90e91771c002a9279620f4a",
+      "shape": [
+        384,
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block5_up.scales.q8_8_u16le.bin",
+      "name": "block5_up.scales",
+      "role": "up_projection_per_output_row_scale",
+      "sha256": "7ed57184993e90298e214f6e6912df1ff718b8400c90f04fccfc17225c9283b4",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "i8 (values in {-1,0,1})",
+      "file": "tensors/block5_down.ternary.i8.bin",
+      "layout": "row_major",
+      "name": "block5_down.ternary",
+      "role": "down_projection_ternary_weights",
+      "sha256": "733215f574a2e1b41044c0f69e089319d2fb523d7002e6d520642adfce803ba6",
+      "shape": [
+        192,
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block5_down.scales.q8_8_u16le.bin",
+      "name": "block5_down.scales",
+      "role": "down_projection_per_output_row_scale",
+      "sha256": "bd62ca73c37f94c195265a040e9c70094a0cd8eb91abf34360a81dc9a38bcd14",
+      "shape": [
+        192
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256, exact for MT4 rates)",
+      "file": "tensors/state_decay.q8_8_u16le.bin",
+      "name": "state_decay",
+      "role": "linear_state_per_slot_decay",
+      "sha256": "c4c30a3b7b383417652895d8da827a0a431bb449f5f24d0fd128d87a4cc19664",
+      "shape": [
+        192
+      ]
+    }
+  ],
+  "topology": {
+    "d_ff": 384,
+    "d_model": 192,
+    "family": "linear_state_multi_timescale_then_dense_ffn",
+    "lexical": "charset_v1 (80 ids; ids 0..75 printable incl. newline, 76 reserved, 77 <bos>, 78 <eos>, 79 <unk>)",
+    "moe": false,
+    "n_blocks": 6,
+    "n_experts_per_block": 1,
+    "sequence_state_kind": "linear_state_multi_timescale",
+    "sequence_state_params": {
+      "band_layout": "state_slots partitioned into 4 equal contiguous bands in declaration order; slot s uses decay_rates[s / (state_slots/4)] (gbf_model::sequence::DecayPolicy::decay_for_slot)",
+      "decay_policy": "MultiTimescale",
+      "decay_rates_by_band": [
+        0.5,
+        0.75,
+        0.875,
+        0.9375
+      ],
+      "state_bytes_per_layer": 768,
+      "state_slots": 192
+    },
+    "tied_head": true,
+    "vocab": 80
+  }
+}

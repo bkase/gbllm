@@ -1,5 +1,17 @@
 {
   "arm": "CUSTOM_distill",
+  "checkpoint_export": {
+    "exported": true,
+    "manifest": "experiments/S8/sweep/checkpoint-export-CUSTOM_distill/manifest.json",
+    "n_tensors": 30,
+    "schema": "f_s5_state_checkpoint_export.v1",
+    "verification": {
+      "method": "re-read every tensor file and check manifest sha256; bitwise embedding/decay/router round-trip; per-matrix exact ternary symbol + Q8.8 scale raw agreement; rebuild hard cores from exported bytes alone and compare hard inference_forward on a deterministic probe input",
+      "reload_probe_max_abs_diff": 0.0,
+      "tensors_sha256_checked": 30,
+      "verified": true
+    }
+  },
   "config": {
     "d_ff": 384,
     "d_model": 192,
@@ -17,13 +29,15 @@
           "d_model": 384,
           "description": "fp dense teacher for CUSTOM: 2x width, QAT hardness Off + act passthrough for all steps",
           "eval_pairs": 1042400,
-          "fp_val_bits_per_raw_byte": 2.5713090557876526,
-          "fp_val_bpc_per_normalized_char": 2.58650629977657,
+          "fp_val_bits_per_raw_byte": 2.286768975095475,
+          "fp_val_bpc_per_normalized_char": 2.3002844978532666,
           "n_blocks": 6,
+          "saved_to": "/Users/bkase/Documents/gbllm/experiments/S8/sweep/teacher-CUSTOM",
+          "source": "trained_this_run",
           "state_slots": 384,
-          "steps": 30000,
-          "steps_per_second": 4.195660330792443,
-          "train_wall_clock_seconds": 7150.245166375
+          "steps": 75000,
+          "steps_per_second": 4.253274207577088,
+          "train_wall_clock_seconds": 17633.47396375
         },
         "temperature": 2.0,
         "weight": 0.5
@@ -49,12 +63,12 @@
   "corpus": {
     "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
     "train_bytes_trimmed_at_utf8_boundary": 0,
-    "train_cap_bytes": 268435456,
-    "train_chars_normalized": 264959371,
-    "train_norm_tokens_sha256": "95248297d0e6d237818eb6f4b9113ac4ce453fff9232a749cd9b2b658e89ab8e",
-    "train_prefix_raw_sha256": "f81fe6d97cbfdbd72dc878b6602076c7bfee31f6ea36f0f751babf048c4eeb37",
-    "train_raw_bytes_used": 268435456,
-    "train_unk_count": 747379,
+    "train_cap_bytes": 488636416,
+    "train_chars_normalized": 478858358,
+    "train_norm_tokens_sha256": "d67b0716ed8e270fee0a5c07178fcde10239c0fa0857ac47a74d357c8d2fce86",
+    "train_prefix_raw_sha256": "a539a19a2325b4a476a1f0b95faf4cf5a9767165becef660ea76de772a5aa49e",
+    "train_raw_bytes_used": 488636416,
+    "train_unk_count": 1824029,
     "val_book_ids_used": [
       1017,
       1233,
@@ -104,31 +118,31 @@
     }
   },
   "description": "custom topology from CLI flags",
-  "git_sha": "0efc87b3ac54b6f388022a10526d1bad58a0b614",
+  "git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
   "measurement": {
     "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
     "eval_lanes": 8,
     "eval_pairs": 1042400,
-    "eval_wall_clock_seconds": 229.661312417,
+    "eval_wall_clock_seconds": 232.167970375,
     "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling)",
-    "fp_val_bits_per_raw_byte": 2.717055774578585,
-    "fp_val_bpc_per_normalized_char": 2.7331144274444577,
-    "gap_bpc_per_normalized_char": 0.028513415755194504,
+    "fp_val_bits_per_raw_byte": 2.65956441552134,
+    "fp_val_bpc_per_normalized_char": 2.67528327640115,
+    "gap_bpc_per_normalized_char": 0.10326834254037243,
     "state_block_scalar_parity_max_abs_diff": 5.7220458984375e-6,
     "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
-    "ternary_val_bits_per_raw_byte": 2.74540165726563,
-    "ternary_val_bpc_per_normalized_char": 2.761627843199652
+    "ternary_val_bits_per_raw_byte": 2.7622259958829183,
+    "ternary_val_bpc_per_normalized_char": 2.7785516189415222
   },
   "sample": {
-    "greedy_continuation": " the propert of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the party of the pa",
+    "greedy_continuation": " the streated to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was ",
     "prompt_normalized": "The children walked down to the river in the morning, and",
     "sample_path": "experiments/S8/sweep/sample_CUSTOM_distill.txt"
   },
   "status": "ok",
   "training": {
     "expert_usage_fraction_last_log_window_per_block": null,
-    "final_logged_train_ce_bpc": 2.5867045502015307,
-    "steps_per_second": 4.286216215280644,
-    "train_wall_clock_seconds": 30329.781203417
+    "final_logged_train_ce_bpc": 2.4900908446386425,
+    "steps_per_second": 4.335598072247669,
+    "train_wall_clock_seconds": 29984.329228333
   }
 }

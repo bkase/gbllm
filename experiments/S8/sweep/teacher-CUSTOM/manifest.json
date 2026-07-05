@@ -1,0 +1,502 @@
+{
+  "bead": "bd-3771m",
+  "eval": {
+    "eval_pairs": 1042400,
+    "fp_val_bits_per_raw_byte": 2.286768975095475,
+    "fp_val_bpc_per_normalized_char": 2.3002844978532666,
+    "semantics": "hardness Off + activation fake-quant passthrough (genuine fp)"
+  },
+  "forward_semantics": "genuine full-precision teacher: QAT hardness Off (plain fp linear layers; thresholds/scales saved but unused at Off) + activation fake-quant passthrough; block/state composition identical to the student (see the student checkpoint-export manifest recurrence_semantics)",
+  "git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
+  "schema": "s8_fp_teacher_checkpoint.v1",
+  "seed": 0,
+  "tensors": [
+    {
+      "dtype": "f32_le",
+      "file": "tensors/embedding.f32.bin",
+      "layout": "row_major",
+      "name": "embedding",
+      "role": "token_embedding_and_tied_head",
+      "sha256": "f3d39bda4681f41f4f2dcaf7bd6ba2f596a90e8ac1746c5576870e1c237b63e6",
+      "shape": [
+        80,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/state_input_to_state.weights.f32.bin",
+      "layout": "row_major",
+      "name": "state_input_to_state.weights",
+      "role": "linear_state_input_projection_full_precision_weights",
+      "sha256": "913edd3f9bda0b499c8501cd4bc5aa6df7cf4b704120cc5ff0fb45448d8ff121",
+      "shape": [
+        384,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/state_input_to_state.thresholds.f32.bin",
+      "name": "state_input_to_state.thresholds",
+      "role": "linear_state_input_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/state_input_to_state.scales.q8_8_u16le.bin",
+      "name": "state_input_to_state.scales",
+      "role": "linear_state_input_projection_per_output_row_scale_trained",
+      "sha256": "254e8d8bd8f2bc40b55e90f21dfbdfadb97f8513c96e2411c0ef4e75a3e56c67",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/state_state_to_output.weights.f32.bin",
+      "layout": "row_major",
+      "name": "state_state_to_output.weights",
+      "role": "linear_state_output_projection_full_precision_weights",
+      "sha256": "ce0170f4e8328adb775baa420da931f4ed86a176f7804294aaf4cf8ad317910f",
+      "shape": [
+        384,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/state_state_to_output.thresholds.f32.bin",
+      "name": "state_state_to_output.thresholds",
+      "role": "linear_state_output_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/state_state_to_output.scales.q8_8_u16le.bin",
+      "name": "state_state_to_output.scales",
+      "role": "linear_state_output_projection_per_output_row_scale_trained",
+      "sha256": "eea817e6b46f971f042a9a7b03797e8e9f3f39502a00cfaba5e6b9a4512cbac5",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block0_up.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block0_up.weights",
+      "role": "up_projection_full_precision_weights",
+      "sha256": "ebf495e22d82968f5264182a9db3d2293e7391ed54bcc791fff23f82af565533",
+      "shape": [
+        768,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block0_up.thresholds.f32.bin",
+      "name": "block0_up.thresholds",
+      "role": "up_projection_ternary_thresholds_trained",
+      "sha256": "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_up.scales.q8_8_u16le.bin",
+      "name": "block0_up.scales",
+      "role": "up_projection_per_output_row_scale_trained",
+      "sha256": "00b7b89bb8e941b1f85e056b2cfd13c3924a87d5b4274eb8f4be5d721ea7db4c",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block0_down.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block0_down.weights",
+      "role": "down_projection_full_precision_weights",
+      "sha256": "9256be5a8fd576f4882e45835f8b7d603c9998680f533d690a0e5f95edd92007",
+      "shape": [
+        384,
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block0_down.thresholds.f32.bin",
+      "name": "block0_down.thresholds",
+      "role": "down_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block0_down.scales.q8_8_u16le.bin",
+      "name": "block0_down.scales",
+      "role": "down_projection_per_output_row_scale_trained",
+      "sha256": "019aa9f53da4a5a565762f63ac5d647522c17cf1ef7a646cae39146589ece832",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block1_up.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block1_up.weights",
+      "role": "up_projection_full_precision_weights",
+      "sha256": "8af6f67b84e6988fceb6095b16e21d895b587a2e5da2054b6497a51fd2cd8fdc",
+      "shape": [
+        768,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block1_up.thresholds.f32.bin",
+      "name": "block1_up.thresholds",
+      "role": "up_projection_ternary_thresholds_trained",
+      "sha256": "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_up.scales.q8_8_u16le.bin",
+      "name": "block1_up.scales",
+      "role": "up_projection_per_output_row_scale_trained",
+      "sha256": "dbdc8eb01ea4293cb7da68d92bbbdab5956a927b9dbe9f5e3fb73ae5038c40f7",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block1_down.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block1_down.weights",
+      "role": "down_projection_full_precision_weights",
+      "sha256": "766356e3b19bf0b8f7bfb6f39bf5081249130e3dac64b256ea0901465c320544",
+      "shape": [
+        384,
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block1_down.thresholds.f32.bin",
+      "name": "block1_down.thresholds",
+      "role": "down_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block1_down.scales.q8_8_u16le.bin",
+      "name": "block1_down.scales",
+      "role": "down_projection_per_output_row_scale_trained",
+      "sha256": "018887899eb417415a74aa2a620cd67d8d796cb48ff8a766f41c2e1a643317e7",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block2_up.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block2_up.weights",
+      "role": "up_projection_full_precision_weights",
+      "sha256": "4e6e278751c18fc5fa5daf63962165962cf3d2df90649726cad2d99e936443e3",
+      "shape": [
+        768,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block2_up.thresholds.f32.bin",
+      "name": "block2_up.thresholds",
+      "role": "up_projection_ternary_thresholds_trained",
+      "sha256": "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_up.scales.q8_8_u16le.bin",
+      "name": "block2_up.scales",
+      "role": "up_projection_per_output_row_scale_trained",
+      "sha256": "71bde571bbb25bcd5cb4eced5a17b797b6b066d3f78fb7692c2c320ebe3ab4a1",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block2_down.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block2_down.weights",
+      "role": "down_projection_full_precision_weights",
+      "sha256": "2e3b7465e8f3fabfe7288aa060541371b00d971eb2548445187b28497672f63e",
+      "shape": [
+        384,
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block2_down.thresholds.f32.bin",
+      "name": "block2_down.thresholds",
+      "role": "down_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block2_down.scales.q8_8_u16le.bin",
+      "name": "block2_down.scales",
+      "role": "down_projection_per_output_row_scale_trained",
+      "sha256": "44c692614ef128162028adc10385ee53db527dd2b4f887e92fe25e6999767c33",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block3_up.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block3_up.weights",
+      "role": "up_projection_full_precision_weights",
+      "sha256": "91c0b6baa07534b392c96bfdea0ac16ca7856d7af88ae533eb8673f24dad6f80",
+      "shape": [
+        768,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block3_up.thresholds.f32.bin",
+      "name": "block3_up.thresholds",
+      "role": "up_projection_ternary_thresholds_trained",
+      "sha256": "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_up.scales.q8_8_u16le.bin",
+      "name": "block3_up.scales",
+      "role": "up_projection_per_output_row_scale_trained",
+      "sha256": "b2368381308d8b567d8f82089d8c98a38e8ff27a456a3ef0be9d4bd86e5e8413",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block3_down.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block3_down.weights",
+      "role": "down_projection_full_precision_weights",
+      "sha256": "1da862e78c86ad98ea3ebc012aafb2f2ad1a638d56055b19a19e4cfc65e17abf",
+      "shape": [
+        384,
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block3_down.thresholds.f32.bin",
+      "name": "block3_down.thresholds",
+      "role": "down_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block3_down.scales.q8_8_u16le.bin",
+      "name": "block3_down.scales",
+      "role": "down_projection_per_output_row_scale_trained",
+      "sha256": "fe80784cb42a018cae8afab8cf9a6e4094314a79a95b81613dca9836fcd4d1b2",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block4_up.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block4_up.weights",
+      "role": "up_projection_full_precision_weights",
+      "sha256": "54147a7f3c13d4a8de03e21734eebb219516b4aa7e2b8362054d743796f02ece",
+      "shape": [
+        768,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block4_up.thresholds.f32.bin",
+      "name": "block4_up.thresholds",
+      "role": "up_projection_ternary_thresholds_trained",
+      "sha256": "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block4_up.scales.q8_8_u16le.bin",
+      "name": "block4_up.scales",
+      "role": "up_projection_per_output_row_scale_trained",
+      "sha256": "8118870562317cc5cde7f1654ff02f9522edbed9ddb05332bbb12711e339948b",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block4_down.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block4_down.weights",
+      "role": "down_projection_full_precision_weights",
+      "sha256": "958c009a91cea5e20557142f80784386f734dafa9e36b65d226da6b06fe7ae6b",
+      "shape": [
+        384,
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block4_down.thresholds.f32.bin",
+      "name": "block4_down.thresholds",
+      "role": "down_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block4_down.scales.q8_8_u16le.bin",
+      "name": "block4_down.scales",
+      "role": "down_projection_per_output_row_scale_trained",
+      "sha256": "c1494249a2d5451571680ef35b6cdc75a35e25aa736fe297dbbb169e9bba2cec",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block5_up.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block5_up.weights",
+      "role": "up_projection_full_precision_weights",
+      "sha256": "e96409af8d24da11ed092f091c4d75681bfb425671cf12c57a4c8bfbbdff6b0f",
+      "shape": [
+        768,
+        384
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block5_up.thresholds.f32.bin",
+      "name": "block5_up.thresholds",
+      "role": "up_projection_ternary_thresholds_trained",
+      "sha256": "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block5_up.scales.q8_8_u16le.bin",
+      "name": "block5_up.scales",
+      "role": "up_projection_per_output_row_scale_trained",
+      "sha256": "cfbc365d4e51ea852e1f08b3bc171c36ced751222594ec42258dd9ccb3947039",
+      "shape": [
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block5_down.weights.f32.bin",
+      "layout": "row_major",
+      "name": "block5_down.weights",
+      "role": "down_projection_full_precision_weights",
+      "sha256": "73ec0c57a4b16637fc21c290e9f367ad5379d36576de716a8eb01e5815c448fe",
+      "shape": [
+        384,
+        768
+      ]
+    },
+    {
+      "dtype": "f32_le",
+      "file": "tensors/block5_down.thresholds.f32.bin",
+      "name": "block5_down.thresholds",
+      "role": "down_projection_ternary_thresholds_trained",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+      "shape": [
+        384
+      ]
+    },
+    {
+      "dtype": "u16_le (Q8.8 fixed-point; f32 = raw/256)",
+      "file": "tensors/block5_down.scales.q8_8_u16le.bin",
+      "name": "block5_down.scales",
+      "role": "down_projection_per_output_row_scale_trained",
+      "sha256": "10e0762168af3113836b390e34e6b96a369756664958edfa45171f686fb5e143",
+      "shape": [
+        384
+      ]
+    }
+  ],
+  "topology": {
+    "d_ff": 768,
+    "d_model": 384,
+    "decay_rates_by_band": [
+      0.5,
+      0.75,
+      0.875,
+      0.9375
+    ],
+    "description": "fp dense teacher for CUSTOM: 2x width, QAT hardness Off + act passthrough for all steps",
+    "family": "linear_state_multi_timescale_then_dense_ffn",
+    "n_blocks": 6,
+    "state_slots": 384,
+    "tied_head": true,
+    "vocab": 80
+  },
+  "training": {
+    "final_logged_train_ce_bpc": 2.0604534943298503,
+    "lanes": 4,
+    "lr": 0.01,
+    "seq_len": 128,
+    "steps": 75000,
+    "steps_per_second": 4.253274207577088,
+    "tokens_per_step": 512,
+    "train_cap_bytes": 488636416,
+    "train_wall_clock_seconds": 17633.47396375
+  }
+}
