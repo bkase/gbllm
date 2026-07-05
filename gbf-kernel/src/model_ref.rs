@@ -132,11 +132,13 @@ impl TernaryLayer {
     }
 
     /// `-128 * sum(row)` — the u8 zero-point correction folded into the
-    /// accumulator seed (pinned v0 contract).
+    /// accumulator seed (pinned v0 contract). i32: at fan-in past 256 the
+    /// raw bias can escape i16; the device seed is taken mod 2^16, which is
+    /// exact whenever the true accumulator fits the carrier width.
     #[must_use]
-    pub fn row_zero_point_bias(&self, row: usize) -> i16 {
+    pub fn row_zero_point_bias(&self, row: usize) -> i32 {
         let sum: i32 = self.row(row).iter().map(|&w| i32::from(w)).sum();
-        i16::try_from(-128 * sum).expect("|sum(row)| <= cols <= 128 so bias fits i16")
+        -128 * sum
     }
 
     /// Fraction of zero weights in permille (reporting only).
@@ -363,8 +365,9 @@ pub(crate) fn build_gelu_lut() -> [u8; 255] {
 #[derive(Debug, Clone)]
 pub struct LoweredLayer {
     pub layer: TernaryLayer,
-    /// Per-row `-128 * sum(row)` accumulator seeds.
-    pub biases: Vec<i16>,
+    /// Per-row `-128 * sum(row)` accumulator seeds (i32 carrier; device
+    /// i16 chunks embed them mod 2^16, exact when the true value fits i16).
+    pub biases: Vec<i32>,
 }
 
 impl LoweredLayer {
@@ -640,7 +643,7 @@ pub fn int_norm_quant(x: &[i16; D_MODEL], stats: &mut IntForwardStats) -> [i16; 
 /// bound on the true accumulator value.
 pub(crate) fn int_matvec(
     layer: &TernaryLayer,
-    biases: &[i16],
+    biases: &[i32],
     act: &[u8],
     out: &mut [i16],
     stats: &mut IntForwardStats,
@@ -648,13 +651,14 @@ pub(crate) fn int_matvec(
     debug_assert_eq!(act.len(), layer.cols());
     debug_assert_eq!(out.len(), layer.rows());
     for (row, out_v) in out.iter_mut().enumerate() {
-        let mut acc: i32 = i32::from(biases[row]);
+        let mut acc: i32 = biases[row];
         for (w, u) in layer.row(row).iter().zip(act.iter()) {
             acc += i32::from(*w) * i32::from(*u);
         }
         assert!(
             (-32768..=32767).contains(&acc),
-            "matvec accumulator {acc} escapes i16 (structurally impossible for fan-in <= 128)"
+            "matvec accumulator {acc} escapes i16 (the lowering's structural row bound \
+             guarantees this for every layer routed to the i16 path)"
         );
         stats.max_abs_matvec_acc = stats.max_abs_matvec_acc.max(acc.unsigned_abs());
         *out_v = acc as i16;

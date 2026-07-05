@@ -71,12 +71,12 @@ use gbf_asm::isa::{AluSrc8, BitIndex, CbTarget, Cond, HighDirectOffset, Instr, R
 use gbf_asm::rom::{ENTRY_POINT, RomSize};
 
 use crate::asm_impl_model::{
-    BANK_BYTES, CHUNK_ENTRY, MBC5_ROMB0, ModelAsm, ModelRomError, a_from, a_to, ld_r_imm, ld_rr,
-    ld16,
+    BANK_BYTES, CHUNK_ENTRY, ModelAsm, ModelRomError, a_from, a_to, ld_r_imm, ld_rr, ld16,
 };
 use crate::asm_impl_state::{
-    S_INPUT_ADDR, S_OUT_BASE, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP, S_STATE_BASE,
-    assemble_state_rom, emit_state_forward_body, emit_state_routines_and_tables, plan_state_rom,
+    S_INPUT_ADDR, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP, ShellWram, StateWramLayout,
+    assemble_state_rom, emit_state_forward_body, emit_state_routines_and_tables, emit_zero16,
+    plan_state_rom, set_bank,
 };
 use crate::state_model_ref::IntStateLoweredModel;
 
@@ -84,32 +84,8 @@ use crate::state_model_ref::IntStateLoweredModel;
 // WRAM map (shell-owned block; disjoint from every stateful-ROM buffer)
 // ---------------------------------------------------------------------------
 
-/// Prompt buffer (charset ids), [`SHELL_PROMPT_CAP`] bytes. The base is
-/// page-aligned so `lo(addr) == index`.
-pub const SH_PROMPT_BASE: u16 = 0xD400;
 /// Maximum prompt length (one BG row).
 pub const SHELL_PROMPT_CAP: u8 = 20;
-/// Current prompt length.
-pub const SH_PLEN_ADDR: u16 = 0xD418;
-/// Submit flag (set by START, consumed by the control loop).
-pub const SH_SUBMIT_ADDR: u16 = 0xD419;
-/// Keyboard cursor cell index (0..=75; cell index == charset id).
-pub const SH_KBCUR_ADDR: u16 = 0xD41A;
-/// Joypad state, active-high (this frame / previous frame).
-pub const SH_JOY_CUR_ADDR: u16 = 0xD41B;
-pub const SH_JOY_PREV_ADDR: u16 = 0xD41C;
-/// Warmup index over the prompt.
-pub const SH_WIDX_ADDR: u16 = 0xD41D;
-/// Tokens generated in the current run.
-pub const SH_GCOUNT_ADDR: u16 = 0xD41E;
-/// Transcript cell cursor (0..=200).
-pub const SH_TCUR_ADDR: u16 = 0xD41F;
-/// Set when the transcript region filled (ends the run).
-pub const SH_TFULL_ADDR: u16 = 0xD420;
-/// UI scratch (row counter for multi-VBlank clears).
-pub const SH_UI_ROW_ADDR: u16 = 0xD421;
-/// End of the zero-initialized shell WRAM block `[SH_PROMPT_BASE, ..)`.
-pub const SH_WRAM_END: u16 = 0xD430;
 
 // ---------------------------------------------------------------------------
 // screen geometry and tile mapping
@@ -168,6 +144,7 @@ const BGP_STANDARD: u8 = 0xE4;
 #[derive(Debug, Clone)]
 pub struct ShellRom {
     pub rom: Vec<u8>,
+    pub layout: StateWramLayout,
     /// Idle input loop head; hit exactly once per polled frame.
     pub idle_pc: u16,
     /// Hit once per prompt char after its warmup forward pass.
@@ -240,10 +217,10 @@ fn emit_ui_wait_vbl(asm: &mut ModelAsm) {
 /// active-high WRAM cache (flat port of the M0 runtime joypad reader:
 /// directions into bits 4..=7, buttons into bits 0..=3, double-read
 /// debounce, both select lines released afterwards).
-fn emit_ui_joypad(asm: &mut ModelAsm) {
+fn emit_ui_joypad(asm: &mut ModelAsm, sh: &ShellWram) {
     asm.label("ui_joypad");
-    a_from(asm, SH_JOY_CUR_ADDR);
-    a_to(asm, SH_JOY_PREV_ADDR);
+    a_from(asm, sh.joy_cur);
+    a_to(asm, sh.joy_prev);
     // directions column
     ld_r_imm(asm, Reg8::A, 0x20);
     ldh_a_to(asm, IO_JOYP);
@@ -273,7 +250,7 @@ fn emit_ui_joypad(asm: &mut ModelAsm) {
         src: AluSrc8::Reg(Reg8::B),
     });
     asm.i(Instr::Cpl);
-    a_to(asm, SH_JOY_CUR_ADDR);
+    a_to(asm, sh.joy_cur);
     ld_r_imm(asm, Reg8::A, 0x30);
     ldh_a_to(asm, IO_JOYP);
     asm.i(Instr::Ret { cond: None });
@@ -366,10 +343,10 @@ fn emit_ui_cell_addr(asm: &mut ModelAsm) {
 
 /// `ui_kb_move`: E = old cell index, C = new cell index. Re-draws the old
 /// key normal and the new key inverted, and stores the new cursor.
-fn emit_ui_kb_move(asm: &mut ModelAsm) {
+fn emit_ui_kb_move(asm: &mut ModelAsm, sh: &ShellWram) {
     asm.label("ui_kb_move");
     ld_rr(asm, Reg8::A, Reg8::C);
-    a_to(asm, SH_KBCUR_ADDR);
+    a_to(asm, sh.kbcur);
     ld_rr(asm, Reg8::A, Reg8::E);
     asm.call("ui_kb_addr");
     asm.i(Instr::Ld8HlFromReg { src: Reg8::E });
@@ -386,16 +363,16 @@ fn emit_ui_kb_move(asm: &mut ModelAsm) {
 /// `ui_frame`: one idle-loop frame — VBlank edge, joypad poll, then the
 /// keyboard step (cursor moves, type, backspace, submit). All BG writes
 /// happen right after the VBlank edge, well inside the VBlank window.
-fn emit_ui_frame(asm: &mut ModelAsm) {
+fn emit_ui_frame(asm: &mut ModelAsm, sh: &ShellWram) {
     let prompt_bg = BG_MAP_BASE + u16::from(PROMPT_ROW) * BG_MAP_STRIDE; // 0x9960
     asm.label("ui_frame");
     asm.call("ui_wait_vbl");
     asm.call("ui_joypad");
     // D = newly pressed = CUR & !PREV
-    a_from(asm, SH_JOY_PREV_ADDR);
+    a_from(asm, sh.joy_prev);
     asm.i(Instr::Cpl);
     ld_rr(asm, Reg8::B, Reg8::A);
-    a_from(asm, SH_JOY_CUR_ADDR);
+    a_from(asm, sh.joy_cur);
     asm.i(Instr::AndA {
         src: AluSrc8::Reg(Reg8::B),
     });
@@ -407,7 +384,7 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
         src: AluSrc8::Imm(0x80),
     });
     asm.jr(Some(Cond::Z), "uf_no_r");
-    a_from(asm, SH_KBCUR_ADDR);
+    a_from(asm, sh.kbcur);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(KB_CELLS - 1),
     });
@@ -426,7 +403,7 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
         src: AluSrc8::Imm(0x40),
     });
     asm.jr(Some(Cond::Z), "uf_no_l");
-    a_from(asm, SH_KBCUR_ADDR);
+    a_from(asm, sh.kbcur);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -445,7 +422,7 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
         src: AluSrc8::Imm(0x10),
     });
     asm.jr(Some(Cond::Z), "uf_no_u");
-    a_from(asm, SH_KBCUR_ADDR);
+    a_from(asm, sh.kbcur);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(KB_COLS),
     });
@@ -464,7 +441,7 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
         src: AluSrc8::Imm(0x20),
     });
     asm.jr(Some(Cond::Z), "uf_no_d");
-    a_from(asm, SH_KBCUR_ADDR);
+    a_from(asm, sh.kbcur);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(KB_CELLS - KB_COLS),
     });
@@ -483,16 +460,16 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
         src: AluSrc8::Imm(0x01),
     });
     asm.jr(Some(Cond::Z), "uf_no_a");
-    a_from(asm, SH_PLEN_ADDR);
+    a_from(asm, sh.plen);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(SHELL_PROMPT_CAP),
     });
     asm.jr(Some(Cond::NC), "uf_no_a");
     ld_rr(asm, Reg8::C, Reg8::A); // C = plen
-    a_from(asm, SH_KBCUR_ADDR);
+    a_from(asm, sh.kbcur);
     ld_rr(asm, Reg8::E, Reg8::A); // E = id
-    // prompt[plen] = id  (SH_PROMPT_BASE low byte is 0x00)
-    ld_r_imm(asm, Reg8::H, (SH_PROMPT_BASE >> 8) as u8);
+    // prompt[plen] = id  (sh.prompt low byte is 0x00)
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
     ld_rr(asm, Reg8::L, Reg8::C);
     asm.i(Instr::Ld8HlFromReg { src: Reg8::E });
     // echo to the prompt row
@@ -507,7 +484,7 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
     asm.i(Instr::Inc8 {
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
     });
-    a_to(asm, SH_PLEN_ADDR);
+    a_to(asm, sh.plen);
     asm.label("uf_no_a");
 
     // B (bit 1): backspace
@@ -516,7 +493,7 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
         src: AluSrc8::Imm(0x02),
     });
     asm.jr(Some(Cond::Z), "uf_no_b");
-    a_from(asm, SH_PLEN_ADDR);
+    a_from(asm, sh.plen);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -524,7 +501,7 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
     asm.i(Instr::Dec8 {
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
     });
-    a_to(asm, SH_PLEN_ADDR);
+    a_to(asm, sh.plen);
     asm.i(Instr::AddA {
         src: AluSrc8::Imm((prompt_bg & 0xFF) as u8),
     });
@@ -542,20 +519,20 @@ fn emit_ui_frame(asm: &mut ModelAsm) {
     });
     asm.jr(Some(Cond::Z), "uf_no_s");
     ld_r_imm(asm, Reg8::A, 1);
-    a_to(asm, SH_SUBMIT_ADDR);
+    a_to(asm, sh.submit);
     asm.label("uf_no_s");
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `ui_warm_mark`: highlight (invert) prompt char [`SH_WIDX_ADDR`] on the
+/// `ui_warm_mark`: highlight (invert) prompt char [`sh.widx`] on the
 /// prompt row — the warmup progress affordance.
-fn emit_ui_warm_mark(asm: &mut ModelAsm) {
+fn emit_ui_warm_mark(asm: &mut ModelAsm, sh: &ShellWram) {
     let prompt_bg = BG_MAP_BASE + u16::from(PROMPT_ROW) * BG_MAP_STRIDE;
     asm.label("ui_warm_mark");
     asm.call("ui_wait_vbl");
-    a_from(asm, SH_WIDX_ADDR);
+    a_from(asm, sh.widx);
     ld_rr(asm, Reg8::C, Reg8::A);
-    ld_r_imm(asm, Reg8::H, (SH_PROMPT_BASE >> 8) as u8);
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
     ld_rr(asm, Reg8::L, Reg8::C);
     asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
     asm.i(Instr::AddA {
@@ -575,9 +552,9 @@ fn emit_ui_warm_mark(asm: &mut ModelAsm) {
 /// `ui_render_token`: render the sampled id at the transcript cursor. A
 /// newline id erases the block cursor and advances to the next row start;
 /// any other id writes its glyph and advances one cell. If the region is
-/// now full, [`SH_TFULL_ADDR`] is set; otherwise the block cursor is drawn
+/// now full, [`sh.tfull`] is set; otherwise the block cursor is drawn
 /// at the new cell.
-fn emit_ui_render_token(asm: &mut ModelAsm) {
+fn emit_ui_render_token(asm: &mut ModelAsm, sh: &ShellWram) {
     asm.label("ui_render_token");
     asm.call("ui_wait_vbl");
     a_from(asm, S_SAMPLED_ADDR);
@@ -586,23 +563,23 @@ fn emit_ui_render_token(asm: &mut ModelAsm) {
     });
     asm.jr(Some(Cond::Z), "urt_nl");
     ld_rr(asm, Reg8::E, Reg8::A);
-    a_from(asm, SH_TCUR_ADDR);
+    a_from(asm, sh.tcur);
     asm.call("ui_cell_addr");
     asm.i(Instr::Ld8HlFromReg { src: Reg8::E });
-    a_from(asm, SH_TCUR_ADDR);
+    a_from(asm, sh.tcur);
     asm.i(Instr::Inc8 {
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
     });
-    a_to(asm, SH_TCUR_ADDR);
+    a_to(asm, sh.tcur);
     asm.jr(None, "urt_after");
     asm.label("urt_nl");
-    a_from(asm, SH_TCUR_ADDR);
+    a_from(asm, sh.tcur);
     asm.call("ui_cell_addr");
     asm.i(Instr::Ld8HlFromImm {
         imm: SHELL_SPACE_ID,
     });
     // new cell = (row + 1) * 20
-    a_from(asm, SH_TCUR_ADDR);
+    a_from(asm, sh.tcur);
     ld_r_imm(asm, Reg8::B, 0);
     asm.label("urt_div");
     asm.i(Instr::CpA {
@@ -637,18 +614,18 @@ fn emit_ui_render_token(asm: &mut ModelAsm) {
     asm.i(Instr::AddA {
         src: AluSrc8::Reg(Reg8::A),
     }); // *20
-    a_to(asm, SH_TCUR_ADDR);
+    a_to(asm, sh.tcur);
     asm.label("urt_after");
-    a_from(asm, SH_TCUR_ADDR);
+    a_from(asm, sh.tcur);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(TRANSCRIPT_CELLS),
     });
     asm.jr(Some(Cond::C), "urt_nf");
     ld_r_imm(asm, Reg8::A, 1);
-    a_to(asm, SH_TFULL_ADDR);
+    a_to(asm, sh.tfull);
     asm.i(Instr::Ret { cond: None });
     asm.label("urt_nf");
-    a_from(asm, SH_TCUR_ADDR);
+    a_from(asm, sh.tcur);
     asm.call("ui_cell_addr");
     asm.i(Instr::Ld8HlFromImm {
         imm: SHELL_CURSOR_TILE,
@@ -659,7 +636,7 @@ fn emit_ui_render_token(asm: &mut ModelAsm) {
 /// `ui_gen_begin`: show the "GENERATING" message, clear the transcript
 /// region (one row per VBlank), reset the transcript cursor, and draw the
 /// block cursor at cell 0.
-fn emit_ui_gen_begin(asm: &mut ModelAsm) {
+fn emit_ui_gen_begin(asm: &mut ModelAsm, sh: &ShellWram) {
     let msg_bg = BG_MAP_BASE + u16::from(MSG_ROW) * BG_MAP_STRIDE;
     asm.label("ui_gen_begin");
     asm.call("ui_wait_vbl");
@@ -682,10 +659,10 @@ fn emit_ui_gen_begin(asm: &mut ModelAsm) {
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    a_to(asm, SH_UI_ROW_ADDR);
+    a_to(asm, sh.ui_row);
     asm.label("ugb_row");
     asm.call("ui_wait_vbl");
-    a_from(asm, SH_UI_ROW_ADDR);
+    a_from(asm, sh.ui_row);
     for _ in 0..4 {
         asm.i(Instr::AddA {
             src: AluSrc8::Reg(Reg8::A),
@@ -710,11 +687,11 @@ fn emit_ui_gen_begin(asm: &mut ModelAsm) {
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
     });
     asm.jr(Some(Cond::NZ), "ugb_fill");
-    a_from(asm, SH_UI_ROW_ADDR);
+    a_from(asm, sh.ui_row);
     asm.i(Instr::Inc8 {
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
     });
-    a_to(asm, SH_UI_ROW_ADDR);
+    a_to(asm, sh.ui_row);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(TRANSCRIPT_ROWS),
     });
@@ -723,8 +700,8 @@ fn emit_ui_gen_begin(asm: &mut ModelAsm) {
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    a_to(asm, SH_TCUR_ADDR);
-    a_to(asm, SH_TFULL_ADDR);
+    a_to(asm, sh.tcur);
+    a_to(asm, sh.tfull);
     asm.call("ui_wait_vbl");
     ld16(asm, Reg16Data::HL, BG_MAP_BASE);
     asm.i(Instr::Ld8HlFromImm {
@@ -735,7 +712,7 @@ fn emit_ui_gen_begin(asm: &mut ModelAsm) {
 
 /// `ui_gen_end`: clear the "GENERATING" message and the prompt row, and
 /// reset the prompt length for the next entry.
-fn emit_ui_gen_end(asm: &mut ModelAsm) {
+fn emit_ui_gen_end(asm: &mut ModelAsm, sh: &ShellWram) {
     let msg_bg = BG_MAP_BASE + u16::from(MSG_ROW) * BG_MAP_STRIDE;
     let prompt_bg = BG_MAP_BASE + u16::from(PROMPT_ROW) * BG_MAP_STRIDE;
     asm.label("ui_gen_end");
@@ -764,14 +741,14 @@ fn emit_ui_gen_end(asm: &mut ModelAsm) {
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    a_to(asm, SH_PLEN_ADDR);
+    a_to(asm, sh.plen);
     asm.i(Instr::Ret { cond: None });
 }
 
 /// `ui_init`: LCD off (from inside VBlank), palette/scroll setup, font tile
 /// upload (normal to 0x8000, inverted to 0x8800), full BG-map clear,
 /// keyboard grid + status row + initial cursor, then LCD on.
-fn emit_ui_init(asm: &mut ModelAsm) {
+fn emit_ui_init(asm: &mut ModelAsm, sh: &ShellWram) {
     let status_bg = BG_MAP_BASE + u16::from(STATUS_ROW) * BG_MAP_STRIDE;
     asm.label("ui_init");
     asm.call("ui_wait_vbl");
@@ -868,7 +845,7 @@ fn emit_ui_init(asm: &mut ModelAsm) {
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    a_to(asm, SH_KBCUR_ADDR);
+    a_to(asm, sh.kbcur);
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -884,20 +861,20 @@ fn emit_ui_init(asm: &mut ModelAsm) {
 
 /// Build the UI bank image (routines + font + text data) and return its
 /// bytes plus the entry addresses bank-0 code calls.
-fn build_ui_bank(font_tiles: &[u8]) -> Result<(Vec<u8>, UiEntries), ModelRomError> {
+fn build_ui_bank(font_tiles: &[u8], sh: &ShellWram) -> Result<(Vec<u8>, UiEntries), ModelRomError> {
     debug_assert_eq!(font_tiles.len(), SHELL_FONT_BYTES);
     let mut asm = ModelAsm::new(CHUNK_ENTRY);
-    emit_ui_init(&mut asm);
-    emit_ui_frame(&mut asm);
-    emit_ui_warm_mark(&mut asm);
-    emit_ui_render_token(&mut asm);
-    emit_ui_gen_begin(&mut asm);
-    emit_ui_gen_end(&mut asm);
+    emit_ui_init(&mut asm, sh);
+    emit_ui_frame(&mut asm, sh);
+    emit_ui_warm_mark(&mut asm, sh);
+    emit_ui_render_token(&mut asm, sh);
+    emit_ui_gen_begin(&mut asm, sh);
+    emit_ui_gen_end(&mut asm, sh);
     emit_ui_wait_vbl(&mut asm);
-    emit_ui_joypad(&mut asm);
+    emit_ui_joypad(&mut asm, sh);
     emit_ui_kb_addr(&mut asm);
     emit_ui_cell_addr(&mut asm);
-    emit_ui_kb_move(&mut asm);
+    emit_ui_kb_move(&mut asm, sh);
     asm.label("shell_font");
     asm.bytes(font_tiles.to_vec());
     asm.label("shell_status_txt");
@@ -953,15 +930,17 @@ pub fn build_state_shell_rom(
         });
     }
 
-    let plan = plan_state_rom(model, 1)?;
-    let ui_bank = plan.head_bank + 1;
-    let ui_bank_u8 = ui_bank as u8;
-    let (ui_bytes, ui) = build_ui_bank(font_tiles)?;
+    let layout = StateWramLayout::plan(model.topology, model.down_width, true)?;
+    let sh = layout
+        .shell
+        .expect("shell layout allocates the shell block");
+    let plan = plan_state_rom(model, layout, 1)?;
+    let ui_bank = plan.head_bank0 + plan.head_groups.len();
+    let (ui_bytes, ui) = build_ui_bank(font_tiles, &sh)?;
     let ui_bank_bytes = ui_bytes.len();
 
     let map_ui = |asm: &mut ModelAsm| {
-        ld_r_imm(asm, Reg8::A, ui_bank_u8);
-        a_to(asm, MBC5_ROMB0);
+        set_bank(asm, ui_bank as u16);
     };
     let call_abs = |asm: &mut ModelAsm, addr: u16| {
         asm.i(Instr::Call { cond: None, addr });
@@ -972,8 +951,8 @@ pub fn build_state_shell_rom(
     asm.i(Instr::Di);
     ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
     // zero the shell WRAM block
-    ld16(&mut asm, Reg16Data::HL, SH_PROMPT_BASE);
-    ld_r_imm(&mut asm, Reg8::B, (SH_WRAM_END - SH_PROMPT_BASE) as u8);
+    ld16(&mut asm, Reg16Data::HL, sh.prompt);
+    ld_r_imm(&mut asm, Reg8::B, (sh.end - sh.prompt) as u8);
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -993,7 +972,7 @@ pub fn build_state_shell_rom(
     asm.label("shell_idle");
     map_ui(&mut asm);
     call_abs(&mut asm, ui.frame);
-    a_from(&mut asm, SH_SUBMIT_ADDR);
+    a_from(&mut asm, sh.submit);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -1001,8 +980,8 @@ pub fn build_state_shell_rom(
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    a_to(&mut asm, SH_SUBMIT_ADDR);
-    a_from(&mut asm, SH_PLEN_ADDR);
+    a_to(&mut asm, sh.submit);
+    a_from(&mut asm, sh.plen);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -1010,21 +989,13 @@ pub fn build_state_shell_rom(
 
     // --- generation run ---
     call_abs(&mut asm, ui.gen_begin); // UI bank still mapped
-    // zero the recurrent state (256 bytes; trained initial-state contract,
-    // fresh context per submit)
-    ld16(&mut asm, Reg16Data::HL, S_STATE_BASE);
-    ld_r_imm(&mut asm, Reg8::B, 0);
-    asm.i(Instr::XorA {
-        src: AluSrc8::Reg(Reg8::A),
-    });
-    asm.label("sh_zstate");
-    asm.i(Instr::LdReg16AddrFromA {
-        dst: gbf_asm::isa::Reg16Addr::Hli,
-    });
-    asm.i(Instr::Dec8 {
-        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
-    });
-    asm.jr(Some(Cond::NZ), "sh_zstate");
+    // zero the recurrent state (trained initial-state contract, fresh
+    // context per submit)
+    emit_zero16(
+        &mut asm,
+        plan.layout.state,
+        (4 * plan.layout.topology.state_slots) as u16,
+    );
     // canonicalize the RNG seed (0 -> 1, decode contract); otherwise the
     // XorShift16 state carries across runs within a session
     a_from(&mut asm, S_RNG_ADDR);
@@ -1042,24 +1013,24 @@ pub fn build_state_shell_rom(
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    a_to(&mut asm, SH_WIDX_ADDR);
+    a_to(&mut asm, sh.widx);
     asm.label("sh_warm_loop");
-    a_from(&mut asm, SH_WIDX_ADDR);
+    a_from(&mut asm, sh.widx);
     ld_rr(&mut asm, Reg8::L, Reg8::A);
-    ld_r_imm(&mut asm, Reg8::H, (SH_PROMPT_BASE >> 8) as u8);
+    ld_r_imm(&mut asm, Reg8::H, (sh.prompt >> 8) as u8);
     asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
     a_to(&mut asm, S_INPUT_ADDR);
     asm.call("forward_pass");
     map_ui(&mut asm);
     call_abs(&mut asm, ui.warm_mark);
     asm.label("shell_warm_boundary");
-    a_from(&mut asm, SH_WIDX_ADDR);
+    a_from(&mut asm, sh.widx);
     asm.i(Instr::Inc8 {
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
     });
-    a_to(&mut asm, SH_WIDX_ADDR);
+    a_to(&mut asm, sh.widx);
     ld_rr(&mut asm, Reg8::B, Reg8::A);
-    a_from(&mut asm, SH_PLEN_ADDR);
+    a_from(&mut asm, sh.plen);
     asm.i(Instr::CpA {
         src: AluSrc8::Reg(Reg8::B),
     });
@@ -1069,28 +1040,28 @@ pub fn build_state_shell_rom(
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    a_to(&mut asm, SH_GCOUNT_ADDR);
+    a_to(&mut asm, sh.gcount);
     asm.label("sh_gen_loop");
-    asm.call("sample80");
-    a_from(&mut asm, SH_GCOUNT_ADDR);
+    asm.call("sample_v");
+    a_from(&mut asm, sh.gcount);
     ld_rr(&mut asm, Reg8::L, Reg8::A);
-    ld_r_imm(&mut asm, Reg8::H, (S_OUT_BASE >> 8) as u8);
+    ld_r_imm(&mut asm, Reg8::H, (plan.layout.out >> 8) as u8);
     a_from(&mut asm, S_SAMPLED_ADDR);
     asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
     a_to(&mut asm, S_INPUT_ADDR);
     map_ui(&mut asm);
     call_abs(&mut asm, ui.render_token);
     asm.label("shell_token_boundary");
-    a_from(&mut asm, SH_GCOUNT_ADDR);
+    a_from(&mut asm, sh.gcount);
     asm.i(Instr::Inc8 {
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
     });
-    a_to(&mut asm, SH_GCOUNT_ADDR);
+    a_to(&mut asm, sh.gcount);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(n_gen_tokens),
     });
     asm.jp(Some(Cond::Z), "shell_gen_done");
-    a_from(&mut asm, SH_TFULL_ADDR);
+    a_from(&mut asm, sh.tfull);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -1108,7 +1079,7 @@ pub fn build_state_shell_rom(
     emit_state_forward_body(&mut asm, &plan);
     asm.i(Instr::Ret { cond: None });
 
-    emit_state_routines_and_tables(&mut asm, model, plan.emb_bank as u8, Some(sampler));
+    emit_state_routines_and_tables(&mut asm, model, &plan, Some(sampler));
 
     let (driver, labels) = asm.finish()?;
     let driver_bytes = driver.len();
@@ -1123,6 +1094,7 @@ pub fn build_state_shell_rom(
 
     Ok(ShellRom {
         rom,
+        layout: plan.layout.clone(),
         idle_pc: labels["shell_idle"],
         warm_boundary_pc: labels["shell_warm_boundary"],
         token_boundary_pc: labels["shell_token_boundary"],

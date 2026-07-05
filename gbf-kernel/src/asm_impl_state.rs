@@ -1,47 +1,54 @@
 //! One-token and multi-token forward-pass ROM builders for the LinearState
-//! stateful bring-up (stateful deployment of the bd-29ai4 arm-B checkpoint).
+//! stateful bring-up, generalized to a **parameterized topology** (d_model,
+//! d_ff, n_blocks, state_slots, vocab) so the same builder serves the arm-B
+//! d64/ff128/4blk/slots64 checkpoint and the S8 distilled
+//! d192/ff384/6blk/slots192 student the moment its export lands.
 //!
 //! Builds a banked MBC5 ROM that computes the canonical integer semantics of
 //! [`crate::state_model_ref::IntStateLoweredModel::forward`] — including the
 //! exact integer recurrence — for one charset id poked into WRAM by the
-//! host, and leaves every semantic checkpoint (state-block norm/acc/state/y
-//! dumps, per-block residuals, final norm output, i24 logits, argmax, and
-//! the persistent state vector itself) in WRAM for byte-exact comparison
-//! against the host evaluator.
+//! host, and leaves every semantic checkpoint the topology's WRAM budget
+//! allows (state-block norm/acc/state/y dumps, block-0 dumps, final norm,
+//! i24 logits, argmax, and the persistent state vector itself) in WRAM for
+//! byte-exact comparison against the host evaluator.
 //!
-//! The **state vector lives in WRAM at [`S_STATE_BASE`]** (64 x i32 LE,
-//! two's complement) and persists across tokens: the one-token ROM never
-//! initializes it (the host pokes it, which lets the gate exercise nonzero
-//! carried states), while the multi-token ROM zeroes it once before the
-//! generation loop (the trained initial-state contract) and then lets it
-//! evolve on-device for the whole run.
+//! # Parameterization (vs the fixed d64 bring-up)
 //!
-//! Differences from the dense builder ([`crate::asm_impl_model`]), all
-//! mirroring the canonical integer semantics:
-//! - the residual stream is **i24 Q19.5** (3 bytes/lane): norm runs a 7-byte
-//!   sum-of-squares, a 48-bit floor isqrt, and 5-byte rounded divisions;
-//!   residual adds are 3-byte;
-//! - a state stage runs between the embedding and the FFN stack: dense-style
-//!   banked in-projection matvec (u8 activations, i16 accumulators), the
-//!   per-slot Q8.8 decay multiply-accumulate with i24 saturation, a
-//!   loop-driven out-projection matvec over the i32 state (ternary weight
-//!   table in its own bank), and the y epilogue (Q8.8 scale, activation
-//!   grid, i16 residual-LUT add);
-//! - vocabulary is charset_v1's 80 ids (one embedding bank at a 192-byte row
-//!   stride, an 80-entry tied head, 240-byte i24 logits).
+//! - **WRAM map**: [`StateWramLayout::plan`] computes every buffer address
+//!   from the topology and **asserts the 8 KiB budget**, failing loudly
+//!   ([`ModelRomError::WramOverflow`]) instead of silently colliding.
+//!   When the full debug surface does not fit it degrades in documented
+//!   steps: first the per-block residual dumps are dropped (the final
+//!   residual is still gated directly from the live `x` buffer), then the
+//!   norm `|x|` scratch and the state out-projection accumulators overlay
+//!   the matvec accumulator arena (disjoint lifetimes; the out-acc dump
+//!   segment is skipped because the FFN accumulators overwrite it).
+//! - **Accumulator widths**: matvecs whose structural per-row bound escapes
+//!   i16 (the d192 down projection at fan-in 384) get column-segmented
+//!   weight code with 3-byte accumulators and a widened epilogue
+//!   (`down_ep24w`); everything else keeps the proven i16 V3 chunks. The
+//!   decision comes from [`IntStateLoweredModel::lower`].
+//! - **Banked tables**: the embedding, tied-head, and state out-projection
+//!   tables split across banks with power-of-two row strides; per-row scale
+//!   and decay tables move from bank 0 into a dedicated **params bank** so
+//!   the driver bank cannot overflow at large topologies.
+//! - **Bank count**: up to 512 MBC5 banks; bank switches past 255 write
+//!   the ROMB1 high-bit register.
+//! - **Norm**: `mean = floor(ss / d_model)` runs as shift-only when
+//!   `d_model` is a power of two (the pinned d64 behavior, bit-identical)
+//!   and as shift + odd-constant byte-serial division otherwise (d192:
+//!   `>> 6` then `/ 3`).
 //!
-//! Bank layout: bank 0 driver + integer routines + LUT/scale/decay tables;
-//! banks 1..=N V3-style weights-as-code matvec chunks (state in-projection
-//! first, then the 8 FFN matvecs in execution order); then the state
-//! out-projection weight-table bank, the embedding bank, and the head bank.
+//! The **state vector lives in WRAM at `layout.state`** (`state_slots` x
+//! i32 LE, two's complement) and persists across tokens: the one-token ROM
+//! never initializes it (the host pokes it), while the multi-token ROM
+//! zeroes it once before the generation loop and then lets it evolve
+//! on-device for the whole run.
 //!
-//! Decode: argmax is the default (planv0 v0 decode pin). The **sampling
-//! variant** ([`build_state_multi_token_sampling_rom`]) additionally emits
-//! the integer top-k/temperature sampler pinned in [`crate::decode`]
-//! (exp2 LUT in bank 0, XorShift16 state at [`S_RNG_ADDR`], candidate
-//! tables at [`S_SAMP_USED`]/[`S_SAMP_IDS`]/[`S_SAMP_WTS`]) and feeds the
-//! sampled id back instead of the argmax; argmax is still computed and
-//! dumped for debugging.
+//! Decode: argmax is the default (planv0 v0 decode pin). The sampling
+//! variant additionally emits the integer top-k/temperature sampler pinned
+//! in [`crate::decode`] and feeds the sampled id back; argmax is still
+//! computed and dumped.
 
 use std::collections::BTreeMap;
 
@@ -54,125 +61,451 @@ use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, RomSize, assemble_rom};
 use gbf_asm::section::SectionId;
 
 use crate::asm_impl_model::{
-    ACT_BASE, CHUNK_ENTRY, DIV_NUM, IPTR, LANE, MBC5_ROMB0, MODEL_STACK_TOP, ModelAsm,
-    ModelRomError, OPTR, PTR, ROWCNT, SIGN, SPTR, XPTR, a_from, a_to, abs_de_store_sign,
-    build_matvec_chunks, emit_copy_bytes, emit_copy_call, emit_mul16, emit_mul16x8, emit_udiv254,
-    emit_up_epilogue, ld_r_imm, ld_rr, ld16, load_de_via_ptr, mem_add, mem_copy, mem_shl1,
-    mem_shr1, mem_sub_into, smallest_rom_size, zero_mem,
+    BANK_BYTES, CHUNK_ENTRY, DIV_NUM, IPTR, LANE, MBC5_ROMB0, MBC5_ROMB1, MODEL_STACK_TOP,
+    ModelAsm, ModelRomError, OPTR, PTR, ROWCNT, SIGN, SPTR, XPTR, a_from, a_to, abs_de_store_sign,
+    build_matvec_chunks_at, build_matvec_chunks_wide, emit_copy_bytes, emit_mul16, emit_mul16x8,
+    emit_udiv254, ld_r_imm, ld_rr, ld16, load_de_via_ptr, mem_add, mem_copy, mem_shl1, mem_shr1,
+    mem_sub_into, smallest_rom_size, zero_mem,
 };
-use crate::model_ref::{D_FF, D_MODEL};
-use crate::state_model_ref::{IntStateLoweredModel, STATE_SLOTS, STATE_VOCAB};
+use crate::state_model_ref::{AccWidth, IntStateLoweredModel, StateTopology};
 
 // ---------------------------------------------------------------------------
-// WRAM map (all state-ROM addresses; the runner reads these)
+// fixed WRAM anchors (topology-independent)
 // ---------------------------------------------------------------------------
 
-/// Matvec input activations, `u8` zero point 128 (dense address, shared with
-/// the reused chunk codegen and epilogues).
-pub const S_ACT_BASE: u16 = ACT_BASE;
-/// |x| buffer for the widened norm (u24 LE x 64 = 192 bytes).
-pub const S_ABSX_BASE: u16 = 0xD300;
-/// Matvec raw accumulator outputs (i16 LE, up to 128 rows; dense address).
-pub const S_ACC_BASE: u16 = 0xC100;
-/// Residual vector x (i24 LE x 64 = 192 bytes).
-pub const S_X_BASE: u16 = 0xC300;
-/// Persistent recurrent state (i32 LE two's complement x 64 = 256 bytes).
-pub const S_STATE_BASE: u16 = 0xC500;
-/// State out-projection raw accumulators (i32 LE x 64 = 256 bytes).
-pub const S_SACC_BASE: u16 = 0xC600;
-/// Head per-lane product LUT pages (lo / hi / sign-extension; dense address).
-pub const S_LUT_LO_PAGE: u16 = 0xC700;
-/// i24 LE logits x 80 (240 bytes).
-pub const S_LOGITS_BASE: u16 = 0xCA00;
-/// Per-block residual dumps (4 x 192 bytes).
-pub const S_XDUMP_BASE: u16 = 0xCB00;
-/// State-block norm output dump (u8 zp128 x 64).
-pub const S_DUMP_SNORM: u16 = 0xCE00;
-/// State-block y activation dump (u8 zp128 x 64).
-pub const S_DUMP_YACT: u16 = 0xCE40;
-/// Block-0 norm output dump.
-pub const S_DUMP_NORM0: u16 = 0xCE80;
-/// Final norm output dump (u8 zp128 x 64).
-pub const S_QDUMP_BASE: u16 = 0xCEC0;
-/// Block-0 GELU activation dump (128 bytes).
-pub const S_DUMP_GELU0: u16 = 0xCF00;
-/// Block-0 down accumulator dump (i16 LE x 64).
-pub const S_DUMP_DOWNACC0: u16 = 0xCF80;
-/// Block-0 up accumulator dump (i16 LE x 128).
-pub const S_DUMP_UPACC0: u16 = 0xD000;
-/// Argmax id.
-pub const S_ARGMAX_ADDR: u16 = 0xD100;
-/// Done flag (1 when the run is complete).
-pub const S_DONE_ADDR: u16 = 0xD101;
-/// Multi-token loop counter.
-pub const S_TOKEN_IDX_ADDR: u16 = 0xD102;
-/// Sampled id for the current token (sampling variant only; argmax is
-/// still computed and dumped at [`S_ARGMAX_ADDR`]).
-pub const S_SAMPLED_ADDR: u16 = 0xD103;
-/// XorShift16 RNG state (2 bytes LE; the host pokes the seed before
-/// running the sampling variant; seed 0 is canonicalized to 1 on entry,
-/// mirroring `gbf_kernel::decode::XorShift16::new`).
-pub const S_RNG_ADDR: u16 = 0xD104;
+/// Activation buffer base (u8 zero point 128). Fixed and page-aligned: the
+/// head routine indexes it single-page and the weight chunks embed it as
+/// their pop-stream seed. Must hold max(d_model, d_ff) bytes below the
+/// shared scratch page at [`SCRATCH_A_BASE`].
+pub const S_ACT_BASE: u16 = 0xC000;
+/// Shared dense scratch page A (asm_impl_model consts: SPSAVE, MUL_R, ...).
+const SCRATCH_A_BASE: u16 = 0xC280;
+const SCRATCH_A_END: u16 = 0xC2E0;
+
+// control bytes (fixed block right after scratch A)
 /// Input context id; the host pokes this before running.
-pub const S_INPUT_ADDR: u16 = 0xD110;
-/// Top-k used flags, one byte per charset id (80 bytes; sampling variant).
-pub const S_SAMP_USED: u16 = 0xD120;
-/// Selected candidate ids in selection order (up to 8; sampling variant).
-pub const S_SAMP_IDS: u16 = 0xD170;
-/// Selected candidate exp-LUT weights, same order (sampling variant).
-pub const S_SAMP_WTS: u16 = 0xD178;
-/// State in-projection accumulator dump (i16 LE x 64).
-pub const S_DUMP_INACC: u16 = 0xD180;
-/// Multi-token output ring (page-aligned, max 256 tokens).
-pub const S_OUT_BASE: u16 = 0xD200;
+pub const S_INPUT_ADDR: u16 = 0xC2E0;
+/// Argmax id.
+pub const S_ARGMAX_ADDR: u16 = 0xC2E1;
+/// Done flag (1 when the run is complete).
+pub const S_DONE_ADDR: u16 = 0xC2E2;
+/// Multi-token loop counter.
+pub const S_TOKEN_IDX_ADDR: u16 = 0xC2E3;
+/// Sampled id for the current token (sampling variant only).
+pub const S_SAMPLED_ADDR: u16 = 0xC2E4;
+/// XorShift16 RNG state (2 bytes LE; host pokes the seed; 0 -> 1 on entry).
+pub const S_RNG_ADDR: u16 = 0xC2E6;
+const CTRL_END: u16 = 0xC2E8;
+
+// scratch page B (state-ROM-owned; fixed block 0xC300..0xC3C0)
+const NORM_SS7: u16 = 0xC300; // 7 bytes sum of squares
+const ISQ_IN6: u16 = 0xC308; // 6 bytes
+const ISQ_REM6: u16 = 0xC310; // 6 bytes
+const ISQ_T16: u16 = 0xC318; // 6 bytes
+const ISQ_ROOT6: u16 = 0xC320; // 6 bytes
+const NORM_R3: u16 = 0xC328; // 3 bytes (rms raw)
+const NORM_D5: u16 = 0xC330; // 5 bytes (8r)
+const NORM_D25: u16 = 0xC338; // 5 bytes (16r)
+const DIV5_NUM: u16 = 0xC340; // 5 bytes
+const DIV5_T1: u16 = 0xC348; // 5 bytes
+const DIV5_T2: u16 = 0xC350; // 5 bytes
+const SQ_T: u16 = 0xC358; // 4 bytes squaring temp
+const ST_H: u16 = 0xC360; // 4 bytes state temp
+const ST_P: u16 = 0xC368; // 5 bytes decay product
+const ST_M: u16 = 0xC370; // 4 bytes delta m
+const SIGN2: u16 = 0xC378; // 1 byte (state sign)
+const HI8: u16 = 0xC379; // 1 byte (norm squaring high byte)
+const DPTR: u16 = 0xC37A; // 2 bytes decay table pointer
+const HPTR: u16 = 0xC37C; // 2 bytes state pointer
+const WPTR: u16 = 0xC37E; // 2 bytes weight pointer
+const ACC4: u16 = 0xC380; // 4 bytes out-matvec accumulator
+const OEP_A: u16 = 0xC388; // 5 bytes out-epilogue product
+const XP2: u16 = 0xC390; // 2 bytes secondary pointer
+const CNT2: u16 = 0xC392; // 1 byte inner counter
+const YPTR: u16 = 0xC394; // 2 bytes y dump pointer
+const SC2: u16 = 0xC396; // 2 bytes out-epilogue scale
+const ROWCNT2: u16 = 0xC398; // 2 bytes 16-bit row counter (d_ff rows)
+
+// sampling-decode scratch (same fixed page)
+const SMP_M: u16 = 0xC3A0; // 3 bytes max logit (hi byte sign-flipped)
+const SMP_BEST: u16 = 0xC3A4; // 3 bytes pass best (hi byte sign-flipped)
+const SMP_BESTID: u16 = 0xC3A7; // 1 byte
+const SMP_D: u16 = 0xC3A8; // 3 bytes d = max - best (u24)
+const SMP_P: u16 = 0xC3B0; // 5 bytes d * scale product
+const SMP_TOT: u16 = 0xC3B6; // 2 bytes weight total
+const SMP_THR: u16 = 0xC3B8; // 2 bytes draw threshold
+const SMP_CUM: u16 = 0xC3BA; // 2 bytes cumulative weight
+const SMP_PASS: u16 = 0xC3BC; // 1 byte pass counter
+const SMP_RT: u16 = 0xC3BE; // 2 bytes rng shift temp
+const SCRATCH_B_END: u16 = 0xC3C0;
+
+/// Stack arena: SP starts at [`MODEL_STACK_TOP`] (0xDFF0) and the driver's
+/// call depth stays shallow; everything above this line is stack-owned.
+const STACK_ARENA_BASE: u16 = 0xDF00;
+/// End of the WRAM arena (echo RAM above).
+const WRAM_END: u16 = 0xE000;
 /// Stack top (grows down; well above every buffer).
 pub const S_STACK_TOP: u16 = MODEL_STACK_TOP;
 
-// scratch page B (0xC4xx; page A 0xC28x..0xC2Dx is shared with the dense
-// routines reused here)
-const NORM_SS7: u16 = 0xC400; // 7 bytes sum of squares
-const ISQ_IN6: u16 = 0xC408; // 6 bytes
-const ISQ_REM6: u16 = 0xC410; // 6 bytes
-const ISQ_T16: u16 = 0xC418; // 6 bytes
-const ISQ_ROOT6: u16 = 0xC420; // 6 bytes
-const NORM_R3: u16 = 0xC428; // 3 bytes (rms raw)
-const NORM_D5: u16 = 0xC430; // 5 bytes (8r)
-const NORM_D25: u16 = 0xC438; // 5 bytes (16r)
-const DIV5_NUM: u16 = 0xC440; // 5 bytes
-const DIV5_T1: u16 = 0xC448; // 5 bytes
-const DIV5_T2: u16 = 0xC450; // 5 bytes
-const SQ_T: u16 = 0xC458; // 4 bytes squaring temp
-const ST_H: u16 = 0xC460; // 4 bytes state temp
-const ST_P: u16 = 0xC468; // 5 bytes decay product
-const ST_M: u16 = 0xC470; // 4 bytes delta m
-const SIGN2: u16 = 0xC478; // 1 byte (state sign)
-const HI8: u16 = 0xC479; // 1 byte (norm squaring high byte)
-const DPTR: u16 = 0xC47A; // 2 bytes decay table pointer
-const HPTR: u16 = 0xC47C; // 2 bytes state pointer
-const WPTR: u16 = 0xC47E; // (reserved) weight pointer
-const ACC4: u16 = 0xC480; // 4 bytes out-matvec accumulator
-const OEP_A: u16 = 0xC488; // 5 bytes out-epilogue product
-const XP2: u16 = 0xC490; // 2 bytes secondary pointer
-const CNT2: u16 = 0xC492; // 1 byte inner counter
-const YPTR: u16 = 0xC494; // 2 bytes y dump pointer
-const SC2: u16 = 0xC496; // 2 bytes out-epilogue scale
+// ---------------------------------------------------------------------------
+// WRAM layout (topology-driven)
+// ---------------------------------------------------------------------------
 
-// sampling-decode scratch (0xC4A0..0xC4C2; sampling variant only)
-const SMP_M: u16 = 0xC4A0; // 3 bytes max logit (hi byte sign-flipped)
-const SMP_BEST: u16 = 0xC4A4; // 3 bytes pass best (hi byte sign-flipped)
-const SMP_BESTID: u16 = 0xC4A7; // 1 byte
-const SMP_D: u16 = 0xC4A8; // 3 bytes d = max - best (u24)
-const SMP_P: u16 = 0xC4B0; // 5 bytes d * scale product
-const SMP_TOT: u16 = 0xC4B8; // 2 bytes weight total
-const SMP_THR: u16 = 0xC4BA; // 2 bytes draw threshold
-const SMP_CUM: u16 = 0xC4BC; // 2 bytes cumulative weight
-const SMP_PASS: u16 = 0xC4BE; // 1 byte pass counter
-const SMP_RT: u16 = 0xC4C0; // 2 bytes rng shift temp
+/// Shell-owned WRAM block (allocated only for the interactive shell ROM).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellWram {
+    /// Prompt buffer page base (`lo(addr) == index`).
+    pub prompt: u16,
+    pub plen: u16,
+    pub submit: u16,
+    pub kbcur: u16,
+    pub joy_cur: u16,
+    pub joy_prev: u16,
+    pub widx: u16,
+    pub gcount: u16,
+    pub tcur: u16,
+    pub tfull: u16,
+    pub ui_row: u16,
+    /// End of the zero-initialized shell block `[prompt, end)`.
+    pub end: u16,
+}
+
+/// The complete topology-driven WRAM map for one stateful ROM, plus the
+/// budget facts the evidence report cites. Every buffer the runner pokes or
+/// peeks comes from here — nothing about buffer placement is hard-coded
+/// beyond the fixed scratch/control anchors documented above.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateWramLayout {
+    pub topology: StateTopology,
+    pub down_width: AccWidth,
+    /// Matvec input activations (u8 zp128), fixed at [`S_ACT_BASE`].
+    pub act: u16,
+    /// Matvec raw accumulator arena (i16 LE, or 3-byte LE rows for the wide
+    /// down projection).
+    pub acc: u16,
+    /// |x| buffer for the widened norm (u24 LE x d_model). May equal `acc`
+    /// (overlay; disjoint lifetimes).
+    pub absx: u16,
+    /// State out-projection raw accumulators (i32 LE x d_model). May equal
+    /// `acc` (overlay); see `sacc_separate`.
+    pub sacc: u16,
+    /// True when `sacc` survives to the end of the token (peekable gate
+    /// segment); false when it overlays the matvec arena.
+    pub sacc_separate: bool,
+    /// Residual vector x (i24 LE x d_model).
+    pub x: u16,
+    /// Persistent recurrent state (i32 LE two's complement x state_slots).
+    pub state: u16,
+    /// Head per-lane product LUT pages (lo / hi / sign-extension).
+    pub lut_lo_page: u16,
+    /// i24 LE logits x vocab (page-aligned; single page).
+    pub logits: u16,
+    /// Multi-token output ring (page-aligned, 256 tokens).
+    pub out: u16,
+    /// Top-k sampler tables (one page): used flags, candidate ids, weights.
+    pub samp_used: u16,
+    pub samp_ids: u16,
+    pub samp_wts: u16,
+    /// State-block norm output dump (u8 zp128 x d_model).
+    pub dump_snorm: u16,
+    /// State in-projection accumulator dump (i16 LE x state_slots).
+    pub dump_inacc: u16,
+    /// State-block y activation dump (u8 zp128 x d_model).
+    pub dump_yact: u16,
+    /// Block-0 norm output dump.
+    pub dump_norm0: u16,
+    /// Block-0 up accumulator dump (i16 LE x d_ff).
+    pub dump_upacc0: u16,
+    /// Block-0 GELU activation dump (d_ff bytes).
+    pub dump_gelu0: u16,
+    /// Block-0 down accumulator dump (2- or 3-byte rows per `down_width`).
+    pub dump_downacc0: u16,
+    /// Final norm output dump (u8 zp128 x d_model).
+    pub dump_qdump: u16,
+    /// Per-block residual dumps (stride 3 * d_model), when the budget holds
+    /// them; the final residual is always gated from the live `x` buffer.
+    pub xdump: Option<u16>,
+    /// Shell block (interactive shell variant only).
+    pub shell: Option<ShellWram>,
+    /// Total bytes allocated (excluding gaps), for the budget report.
+    pub bytes_allocated: usize,
+    /// Named allocations, for the untouched-WRAM gate.
+    allocations: Vec<(u16, u16)>,
+}
+
+/// Bump allocator over the non-reserved WRAM regions.
+struct WramBump {
+    /// (cursor, end) free regions in address order.
+    regions: Vec<(u16, u16)>,
+    allocations: Vec<(u16, u16)>,
+    bytes: usize,
+}
+
+impl WramBump {
+    fn new(regions: Vec<(u16, u16)>) -> Self {
+        Self {
+            regions,
+            allocations: Vec::new(),
+            bytes: 0,
+        }
+    }
+
+    /// Allocate `len` bytes at `align` (power of two), first-fit.
+    fn alloc(&mut self, len: usize, align: u16) -> Option<u16> {
+        for (cursor, end) in &mut self.regions {
+            let aligned = cursor.checked_add(align - 1)? & !(align - 1);
+            let need = u16::try_from(len).ok()?;
+            if aligned.checked_add(need).is_some_and(|e| e <= *end) {
+                *cursor = aligned + need;
+                self.allocations.push((aligned, aligned + need));
+                self.bytes += len;
+                return Some(aligned);
+            }
+        }
+        None
+    }
+}
+
+/// Debug-dump surface levels, from strongest to weakest. The planner takes
+/// the strongest level that fits the 8 KiB arena.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DumpLevel {
+    /// Separate |x|/out-acc buffers plus per-block residual dumps.
+    FullSeparate,
+    /// Separate buffers, no per-block residual dumps.
+    NoXdumpSeparate,
+    /// |x| and out-acc overlay the matvec arena, no per-block dumps.
+    NoXdumpOverlay,
+}
+
+impl StateWramLayout {
+    /// Plan the WRAM map for a topology, asserting the 8 KiB budget. Tries
+    /// the strongest debug surface first and degrades in documented steps;
+    /// errors loudly when even the minimal working set cannot fit.
+    pub fn plan(
+        topology: StateTopology,
+        down_width: AccWidth,
+        with_shell: bool,
+    ) -> Result<Self, ModelRomError> {
+        topology
+            .validate()
+            .map_err(|e| ModelRomError::WramOverflow {
+                needed: 0,
+                budget: usize::from(WRAM_END - 0xC000),
+                detail: e.to_string(),
+            })?;
+        let act_len = topology.d_model.max(topology.d_ff);
+        if S_ACT_BASE + act_len as u16 > SCRATCH_A_BASE {
+            return Err(ModelRomError::WramOverflow {
+                needed: act_len,
+                budget: usize::from(SCRATCH_A_BASE - S_ACT_BASE),
+                detail: format!(
+                    "activation buffer ({act_len} B) overruns the fixed scratch page at {SCRATCH_A_BASE:#06x}"
+                ),
+            });
+        }
+        let mut last_err = String::new();
+        for level in [
+            DumpLevel::FullSeparate,
+            DumpLevel::NoXdumpSeparate,
+            DumpLevel::NoXdumpOverlay,
+        ] {
+            match Self::plan_at(topology, down_width, with_shell, level) {
+                Ok(layout) => return Ok(layout),
+                Err(detail) => last_err = detail,
+            }
+        }
+        Err(ModelRomError::WramOverflow {
+            needed: 0,
+            budget: usize::from(WRAM_END - 0xC000),
+            detail: format!("no dump level fits: {last_err}"),
+        })
+    }
+
+    fn plan_at(
+        t: StateTopology,
+        down_width: AccWidth,
+        with_shell: bool,
+        level: DumpLevel,
+    ) -> Result<Self, String> {
+        let d = t.d_model;
+        let act_len = d.max(t.d_ff);
+        let act_end = S_ACT_BASE + act_len as u16;
+        // Free regions: after ACT up to scratch A, and after scratch B up
+        // to the stack arena. (Control bytes and both scratch pages are
+        // fixed reservations.)
+        let mut bump = WramBump::new(vec![
+            (act_end, SCRATCH_A_BASE),
+            (SCRATCH_B_END, STACK_ARENA_BASE),
+        ]);
+        let fail = |what: &str| format!("{what} does not fit ({level:?})");
+
+        // Page-aligned buffers first (minimize alignment waste).
+        let lut_lo_page = bump
+            .alloc(0x300, 0x100)
+            .ok_or_else(|| fail("head LUT pages"))?;
+        let logits = bump
+            .alloc(0x100, 0x100)
+            .ok_or_else(|| fail("logits page"))?;
+        let out = bump
+            .alloc(0x100, 0x100)
+            .ok_or_else(|| fail("output ring"))?;
+        let samp_used = bump
+            .alloc(0x100, 0x100)
+            .ok_or_else(|| fail("sampler page"))?;
+        let samp_ids = samp_used + t.vocab as u16;
+        let samp_wts = samp_ids + 8;
+        let shell = if with_shell {
+            let prompt = bump.alloc(0x100, 0x100).ok_or_else(|| fail("shell page"))?;
+            Some(ShellWram {
+                prompt,
+                plen: prompt + 0x20,
+                submit: prompt + 0x21,
+                kbcur: prompt + 0x22,
+                joy_cur: prompt + 0x23,
+                joy_prev: prompt + 0x24,
+                widx: prompt + 0x25,
+                gcount: prompt + 0x26,
+                tcur: prompt + 0x27,
+                tfull: prompt + 0x28,
+                ui_row: prompt + 0x29,
+                end: prompt + 0x30,
+            })
+        } else {
+            None
+        };
+
+        // Matvec accumulator arena. When overlaying, it must also hold the
+        // |x| buffer (3d) and the out-projection accumulators (4d).
+        let overlay = level == DumpLevel::NoXdumpOverlay;
+        let down_acc_bytes = match down_width {
+            AccWidth::I16 => 2 * d,
+            AccWidth::I24 => 3 * d,
+        };
+        let mut acc_len = (2 * t.d_ff).max(down_acc_bytes).max(2 * t.state_slots);
+        if overlay {
+            acc_len = acc_len.max(3 * d).max(4 * d);
+        }
+        let acc = bump
+            .alloc(acc_len, 1)
+            .ok_or_else(|| fail("matvec accumulators"))?;
+        let x = bump.alloc(3 * d, 1).ok_or_else(|| fail("residual x"))?;
+        let state = bump
+            .alloc(4 * t.state_slots, 1)
+            .ok_or_else(|| fail("recurrent state"))?;
+        let (absx, sacc, sacc_separate) = if overlay {
+            (acc, acc, false)
+        } else {
+            let absx = bump.alloc(3 * d, 1).ok_or_else(|| fail("|x| buffer"))?;
+            let sacc = bump.alloc(4 * d, 1).ok_or_else(|| fail("state out accs"))?;
+            (absx, sacc, true)
+        };
+
+        // Debug dumps (gate surface).
+        let dump_snorm = bump.alloc(d, 1).ok_or_else(|| fail("snorm dump"))?;
+        let dump_inacc = bump
+            .alloc(2 * t.state_slots, 1)
+            .ok_or_else(|| fail("in-acc dump"))?;
+        let dump_yact = bump.alloc(d, 1).ok_or_else(|| fail("yact dump"))?;
+        let dump_norm0 = bump.alloc(d, 1).ok_or_else(|| fail("norm0 dump"))?;
+        let dump_qdump = bump.alloc(d, 1).ok_or_else(|| fail("final norm dump"))?;
+        let dump_gelu0 = bump.alloc(t.d_ff, 1).ok_or_else(|| fail("gelu0 dump"))?;
+        let dump_downacc0 = bump
+            .alloc(down_acc_bytes, 1)
+            .ok_or_else(|| fail("downacc0 dump"))?;
+        let dump_upacc0 = bump
+            .alloc(2 * t.d_ff, 1)
+            .ok_or_else(|| fail("upacc0 dump"))?;
+        let xdump = match level {
+            DumpLevel::FullSeparate => Some(
+                bump.alloc(t.n_blocks * 3 * d, 1)
+                    .ok_or_else(|| fail("per-block residual dumps"))?,
+            ),
+            _ => None,
+        };
+
+        let mut allocations = bump.allocations.clone();
+        // Fixed reservations count as allocated for the untouched gate.
+        allocations.push((S_ACT_BASE, act_end));
+        allocations.push((SCRATCH_A_BASE, SCRATCH_A_END));
+        allocations.push((S_INPUT_ADDR, CTRL_END));
+        allocations.push((NORM_SS7, SCRATCH_B_END));
+        allocations.push((STACK_ARENA_BASE, WRAM_END));
+        allocations.sort_unstable();
+
+        Ok(Self {
+            topology: t,
+            down_width,
+            act: S_ACT_BASE,
+            acc,
+            absx,
+            sacc,
+            sacc_separate,
+            x,
+            state,
+            lut_lo_page,
+            logits,
+            out,
+            samp_used,
+            samp_ids,
+            samp_wts,
+            dump_snorm,
+            dump_inacc,
+            dump_yact,
+            dump_norm0,
+            dump_upacc0,
+            dump_gelu0,
+            dump_downacc0,
+            dump_qdump,
+            xdump,
+            shell,
+            bytes_allocated: bump.bytes
+                + usize::from(act_end - S_ACT_BASE)
+                + usize::from(SCRATCH_A_END - SCRATCH_A_BASE)
+                + usize::from(CTRL_END - S_INPUT_ADDR)
+                + usize::from(SCRATCH_B_END - NORM_SS7),
+            allocations,
+        })
+    }
+
+    /// Bytes of the wide-down accumulator rows (2 or 3 per row).
+    #[must_use]
+    pub fn down_acc_row_bytes(&self) -> usize {
+        match self.down_width {
+            AccWidth::I16 => 2,
+            AccWidth::I24 => 3,
+        }
+    }
+
+    /// WRAM regions `[start, end)` no token-loop write may touch: the
+    /// complement of every allocation over the 8 KiB arena (the stack arena
+    /// and fixed scratch are treated as owned, not untouched).
+    #[must_use]
+    pub fn untouched_regions(&self) -> Vec<(u16, u16)> {
+        let mut gaps = Vec::new();
+        let mut cursor = 0xC000u16;
+        for &(start, end) in &self.allocations {
+            if start > cursor {
+                gaps.push((cursor, start));
+            }
+            cursor = cursor.max(end);
+        }
+        if cursor < WRAM_END {
+            gaps.push((cursor, WRAM_END));
+        }
+        gaps
+    }
+}
+
+// ---------------------------------------------------------------------------
+// public result types
+// ---------------------------------------------------------------------------
 
 /// A fully assembled stateful one-token ROM plus the facts the runner needs.
 #[derive(Debug, Clone)]
 pub struct StateOneTokenRom {
     pub rom: Vec<u8>,
+    pub layout: StateWramLayout,
     pub token_start_pc: u16,
     pub token_end_pc: u16,
     pub rom_size: RomSize,
@@ -187,6 +520,7 @@ pub struct StateOneTokenRom {
 #[derive(Debug, Clone)]
 pub struct StateMultiTokenRom {
     pub rom: Vec<u8>,
+    pub layout: StateWramLayout,
     pub token_start_pc: u16,
     pub token_boundary_pc: u16,
     pub token_end_pc: u16,
@@ -202,6 +536,14 @@ pub struct StateMultiTokenRom {
 // ---------------------------------------------------------------------------
 // small emit helpers on top of the shared ModelAsm
 // ---------------------------------------------------------------------------
+
+/// Map ROM bank `bank` (writes ROMB0 and, for the 9-bit space, ROMB1).
+pub(crate) fn set_bank(asm: &mut ModelAsm, bank: u16) {
+    ld_r_imm(asm, Reg8::A, (bank & 0xFF) as u8);
+    a_to(asm, MBC5_ROMB0);
+    ld_r_imm(asm, Reg8::A, (bank >> 8) as u8);
+    a_to(asm, MBC5_ROMB1);
+}
 
 /// `ptr` variable += `k` (16-bit).
 fn ptr_advance(asm: &mut ModelAsm, ptr: u16, k: u8) {
@@ -222,15 +564,6 @@ fn ptr_init(asm: &mut ModelAsm, ptr: u16, value: u16) {
     ld_r_imm(asm, Reg8::A, (value & 0xFF) as u8);
     a_to(asm, ptr);
     ld_r_imm(asm, Reg8::A, (value >> 8) as u8);
-    a_to(asm, ptr + 1);
-}
-
-/// Initialize a pointer variable with a label address.
-fn ptr_init_label(asm: &mut ModelAsm, ptr: u16, label: &str) {
-    asm.ld16_label(Reg16Data::HL, label, 0);
-    ld_rr(asm, Reg8::A, Reg8::L);
-    a_to(asm, ptr);
-    ld_rr(asm, Reg8::A, Reg8::H);
     a_to(asm, ptr + 1);
 }
 
@@ -311,6 +644,41 @@ fn carry_ripple(asm: &mut ModelAsm, addr: u16, n: u16) {
         });
         a_to(asm, addr + k);
     }
+}
+
+/// Emit `call copy_bytes` runs covering `len` bytes (splits past 256; a
+/// 256-byte run passes B = 0).
+fn emit_copy16(asm: &mut ModelAsm, mut src: u16, mut dst: u16, mut len: usize) {
+    while len > 0 {
+        let run = len.min(256);
+        ld16(asm, Reg16Data::HL, src);
+        ld16(asm, Reg16Data::DE, dst);
+        ld_r_imm(asm, Reg8::B, (run & 0xFF) as u8);
+        asm.call("copy_bytes");
+        src += run as u16;
+        dst += run as u16;
+        len -= run;
+    }
+}
+
+/// Zero `len` bytes at `base` with a BC-counted loop (16-bit lengths).
+pub(crate) fn emit_zero16(asm: &mut ModelAsm, base: u16, len: u16) {
+    ld16(asm, Reg16Data::HL, base);
+    ld16(asm, Reg16Data::BC, len);
+    let head = asm.fresh("z16");
+    asm.label(&head);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), &head);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,16 +762,55 @@ fn emit_udiv_norm5(asm: &mut ModelAsm) {
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `norm24`: X (i24 x 64 at [`S_X_BASE`]) -> ACT (u8 zp128 x 64), the
+/// `udiv16_odd`: HL (< 256 * odd) / `odd` -> A = quotient (u8), L = remainder,
+/// H = 0. Unrolled 8-step restoring division against compile-time shifted
+/// divisor immediates. Emitted only for non-power-of-two `d_model`.
+fn emit_udiv16_odd(asm: &mut ModelAsm, odd: u16) {
+    debug_assert!(odd > 1 && odd <= 255 && odd % 2 == 1);
+    asm.label("udiv16_odd");
+    ld_r_imm(asm, Reg8::B, 0);
+    for bit in (0..8u16).rev() {
+        let t = odd << bit;
+        let skip = format!("u16o_skip_{bit}");
+        ld_rr(asm, Reg8::A, Reg8::L);
+        asm.i(Instr::SubA {
+            src: AluSrc8::Imm((t & 0xFF) as u8),
+        });
+        ld_rr(asm, Reg8::E, Reg8::A);
+        ld_rr(asm, Reg8::A, Reg8::H);
+        asm.i(Instr::SbcA {
+            src: AluSrc8::Imm((t >> 8) as u8),
+        });
+        asm.jr(Some(Cond::C), &skip);
+        ld_rr(asm, Reg8::H, Reg8::A);
+        ld_rr(asm, Reg8::L, Reg8::E);
+        ld_rr(asm, Reg8::A, Reg8::B);
+        asm.i(Instr::OrA {
+            src: AluSrc8::Imm(1u8 << bit),
+        });
+        ld_rr(asm, Reg8::B, Reg8::A);
+        asm.label(&skip);
+    }
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `norm24`: X (i24 x d_model at `l.x`) -> ACT (u8 zp128 x d_model), the
 /// canonical integer norm+activation-quant on the widened residual.
-fn emit_norm_quant24(asm: &mut ModelAsm) {
+/// `mean = floor(ss / d_model)` runs as `>> k` for the power-of-two factor
+/// and byte-serial division for the odd factor (bit-identical to the pinned
+/// d64 shift when d_model is a power of two).
+fn emit_norm_quant24(asm: &mut ModelAsm, l: &StateWramLayout) {
+    let d = l.topology.d_model;
+    let k = d.trailing_zeros();
+    let odd = (d >> k) as u16;
     asm.label("norm24");
     zero_mem(asm, NORM_SS7, 7);
     // pass 1: abs (u24) + square accumulate into the 7-byte sum
-    ld_r_imm(asm, Reg8::A, 64);
+    ld_r_imm(asm, Reg8::A, d as u8);
     a_to(asm, LANE);
-    ptr_init(asm, PTR, S_X_BASE);
-    ptr_init(asm, XP2, S_ABSX_BASE);
+    ptr_init(asm, PTR, l.x);
+    ptr_init(asm, XP2, l.absx);
     asm.label("n24_p1");
     // load x lanes: E = lo, D = mid, C = hi
     a_from(asm, PTR);
@@ -519,21 +926,33 @@ fn emit_norm_quant24(asm: &mut ModelAsm) {
     a_to(asm, LANE);
     asm.jp(Some(Cond::NZ), "n24_p1");
 
-    // mean = SS >> 6 (low 6 bytes), ISQ_IN6 = mean + 1
-    for _ in 0..6 {
+    // mean = SS / d_model = (SS >> k) / odd; ISQ_IN6 = mean + 1
+    for _ in 0..k {
         mem_shr1(asm, NORM_SS7, 7);
+    }
+    if odd > 1 {
+        // byte-serial long division MSB -> LSB, remainder carried in C
+        ld_r_imm(asm, Reg8::C, 0);
+        for i in (0..7u16).rev() {
+            ld_rr(asm, Reg8::H, Reg8::C);
+            a_from(asm, NORM_SS7 + i);
+            ld_rr(asm, Reg8::L, Reg8::A);
+            asm.call("udiv16_odd"); // A = q, L = rem
+            a_to(asm, NORM_SS7 + i);
+            ld_rr(asm, Reg8::C, Reg8::L);
+        }
     }
     a_from(asm, NORM_SS7);
     asm.i(Instr::AddA {
         src: AluSrc8::Imm(1),
     });
     a_to(asm, ISQ_IN6);
-    for k in 1..6u16 {
-        a_from(asm, NORM_SS7 + k);
+    for j in 1..6u16 {
+        a_from(asm, NORM_SS7 + j);
         asm.i(Instr::AdcA {
             src: AluSrc8::Imm(0),
         });
-        a_to(asm, ISQ_IN6 + k);
+        a_to(asm, ISQ_IN6 + j);
     }
     asm.call("isqrt48");
     // NORM_D5 = r << 3; NORM_D25 = r << 4
@@ -546,11 +965,11 @@ fn emit_norm_quant24(asm: &mut ModelAsm) {
     mem_shl1(asm, NORM_D25, 5);
 
     // pass 2: per-lane rounded division + sign + zero point
-    ld_r_imm(asm, Reg8::A, 64);
+    ld_r_imm(asm, Reg8::A, d as u8);
     a_to(asm, LANE);
-    ptr_init(asm, PTR, S_X_BASE);
-    ptr_init(asm, XP2, S_ABSX_BASE);
-    ptr_init(asm, OPTR, S_ACT_BASE);
+    ptr_init(asm, PTR, l.x);
+    ptr_init(asm, XP2, l.absx);
+    ptr_init(asm, OPTR, l.act);
     asm.label("n24_p2");
     // DIV5_NUM = |x| * 254 + 8r  =  (|x| << 8) - (|x| << 1) + NORM_D5
     load_via_ptr_to(asm, XP2, ST_H, 3); // |x| -> ST_H (3 bytes)
@@ -629,15 +1048,16 @@ fn emit_norm_quant24(asm: &mut ModelAsm) {
 
 /// `state_update`: for each slot, `h = clamp_i24(sign(h) * ((|h| * decay +
 /// 128) >> 8) + scale * acc)` with the exact integer delta. Reads ACC (i16),
-/// the bank-0 decay/scale tables, and updates STATE in place.
-fn emit_state_update(asm: &mut ModelAsm) {
+/// the params-bank decay/scale tables (caller maps the params bank), and
+/// updates STATE in place.
+fn emit_state_update(asm: &mut ModelAsm, l: &StateWramLayout, scales_addr: u16, decay_addr: u16) {
     asm.label("state_update");
-    ld_r_imm(asm, Reg8::A, STATE_SLOTS as u8);
+    ld_r_imm(asm, Reg8::A, l.topology.state_slots as u8);
     a_to(asm, ROWCNT);
-    ptr_init(asm, HPTR, S_STATE_BASE);
-    ptr_init(asm, IPTR, S_ACC_BASE);
-    ptr_init_label(asm, SPTR, "scales_state_in");
-    ptr_init_label(asm, DPTR, "decay_tab");
+    ptr_init(asm, HPTR, l.state);
+    ptr_init(asm, IPTR, l.acc);
+    ptr_init(asm, SPTR, scales_addr);
+    ptr_init(asm, DPTR, decay_addr);
     asm.label("su_loop");
     // --- load h (4 bytes, do not advance HPTR yet) ---
     a_from(asm, HPTR);
@@ -821,19 +1241,17 @@ fn emit_state_update(asm: &mut ModelAsm) {
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `state_out_mv`: with the state-table bank mapped, accumulate the ternary
-/// out-projection over the i32 state into SACC (i32 x 64). The weight table
-/// at [`CHUNK_ENTRY`] is row-major `[D_MODEL][STATE_SLOTS]` i8.
-fn emit_state_out_matvec(asm: &mut ModelAsm) {
+/// `state_out_mv`: with a state-table bank mapped and `ROWCNT`/`WPTR` preset
+/// by the caller, accumulate the ternary out-projection over the i32 state
+/// into SACC via the persistent OPTR. The weight table rows are
+/// `state_slots` i8 entries padded to `pad` extra bytes (power-of-two
+/// stride), so the caller can walk multiple banks.
+fn emit_state_out_matvec(asm: &mut ModelAsm, l: &StateWramLayout, pad: u8) {
     asm.label("state_out_mv");
-    ld_r_imm(asm, Reg8::A, D_MODEL as u8);
-    a_to(asm, ROWCNT);
-    ptr_init(asm, WPTR, CHUNK_ENTRY);
-    ptr_init(asm, OPTR, S_SACC_BASE);
     asm.label("smv_row");
     zero_mem(asm, ACC4, 4);
-    ptr_init(asm, XP2, S_STATE_BASE);
-    ld_r_imm(asm, Reg8::A, STATE_SLOTS as u8);
+    ptr_init(asm, XP2, l.state);
+    ld_r_imm(asm, Reg8::A, l.topology.state_slots as u8);
     a_to(asm, CNT2);
     asm.label("smv_col");
     // w = *WPTR++
@@ -882,6 +1300,9 @@ fn emit_state_out_matvec(asm: &mut ModelAsm) {
     a_to(asm, CNT2);
     asm.jp(Some(Cond::NZ), "smv_col");
     store_via_ptr_from(asm, OPTR, ACC4, 4);
+    if pad > 0 {
+        ptr_advance(asm, WPTR, pad);
+    }
     a_from(asm, ROWCNT);
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::A),
@@ -893,15 +1314,15 @@ fn emit_state_out_matvec(asm: &mut ModelAsm) {
 
 /// `state_out_ep`: per output row, `p = sign(acc2) * min(127,
 /// (scale * |acc2| + 32768) >> 16)`; writes `p + 128` to the YACT dump and
-/// adds `y_lut[p]` (i16) into the i24 residual.
-fn emit_state_out_epilogue(asm: &mut ModelAsm) {
+/// adds `y_lut[p]` (i16) into the i24 residual. Caller maps the params bank.
+fn emit_state_out_epilogue(asm: &mut ModelAsm, l: &StateWramLayout, scales_addr: u16) {
     asm.label("state_out_ep");
-    ld_r_imm(asm, Reg8::A, D_MODEL as u8);
+    ld_r_imm(asm, Reg8::A, l.topology.d_model as u8);
     a_to(asm, ROWCNT);
-    ptr_init(asm, IPTR, S_SACC_BASE);
-    ptr_init(asm, XPTR, S_X_BASE);
-    ptr_init(asm, YPTR, S_DUMP_YACT);
-    ptr_init_label(asm, SPTR, "scales_state_out");
+    ptr_init(asm, IPTR, l.sacc);
+    ptr_init(asm, XPTR, l.x);
+    ptr_init(asm, YPTR, l.dump_yact);
+    ptr_init(asm, SPTR, scales_addr);
     asm.label("sep_loop");
     load_via_ptr_to(asm, IPTR, ST_H, 4); // acc2 (i32)
     load_de_via_ptr(asm, SPTR); // DE = scale raw
@@ -1085,6 +1506,20 @@ fn emit_state_out_epilogue(asm: &mut ModelAsm) {
     asm.jr(Some(Cond::Z), "sep_add");
     ld_r_imm(asm, Reg8::B, 0xFF);
     asm.label("sep_add");
+    asm.call("resid_add24");
+    a_from(asm, ROWCNT);
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, ROWCNT);
+    asm.jp(Some(Cond::NZ), "sep_loop");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `resid_add24`: X[row] += B:DE (24-bit wrapping) via XPTR, advancing XPTR
+/// by one 3-byte lane. Shared by the state and down epilogues.
+fn emit_resid_add24(asm: &mut ModelAsm) {
+    asm.label("resid_add24");
     a_from(asm, XPTR);
     ld_rr(asm, Reg8::L, Reg8::A);
     a_from(asm, XPTR + 1);
@@ -1114,52 +1549,19 @@ fn emit_state_out_epilogue(asm: &mut ModelAsm) {
     a_to(asm, XPTR);
     ld_rr(asm, Reg8::A, Reg8::H);
     a_to(asm, XPTR + 1);
-    a_from(asm, ROWCNT);
-    asm.i(Instr::Dec8 {
-        dst: IncDec8Target::Reg(Reg8::A),
-    });
-    a_to(asm, ROWCNT);
-    asm.jp(Some(Cond::NZ), "sep_loop");
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `down_ep24`: DE = scale-table pointer; 64 rows. X[row] (i24) += (mod
-/// 2^24) sign(m) * min(65535, (|m|*2 + 127) / 254) with m = scale * acc —
-/// the dense Q-grid formula on the widened residual.
-fn emit_down_epilogue24(asm: &mut ModelAsm) {
-    asm.label("down_ep24");
-    ld_rr(asm, Reg8::A, Reg8::E);
-    a_to(asm, SPTR);
-    ld_rr(asm, Reg8::A, Reg8::D);
-    a_to(asm, SPTR + 1);
-    ld_r_imm(asm, Reg8::A, 64);
-    a_to(asm, ROWCNT);
-    ptr_init(asm, IPTR, S_ACC_BASE);
-    ptr_init(asm, XPTR, S_X_BASE);
-    asm.label("d24_loop");
-    load_de_via_ptr(asm, IPTR);
-    abs_de_store_sign(asm);
-    ld_rr(asm, Reg8::B, Reg8::D);
-    ld_rr(asm, Reg8::C, Reg8::E);
-    load_de_via_ptr(asm, SPTR);
-    asm.call("mul16");
-    // DIV_NUM = (MUL_R << 1) + 127
-    mem_copy(asm, DIV_NUM, crate::asm_impl_model::MUL_R, 4);
-    mem_shl1(asm, DIV_NUM, 4);
-    a_from(asm, DIV_NUM);
-    asm.i(Instr::AddA {
-        src: AluSrc8::Imm(127),
-    });
-    a_to(asm, DIV_NUM);
-    carry_ripple(asm, DIV_NUM + 1, 3);
-    asm.call("udiv254"); // DE = min(q, 65535)
-    // sign-extend to 3 bytes; negate when SIGN
+/// Shared epilogue tail: DE = |delta| (u16), SIGN live. Sign-extend/negate
+/// into B:DE and add into X[row] (i24 wrapping), advancing XPTR.
+fn emit_delta_apply24(asm: &mut ModelAsm, neg_label: &str, add_label: &str) {
     ld_r_imm(asm, Reg8::B, 0);
     a_from(asm, SIGN);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    asm.jr(Some(Cond::Z), "d24_add");
+    asm.jr(Some(Cond::Z), add_label);
+    asm.label(neg_label);
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -1177,37 +1579,155 @@ fn emit_down_epilogue24(asm: &mut ModelAsm) {
         src: AluSrc8::Reg(Reg8::B),
     });
     ld_rr(asm, Reg8::B, Reg8::A);
-    asm.label("d24_add");
-    // X[row] += B:DE (24-bit wrapping)
-    a_from(asm, XPTR);
+    asm.label(add_label);
+    asm.call("resid_add24");
+}
+
+/// `up_ep16`: DE = scale-table pointer; ROWCNT2 preset to the row count
+/// (16-bit, so d_ff can exceed 255). For each row:
+/// ACT[row] = GELU_LUT[127 + clamp(round_half_away(scale*acc / 256), -127, 127)].
+/// Caller maps the params bank first (GELU LUT itself lives in bank 0).
+fn emit_up_epilogue16(asm: &mut ModelAsm, l: &StateWramLayout) {
+    use crate::asm_impl_model::MUL_R;
+    asm.label("up_ep16");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    a_to(asm, SPTR);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    a_to(asm, SPTR + 1);
+    ptr_init(asm, IPTR, l.acc);
+    ptr_init(asm, OPTR, l.act);
+    asm.label("upe16_loop");
+    load_de_via_ptr(asm, IPTR);
+    abs_de_store_sign(asm);
+    ld_rr(asm, Reg8::B, Reg8::D);
+    ld_rr(asm, Reg8::C, Reg8::E);
+    load_de_via_ptr(asm, SPTR);
+    asm.call("mul16");
+    // p = min(127, (MUL_R + 128) >> 8)
+    a_from(asm, MUL_R);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(128),
+    });
+    a_from(asm, MUL_R + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    a_from(asm, MUL_R + 2);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    a_from(asm, MUL_R + 3);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::D),
+    });
+    asm.jr(Some(Cond::NZ), "upe16_clamp");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(128),
+    });
+    asm.jr(Some(Cond::C), "upe16_pok");
+    asm.label("upe16_clamp");
+    ld_r_imm(asm, Reg8::E, 127);
+    asm.label("upe16_pok");
+    // HL = gelu_center +/- E
+    asm.ld16_label(Reg16Data::HL, "gelu_lut", 127);
+    a_from(asm, SIGN);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "upe16_plus");
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
     ld_rr(asm, Reg8::L, Reg8::A);
-    a_from(asm, XPTR + 1);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Imm(0),
+    });
     ld_rr(asm, Reg8::H, Reg8::A);
-    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.jr(None, "upe16_fetch");
+    asm.label("upe16_plus");
+    ld_rr(asm, Reg8::A, Reg8::L);
     asm.i(Instr::AddA {
         src: AluSrc8::Reg(Reg8::E),
     });
-    asm.i(Instr::LdReg16AddrFromA {
-        dst: Reg16Addr::Hli,
-    });
-    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::H);
     asm.i(Instr::AdcA {
-        src: AluSrc8::Reg(Reg8::D),
+        src: AluSrc8::Imm(0),
     });
-    asm.i(Instr::LdReg16AddrFromA {
-        dst: Reg16Addr::Hli,
-    });
-    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
-    asm.i(Instr::AdcA {
-        src: AluSrc8::Reg(Reg8::B),
-    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.label("upe16_fetch");
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::C });
+    a_from(asm, OPTR);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, OPTR + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::LdReg16AddrFromA {
         dst: Reg16Addr::Hli,
     });
     ld_rr(asm, Reg8::A, Reg8::L);
-    a_to(asm, XPTR);
+    a_to(asm, OPTR);
     ld_rr(asm, Reg8::A, Reg8::H);
-    a_to(asm, XPTR + 1);
+    a_to(asm, OPTR + 1);
+    // 16-bit row counter decrement
+    a_from(asm, ROWCNT2);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    a_to(asm, ROWCNT2);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, ROWCNT2 + 1);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, ROWCNT2 + 1);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::NZ), "upe16_loop");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `down_ep24`: DE = scale-table pointer; d_model rows of **i16** accs.
+/// X[row] (i24) += (mod 2^24) sign(m) * min(65535, (|m|*2 + 127) / 254)
+/// with m = scale * acc — the dense Q-grid formula on the widened residual.
+fn emit_down_epilogue24(asm: &mut ModelAsm, l: &StateWramLayout) {
+    use crate::asm_impl_model::MUL_R;
+    asm.label("down_ep24");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    a_to(asm, SPTR);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    a_to(asm, SPTR + 1);
+    ld_r_imm(asm, Reg8::A, l.topology.d_model as u8);
+    a_to(asm, ROWCNT);
+    ptr_init(asm, IPTR, l.acc);
+    ptr_init(asm, XPTR, l.x);
+    asm.label("d24_loop");
+    load_de_via_ptr(asm, IPTR);
+    abs_de_store_sign(asm);
+    ld_rr(asm, Reg8::B, Reg8::D);
+    ld_rr(asm, Reg8::C, Reg8::E);
+    load_de_via_ptr(asm, SPTR);
+    asm.call("mul16");
+    // DIV_NUM = (MUL_R << 1) + 127
+    mem_copy(asm, DIV_NUM, MUL_R, 4);
+    mem_shl1(asm, DIV_NUM, 4);
+    a_from(asm, DIV_NUM);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(127),
+    });
+    a_to(asm, DIV_NUM);
+    carry_ripple(asm, DIV_NUM + 1, 3);
+    asm.call("udiv254"); // DE = min(q, 65535)
+    emit_delta_apply24(asm, "d24_neg", "d24_add");
     a_from(asm, ROWCNT);
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::A),
@@ -1217,46 +1737,158 @@ fn emit_down_epilogue24(asm: &mut ModelAsm) {
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `emb_copy24`: A = input id (0..79). Switches to the embedding bank and
-/// copies the 192-byte i24 residual row into X.
-fn emit_emb_copy24(asm: &mut ModelAsm, emb_bank: u8) {
+/// `down_ep24w`: the wide twin of `down_ep24` over **3-byte i24** accs.
+/// m = scale * |acc| via mul16 + mul16x8 (the lowering guarantees
+/// m < 2^31 so the u32 division numerator holds), then the identical
+/// Q19.5 delta formula and residual add.
+fn emit_down_epilogue24_wide(asm: &mut ModelAsm, l: &StateWramLayout) {
+    use crate::asm_impl_model::MUL_R;
+    asm.label("down_ep24w");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    a_to(asm, SPTR);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    a_to(asm, SPTR + 1);
+    ld_r_imm(asm, Reg8::A, l.topology.d_model as u8);
+    a_to(asm, ROWCNT);
+    ptr_init(asm, IPTR, l.acc);
+    ptr_init(asm, XPTR, l.x);
+    asm.label("d24w_loop");
+    load_via_ptr_to(asm, IPTR, ST_H, 3); // acc (i24 LE)
+    // sign + abs
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, SIGN);
+    a_from(asm, ST_H + 2);
+    asm.i(Instr::Bit {
+        bit: BitIndex::new(7).expect("bit 7"),
+        target: CbTarget::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "d24w_abs");
+    ld_r_imm(asm, Reg8::A, 1);
+    a_to(asm, SIGN);
+    neg_mem(asm, ST_H, 3);
+    asm.label("d24w_abs");
+    // m = scale * |acc|: DIV_NUM = MUL_R(lo16 * scale) + (hi8 * scale) << 16
+    a_from(asm, ST_H);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, ST_H + 1);
+    ld_rr(asm, Reg8::B, Reg8::A); // BC = lo16(|acc|)
+    load_de_via_ptr(asm, SPTR); // DE = scale raw
+    asm.call("mul16"); // MUL_R = scale * lo16, DE preserved
+    mem_copy(asm, DIV_NUM, MUL_R, 4);
+    a_from(asm, ST_H + 2); // hi8(|acc|)
+    asm.call("mul16x8"); // C:HL = hi8 * scale (C = 0 by the lowering bound)
+    a_from(asm, DIV_NUM + 2);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::L),
+    });
+    a_to(asm, DIV_NUM + 2);
+    a_from(asm, DIV_NUM + 3);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::H),
+    });
+    a_to(asm, DIV_NUM + 3);
+    // DIV_NUM = (m << 1) + 127 (fits u32 by the lowering bound)
+    mem_shl1(asm, DIV_NUM, 4);
+    a_from(asm, DIV_NUM);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(127),
+    });
+    a_to(asm, DIV_NUM);
+    carry_ripple(asm, DIV_NUM + 1, 3);
+    asm.call("udiv254"); // DE = min(q, 65535)
+    emit_delta_apply24(asm, "d24w_neg", "d24w_add");
+    a_from(asm, ROWCNT);
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, ROWCNT);
+    asm.jp(Some(Cond::NZ), "d24w_loop");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `emb_copy24`: A = input id. Maps the embedding bank holding the id's
+/// row (power-of-two `stride` bytes per row, `rows_per_bank` rows per
+/// bank) and copies the `3 * d_model`-byte i24 row into X.
+fn emit_emb_copy24(asm: &mut ModelAsm, l: &StateWramLayout, emb_bank0: u16, stride: usize) {
+    let rows_per_bank = BANK_BYTES / stride;
+    debug_assert!(rows_per_bank.is_power_of_two());
+    let log_rpb = rows_per_bank.trailing_zeros();
+    let page_shift = stride.trailing_zeros() - 8;
+    let mask = (rows_per_bank - 1) as u8;
     asm.label("emb_copy24");
     ld_rr(asm, Reg8::B, Reg8::A);
-    ld_r_imm(asm, Reg8::A, emb_bank);
-    a_to(asm, MBC5_ROMB0);
-    // HL = 0x4000 + id * 192  (id * 192 = (id << 6) + (id << 7))
-    ld_rr(asm, Reg8::L, Reg8::B);
-    ld_r_imm(asm, Reg8::H, 0);
-    for _ in 0..6 {
-        asm.i(Instr::AddHl { src: Reg16Data::HL });
+    // bank = emb_bank0 + (id >> log_rpb), 9-bit
+    for _ in 0..log_rpb {
+        asm.i(Instr::Srl {
+            target: CbTarget::Reg(Reg8::A),
+        });
     }
-    ld_rr(asm, Reg8::D, Reg8::H);
-    ld_rr(asm, Reg8::E, Reg8::L);
-    asm.i(Instr::AddHl { src: Reg16Data::HL });
-    asm.i(Instr::AddHl { src: Reg16Data::DE });
-    ld_rr(asm, Reg8::A, Reg8::H);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((emb_bank0 & 0xFF) as u8),
+    });
+    a_to(asm, MBC5_ROMB0); // LD (nn),A preserves flags; carry survives
+    ld_r_imm(asm, Reg8::A, (emb_bank0 >> 8) as u8); // LD r,n preserves flags
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, MBC5_ROMB1);
+    // HL = 0x4000 + (id & mask) * stride
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(mask),
+    });
+    for _ in 0..page_shift {
+        asm.i(Instr::AddA {
+            src: AluSrc8::Reg(Reg8::A),
+        });
+    }
     asm.i(Instr::AddA {
         src: AluSrc8::Imm((CHUNK_ENTRY >> 8) as u8),
     });
     ld_rr(asm, Reg8::H, Reg8::A);
-    ld16(asm, Reg16Data::DE, S_X_BASE);
-    ld_r_imm(asm, Reg8::B, 192);
-    asm.jp(None, "copy_bytes");
+    ld_r_imm(asm, Reg8::L, 0);
+    // copy 3 * d_model bytes HL -> X (16-bit count)
+    ld16(asm, Reg16Data::DE, l.x);
+    ld16(asm, Reg16Data::BC, (3 * l.topology.d_model) as u16);
+    asm.label("ec24_copy");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "ec24_copy");
+    asm.i(Instr::Ret { cond: None });
 }
 
-/// `head80`: with the head bank mapped, accumulate all 64 lanes into the 80
-/// i24 logits via per-lane product LUTs (dense construction, 80-entry rows).
-fn emit_head80(asm: &mut ModelAsm) {
-    asm.label("head80");
-    asm.i(Instr::XorA {
-        src: AluSrc8::Reg(Reg8::A),
-    });
+/// One head lane group: with head bank `g` mapped, accumulate lanes
+/// `lane_lo..lane_hi` into the `vocab` i24 logits via per-lane product LUT
+/// pages (dense construction). Emitted once per head bank because the
+/// bank-relative page base is a compile-time immediate.
+fn emit_head_group(
+    asm: &mut ModelAsm,
+    l: &StateWramLayout,
+    g: usize,
+    lane_lo: usize,
+    lane_hi: usize,
+) {
+    let t = &l.topology;
+    let lut_hi = (l.lut_lo_page >> 8) as u8;
+    let act_hi = (l.act >> 8) as u8;
+    debug_assert_eq!(l.act & 0xFF, 0, "activation page-aligned");
+    let lbl = |s: &str| format!("{s}_{g}");
+    asm.label(&lbl("head_grp"));
+    ld_r_imm(asm, Reg8::A, lane_lo as u8);
     a_to(asm, LANE);
-    asm.label("h80_lane");
+    asm.label(&lbl("hg_lane"));
     // q = ACT[lane] - 128
     a_from(asm, LANE);
     ld_rr(asm, Reg8::L, Reg8::A);
-    ld_r_imm(asm, Reg8::H, (S_ACT_BASE >> 8) as u8);
+    ld_r_imm(asm, Reg8::H, act_hi);
     asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
     asm.i(Instr::SubA {
         src: AluSrc8::Imm(128),
@@ -1268,13 +1900,13 @@ fn emit_head80(asm: &mut ModelAsm) {
         bit: BitIndex::new(7).expect("bit 7"),
         target: CbTarget::Reg(Reg8::A),
     });
-    asm.jr(Some(Cond::Z), "h80_qpos");
+    asm.jr(Some(Cond::Z), &lbl("hg_qpos"));
     ld_r_imm(asm, Reg8::B, 0xFF);
-    asm.label("h80_qpos");
+    asm.label(&lbl("hg_qpos"));
     // ascending half: entries 0..=127
     ld16(asm, Reg16Data::DE, 0);
-    ld16(asm, Reg16Data::HL, S_LUT_LO_PAGE);
-    asm.label("h80_asc");
+    ld16(asm, Reg16Data::HL, l.lut_lo_page);
+    asm.label(&lbl("hg_asc"));
     ld_rr(asm, Reg8::A, Reg8::E);
     asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
     asm.i(Instr::Inc8 {
@@ -1302,11 +1934,11 @@ fn emit_head80(asm: &mut ModelAsm) {
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(0x80),
     });
-    asm.jr(Some(Cond::NZ), "h80_asc");
+    asm.jr(Some(Cond::NZ), &lbl("hg_asc"));
     // descending half: entries 255 down to 128
     ld16(asm, Reg16Data::DE, 0);
     ld_r_imm(asm, Reg8::L, 0xFF);
-    asm.label("h80_desc");
+    asm.label(&lbl("hg_desc"));
     ld_rr(asm, Reg8::A, Reg8::E);
     asm.i(Instr::SubA {
         src: AluSrc8::Reg(Reg8::C),
@@ -1331,30 +1963,30 @@ fn emit_head80(asm: &mut ModelAsm) {
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(0x80),
     });
-    asm.jr(Some(Cond::Z), "h80_desc_done");
+    asm.jr(Some(Cond::Z), &lbl("hg_desc_done"));
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::L),
     });
-    asm.jr(None, "h80_desc");
-    asm.label("h80_desc_done");
+    asm.jr(None, &lbl("hg_desc"));
+    asm.label(&lbl("hg_desc_done"));
     // sign-extension page
     a_from(asm, SIGN);
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
     ld_rr(asm, Reg8::A, Reg8::B);
-    asm.jr(Some(Cond::Z), "h80_sx");
+    asm.jr(Some(Cond::Z), &lbl("hg_sx"));
     asm.i(Instr::Cpl);
-    asm.label("h80_sx");
+    asm.label(&lbl("hg_sx"));
     ld_rr(asm, Reg8::C, Reg8::A);
-    ld16(asm, Reg16Data::HL, S_LUT_LO_PAGE + 0x200);
+    ld16(asm, Reg16Data::HL, l.lut_lo_page + 0x200);
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
     asm.i(Instr::LdReg16AddrFromA {
         dst: Reg16Addr::Hli,
     });
-    asm.label("h80_fillp");
+    asm.label(&lbl("hg_fillp"));
     ld_rr(asm, Reg8::A, Reg8::B);
     asm.i(Instr::LdReg16AddrFromA {
         dst: Reg16Addr::Hli,
@@ -1363,8 +1995,8 @@ fn emit_head80(asm: &mut ModelAsm) {
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(0x80),
     });
-    asm.jr(Some(Cond::NZ), "h80_fillp");
-    asm.label("h80_filln");
+    asm.jr(Some(Cond::NZ), &lbl("hg_fillp"));
+    asm.label(&lbl("hg_filln"));
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::LdReg16AddrFromA {
         dst: Reg16Addr::Hli,
@@ -1373,19 +2005,24 @@ fn emit_head80(asm: &mut ModelAsm) {
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    asm.jr(Some(Cond::NZ), "h80_filln");
-    // accumulate: D = head page (0x40 + lane), E over 0..79, HL = LOGITS
+    asm.jr(Some(Cond::NZ), &lbl("hg_filln"));
+    // accumulate: D = head page (0x40 + lane - lane_lo), E over 0..vocab
     a_from(asm, LANE);
+    if lane_lo > 0 {
+        asm.i(Instr::SubA {
+            src: AluSrc8::Imm(lane_lo as u8),
+        });
+    }
     asm.i(Instr::AddA {
         src: AluSrc8::Imm((CHUNK_ENTRY >> 8) as u8),
     });
     ld_rr(asm, Reg8::D, Reg8::A);
     ld_r_imm(asm, Reg8::E, 0);
-    ld16(asm, Reg16Data::HL, S_LOGITS_BASE);
-    asm.label("h80_acc");
+    ld16(asm, Reg16Data::HL, l.logits);
+    asm.label(&lbl("hg_acc"));
     asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
     ld_rr(asm, Reg8::C, Reg8::A);
-    ld_r_imm(asm, Reg8::B, (S_LUT_LO_PAGE >> 8) as u8);
+    ld_r_imm(asm, Reg8::B, lut_hi);
     asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
     asm.i(Instr::AddA {
         src: AluSrc8::HlIndirect,
@@ -1418,27 +2055,27 @@ fn emit_head80(asm: &mut ModelAsm) {
     });
     ld_rr(asm, Reg8::A, Reg8::E);
     asm.i(Instr::CpA {
-        src: AluSrc8::Imm(STATE_VOCAB as u8),
+        src: AluSrc8::Imm(t.vocab as u8),
     });
-    asm.jr(Some(Cond::NZ), "h80_acc");
+    asm.jr(Some(Cond::NZ), &lbl("hg_acc"));
     a_from(asm, LANE);
     asm.i(Instr::Inc8 {
         dst: IncDec8Target::Reg(Reg8::A),
     });
     a_to(asm, LANE);
     asm.i(Instr::CpA {
-        src: AluSrc8::Imm(D_MODEL as u8),
+        src: AluSrc8::Imm(lane_hi as u8),
     });
-    asm.jp(Some(Cond::NZ), "h80_lane");
+    asm.jp(Some(Cond::NZ), &lbl("hg_lane"));
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `argmax80`: scan the 80 i24 logits, strict-greater update (lowest index
-/// wins ties), signed compare via a sign-flipped top byte.
-fn emit_argmax80(asm: &mut ModelAsm) {
+/// `argmax_v`: scan the `vocab` i24 logits, strict-greater update (lowest
+/// index wins ties), signed compare via a sign-flipped top byte.
+fn emit_argmax(asm: &mut ModelAsm, l: &StateWramLayout) {
     use crate::asm_impl_model::{ARG_BEST, ARG_CAND};
-    asm.label("argmax80");
-    ld16(asm, Reg16Data::HL, S_LOGITS_BASE);
+    asm.label("argmax_v");
+    ld16(asm, Reg16Data::HL, l.logits);
     asm.i(Instr::LdAFromReg16Addr {
         src: Reg16Addr::Hli,
     });
@@ -1459,7 +2096,7 @@ fn emit_argmax80(asm: &mut ModelAsm) {
     });
     a_to(asm, S_ARGMAX_ADDR);
     ld_r_imm(asm, Reg8::C, 1);
-    asm.label("a80_loop");
+    asm.label("amx_loop");
     asm.i(Instr::LdAFromReg16Addr {
         src: Reg16Addr::Hli,
     });
@@ -1482,33 +2119,32 @@ fn emit_argmax80(asm: &mut ModelAsm) {
         asm.i(Instr::CpA {
             src: AluSrc8::Reg(Reg8::B),
         });
-        asm.jr(Some(Cond::C), "a80_upd");
+        asm.jr(Some(Cond::C), "amx_upd");
         if k > 0 {
-            asm.jr(Some(Cond::NZ), "a80_next");
+            asm.jr(Some(Cond::NZ), "amx_next");
         } else {
-            asm.jr(None, "a80_next");
+            asm.jr(None, "amx_next");
         }
     }
-    asm.label("a80_upd");
+    asm.label("amx_upd");
     mem_copy(asm, ARG_BEST, ARG_CAND, 3);
     ld_rr(asm, Reg8::A, Reg8::C);
     a_to(asm, S_ARGMAX_ADDR);
-    asm.label("a80_next");
+    asm.label("amx_next");
     asm.i(Instr::Inc8 {
         dst: IncDec8Target::Reg(Reg8::C),
     });
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::CpA {
-        src: AluSrc8::Imm(STATE_VOCAB as u8),
+        src: AluSrc8::Imm(l.topology.vocab as u8),
     });
-    asm.jp(Some(Cond::NZ), "a80_loop");
+    asm.jp(Some(Cond::NZ), "amx_loop");
     asm.i(Instr::Ret { cond: None });
 }
 
 /// `rng_step`: advance the XorShift16 state at [`S_RNG_ADDR`] by one step
 /// of the pinned (7, 9, 8) triple: `x ^= x << 7; x ^= x >> 9; x ^= x << 8`
-/// (byte-serial shifts on the 2-byte LE state; cycle cost is irrelevant
-/// next to the matvecs).
+/// (byte-serial shifts on the 2-byte LE state).
 fn emit_rng_step(asm: &mut ModelAsm) {
     asm.label("rng_step");
     mem_copy(asm, SMP_RT, S_RNG_ADDR, 2);
@@ -1533,9 +2169,7 @@ fn emit_rng_step(asm: &mut ModelAsm) {
 }
 
 /// `smp_weight`: SMP_D (u24 logit deficit) -> A = exp-LUT weight.
-/// `u = min(255, (d * scale_q16 + 0x8000) >> 16)`, `w = exp_lut[u]` —
-/// the same mul16/mul16x8 + round-half-up shape as the deployed
-/// state-out epilogue. Mirrors `gbf_kernel::decode` exactly.
+/// Mirrors `gbf_kernel::decode` exactly.
 fn emit_smp_weight(asm: &mut ModelAsm, scale_q16: u16) {
     asm.label("smp_weight");
     // SMP_P = lo16(d) * scale (u32) with a fifth zero byte.
@@ -1605,42 +2239,40 @@ fn emit_smp_weight(asm: &mut ModelAsm, scale_q16: u16) {
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `sample80`: the integer top-k/temperature sampling epilogue. Must run
-/// right after `argmax80` (candidate 0 = the argmax with LUT weight
-/// `exp_lut[0]`); later passes re-scan the 80 i24 logits skipping used
-/// ids (first-unused-then-strictly-greater, so ties go to lower ids),
-/// weigh each candidate through `smp_weight`, then draw one XorShift16
-/// value, form `threshold = (r * total) >> 16`, and pick the first
-/// candidate whose cumulative weight strictly exceeds it. Byte-exact
-/// mirror of `gbf_kernel::decode::sample_topk`.
-fn emit_sample80(asm: &mut ModelAsm, k: u8) {
-    let used_lo = (S_SAMP_USED & 0xFF) as u8;
-    let used_hi = (S_SAMP_USED >> 8) as u8;
-    let ids_lo = (S_SAMP_IDS & 0xFF) as u8;
-    let wts_lo = (S_SAMP_WTS & 0xFF) as u8;
-    let logits_hi = (S_LOGITS_BASE >> 8) as u8;
+/// `sample_v`: the integer top-k/temperature sampling epilogue over the
+/// `vocab` i24 logits. Must run right after `argmax_v` (candidate 0 = the
+/// argmax with LUT weight `exp_lut[0]`). Byte-exact mirror of
+/// `gbf_kernel::decode::sample_topk`.
+fn emit_sample_topk(asm: &mut ModelAsm, l: &StateWramLayout, k: u8) {
+    let vocab = l.topology.vocab;
+    let used_lo = (l.samp_used & 0xFF) as u8;
+    let used_hi = (l.samp_used >> 8) as u8;
+    let ids_lo = (l.samp_ids & 0xFF) as u8;
+    let wts_lo = (l.samp_wts & 0xFF) as u8;
+    let logits_hi = (l.logits >> 8) as u8;
+    debug_assert_eq!(l.logits & 0xFF, 0, "logits page-aligned");
     use crate::asm_impl_model::ARG_CAND;
 
-    asm.label("sample80");
-    // clear the 80 used flags
-    ld16(asm, Reg16Data::HL, S_SAMP_USED);
+    asm.label("sample_v");
+    // clear the vocab used flags
+    ld16(asm, Reg16Data::HL, l.samp_used);
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    ld_r_imm(asm, Reg8::B, STATE_VOCAB as u8);
-    asm.label("s80_clr");
+    ld_r_imm(asm, Reg8::B, vocab as u8);
+    asm.label("smp_clr");
     asm.i(Instr::LdReg16AddrFromA {
         dst: Reg16Addr::Hli,
     });
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::B),
     });
-    asm.jr(Some(Cond::NZ), "s80_clr");
+    asm.jr(Some(Cond::NZ), "smp_clr");
 
     // candidate 0 = argmax (d = 0 -> u = 0 -> w = exp_lut[0])
     mem_copy(asm, SMP_M, crate::asm_impl_model::ARG_BEST, 3);
     a_from(asm, S_ARGMAX_ADDR);
-    a_to(asm, S_SAMP_IDS);
+    a_to(asm, l.samp_ids);
     asm.i(Instr::AddA {
         src: AluSrc8::Imm(used_lo),
     });
@@ -1650,7 +2282,7 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
     asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
     asm.ld16_label(Reg16Data::HL, "exp_lut", 0);
     asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
-    a_to(asm, S_SAMP_WTS);
+    a_to(asm, l.samp_wts);
     a_to(asm, SMP_TOT);
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
@@ -1660,16 +2292,16 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
     a_to(asm, SMP_PASS);
 
     // passes 1..k
-    asm.label("s80_pass");
+    asm.label("smp_pass");
     a_from(asm, SMP_PASS);
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(k),
     });
-    asm.jp(Some(Cond::Z), "s80_draw");
+    asm.jp(Some(Cond::Z), "smp_draw");
     ld_r_imm(asm, Reg8::A, 0xFF);
     a_to(asm, SMP_BESTID);
     ld_r_imm(asm, Reg8::C, 0);
-    asm.label("s80_scan");
+    asm.label("smp_scan");
     // skip used ids
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::AddA {
@@ -1681,8 +2313,8 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    asm.jp(Some(Cond::NZ), "s80_next");
-    // load logit id C (3 bytes at S_LOGITS_BASE + 3*C), sign-flip hi
+    asm.jp(Some(Cond::NZ), "smp_next");
+    // load logit id C (3 bytes at logits + 3*C), sign-flip hi
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::AddA {
         src: AluSrc8::Reg(Reg8::A),
@@ -1712,7 +2344,7 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(0xFF),
     });
-    asm.jr(Some(Cond::Z), "s80_take");
+    asm.jr(Some(Cond::Z), "smp_take");
     // 3-byte unsigned compare: take iff CAND > BEST
     for kb in [2u16, 1, 0] {
         a_from(asm, ARG_CAND + kb);
@@ -1721,26 +2353,26 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
         asm.i(Instr::CpA {
             src: AluSrc8::Reg(Reg8::B),
         });
-        asm.jr(Some(Cond::C), "s80_take");
+        asm.jr(Some(Cond::C), "smp_take");
         if kb > 0 {
-            asm.jp(Some(Cond::NZ), "s80_next");
+            asm.jp(Some(Cond::NZ), "smp_next");
         } else {
-            asm.jp(None, "s80_next");
+            asm.jp(None, "smp_next");
         }
     }
-    asm.label("s80_take");
+    asm.label("smp_take");
     mem_copy(asm, SMP_BEST, ARG_CAND, 3);
     ld_rr(asm, Reg8::A, Reg8::C);
     a_to(asm, SMP_BESTID);
-    asm.label("s80_next");
+    asm.label("smp_next");
     asm.i(Instr::Inc8 {
         dst: IncDec8Target::Reg(Reg8::C),
     });
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::CpA {
-        src: AluSrc8::Imm(STATE_VOCAB as u8),
+        src: AluSrc8::Imm(vocab as u8),
     });
-    asm.jp(Some(Cond::NZ), "s80_scan");
+    asm.jp(Some(Cond::NZ), "smp_scan");
     // commit the pass winner: mark used, record id
     a_from(asm, SMP_BESTID);
     asm.i(Instr::AddA {
@@ -1786,10 +2418,10 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
         dst: IncDec8Target::Reg(Reg8::A),
     });
     a_to(asm, SMP_PASS);
-    asm.jp(None, "s80_pass");
+    asm.jp(None, "smp_pass");
 
     // draw: r = rng_step(); threshold = (r * total) >> 16
-    asm.label("s80_draw");
+    asm.label("smp_draw");
     asm.call("rng_step");
     a_from(asm, S_RNG_ADDR);
     ld_rr(asm, Reg8::C, Reg8::A);
@@ -1803,7 +2435,7 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
     mem_copy(asm, SMP_THR, crate::asm_impl_model::MUL_R + 2, 2);
     zero_mem(asm, SMP_CUM, 2);
     ld_r_imm(asm, Reg8::C, 0);
-    asm.label("s80_walk");
+    asm.label("smp_walk");
     // cum += wts[j]
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::AddA {
@@ -1836,7 +2468,7 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
     asm.i(Instr::SbcA {
         src: AluSrc8::Reg(Reg8::B),
     });
-    asm.jr(Some(Cond::C), "s80_pick");
+    asm.jr(Some(Cond::C), "smp_pick");
     asm.i(Instr::Inc8 {
         dst: IncDec8Target::Reg(Reg8::C),
     });
@@ -1844,12 +2476,12 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(k),
     });
-    asm.jp(Some(Cond::NZ), "s80_walk");
+    asm.jp(Some(Cond::NZ), "smp_walk");
     // structurally unreachable (threshold < total); defensively pick last
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::C),
     });
-    asm.label("s80_pick");
+    asm.label("smp_pick");
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::AddA {
         src: AluSrc8::Imm(ids_lo),
@@ -1862,89 +2494,346 @@ fn emit_sample80(asm: &mut ModelAsm, k: u8) {
 }
 
 // ---------------------------------------------------------------------------
+// bank plan + params blob
+// ---------------------------------------------------------------------------
+
+/// Per-row scale/decay tables, packed into one dedicated ROM bank (mapped
+/// at [`CHUNK_ENTRY`] whenever an epilogue or the state update needs them).
+pub(crate) struct ParamsBlob {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) state_in_scales: u16,
+    pub(crate) state_out_scales: u16,
+    pub(crate) decay: u16,
+    /// (up scales, down scales) offsets per block.
+    pub(crate) blocks: Vec<(u16, u16)>,
+}
+
+/// Weight-chunk plan and bank numbering shared by every stateful ROM
+/// variant (one-token, multi-token, sampling, interactive shell).
+pub(crate) struct StateRomPlan {
+    pub(crate) layout: StateWramLayout,
+    pub(crate) per_matvec_chunks: Vec<Vec<Vec<u8>>>,
+    pub(crate) weight_chunk_count: usize,
+    pub(crate) weight_code_bytes: usize,
+    pub(crate) params: ParamsBlob,
+    pub(crate) params_bank: usize,
+    pub(crate) state_bank0: usize,
+    /// Rows served by each state-table bank, in bank order.
+    pub(crate) state_bank_rows: Vec<u8>,
+    pub(crate) state_stride: usize,
+    pub(crate) emb_bank0: usize,
+    pub(crate) emb_stride: usize,
+    pub(crate) emb_bank_count: usize,
+    pub(crate) head_bank0: usize,
+    /// (lane_lo, lane_hi) per head bank.
+    pub(crate) head_groups: Vec<(usize, usize)>,
+    /// Total banks including `extra_banks` appended after the head banks.
+    pub(crate) bank_count: usize,
+}
+
+fn push_scales(bytes: &mut Vec<u8>, layer: &crate::model_ref::TernaryLayer) -> u16 {
+    let off = bytes.len() as u16;
+    for row in 0..layer.rows() {
+        bytes.extend_from_slice(&layer.scale_raw(row).to_le_bytes());
+    }
+    off
+}
+
+/// Build the weight chunks, params blob, and bank numbering: chunks 1..=W,
+/// the params bank, the state weight-table banks, the embedding banks, the
+/// head banks, and finally `extra_banks` variant-owned banks.
+pub(crate) fn plan_state_rom(
+    model: &IntStateLoweredModel,
+    layout: StateWramLayout,
+    extra_banks: usize,
+) -> Result<StateRomPlan, ModelRomError> {
+    let t = model.topology;
+    let l = &layout;
+    let mut per_matvec_chunks: Vec<Vec<Vec<u8>>> = Vec::new();
+    per_matvec_chunks.push(build_matvec_chunks_at(&model.state_in, l.act, l.acc)?);
+    for (up, down) in &model.blocks {
+        per_matvec_chunks.push(build_matvec_chunks_at(up, l.act, l.acc)?);
+        match model.down_width {
+            AccWidth::I16 => {
+                per_matvec_chunks.push(build_matvec_chunks_at(down, l.act, l.acc)?);
+            }
+            AccWidth::I24 => {
+                per_matvec_chunks.push(build_matvec_chunks_wide(&down.layer, l.act, l.acc)?);
+            }
+        }
+    }
+    let weight_chunk_count: usize = per_matvec_chunks.iter().map(Vec::len).sum();
+    let weight_code_bytes: usize = per_matvec_chunks
+        .iter()
+        .flat_map(|chunks| chunks.iter().map(Vec::len))
+        .sum();
+
+    // Params blob (one bank).
+    let mut bytes = Vec::new();
+    let state_in_scales = push_scales(&mut bytes, &model.state_in.layer);
+    let state_out_scales = push_scales(&mut bytes, &model.state_out);
+    let decay = bytes.len() as u16;
+    bytes.extend_from_slice(&model.decay_u8);
+    let mut blocks = Vec::new();
+    for (up, down) in &model.blocks {
+        let up_off = push_scales(&mut bytes, &up.layer);
+        let down_off = push_scales(&mut bytes, &down.layer);
+        blocks.push((up_off, down_off));
+    }
+    if bytes.len() > BANK_BYTES {
+        return Err(ModelRomError::ParamsBankOverflow { bytes: bytes.len() });
+    }
+    let params = ParamsBlob {
+        bytes,
+        state_in_scales,
+        state_out_scales,
+        decay,
+        blocks,
+    };
+
+    // State out-projection table: power-of-two row stride, multi-bank.
+    let state_stride = t.state_slots.next_power_of_two();
+    if state_stride > BANK_BYTES {
+        return Err(ModelRomError::TableRowTooWide {
+            stride: state_stride,
+        });
+    }
+    let state_rpb = BANK_BYTES / state_stride;
+    let mut state_bank_rows = Vec::new();
+    let mut remaining = t.d_model;
+    while remaining > 0 {
+        let rows = remaining.min(state_rpb);
+        state_bank_rows.push(rows as u8);
+        remaining -= rows;
+    }
+
+    // Embedding table: power-of-two stride >= 256 (single-page rows so the
+    // in-bank address is just a page number).
+    let emb_stride = (3 * t.d_model).next_power_of_two().max(256);
+    if emb_stride > BANK_BYTES {
+        return Err(ModelRomError::TableRowTooWide { stride: emb_stride });
+    }
+    let emb_rpb = BANK_BYTES / emb_stride;
+    let emb_bank_count = t.vocab.div_ceil(emb_rpb);
+
+    // Head: 64 lane pages of 256 bytes per bank.
+    let head_groups: Vec<(usize, usize)> = (0..t.d_model)
+        .step_by(64)
+        .map(|lo| (lo, (lo + 64).min(t.d_model)))
+        .collect();
+
+    let params_bank = 1 + weight_chunk_count;
+    let state_bank0 = params_bank + 1;
+    let emb_bank0 = state_bank0 + state_bank_rows.len();
+    let head_bank0 = emb_bank0 + emb_bank_count;
+    let bank_count = head_bank0 + head_groups.len() + extra_banks;
+    if bank_count > 512 {
+        return Err(ModelRomError::TooManyBanks { banks: bank_count });
+    }
+    Ok(StateRomPlan {
+        layout,
+        per_matvec_chunks,
+        weight_chunk_count,
+        weight_code_bytes,
+        params,
+        params_bank,
+        state_bank0,
+        state_bank_rows,
+        state_stride,
+        emb_bank0,
+        emb_stride,
+        emb_bank_count,
+        head_bank0,
+        head_groups,
+        bank_count,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // top-level build
 // ---------------------------------------------------------------------------
 
-/// Assemble the complete stateful one-token ROM. The state vector is NOT
-/// initialized by the ROM: the host pokes [`S_STATE_BASE`] (and
-/// [`S_INPUT_ADDR`]) before running, which lets the gate exercise nonzero
-/// carried states.
-pub fn build_state_one_token_rom(
-    model: &IntStateLoweredModel,
-) -> Result<StateOneTokenRom, ModelRomError> {
-    let built = build_state_model_rom(model, None, None)?;
-    Ok(StateOneTokenRom {
-        token_start_pc: built.labels["token_start"],
-        token_end_pc: built.labels["token_end"],
-        rom: built.rom,
-        rom_size: built.rom_size,
-        bank_count: built.bank_count,
-        driver_bytes: built.driver_bytes,
-        weight_code_bytes: built.weight_code_bytes,
-        weight_chunk_count: built.weight_chunk_count,
-        table_bytes: built.table_bytes,
-    })
+/// Emit the chunk-call run for one matvec: consecutive banks starting at
+/// `*next_bank`, writing ROMB1 only when the high bank bit changes within
+/// the run (each run re-establishes it because interleaved routines map
+/// other banks).
+fn emit_call_chunks(asm: &mut ModelAsm, n_chunks: usize, next_bank: &mut u16) {
+    let mut cur_hi: Option<u8> = None;
+    for _ in 0..n_chunks {
+        let bank = *next_bank;
+        let hi = (bank >> 8) as u8;
+        if cur_hi != Some(hi) {
+            ld_r_imm(asm, Reg8::A, hi);
+            a_to(asm, MBC5_ROMB1);
+            cur_hi = Some(hi);
+        }
+        ld_r_imm(asm, Reg8::A, (bank & 0xFF) as u8);
+        a_to(asm, MBC5_ROMB0);
+        asm.i(Instr::Call {
+            cond: None,
+            addr: CHUNK_ENTRY,
+        });
+        *next_bank += 1;
+    }
 }
 
-/// Assemble the stateful multi-token generation ROM: zeroes the WRAM state
-/// once (trained initial-state contract), then generates `n_tokens` steps
-/// on-device, feeding each argmax id back and letting the state evolve in
-/// WRAM across the whole run.
-pub fn build_state_multi_token_rom(
-    model: &IntStateLoweredModel,
-    n_tokens: u16,
-) -> Result<StateMultiTokenRom, ModelRomError> {
-    if n_tokens == 0 || n_tokens > 256 {
-        return Err(ModelRomError::BadTokenCount { n_tokens });
+/// Emit the per-token forward pass (embedding copy through `argmax_v`),
+/// leaving the argmax at [`S_ARGMAX_ADDR`] and the i24 logits at
+/// `layout.logits`. The caller owns the surrounding labels and any decode
+/// epilogue (`sample_v`) or loop control.
+pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
+    let l = &plan.layout;
+    let t = &l.topology;
+    let params_bank = plan.params_bank as u16;
+    let scales_at = |off: u16| CHUNK_ENTRY + off;
+
+    a_from(asm, S_INPUT_ADDR);
+    asm.call("emb_copy24");
+
+    let mut chunk_iter = plan.per_matvec_chunks.iter();
+    let mut next_bank: u16 = 1;
+
+    // --- state stage ---
+    asm.call("norm24");
+    emit_copy16(asm, l.act, l.dump_snorm, t.d_model);
+    let in_chunks = chunk_iter.next().expect("state in-proj chunks exist");
+    emit_call_chunks(asm, in_chunks.len(), &mut next_bank);
+    emit_copy16(asm, l.acc, l.dump_inacc, 2 * t.state_slots);
+    set_bank(asm, params_bank);
+    asm.call("state_update");
+    // out projection across the state-table banks
+    ptr_init(asm, OPTR, l.sacc);
+    for (i, &rows) in plan.state_bank_rows.iter().enumerate() {
+        set_bank(asm, (plan.state_bank0 + i) as u16);
+        ptr_init(asm, WPTR, CHUNK_ENTRY);
+        ld_r_imm(asm, Reg8::A, rows);
+        a_to(asm, ROWCNT);
+        asm.call("state_out_mv");
     }
-    let built = build_state_model_rom(model, Some(n_tokens), None)?;
-    Ok(StateMultiTokenRom {
-        token_start_pc: built.labels["token_start"],
-        token_boundary_pc: built.labels["token_boundary"],
-        token_end_pc: built.labels["token_end"],
-        n_tokens,
-        rom: built.rom,
-        rom_size: built.rom_size,
-        bank_count: built.bank_count,
-        driver_bytes: built.driver_bytes,
-        weight_code_bytes: built.weight_code_bytes,
-        weight_chunk_count: built.weight_chunk_count,
-        table_bytes: built.table_bytes,
-    })
+    set_bank(asm, params_bank);
+    asm.call("state_out_ep");
+
+    // --- FFN blocks (dense conventions on the widened residual) ---
+    for block in 0..t.n_blocks {
+        asm.call("norm24");
+        if block == 0 {
+            emit_copy16(asm, l.act, l.dump_norm0, t.d_model);
+        }
+        let up_chunks = chunk_iter.next().expect("up chunks exist");
+        emit_call_chunks(asm, up_chunks.len(), &mut next_bank);
+        if block == 0 {
+            emit_copy16(asm, l.acc, l.dump_upacc0, 2 * t.d_ff);
+        }
+        set_bank(asm, params_bank);
+        // ROWCNT2 := d_ff (16-bit)
+        ld_r_imm(asm, Reg8::A, (t.d_ff & 0xFF) as u8);
+        a_to(asm, ROWCNT2);
+        ld_r_imm(asm, Reg8::A, (t.d_ff >> 8) as u8);
+        a_to(asm, ROWCNT2 + 1);
+        ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].0));
+        asm.call("up_ep16");
+        if block == 0 {
+            emit_copy16(asm, l.act, l.dump_gelu0, t.d_ff);
+        }
+        let down_chunks = chunk_iter.next().expect("down chunks exist");
+        emit_call_chunks(asm, down_chunks.len(), &mut next_bank);
+        if block == 0 {
+            emit_copy16(
+                asm,
+                l.acc,
+                l.dump_downacc0,
+                l.down_acc_row_bytes() * t.d_model,
+            );
+        }
+        set_bank(asm, params_bank);
+        ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].1));
+        match l.down_width {
+            AccWidth::I16 => asm.call("down_ep24"),
+            AccWidth::I24 => asm.call("down_ep24w"),
+        }
+        if let Some(xdump) = l.xdump {
+            emit_copy16(
+                asm,
+                l.x,
+                xdump + (3 * t.d_model * block) as u16,
+                3 * t.d_model,
+            );
+        }
+    }
+
+    asm.call("norm24");
+    emit_copy16(asm, l.act, l.dump_qdump, t.d_model);
+
+    // zero the i24 logits, then accumulate the head lane groups
+    emit_zero16(asm, l.logits, (3 * t.vocab) as u16);
+    for (g, _) in plan.head_groups.iter().enumerate() {
+        set_bank(asm, (plan.head_bank0 + g) as u16);
+        asm.call(&format!("head_grp_{g}"));
+    }
+    asm.call("argmax_v");
 }
 
-/// Assemble the stateful multi-token **sampling** generation ROM: identical
-/// forward pass and WRAM layout to [`build_state_multi_token_rom`] (argmax
-/// is still computed and dumped), but each token is decoded by the integer
-/// top-k/temperature sampler pinned in [`crate::decode`] and the sampled id
-/// is fed back. The host must poke a nonzero XorShift16 seed at
-/// [`S_RNG_ADDR`] (2 bytes LE) before running; seed 0 is canonicalized to 1
-/// on entry, mirroring `decode::XorShift16::new`. The output ring receives
-/// the sampled ids, which must be byte-identical to
-/// `decode::sample_topk` driven by the host integer evaluator with the
-/// same seed.
-pub fn build_state_multi_token_sampling_rom(
+/// Emit every shared routine body plus the bank-0 data tables (GELU/y LUTs
+/// and — when a sampler config is present — the exp2 LUT and the sampler
+/// routines). Per-row scale/decay tables live in the params bank, not here.
+pub(crate) fn emit_state_routines_and_tables(
+    asm: &mut ModelAsm,
     model: &IntStateLoweredModel,
-    n_tokens: u16,
-    sampler: &crate::decode::SamplerConfig,
-) -> Result<StateMultiTokenRom, ModelRomError> {
-    if n_tokens == 0 || n_tokens > 256 {
-        return Err(ModelRomError::BadTokenCount { n_tokens });
+    plan: &StateRomPlan,
+    sampler: Option<&crate::decode::SamplerConfig>,
+) {
+    let l = &plan.layout;
+    let t = &l.topology;
+    emit_copy_bytes(asm);
+    emit_emb_copy24(asm, l, plan.emb_bank0 as u16, plan.emb_stride);
+    emit_mul16x8(asm);
+    emit_mul16(asm);
+    emit_isqrt48(asm);
+    emit_udiv_norm5(asm);
+    emit_udiv254(asm);
+    let odd = (t.d_model >> t.d_model.trailing_zeros()) as u16;
+    if odd > 1 {
+        emit_udiv16_odd(asm, odd);
     }
-    let built = build_state_model_rom(model, Some(n_tokens), Some(sampler))?;
-    Ok(StateMultiTokenRom {
-        token_start_pc: built.labels["token_start"],
-        token_boundary_pc: built.labels["token_boundary"],
-        token_end_pc: built.labels["token_end"],
-        n_tokens,
-        rom: built.rom,
-        rom_size: built.rom_size,
-        bank_count: built.bank_count,
-        driver_bytes: built.driver_bytes,
-        weight_code_bytes: built.weight_code_bytes,
-        weight_chunk_count: built.weight_chunk_count,
-        table_bytes: built.table_bytes,
-    })
+    emit_norm_quant24(asm, l);
+    emit_state_update(
+        asm,
+        l,
+        CHUNK_ENTRY + plan.params.state_in_scales,
+        CHUNK_ENTRY + plan.params.decay,
+    );
+    let state_pad = (plan.state_stride - t.state_slots) as u8;
+    emit_state_out_matvec(asm, l, state_pad);
+    emit_state_out_epilogue(asm, l, CHUNK_ENTRY + plan.params.state_out_scales);
+    emit_resid_add24(asm);
+    emit_up_epilogue16(asm, l);
+    match l.down_width {
+        AccWidth::I16 => emit_down_epilogue24(asm, l),
+        AccWidth::I24 => emit_down_epilogue24_wide(asm, l),
+    }
+    for (g, &(lo, hi)) in plan.head_groups.iter().enumerate() {
+        emit_head_group(asm, l, g, lo, hi);
+    }
+    emit_argmax(asm, l);
+    if let Some(cfg) = sampler {
+        emit_rng_step(asm);
+        emit_smp_weight(asm, cfg.scale_q16());
+        emit_sample_topk(asm, l, cfg.k());
+    }
+
+    // bank-0 data: GELU LUT, y LUT, exp2 LUT
+    asm.label("gelu_lut");
+    asm.bytes(model.gelu_lut.to_vec());
+    asm.label("y_lut");
+    let mut y_bytes = Vec::with_capacity(model.y_resid_lut.len() * 2);
+    for v in &model.y_resid_lut {
+        y_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    asm.bytes(y_bytes);
+    if sampler.is_some() {
+        asm.label("exp_lut");
+        asm.bytes(crate::decode::build_exp2_lut().to_vec());
+    }
 }
 
 pub(crate) struct BuiltStateRom {
@@ -1958,223 +2847,10 @@ pub(crate) struct BuiltStateRom {
     pub(crate) labels: BTreeMap<String, u16>,
 }
 
-/// Weight-chunk plan and bank numbering shared by every stateful ROM
-/// variant (one-token, multi-token, sampling, interactive shell).
-pub(crate) struct StateRomPlan {
-    pub(crate) per_matvec_chunks: Vec<Vec<Vec<u8>>>,
-    pub(crate) weight_chunk_count: usize,
-    pub(crate) weight_code_bytes: usize,
-    pub(crate) state_bank: usize,
-    pub(crate) emb_bank: usize,
-    pub(crate) head_bank: usize,
-    /// Total banks including `extra_banks` appended after the head bank.
-    pub(crate) bank_count: usize,
-}
-
-/// Build the weight chunks and assign banks: chunks 1..=W, then the state
-/// weight-table bank, the embedding bank, the head bank, and finally
-/// `extra_banks` variant-owned banks (the shell's UI bank, for example).
-pub(crate) fn plan_state_rom(
-    model: &IntStateLoweredModel,
-    extra_banks: usize,
-) -> Result<StateRomPlan, ModelRomError> {
-    let mut per_matvec_chunks: Vec<Vec<Vec<u8>>> = Vec::new();
-    per_matvec_chunks.push(build_matvec_chunks(&model.state_in)?);
-    for (up, down) in &model.blocks {
-        per_matvec_chunks.push(build_matvec_chunks(up)?);
-        per_matvec_chunks.push(build_matvec_chunks(down)?);
-    }
-    let weight_chunk_count: usize = per_matvec_chunks.iter().map(Vec::len).sum();
-    let weight_code_bytes: usize = per_matvec_chunks
-        .iter()
-        .flat_map(|chunks| chunks.iter().map(Vec::len))
-        .sum();
-
-    let state_bank = 1 + weight_chunk_count;
-    let emb_bank = state_bank + 1;
-    let head_bank = emb_bank + 1;
-    let bank_count = head_bank + 1 + extra_banks;
-    if bank_count > 256 {
-        // driver bank immediates are u8
-        return Err(ModelRomError::TooManyBanks { banks: bank_count });
-    }
-    Ok(StateRomPlan {
-        per_matvec_chunks,
-        weight_chunk_count,
-        weight_code_bytes,
-        state_bank,
-        emb_bank,
-        head_bank,
-        bank_count,
-    })
-}
-
-/// Emit the per-token forward pass (embedding copy through `argmax80`),
-/// leaving the argmax at [`S_ARGMAX_ADDR`] and the i24 logits at
-/// [`S_LOGITS_BASE`]. The caller owns the surrounding labels and any decode
-/// epilogue (`sample80`) or loop control.
-pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
-    let state_bank_u8 = plan.state_bank as u8;
-    let head_bank_u8 = plan.head_bank as u8;
-
-    a_from(asm, S_INPUT_ADDR);
-    asm.call("emb_copy24");
-
-    let mut chunk_iter = plan.per_matvec_chunks.iter();
-    let mut next_bank: u8 = 1;
-    let call_chunks = |asm: &mut ModelAsm, chunks: &Vec<Vec<u8>>, next_bank: &mut u8| {
-        for _ in chunks {
-            ld_r_imm(asm, Reg8::A, *next_bank);
-            a_to(asm, MBC5_ROMB0);
-            asm.i(Instr::Call {
-                cond: None,
-                addr: CHUNK_ENTRY,
-            });
-            *next_bank += 1;
-        }
-    };
-
-    // --- state stage ---
-    asm.call("norm24");
-    emit_copy_call(asm, S_ACT_BASE, S_DUMP_SNORM, 64);
-    let in_chunks = chunk_iter.next().expect("state in-proj chunks exist");
-    call_chunks(asm, in_chunks, &mut next_bank);
-    emit_copy_call(asm, S_ACC_BASE, S_DUMP_INACC, 128);
-    asm.call("state_update");
-    ld_r_imm(asm, Reg8::A, state_bank_u8);
-    a_to(asm, MBC5_ROMB0);
-    asm.call("state_out_mv");
-    asm.call("state_out_ep");
-
-    // --- FFN blocks (dense conventions on the widened residual) ---
-    for block in 0..crate::model_ref::N_BLOCKS {
-        asm.call("norm24");
-        if block == 0 {
-            emit_copy_call(asm, S_ACT_BASE, S_DUMP_NORM0, 64);
-        }
-        let up_chunks = chunk_iter.next().expect("up chunks exist");
-        call_chunks(asm, up_chunks, &mut next_bank);
-        if block == 0 {
-            emit_copy_call(asm, S_ACC_BASE, S_DUMP_UPACC0, 0); // 256 bytes
-        }
-        asm.ld16_label(Reg16Data::DE, &format!("scales_up_{block}"), 0);
-        ld_r_imm(asm, Reg8::A, D_FF as u8);
-        asm.call("up_epilogue");
-        if block == 0 {
-            emit_copy_call(asm, S_ACT_BASE, S_DUMP_GELU0, 128);
-        }
-        let down_chunks = chunk_iter.next().expect("down chunks exist");
-        call_chunks(asm, down_chunks, &mut next_bank);
-        if block == 0 {
-            emit_copy_call(asm, S_ACC_BASE, S_DUMP_DOWNACC0, 128);
-        }
-        asm.ld16_label(Reg16Data::DE, &format!("scales_down_{block}"), 0);
-        asm.call("down_ep24");
-        emit_copy_call(asm, S_X_BASE, S_XDUMP_BASE + 192 * block as u16, 192);
-    }
-
-    asm.call("norm24");
-    emit_copy_call(asm, S_ACT_BASE, S_QDUMP_BASE, 64);
-
-    // zero the 240-byte logits buffer
-    ld16(asm, Reg16Data::HL, S_LOGITS_BASE);
-    asm.i(Instr::XorA {
-        src: AluSrc8::Reg(Reg8::A),
-    });
-    ld_r_imm(asm, Reg8::B, 240);
-    let zl = asm.fresh("zl80");
-    asm.label(&zl);
-    asm.i(Instr::LdReg16AddrFromA {
-        dst: Reg16Addr::Hli,
-    });
-    asm.i(Instr::Dec8 {
-        dst: IncDec8Target::Reg(Reg8::B),
-    });
-    asm.jr(Some(Cond::NZ), &zl);
-
-    ld_r_imm(asm, Reg8::A, head_bank_u8);
-    a_to(asm, MBC5_ROMB0);
-    asm.call("head80");
-    asm.call("argmax80");
-}
-
-/// Emit every shared routine body plus the bank-0 data tables (GELU/y LUTs,
-/// state scale/decay tables, per-block scales, and — when a sampler config
-/// is present — the exp2 LUT and the sampler routines).
-pub(crate) fn emit_state_routines_and_tables(
-    asm: &mut ModelAsm,
-    model: &IntStateLoweredModel,
-    emb_bank_u8: u8,
-    sampler: Option<&crate::decode::SamplerConfig>,
-) {
-    emit_copy_bytes(asm);
-    emit_emb_copy24(asm, emb_bank_u8);
-    emit_mul16x8(asm);
-    emit_mul16(asm);
-    emit_isqrt48(asm);
-    emit_udiv_norm5(asm);
-    emit_udiv254(asm);
-    emit_norm_quant24(asm);
-    emit_state_update(asm);
-    emit_state_out_matvec(asm);
-    emit_state_out_epilogue(asm);
-    emit_up_epilogue(asm);
-    emit_down_epilogue24(asm);
-    emit_head80(asm);
-    emit_argmax80(asm);
-    if let Some(cfg) = sampler {
-        emit_rng_step(asm);
-        emit_smp_weight(asm, cfg.scale_q16());
-        emit_sample80(asm, cfg.k());
-    }
-
-    // bank-0 data: GELU LUT, y LUT, state scale/decay tables, block scales
-    asm.label("gelu_lut");
-    asm.bytes(model.gelu_lut.to_vec());
-    asm.label("y_lut");
-    let mut y_bytes = Vec::with_capacity(model.y_resid_lut.len() * 2);
-    for v in &model.y_resid_lut {
-        y_bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    asm.bytes(y_bytes);
-    asm.label("scales_state_in");
-    let mut si_bytes = Vec::with_capacity(STATE_SLOTS * 2);
-    for row in 0..STATE_SLOTS {
-        si_bytes.extend_from_slice(&model.state_in.layer.scale_raw(row).to_le_bytes());
-    }
-    asm.bytes(si_bytes);
-    asm.label("scales_state_out");
-    let mut so_bytes = Vec::with_capacity(D_MODEL * 2);
-    for row in 0..D_MODEL {
-        so_bytes.extend_from_slice(&model.state_out.scale_raw(row).to_le_bytes());
-    }
-    asm.bytes(so_bytes);
-    asm.label("decay_tab");
-    asm.bytes(model.decay_u8.clone());
-    if sampler.is_some() {
-        asm.label("exp_lut");
-        asm.bytes(crate::decode::build_exp2_lut().to_vec());
-    }
-    for (block, (up, down)) in model.blocks.iter().enumerate() {
-        asm.label(&format!("scales_up_{block}"));
-        let mut up_bytes = Vec::with_capacity(up.layer.rows() * 2);
-        for row in 0..up.layer.rows() {
-            up_bytes.extend_from_slice(&up.layer.scale_raw(row).to_le_bytes());
-        }
-        asm.bytes(up_bytes);
-        asm.label(&format!("scales_down_{block}"));
-        let mut down_bytes = Vec::with_capacity(down.layer.rows() * 2);
-        for row in 0..down.layer.rows() {
-            down_bytes.extend_from_slice(&down.layer.scale_raw(row).to_le_bytes());
-        }
-        asm.bytes(down_bytes);
-    }
-}
-
 /// Assemble the banked ROM image: bank-0 driver, weight chunk banks, the
-/// state/embedding/head table banks, and any `extra_bank_payloads` (each
-/// placed at [`CHUNK_ENTRY`] in the banks after the head bank). Returns the
-/// ROM bytes, size, and the model table byte count.
+/// params bank, the state/embedding/head table banks, and any
+/// `extra_bank_payloads` (each placed at [`CHUNK_ENTRY`] in the banks after
+/// the head banks). Returns the ROM bytes, size, and table byte count.
 pub(crate) fn assemble_state_rom(
     title: &str,
     driver: Vec<u8>,
@@ -2182,29 +2858,53 @@ pub(crate) fn assemble_state_rom(
     model: &IntStateLoweredModel,
     extra_bank_payloads: &[Vec<u8>],
 ) -> Result<(Vec<u8>, RomSize, usize), ModelRomError> {
-    // Banked data tables.
-    // State out-projection weight table: row-major [D_MODEL][STATE_SLOTS] i8.
-    let mut state_table = Vec::with_capacity(D_MODEL * STATE_SLOTS);
-    for row in 0..D_MODEL {
-        for &w in model.state_out.row(row) {
-            state_table.push(w as u8);
+    let t = model.topology;
+    // State out-projection weight table banks: row-major i8 rows padded to
+    // the power-of-two stride.
+    let mut state_tables: Vec<Vec<u8>> = Vec::new();
+    let mut row = 0usize;
+    for &rows in &plan.state_bank_rows {
+        let mut bank = Vec::with_capacity(usize::from(rows) * plan.state_stride);
+        for _ in 0..rows {
+            for &w in model.state_out.row(row) {
+                bank.push(w as u8);
+            }
+            bank.resize(bank.len() + (plan.state_stride - t.state_slots), 0);
+            row += 1;
         }
+        state_tables.push(bank);
     }
-    // Embedding bank: 192-byte i24 LE rows, 80 ids.
-    let mut emb_table = Vec::with_capacity(STATE_VOCAB * D_MODEL * 3);
-    for id in 0..STATE_VOCAB {
-        for &v in model.emb_resid_row(id as u8) {
-            emb_table.extend_from_slice(&v.to_le_bytes()[..3]);
+    // Embedding banks: i24 LE rows padded to the power-of-two stride.
+    let emb_rpb = BANK_BYTES / plan.emb_stride;
+    let mut emb_tables: Vec<Vec<u8>> = Vec::new();
+    for bank_idx in 0..plan.emb_bank_count {
+        let lo = bank_idx * emb_rpb;
+        let hi = ((bank_idx + 1) * emb_rpb).min(t.vocab);
+        let mut bank = Vec::with_capacity((hi - lo) * plan.emb_stride);
+        for id in lo..hi {
+            let before = bank.len();
+            for &v in model.emb_resid_row(id as u8) {
+                bank.extend_from_slice(&v.to_le_bytes()[..3]);
+            }
+            bank.resize(before + plan.emb_stride, 0);
         }
+        emb_tables.push(bank);
     }
-    // Head bank: 64 lane pages of 256 bytes (entries 0..79 valid).
-    let mut head_table = vec![0u8; D_MODEL * 256];
-    for lane in 0..D_MODEL {
-        for id in 0..STATE_VOCAB {
-            head_table[lane * 256 + id] = model.head_i8_row(id as u8)[lane] as u8;
+    // Head banks: 64 lane pages of 256 bytes each (entries 0..vocab valid).
+    let mut head_tables: Vec<Vec<u8>> = Vec::new();
+    for &(lo, hi) in &plan.head_groups {
+        let mut bank = vec![0u8; (hi - lo) * 256];
+        for (p, lane) in (lo..hi).enumerate() {
+            for id in 0..t.vocab {
+                bank[p * 256 + id] = model.head_i8_row(id as u8)[lane] as u8;
+            }
         }
+        head_tables.push(bank);
     }
-    let table_bytes = state_table.len() + emb_table.len() + head_table.len();
+    let table_bytes = plan.params.bytes.len()
+        + state_tables.iter().map(Vec::len).sum::<usize>()
+        + emb_tables.iter().map(Vec::len).sum::<usize>()
+        + head_tables.iter().map(Vec::len).sum::<usize>();
 
     let rom_size = smallest_rom_size(plan.bank_count)?;
     let mut pairs: Vec<(EncodedSection, PlacedSection)> = Vec::new();
@@ -2247,17 +2947,25 @@ pub(crate) fn assemble_state_rom(
             bank += 1;
         }
     }
-    debug_assert_eq!(bank, plan.state_bank);
-    push_section(&mut pairs, plan.state_bank, CHUNK_ENTRY, state_table);
-    push_section(&mut pairs, plan.emb_bank, CHUNK_ENTRY, emb_table);
-    push_section(&mut pairs, plan.head_bank, CHUNK_ENTRY, head_table);
+    debug_assert_eq!(bank, plan.params_bank);
+    push_section(
+        &mut pairs,
+        plan.params_bank,
+        CHUNK_ENTRY,
+        plan.params.bytes.clone(),
+    );
+    for (i, table) in state_tables.into_iter().enumerate() {
+        push_section(&mut pairs, plan.state_bank0 + i, CHUNK_ENTRY, table);
+    }
+    for (i, table) in emb_tables.into_iter().enumerate() {
+        push_section(&mut pairs, plan.emb_bank0 + i, CHUNK_ENTRY, table);
+    }
+    for (i, table) in head_tables.into_iter().enumerate() {
+        push_section(&mut pairs, plan.head_bank0 + i, CHUNK_ENTRY, table);
+    }
+    let extras_bank0 = plan.head_bank0 + plan.head_groups.len();
     for (k, payload) in extra_bank_payloads.iter().enumerate() {
-        push_section(
-            &mut pairs,
-            plan.head_bank + 1 + k,
-            CHUNK_ENTRY,
-            payload.clone(),
-        );
+        push_section(&mut pairs, extras_bank0 + k, CHUNK_ENTRY, payload.clone());
     }
 
     let layout = LayoutPlan {
@@ -2277,8 +2985,9 @@ fn build_state_model_rom(
     loop_tokens: Option<u16>,
     sampler: Option<&crate::decode::SamplerConfig>,
 ) -> Result<BuiltStateRom, ModelRomError> {
-    let plan = plan_state_rom(model, 0)?;
-    let emb_bank_u8 = plan.emb_bank as u8;
+    let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
+    let plan = plan_state_rom(model, layout, 0)?;
+    let l = &plan.layout;
 
     // Bank-0 driver.
     let mut asm = ModelAsm::new(ENTRY_POINT);
@@ -2291,16 +3000,7 @@ fn build_state_model_rom(
         a_to(&mut asm, S_TOKEN_IDX_ADDR);
         a_to(&mut asm, S_DONE_ADDR);
         // Zero the persistent state once (trained initial-state contract).
-        ld16(&mut asm, Reg16Data::HL, S_STATE_BASE);
-        ld_r_imm(&mut asm, Reg8::B, 0);
-        asm.label("zs_loop");
-        asm.i(Instr::LdReg16AddrFromA {
-            dst: Reg16Addr::Hli,
-        });
-        asm.i(Instr::Dec8 {
-            dst: IncDec8Target::Reg(Reg8::B),
-        });
-        asm.jr(Some(Cond::NZ), "zs_loop");
+        emit_zero16(&mut asm, l.state, (4 * l.topology.state_slots) as u16);
     }
     if sampler.is_some() {
         // Canonicalize the host-poked RNG seed: 0 -> 1 (decode contract).
@@ -2318,7 +3018,7 @@ fn build_state_model_rom(
     asm.label("token_start");
     emit_state_forward_body(&mut asm, &plan);
     let picked_addr = if sampler.is_some() {
-        asm.call("sample80");
+        asm.call("sample_v");
         S_SAMPLED_ADDR
     } else {
         S_ARGMAX_ADDR
@@ -2326,7 +3026,7 @@ fn build_state_model_rom(
     if let Some(n_tokens) = loop_tokens {
         a_from(&mut asm, S_TOKEN_IDX_ADDR);
         ld_rr(&mut asm, Reg8::L, Reg8::A);
-        ld_r_imm(&mut asm, Reg8::H, (S_OUT_BASE >> 8) as u8);
+        ld_r_imm(&mut asm, Reg8::H, (l.out >> 8) as u8);
         a_from(&mut asm, picked_addr);
         asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
         a_to(&mut asm, S_INPUT_ADDR);
@@ -2347,7 +3047,7 @@ fn build_state_model_rom(
     asm.jr(None, "token_end");
 
     // routines + bank-0 tables
-    emit_state_routines_and_tables(&mut asm, model, emb_bank_u8, sampler);
+    emit_state_routines_and_tables(&mut asm, model, &plan, sampler);
 
     let (driver, labels) = asm.finish()?;
     let driver_bytes = driver.len();
@@ -2371,10 +3071,141 @@ fn build_state_model_rom(
     })
 }
 
+/// Assemble the complete stateful one-token ROM. The state vector is NOT
+/// initialized by the ROM: the host pokes `layout.state` (and
+/// [`S_INPUT_ADDR`]) before running, which lets the gate exercise nonzero
+/// carried states.
+pub fn build_state_one_token_rom(
+    model: &IntStateLoweredModel,
+) -> Result<StateOneTokenRom, ModelRomError> {
+    let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
+    let built = build_state_model_rom(model, None, None)?;
+    Ok(StateOneTokenRom {
+        layout,
+        token_start_pc: built.labels["token_start"],
+        token_end_pc: built.labels["token_end"],
+        rom: built.rom,
+        rom_size: built.rom_size,
+        bank_count: built.bank_count,
+        driver_bytes: built.driver_bytes,
+        weight_code_bytes: built.weight_code_bytes,
+        weight_chunk_count: built.weight_chunk_count,
+        table_bytes: built.table_bytes,
+    })
+}
+
+/// Assemble the stateful multi-token generation ROM: zeroes the WRAM state
+/// once (trained initial-state contract), then generates `n_tokens` steps
+/// on-device, feeding each argmax id back and letting the state evolve in
+/// WRAM across the whole run.
+pub fn build_state_multi_token_rom(
+    model: &IntStateLoweredModel,
+    n_tokens: u16,
+) -> Result<StateMultiTokenRom, ModelRomError> {
+    if n_tokens == 0 || n_tokens > 256 {
+        return Err(ModelRomError::BadTokenCount { n_tokens });
+    }
+    let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
+    let built = build_state_model_rom(model, Some(n_tokens), None)?;
+    Ok(StateMultiTokenRom {
+        layout,
+        token_start_pc: built.labels["token_start"],
+        token_boundary_pc: built.labels["token_boundary"],
+        token_end_pc: built.labels["token_end"],
+        n_tokens,
+        rom: built.rom,
+        rom_size: built.rom_size,
+        bank_count: built.bank_count,
+        driver_bytes: built.driver_bytes,
+        weight_code_bytes: built.weight_code_bytes,
+        weight_chunk_count: built.weight_chunk_count,
+        table_bytes: built.table_bytes,
+    })
+}
+
+/// Assemble the stateful multi-token **sampling** generation ROM: identical
+/// forward pass and WRAM layout to [`build_state_multi_token_rom`] (argmax
+/// is still computed and dumped), but each token is decoded by the integer
+/// top-k/temperature sampler pinned in [`crate::decode`] and the sampled id
+/// is fed back. The host must poke a nonzero XorShift16 seed at
+/// [`S_RNG_ADDR`] (2 bytes LE) before running; seed 0 is canonicalized to 1
+/// on entry. The output ring receives the sampled ids, which must be
+/// byte-identical to `decode::sample_topk` driven by the host integer
+/// evaluator with the same seed.
+pub fn build_state_multi_token_sampling_rom(
+    model: &IntStateLoweredModel,
+    n_tokens: u16,
+    sampler: &crate::decode::SamplerConfig,
+) -> Result<StateMultiTokenRom, ModelRomError> {
+    if n_tokens == 0 || n_tokens > 256 {
+        return Err(ModelRomError::BadTokenCount { n_tokens });
+    }
+    let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
+    let built = build_state_model_rom(model, Some(n_tokens), Some(sampler))?;
+    Ok(StateMultiTokenRom {
+        layout,
+        token_start_pc: built.labels["token_start"],
+        token_boundary_pc: built.labels["token_boundary"],
+        token_end_pc: built.labels["token_end"],
+        n_tokens,
+        rom: built.rom,
+        rom_size: built.rom_size,
+        bank_count: built.bank_count,
+        driver_bytes: built.driver_bytes,
+        weight_code_bytes: built.weight_code_bytes,
+        weight_chunk_count: built.weight_chunk_count,
+        table_bytes: built.table_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state_model_ref::synthetic_state_checkpoint;
+    use crate::state_model_ref::{
+        StateTopology, synthetic_state_checkpoint, synthetic_state_checkpoint_with,
+    };
+
+    #[test]
+    fn arm_b_layout_keeps_the_full_dump_surface() {
+        let l = StateWramLayout::plan(StateTopology::ARM_B, AccWidth::I16, false).expect("plans");
+        assert!(l.xdump.is_some(), "arm-B keeps per-block residual dumps");
+        assert!(l.sacc_separate);
+        assert_ne!(l.absx, l.acc);
+        // No allocation overlaps another (fixed anchors included).
+        let mut sorted = l.allocations.clone();
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            assert!(pair[0].1 <= pair[1].0, "overlap: {pair:?}");
+        }
+    }
+
+    #[test]
+    fn d192_layout_fits_with_documented_degradation() {
+        let l = StateWramLayout::plan(StateTopology::D192, AccWidth::I24, false).expect("plans");
+        assert!(l.xdump.is_none(), "d192 drops per-block residual dumps");
+        assert!(!l.sacc_separate, "d192 overlays the out-acc arena");
+        assert_eq!(l.absx, l.acc);
+        assert!(l.bytes_allocated <= 8192, "budget: {}", l.bytes_allocated);
+        // Shell variant must also fit.
+        let ls = StateWramLayout::plan(StateTopology::D192, AccWidth::I24, true).expect("plans");
+        assert!(ls.shell.is_some());
+    }
+
+    #[test]
+    fn untouched_regions_cover_the_gaps() {
+        let l = StateWramLayout::plan(StateTopology::ARM_B, AccWidth::I16, false).expect("plans");
+        let gaps = l.untouched_regions();
+        assert!(!gaps.is_empty());
+        for (start, end) in gaps {
+            assert!(start < end);
+            for &(a0, a1) in &l.allocations {
+                assert!(
+                    end <= a0 || start >= a1,
+                    "gap [{start:#x},{end:#x}) overlaps allocation"
+                );
+            }
+        }
+    }
 
     #[test]
     fn state_one_token_rom_builds_from_synthetic_checkpoint() {
@@ -2384,10 +3215,6 @@ mod tests {
         assert_eq!(rom.rom.len(), rom.rom_size.bytes());
         assert!(rom.token_end_pc > rom.token_start_pc);
         assert!(rom.weight_chunk_count >= 9, "state in-proj + 8 FFN matvecs");
-        assert_eq!(
-            rom.table_bytes,
-            D_MODEL * STATE_SLOTS + STATE_VOCAB * D_MODEL * 3 + D_MODEL * 256
-        );
         assert_eq!(rom.rom[0x0147], 0x19, "MBC5 cartridge type");
     }
 
@@ -2423,6 +3250,7 @@ mod tests {
         assert_eq!(rom.n_tokens, 16);
         assert_eq!(rom.weight_chunk_count, argmax.weight_chunk_count);
         assert_eq!(rom.table_bytes, argmax.table_bytes);
+        assert_eq!(rom.layout, argmax.layout);
         assert!(
             rom.driver_bytes > argmax.driver_bytes + 256,
             "sampling driver must carry the sampler routines and the 256-byte exp LUT \
@@ -2434,5 +3262,25 @@ mod tests {
             build_state_multi_token_sampling_rom(&lowered, 0, &cfg),
             Err(ModelRomError::BadTokenCount { n_tokens: 0 })
         ));
+    }
+
+    #[test]
+    fn d192_one_token_rom_builds_with_wide_down_chunks_and_banked_tables() {
+        let ck = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        assert_eq!(lowered.down_width, AccWidth::I24);
+        let rom = build_state_one_token_rom(&lowered).expect("builds");
+        assert_eq!(rom.rom.len(), rom.rom_size.bytes());
+        assert!(
+            rom.bank_count > 256,
+            "d192 weight code needs the 9-bit MBC5 bank space ({} banks)",
+            rom.bank_count
+        );
+        assert!(rom.bank_count <= 512);
+        assert!(
+            rom.weight_code_bytes > 2 << 20,
+            "several MiB of weight code"
+        );
+        assert_eq!(rom.rom[0x0147], 0x19, "MBC5 cartridge type");
     }
 }

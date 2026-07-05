@@ -1,15 +1,18 @@
 //! Host-side evaluators for the LinearState stateful ROM bring-up
-//! (stateful deployment of the bd-29ai4 arm-B checkpoint).
+//! (bd-x5l2s), generalized to a **parameterized topology** so the same
+//! canonical integer semantics serve both the arm-B d64/ff128/4blk/slots64
+//! checkpoint and the S8 distilled d192/ff384/6blk/slots192 student
+//! (`f_s5_state_checkpoint_export.v1` manifest family; topology is read
+//! from the manifest's `topology` block).
 //!
-//! Two evaluators over the same committed S5 arm-B export
-//! (`f_s5_state_checkpoint_export.v1`):
+//! Two evaluators over the same export:
 //!
 //! 1. [`f32_state_forward`] — a faithful port of the trainer's hard-ternary
 //!    f32 forward pass (`gbf-experiments/src/bin/s5_state_ab.rs`
 //!    `forward_seq`), including the exact recurrence
 //!    `h_t = decay (.) h_{t-1} + W_in(actq(rms_norm(x_t)))`,
 //!    `y_t = actq(W_out(h_t))`, `x'_t = x_t + y_t`, followed by the same
-//!    4-block pre-norm residual FFN stack and tied f32 head.
+//!    pre-norm residual FFN stack and tied f32 head.
 //! 2. [`IntStateLoweredModel::forward`] — the **canonical integer semantics**
 //!    for the deployed stateful ROM, extending the pinned v0 integer
 //!    conventions (u8 zero-point-128 activations, i16 matvec accumulators
@@ -18,21 +21,30 @@
 //!    [`crate::asm_impl_state`] must reproduce this function byte-exactly,
 //!    including the state vector carried in WRAM across tokens.
 //!
-//! Integer recurrence representation (measured on the real checkpoint over
-//! the val stream, then pinned):
+//! # Accumulator widths at large fan-in (RangePlan-style)
+//!
+//! The v0 i16 matvec accumulator is structurally safe only when every row's
+//! worst-case value `[-(128*pos + 127*neg), 127*pos + 128*neg]` fits i16
+//! (`pos`/`neg` = count of +1/-1 weights). At fan-in 128 this always holds;
+//! at fan-in 384 (the d192 down projection) a dense row reaches ~49k. The
+//! `f_s5_state_checkpoint_export.v1` manifest declares no measured
+//! activation ranges, so lowering computes the **exact structural per-row
+//! bound from the actual ternary weights** and widens the down-projection
+//! accumulator to i24 (3 bytes on device, column-segmented weight code)
+//! whenever any row of any block requires it ([`AccWidth`]). This is
+//! conservative: it never relies on unmeasured activation statistics.
+//!
+//! Integer recurrence representation (measured on the real arm-B checkpoint
+//! over the val stream, then pinned; the format is topology-independent):
 //! - The state slot `h[s]` is held as a **saturating i24 in an i32 word**,
 //!   in units of `(ACT_RANGE / QMAX) / 256` real (the "m unit"), so the
 //!   in-projection delta `m = scale_raw * acc` lands **exactly** (no
-//!   rounding on accumulate). Measured max |h| on the val stream is ~1.8e5,
-//!   45x inside the 2^23 - 1 saturation bound.
+//!   rounding on accumulate).
 //! - The decay multiply is `sign(h) * ((|h| * decay_raw + 128) >> 8)` — a
 //!   per-slot Q8.8 integer multiply with round-half-away-from-zero. All MT4
 //!   decay raws {128, 192, 224, 240} fit u8, which the loader validates.
 //! - The residual stream is **i24 Q19.5** (resolution 1/32, range
-//!   +/-262143.97): the trained checkpoint's residual measurably reaches
-//!   |x_raw| ~ 8.4e4 at 1/32 resolution, which overflows the dense
-//!   bring-up's i16 Q11.5, so the format is widened honestly to three bytes
-//!   per lane (still byte-serial adds on device).
+//!   +/-262143.97), three bytes per lane with byte-serial adds on device.
 //!
 //! Every documented divergence between (2) and (1) is listed in
 //! [`STATE_INT_SEMANTIC_DIVERGENCES`] and measured by the fidelity phase in
@@ -41,14 +53,14 @@
 use std::fmt;
 
 use crate::model_ref::{
-    ACT_RANGE, BlockWeights, D_FF, D_MODEL, IntForwardStats, LoweredLayer, ModelRefError, N_BLOCKS,
-    NORM_EPS, QMAX, TernaryLayer, f32_act_fake_quant, gelu_approx_f32, int_down_delta, int_matvec,
+    ACT_RANGE, BlockWeights, IntForwardStats, LoweredLayer, ModelRefError, NORM_EPS, QMAX,
+    TernaryLayer, f32_act_fake_quant, gelu_approx_f32, int_down_delta, int_matvec,
     int_scale_to_grid, rte_i64,
 };
 
-/// charset_v1 vocabulary (ids 0..=79).
+/// charset_v1 vocabulary (ids 0..=79) — the arm-B/D192 lexical space.
 pub const STATE_VOCAB: usize = 80;
-/// Recurrent state width pinned by the manifest.
+/// Recurrent state width of the committed arm-B checkpoint.
 pub const STATE_SLOTS: usize = 64;
 /// Residual fixed point: i24 Q19.5 (fractional bits shared with the dense
 /// bring-up's Q11.5; only the integer width is widened).
@@ -64,28 +76,97 @@ const RESID_I24_MAX: i32 = (1 << 23) - 1;
 
 /// Documented places where the canonical integer semantics diverge from the
 /// trainer's f32 semantics. Reproduced verbatim in the evidence report.
-pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 11] = [
-    "Residual stream is i24 Q19.5 (resolution 1/32, range +/-262143.97) with mod-2^24 wrapping adds (trainer: f32). i24 replaces the dense bring-up's i16 Q11.5 because this checkpoint's residual measurably reaches |x| ~ 2,600 real (8.4e4 raw at 1/32), which no 16-bit split of range/resolution can hold without wrapping (measured: Q13.3 and Q12.4 both wrap tens of thousands of times over 120k val positions). Embedding rows are quantized to Q19.5 at lowering time (round-half-even).",
-    "State slots are saturating-i24 integers in units of (ACT_RANGE/QMAX)/256 real, so the in-projection delta m = scale_raw * acc accumulates exactly; the trainer carries f32 state. Saturation at +/-(2^23 - 1) is canonical and counted (measured max |h| ~ 1.8e5, 45x inside the bound).",
-    "The per-token decay multiply is sign(h) * ((|h| * decay_raw + 128) >> 8) (round-half-away on the Q8.8 product); the trainer multiplies f32 state by decay_raw/256 exactly. Rounding error is at most 0.5 state units (~1.2e-4 real) per slot per token; adding 8 fractional state bits was measured to change val bpc by < 1e-4, so the narrower exact-delta format is pinned.",
-    "The state out-projection epilogue quantizes y = clamp(round_half_away(scale_raw * acc2 / 65536), -127, 127) onto the activation grid via integer multiply (trainer: f32 matvec then Int8 fake-quant with round-ties-even). acc2 is the i32 dot product of ternary out-projection rows with the i24 state (measured max |acc2| ~ 1.6e6, structural bound 2^29).",
+pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 12] = [
+    "Residual stream is i24 Q19.5 (resolution 1/32, range +/-262143.97) with mod-2^24 wrapping adds (trainer: f32). i24 replaces the dense bring-up's i16 Q11.5 because the arm-B checkpoint's residual measurably reaches |x| ~ 2,600 real (8.4e4 raw at 1/32), which no 16-bit split of range/resolution can hold without wrapping. Embedding rows are quantized to Q19.5 at lowering time (round-half-even).",
+    "State slots are saturating-i24 integers in units of (ACT_RANGE/QMAX)/256 real, so the in-projection delta m = scale_raw * acc accumulates exactly; the trainer carries f32 state. Saturation at +/-(2^23 - 1) is canonical and counted.",
+    "The per-token decay multiply is sign(h) * ((|h| * decay_raw + 128) >> 8) (round-half-away on the Q8.8 product); the trainer multiplies f32 state by decay_raw/256 exactly. Rounding error is at most 0.5 state units (~1.2e-4 real) per slot per token.",
+    "The state out-projection epilogue quantizes y = clamp(round_half_away(scale_raw * acc2 / 65536), -127, 127) onto the activation grid via integer multiply (trainer: f32 matvec then Int8 fake-quant with round-ties-even). acc2 is the i32 dot product of ternary out-projection rows with the i24 state.",
     "The state residual add applies y through a 255-entry i16 LUT y_resid[p] = round_ties_even(p * 256 / 127) on the Q19.5 grid (trainer adds the unquantized f32 fake-quant output).",
-    "RMS norm: integer sum of squares over 64 i24 lanes (u64 accumulator, 7 bytes on device), mean = floor(sum/64), epsilon = +1 raw mean unit, rms = floor(isqrt48(mean+1)); norm output and Int8 activation fake-quant collapse into one rounded division q = clamp(round_half_away(|x|*127 / (8*rms)), 0, 127) * sign(x) (trainer: f32 divide, clamp to +/-8, round-ties-even quantization).",
+    "RMS norm: integer sum of squares over the d_model i24 lanes (u64 accumulator, 7 bytes on device), mean = floor(sum / d_model) (a shift when d_model is a power of two, otherwise shift-then-odd-constant division on device), epsilon = +1 raw mean unit, rms = floor(isqrt48(mean+1)); norm output and Int8 activation fake-quant collapse into one rounded division q = clamp(round_half_away(|x|*127 / (8*rms)), 0, 127) * sign(x) (trainer: f32 divide, clamp to +/-8, round-ties-even quantization).",
     "GELU is a 255-entry LUT indexed by the pre-activation value quantized to the same [-8,8]/127 grid (round-half-away on the Q8.8 scale product); the trainer applies tanh-approximate GELU to the unquantized f32 matvec output before fake-quant.",
     "Up/down epilogues apply the Q8.8 row scale as an integer multiply with round-half-away rounding (round-ties-even in the trainer's f32 path).",
-    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * min(65535, round_half_away(|m| / 127)) before the residual add (identical formula to the dense Q11.5 epilogue because the fractional bits are unchanged); the trainer adds unquantized f32 deltas. The 65535 clamp is canonical and counted.",
+    "Down-projection output is quantized to the Q19.5 residual grid as sign(m) * min(65535, round_half_away(|m| / 127)) before the residual add; the trainer adds unquantized f32 deltas. The 65535 clamp is canonical and counted.",
+    "Down-projection matvec accumulators widen from i16 to i24 (3 bytes on device) when the structural per-row worst case over the actual ternary weights exceeds i16 (possible from fan-in 257 up; certain worst-case at the d192 student's fan-in 384). The manifest declares no measured activation ranges, so the width decision uses the exact structural bound, never unmeasured statistics. The value is exact either way; only the carrier width changes.",
     "The final norm output is activation-quantized to the [-8,8]/127 grid before the tied head; tied-head weights are the embedding quantized per-tensor to i8 (scale = max|emb|/127, round-ties-even); logits are integer dot products in i32 (i24 on device).",
     "Integer rounding is round-half-away-from-zero throughout the runtime path; the trainer/Burn rounds ties to even. Because the recurrence carries state across tokens, per-token rounding differences accumulate: fidelity (bpc delta, argmax agreement) is therefore measured over long sequential streams, not per-context.",
 ];
 
 // ---------------------------------------------------------------------------
+// topology
+// ---------------------------------------------------------------------------
+
+/// Model topology as declared by the export manifest's `topology` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateTopology {
+    pub d_model: usize,
+    pub d_ff: usize,
+    pub n_blocks: usize,
+    pub state_slots: usize,
+    pub vocab: usize,
+}
+
+impl StateTopology {
+    /// The committed arm-B checkpoint (S5 state A/B).
+    pub const ARM_B: Self = Self {
+        d_model: 64,
+        d_ff: 128,
+        n_blocks: 4,
+        state_slots: 64,
+        vocab: STATE_VOCAB,
+    };
+
+    /// Tonight's S8 distilled student (bd-3771m).
+    pub const D192: Self = Self {
+        d_model: 192,
+        d_ff: 384,
+        n_blocks: 6,
+        state_slots: 192,
+        vocab: STATE_VOCAB,
+    };
+
+    /// Validate the device structural limits this pipeline supports. These
+    /// are ROM-code constraints (8-bit loop counters, single-page tables),
+    /// not arbitrary caps; each names the device structure that pins it.
+    pub fn validate(&self) -> Result<(), StateModelError> {
+        let lim = |what: &'static str, value: usize, max: usize| {
+            if value == 0 || value > max {
+                Err(StateModelError::Topology { what, value, max })
+            } else {
+                Ok(())
+            }
+        };
+        // d_model: u8 lane counters, one activation page for the head.
+        lim("d_model (u8 lane loops / head act page)", self.d_model, 255)?;
+        // d_ff: activation buffer must fit below the fixed scratch page.
+        lim("d_ff (activation buffer below scratch)", self.d_ff, 512)?;
+        lim("n_blocks", self.n_blocks, 16)?;
+        // state_slots: u8 slot loop, i32 slots in WRAM.
+        lim("state_slots (u8 slot loops)", self.state_slots, 255)?;
+        // vocab: 3-byte logits in one page, sampler tables in one page.
+        lim("vocab (i24 logits single page)", self.vocab, 85)?;
+        Ok(())
+    }
+
+    /// Multiply-accumulates per token (matvecs plus tied head).
+    #[must_use]
+    pub fn macs_per_token(&self) -> u64 {
+        let d = self.d_model as u64;
+        let ff = self.d_ff as u64;
+        let s = self.state_slots as u64;
+        let v = self.vocab as u64;
+        s * d + d * s + (self.n_blocks as u64) * 2 * (ff * d) + v * d
+    }
+}
+
+// ---------------------------------------------------------------------------
 // checkpoint container
 // ---------------------------------------------------------------------------
 
-/// The raw exported arm-B checkpoint: f32 embedding, state in/out ternary
-/// projections, per-slot Q8.8 decay raws, and four ternary FFN blocks.
+/// The raw exported checkpoint: f32 embedding, state in/out ternary
+/// projections, per-slot Q8.8 decay raws, and the ternary FFN blocks.
 #[derive(Debug, Clone)]
 pub struct StateCheckpoint {
+    topology: StateTopology,
     embedding: Vec<f32>,
     pub state_in: TernaryLayer,
     pub state_out: TernaryLayer,
@@ -101,10 +182,29 @@ pub enum StateModelError {
         expected: usize,
         actual: usize,
     },
+    Topology {
+        what: &'static str,
+        value: usize,
+        max: usize,
+    },
     NonFiniteEmbedding,
     DecayRawTooWide {
         slot: usize,
         raw: u16,
+    },
+    /// The state in-projection must keep i16 accumulators (the device state
+    /// update reads i16); structurally guaranteed for d_model <= 255.
+    StateInAccTooWide {
+        row: usize,
+        bound: i64,
+    },
+    /// A wide down-projection row's scale product overflows the u32 division
+    /// numerator the device epilogue uses (`2*scale*|acc| + 127 < 2^32`).
+    DownEpilogueOverflow {
+        block: usize,
+        row: usize,
+        scale_raw: u16,
+        acc_bound: i64,
     },
     Model(ModelRefError),
 }
@@ -117,10 +217,30 @@ impl fmt::Display for StateModelError {
                 expected,
                 actual,
             } => write!(f, "{what}: expected {expected} elements, got {actual}"),
+            Self::Topology { what, value, max } => {
+                write!(
+                    f,
+                    "topology out of device range: {what} = {value} (1..={max})"
+                )
+            }
             Self::NonFiniteEmbedding => write!(f, "embedding contains non-finite values"),
             Self::DecayRawTooWide { slot, raw } => write!(
                 f,
                 "decay slot {slot} raw {raw} exceeds the u8 device table (MT4 rates are <= 240)"
+            ),
+            Self::StateInAccTooWide { row, bound } => write!(
+                f,
+                "state in-projection row {row} structural accumulator bound {bound} escapes i16"
+            ),
+            Self::DownEpilogueOverflow {
+                block,
+                row,
+                scale_raw,
+                acc_bound,
+            } => write!(
+                f,
+                "block {block} down row {row}: 2 * scale {scale_raw} * structural acc bound \
+                 {acc_bound} + 127 overflows the u32 epilogue numerator"
             ),
             Self::Model(e) => write!(f, "{e}"),
         }
@@ -137,40 +257,43 @@ impl From<ModelRefError> for StateModelError {
 
 impl StateCheckpoint {
     pub fn new(
+        topology: StateTopology,
         embedding: Vec<f32>,
         state_in: TernaryLayer,
         state_out: TernaryLayer,
         decay_raw: Vec<u16>,
         blocks: Vec<BlockWeights>,
     ) -> Result<Self, StateModelError> {
-        if embedding.len() != STATE_VOCAB * D_MODEL {
+        topology.validate()?;
+        let t = &topology;
+        if embedding.len() != t.vocab * t.d_model {
             return Err(StateModelError::Shape {
                 what: "embedding",
-                expected: STATE_VOCAB * D_MODEL,
+                expected: t.vocab * t.d_model,
                 actual: embedding.len(),
             });
         }
         if embedding.iter().any(|v| !v.is_finite()) {
             return Err(StateModelError::NonFiniteEmbedding);
         }
-        if state_in.rows() != STATE_SLOTS || state_in.cols() != D_MODEL {
+        if state_in.rows() != t.state_slots || state_in.cols() != t.d_model {
             return Err(StateModelError::Shape {
                 what: "state in-projection",
-                expected: STATE_SLOTS * D_MODEL,
+                expected: t.state_slots * t.d_model,
                 actual: state_in.rows() * state_in.cols(),
             });
         }
-        if state_out.rows() != D_MODEL || state_out.cols() != STATE_SLOTS {
+        if state_out.rows() != t.d_model || state_out.cols() != t.state_slots {
             return Err(StateModelError::Shape {
                 what: "state out-projection",
-                expected: D_MODEL * STATE_SLOTS,
+                expected: t.d_model * t.state_slots,
                 actual: state_out.rows() * state_out.cols(),
             });
         }
-        if decay_raw.len() != STATE_SLOTS {
+        if decay_raw.len() != t.state_slots {
             return Err(StateModelError::Shape {
                 what: "decay slots",
-                expected: STATE_SLOTS,
+                expected: t.state_slots,
                 actual: decay_raw.len(),
             });
         }
@@ -179,30 +302,31 @@ impl StateCheckpoint {
                 return Err(StateModelError::DecayRawTooWide { slot, raw });
             }
         }
-        if blocks.len() != N_BLOCKS {
+        if blocks.len() != t.n_blocks {
             return Err(StateModelError::Shape {
                 what: "blocks",
-                expected: N_BLOCKS,
+                expected: t.n_blocks,
                 actual: blocks.len(),
             });
         }
         for block in &blocks {
-            if block.up.rows() != D_FF || block.up.cols() != D_MODEL {
+            if block.up.rows() != t.d_ff || block.up.cols() != t.d_model {
                 return Err(StateModelError::Shape {
                     what: "up projection",
-                    expected: D_FF * D_MODEL,
+                    expected: t.d_ff * t.d_model,
                     actual: block.up.rows() * block.up.cols(),
                 });
             }
-            if block.down.rows() != D_MODEL || block.down.cols() != D_FF {
+            if block.down.rows() != t.d_model || block.down.cols() != t.d_ff {
                 return Err(StateModelError::Shape {
                     what: "down projection",
-                    expected: D_MODEL * D_FF,
+                    expected: t.d_model * t.d_ff,
                     actual: block.down.rows() * block.down.cols(),
                 });
             }
         }
         Ok(Self {
+            topology,
             embedding,
             state_in,
             state_out,
@@ -212,9 +336,14 @@ impl StateCheckpoint {
     }
 
     #[must_use]
+    pub fn topology(&self) -> StateTopology {
+        self.topology
+    }
+
+    #[must_use]
     pub fn embedding_row(&self, id: u8) -> &[f32] {
-        let start = usize::from(id) * D_MODEL;
-        &self.embedding[start..start + D_MODEL]
+        let start = usize::from(id) * self.topology.d_model;
+        &self.embedding[start..start + self.topology.d_model]
     }
 
     #[must_use]
@@ -232,18 +361,16 @@ impl StateCheckpoint {
 // f32 reference (trainer port)
 // ---------------------------------------------------------------------------
 
-fn f32_rms_norm_clip(x: &[f32; D_MODEL]) -> [f32; D_MODEL] {
+fn f32_rms_norm_clip(x: &[f32]) -> Vec<f32> {
     let mut sum_sq = 0.0f32;
     for v in x {
         sum_sq += v * v;
     }
-    let mean_sq = sum_sq / (D_MODEL as f32);
+    let mean_sq = sum_sq / (x.len() as f32);
     let rms = (mean_sq + NORM_EPS).sqrt();
-    let mut out = [0.0f32; D_MODEL];
-    for (o, v) in out.iter_mut().zip(x.iter()) {
-        *o = (v / rms).clamp(-ACT_RANGE, ACT_RANGE);
-    }
-    out
+    x.iter()
+        .map(|v| (v / rms).clamp(-ACT_RANGE, ACT_RANGE))
+        .collect()
 }
 
 fn f32_ternary_matvec(layer: &TernaryLayer, input: &[f32], out: &mut [f32]) {
@@ -260,16 +387,13 @@ fn f32_ternary_matvec(layer: &TernaryLayer, input: &[f32], out: &mut [f32]) {
 }
 
 /// The trainer's hard-ternary f32 forward pass for one token, with the f32
-/// recurrent state carried in `state`. Returns the 80 tied-head logits.
-/// `state` must be zeroed at stream start (trained initial-state contract).
+/// recurrent state carried in `state` (`state_slots` long, zeroed at stream
+/// start). Returns the `vocab` tied-head logits.
 #[must_use]
-pub fn f32_state_forward(
-    ck: &StateCheckpoint,
-    prev: u8,
-    state: &mut [f32; STATE_SLOTS],
-) -> [f32; STATE_VOCAB] {
-    let mut x = [0.0f32; D_MODEL];
-    x.copy_from_slice(ck.embedding_row(prev));
+pub fn f32_state_forward(ck: &StateCheckpoint, prev: u8, state: &mut [f32]) -> Vec<f32> {
+    let t = ck.topology();
+    assert_eq!(state.len(), t.state_slots, "state width");
+    let mut x = ck.embedding_row(prev).to_vec();
 
     // State block: delta from the normed+act-quantized input, decayed state
     // update, act-quantized out-projection, residual add.
@@ -277,21 +401,21 @@ pub fn f32_state_forward(
     for v in &mut normed {
         *v = f32_act_fake_quant(*v);
     }
-    let mut delta = [0.0f32; STATE_SLOTS];
+    let mut delta = vec![0.0f32; t.state_slots];
     f32_ternary_matvec(&ck.state_in, &normed, &mut delta);
     for (slot, (h, d)) in state.iter_mut().zip(delta.iter()).enumerate() {
         let decay = f32::from(ck.decay_raw[slot]) / 256.0;
         *h = *h * decay + *d;
     }
-    let mut y = [0.0f32; D_MODEL];
+    let mut y = vec![0.0f32; t.d_model];
     f32_ternary_matvec(&ck.state_out, state, &mut y);
     for (xv, yv) in x.iter_mut().zip(y.iter()) {
         *xv += f32_act_fake_quant(*yv);
     }
 
-    // The same 4-block pre-norm residual FFN stack as the dense export.
-    let mut hidden = [0.0f32; D_FF];
-    let mut ffn_delta = [0.0f32; D_MODEL];
+    // The same pre-norm residual FFN stack as the dense export.
+    let mut hidden = vec![0.0f32; t.d_ff];
+    let mut ffn_delta = vec![0.0f32; t.d_model];
     for block in ck.blocks() {
         let mut normed = f32_rms_norm_clip(&x);
         for v in &mut normed {
@@ -308,7 +432,7 @@ pub fn f32_state_forward(
     }
 
     let normed = f32_rms_norm_clip(&x);
-    let mut logits = [0.0f32; STATE_VOCAB];
+    let mut logits = vec![0.0f32; t.vocab];
     for (id, logit) in logits.iter_mut().enumerate() {
         let row = ck.embedding_row(id as u8);
         let mut acc = 0.0f32;
@@ -343,11 +467,40 @@ pub fn isqrt_u48(n: u64) -> u32 {
     u32::try_from(root).expect("isqrt of u48 fits u32")
 }
 
+/// Device accumulator carrier width for one matvec, decided at lowering
+/// time from the exact structural per-row bound over the actual ternary
+/// weights (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccWidth {
+    /// 2-byte accumulators, single-pass V3 weight code (v0 convention).
+    I16,
+    /// 3-byte accumulators, column-segmented weight code (fan-in > i16).
+    I24,
+}
+
+/// Structural worst-case accumulator range of one ternary row under u8
+/// zero-point-128 activations: `acc = sum(w * (act - 128))`,
+/// `act - 128 in [-128, 127]`.
+#[must_use]
+pub fn row_acc_bounds(row: &[i8]) -> (i64, i64) {
+    let pos = row.iter().filter(|w| **w == 1).count() as i64;
+    let neg = row.iter().filter(|w| **w == -1).count() as i64;
+    (-(128 * pos + 127 * neg), 127 * pos + 128 * neg)
+}
+
+fn layer_needs_i24(layer: &TernaryLayer) -> bool {
+    (0..layer.rows()).any(|r| {
+        let (lo, hi) = row_acc_bounds(layer.row(r));
+        lo < -32768 || hi > 32767
+    })
+}
+
 /// The integer-lowered stateful model: every table the canonical integer
 /// function (and therefore the ROM) needs.
 #[derive(Debug, Clone)]
 pub struct IntStateLoweredModel {
-    /// Embedding rows on the Q19.5 residual grid (`[STATE_VOCAB * D_MODEL]`,
+    pub topology: StateTopology,
+    /// Embedding rows on the Q19.5 residual grid (`[vocab * d_model]`,
     /// row-major, values in the i24 range).
     pub emb_resid: Vec<i32>,
     /// Tied-head weights as per-tensor symmetric i8.
@@ -359,7 +512,8 @@ pub struct IntStateLoweredModel {
     /// State residual-add LUT: index `p + 127` for `p in [-127, 127]`;
     /// `round_ties_even(p * STATE_RESID_ONE * ACT_RANGE / QMAX)`.
     pub y_resid_lut: [i16; 255],
-    /// State in-projection with `-128 * sum(row)` accumulator seeds.
+    /// State in-projection with `-128 * sum(row)` accumulator seeds
+    /// (always i16 accumulators; validated at lowering).
     pub state_in: LoweredLayer,
     /// State out-projection (operates on the raw state, no zero-point seed).
     pub state_out: TernaryLayer,
@@ -367,6 +521,11 @@ pub struct IntStateLoweredModel {
     pub decay_u8: Vec<u8>,
     /// Lowered FFN blocks (up, down).
     pub blocks: Vec<(LoweredLayer, LoweredLayer)>,
+    /// Down-projection accumulator width, uniform across blocks (i24 if any
+    /// block's down projection structurally requires it).
+    pub down_width: AccWidth,
+    /// Largest structural |acc| bound over every down row (reported).
+    pub down_acc_structural_bound: i64,
 }
 
 /// Range/overflow observations for the stateful integer evaluator.
@@ -393,6 +552,9 @@ pub struct StateForwardStats {
     pub y_saturation_events: u64,
     /// i24 residual wrap events (expected 0).
     pub residual_i24_wrap_events: u64,
+    /// Max |down accumulator| (only distinct from `ffn.max_abs_matvec_acc`
+    /// when the down width is i24).
+    pub max_abs_down_acc: u32,
 }
 
 impl StateForwardStats {
@@ -408,6 +570,7 @@ impl StateForwardStats {
             max_abs_out_scale_product: 0,
             y_saturation_events: 0,
             residual_i24_wrap_events: 0,
+            max_abs_down_acc: 0,
         }
     }
 
@@ -423,6 +586,7 @@ impl StateForwardStats {
             .max(other.max_abs_out_scale_product);
         self.y_saturation_events += other.y_saturation_events;
         self.residual_i24_wrap_events += other.residual_i24_wrap_events;
+        self.max_abs_down_acc = self.max_abs_down_acc.max(other.max_abs_down_acc);
     }
 }
 
@@ -433,52 +597,55 @@ impl Default for StateForwardStats {
 }
 
 /// Full trace of one canonical stateful integer forward pass, including the
-/// values the ROM gate compares byte-exactly.
+/// values the ROM gate compares byte-exactly. All vectors are sized by the
+/// model topology.
 #[derive(Debug, Clone)]
 pub struct IntStateForwardTrace {
-    /// State-block norm output on the u8 zp128 grid.
-    pub state_norm_act: [u8; D_MODEL],
-    /// In-projection raw accumulators (i16).
-    pub state_in_acc: [i16; STATE_SLOTS],
+    /// State-block norm output on the u8 zp128 grid (`d_model`).
+    pub state_norm_act: Vec<u8>,
+    /// In-projection raw accumulators (i16, `state_slots`).
+    pub state_in_acc: Vec<i16>,
     /// The state vector after this token's update (saturating i24 in i32).
-    pub state_after: [i32; STATE_SLOTS],
-    /// Out-projection raw accumulators (i32).
-    pub state_out_acc: [i32; D_MODEL],
-    /// y on the u8 zp128 grid.
-    pub y_act: [u8; D_MODEL],
+    pub state_after: Vec<i32>,
+    /// Out-projection raw accumulators (i32, `d_model`).
+    pub state_out_acc: Vec<i32>,
+    /// y on the u8 zp128 grid (`d_model`).
+    pub y_act: Vec<u8>,
     /// Residual vector after each FFN block (i24 in i32, Q19.5).
-    pub block_residuals: [[i32; D_MODEL]; N_BLOCKS],
+    pub block_residuals: Vec<Vec<i32>>,
     /// Block-0 debug checkpoints (mirrored by the ROM's debug dumps).
-    pub block0_norm_act: [u8; D_MODEL],
-    pub block0_up_acc: [i16; D_FF],
-    pub block0_gelu_act: [u8; D_FF],
-    pub block0_down_acc: [i16; D_MODEL],
+    pub block0_norm_act: Vec<u8>,
+    pub block0_up_acc: Vec<i16>,
+    pub block0_gelu_act: Vec<u8>,
+    /// Block-0 down accumulators (i16 range or i24 range per `down_width`).
+    pub block0_down_acc: Vec<i32>,
     /// Final norm output on the activation grid (`[-127, 127]`).
-    pub final_q: [i16; D_MODEL],
+    pub final_q: Vec<i16>,
     /// Tied-head integer logits (i24-range values held in i32).
-    pub logits: [i32; STATE_VOCAB],
+    pub logits: Vec<i32>,
     /// Argmax id (lowest index wins ties).
     pub argmax: u8,
     pub stats: StateForwardStats,
 }
 
-/// Norm+quant over the 64-lane i24 Q19.5 residual. Same canonical steps as
-/// the dense `int_norm_quant`, widened: 7-byte sum-of-squares accumulator,
-/// 48-bit floor isqrt, u32 numerators in the rounded division.
-pub fn int_norm_quant24(x: &[i32; D_MODEL], stats: &mut IntForwardStats) -> [i16; D_MODEL] {
+/// Norm+quant over `d_model` i24 Q19.5 residual lanes. Same canonical steps
+/// as the dense `int_norm_quant`, widened: 7-byte sum-of-squares
+/// accumulator, `mean = floor(ss / d_model)` (shift + odd-constant division
+/// on device), 48-bit floor isqrt, u32 numerators in the rounded division.
+pub fn int_norm_quant24(x: &[i32], stats: &mut IntForwardStats) -> Vec<i16> {
     let mut ss: u64 = 0;
     for &v in x {
         let a = u64::from(v.unsigned_abs());
         ss += a * a;
     }
     stats.max_norm_sumsq = stats.max_norm_sumsq.max(ss);
-    let mean = ss >> 6;
+    let mean = ss / (x.len() as u64);
     debug_assert!(mean < 1 << 46, "i24 lanes bound the mean below 2^46");
     let r = u64::from(isqrt_u48(mean + 1));
     stats.min_norm_rms_raw = stats.min_norm_rms_raw.min(r as u32);
     let d = 8 * r;
     let d2 = 16 * r;
-    let mut q = [0i16; D_MODEL];
+    let mut q = vec![0i16; x.len()];
     for (qv, &v) in q.iter_mut().zip(x.iter()) {
         let a = u64::from(v.unsigned_abs());
         let num = a * 254 + d;
@@ -489,6 +656,52 @@ pub fn int_norm_quant24(x: &[i32; D_MODEL], stats: &mut IntForwardStats) -> [i16
     q
 }
 
+/// Ternary matvec with u8 zero-point-128 activations and i24 (3-byte)
+/// accumulators: the wide twin of `int_matvec` for fan-in past the i16
+/// structural bound. The value is exact; the lowering guarantees it fits
+/// i24 structurally.
+pub(crate) fn int_matvec_i24(
+    layer: &TernaryLayer,
+    act: &[u8],
+    out: &mut [i32],
+    stats: &mut StateForwardStats,
+) {
+    debug_assert_eq!(act.len(), layer.cols());
+    debug_assert_eq!(out.len(), layer.rows());
+    for (row, out_v) in out.iter_mut().enumerate() {
+        let mut acc: i64 = 0;
+        for (w, u) in layer.row(row).iter().zip(act.iter()) {
+            acc += i64::from(*w) * (i64::from(*u) - 128);
+        }
+        assert!(
+            (-(1 << 23)..(1 << 23)).contains(&acc),
+            "wide matvec accumulator {acc} escapes i24 (structurally impossible for fan-in <= 65536)"
+        );
+        stats.max_abs_down_acc = stats.max_abs_down_acc.max(acc.unsigned_abs() as u32);
+        *out_v = acc as i32;
+    }
+}
+
+/// Wide down epilogue: identical Q19.5 formula on an i24 accumulator.
+/// `sign(m) * min(65535, (|m|*2 + 127) div 254)` with `m = scale_raw * acc`;
+/// the lowering guarantees `|m|*2 + 127 < 2^32` (device u32 numerator).
+pub(crate) fn int_down_delta_i24(acc: i32, scale_raw: u16, stats: &mut IntForwardStats) -> i32 {
+    let m = i64::from(scale_raw) * i64::from(acc);
+    stats.max_abs_scale_product = stats.max_abs_scale_product.max(m.unsigned_abs());
+    let num = m.unsigned_abs() * 2 + 127;
+    debug_assert!(
+        num < 1 << 32,
+        "u32 down-epilogue bound (checked at lowering)"
+    );
+    let d_abs = num / 254;
+    if d_abs > 65535 {
+        stats.down_delta_clamp_events += 1;
+    }
+    let d_abs = d_abs.min(65535);
+    stats.max_abs_down_delta = stats.max_abs_down_delta.max(d_abs);
+    if m < 0 { -(d_abs as i32) } else { d_abs as i32 }
+}
+
 /// Wrap a residual add result to the i24 range (mod 2^24, sign-extended),
 /// mirroring the device's 3-byte adds.
 fn wrap_i24(v: i32) -> i32 {
@@ -497,10 +710,11 @@ fn wrap_i24(v: i32) -> i32 {
 
 impl IntStateLoweredModel {
     pub fn lower(ck: &StateCheckpoint) -> Result<Self, StateModelError> {
+        let t = ck.topology();
         // Embedding on the Q19.5 residual grid (round-ties-even in f64).
-        let mut emb_resid = Vec::with_capacity(STATE_VOCAB * D_MODEL);
+        let mut emb_resid = Vec::with_capacity(t.vocab * t.d_model);
         let mut max_abs = 0.0f32;
-        for id in 0..STATE_VOCAB {
+        for id in 0..t.vocab {
             for &v in ck.embedding_row(id as u8) {
                 max_abs = max_abs.max(v.abs());
                 let q = rte_i64(f64::from(v) * f64::from(STATE_RESID_ONE))
@@ -511,8 +725,8 @@ impl IntStateLoweredModel {
 
         // Head i8 (per-tensor symmetric).
         let head_step = max_abs / QMAX as f32;
-        let mut head_i8 = Vec::with_capacity(STATE_VOCAB * D_MODEL);
-        for id in 0..STATE_VOCAB {
+        let mut head_i8 = Vec::with_capacity(t.vocab * t.d_model);
+        for id in 0..t.vocab {
             for &v in ck.embedding_row(id as u8) {
                 let q = rte_i64(f64::from(v) * f64::from(QMAX) / f64::from(max_abs))
                     .clamp(-i64::from(QMAX), i64::from(QMAX));
@@ -539,12 +753,55 @@ impl IntStateLoweredModel {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut blocks = Vec::with_capacity(N_BLOCKS);
+        // Width plan: the state in-projection must stay i16 (the device
+        // state update reads i16 accumulators)...
+        for row in 0..ck.state_in.rows() {
+            let (lo, hi) = row_acc_bounds(ck.state_in.row(row));
+            if lo < -32768 || hi > 32767 {
+                return Err(StateModelError::StateInAccTooWide {
+                    row,
+                    bound: lo.abs().max(hi),
+                });
+            }
+        }
+        // ...and the down projection widens to i24 when any row of any
+        // block structurally requires it (uniform device buffer format).
+        let down_needs_i24 = ck.blocks().iter().any(|b| layer_needs_i24(&b.down));
+        let down_width = if down_needs_i24 {
+            AccWidth::I24
+        } else {
+            AccWidth::I16
+        };
+        let mut down_acc_structural_bound: i64 = 0;
+        for (block, b) in ck.blocks().iter().enumerate() {
+            // Up projections have fan-in d_model <= 255: always i16 (the
+            // structural bound 128 * 255 = 32640 fits).
+            debug_assert!(!layer_needs_i24(&b.up), "up fan-in <= 255 always fits i16");
+            for row in 0..b.down.rows() {
+                let (lo, hi) = row_acc_bounds(b.down.row(row));
+                let bound = lo.abs().max(hi);
+                down_acc_structural_bound = down_acc_structural_bound.max(bound);
+                if down_width == AccWidth::I24 {
+                    let scale = i64::from(b.down.scale_raw(row));
+                    if 2 * scale * bound + 127 >= 1 << 32 {
+                        return Err(StateModelError::DownEpilogueOverflow {
+                            block,
+                            row,
+                            scale_raw: b.down.scale_raw(row),
+                            acc_bound: bound,
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut blocks = Vec::with_capacity(t.n_blocks);
         for block in ck.blocks() {
             blocks.push((LoweredLayer::new(&block.up), LoweredLayer::new(&block.down)));
         }
 
         Ok(Self {
+            topology: t,
             emb_resid,
             head_i8,
             head_step,
@@ -554,19 +811,21 @@ impl IntStateLoweredModel {
             state_out: ck.state_out.clone(),
             decay_u8,
             blocks,
+            down_width,
+            down_acc_structural_bound,
         })
     }
 
     #[must_use]
     pub fn emb_resid_row(&self, id: u8) -> &[i32] {
-        let start = usize::from(id) * D_MODEL;
-        &self.emb_resid[start..start + D_MODEL]
+        let start = usize::from(id) * self.topology.d_model;
+        &self.emb_resid[start..start + self.topology.d_model]
     }
 
     #[must_use]
     pub fn head_i8_row(&self, id: u8) -> &[i8] {
-        let start = usize::from(id) * D_MODEL;
-        &self.head_i8[start..start + D_MODEL]
+        let start = usize::from(id) * self.topology.d_model;
+        &self.head_i8[start..start + self.topology.d_model]
     }
 
     /// Real value represented by one integer logit unit.
@@ -575,23 +834,30 @@ impl IntStateLoweredModel {
         f64::from(ACT_RANGE) / f64::from(QMAX) * f64::from(self.head_step)
     }
 
-    /// The canonical integer forward pass for one token. `state` is the
-    /// persistent recurrence vector (zeroed at stream start), updated in
-    /// place exactly as the ROM updates its WRAM copy.
+    /// Fresh zero state sized for this model.
     #[must_use]
-    pub fn forward(&self, prev: u8, state: &mut [i32; STATE_SLOTS]) -> IntStateForwardTrace {
+    pub fn zero_state(&self) -> Vec<i32> {
+        vec![0i32; self.topology.state_slots]
+    }
+
+    /// The canonical integer forward pass for one token. `state` is the
+    /// persistent recurrence vector (`state_slots` long, zeroed at stream
+    /// start), updated in place exactly as the ROM updates its WRAM copy.
+    #[must_use]
+    pub fn forward(&self, prev: u8, state: &mut [i32]) -> IntStateForwardTrace {
+        let t = self.topology;
+        assert_eq!(state.len(), t.state_slots, "state width");
         let mut stats = StateForwardStats::new();
 
-        let mut x = [0i32; D_MODEL];
-        x.copy_from_slice(self.emb_resid_row(prev));
+        let mut x = self.emb_resid_row(prev).to_vec();
 
         // --- state block ---
         let q = int_norm_quant24(&x, &mut stats.ffn);
-        let mut state_norm_act = [0u8; D_MODEL];
+        let mut state_norm_act = vec![0u8; t.d_model];
         for (a, qv) in state_norm_act.iter_mut().zip(q.iter()) {
             *a = (qv + 128) as u8;
         }
-        let mut in_acc = [0i16; STATE_SLOTS];
+        let mut in_acc = vec![0i16; t.state_slots];
         int_matvec(
             &self.state_in.layer,
             &self.state_in.biases,
@@ -622,19 +888,19 @@ impl IntStateLoweredModel {
             *h = next as i32;
             stats.max_abs_state = stats.max_abs_state.max(h.unsigned_abs());
         }
-        let state_after = *state;
+        let state_after = state.to_vec();
 
         // out projection over the i24 state, y quantized to the act grid
-        let mut out_acc = [0i32; D_MODEL];
-        let mut y_act = [0u8; D_MODEL];
-        for row in 0..D_MODEL {
+        let mut out_acc = vec![0i32; t.d_model];
+        let mut y_act = vec![0u8; t.d_model];
+        for row in 0..t.d_model {
             let mut acc: i64 = 0;
             for (w, h) in self.state_out.row(row).iter().zip(state.iter()) {
                 acc += i64::from(*w) * i64::from(*h);
             }
             debug_assert!(
                 acc.unsigned_abs() < 1 << 31,
-                "out-projection accumulator fits i32 (structural bound 64 * 2^23)"
+                "out-projection accumulator fits i32 (structural bound slots * 2^23)"
             );
             stats.max_abs_out_acc = stats.max_abs_out_acc.max(acc.unsigned_abs());
             out_acc[row] = acc as i32;
@@ -657,54 +923,75 @@ impl IntStateLoweredModel {
         }
 
         // --- FFN blocks (dense conventions on the widened residual) ---
-        let mut block_residuals = [[0i32; D_MODEL]; N_BLOCKS];
-        let mut block0_norm_act = [0u8; D_MODEL];
-        let mut block0_up_acc = [0i16; D_FF];
-        let mut block0_gelu_act = [0u8; D_FF];
-        let mut block0_down_acc = [0i16; D_MODEL];
-        let mut act = [0u8; D_FF];
-        let mut acc = [0i16; D_FF];
+        let mut block_residuals: Vec<Vec<i32>> = Vec::with_capacity(t.n_blocks);
+        let mut block0_norm_act = vec![0u8; t.d_model];
+        let mut block0_up_acc = vec![0i16; t.d_ff];
+        let mut block0_gelu_act = vec![0u8; t.d_ff];
+        let mut block0_down_acc = vec![0i32; t.d_model];
+        let mut act = vec![0u8; t.d_ff];
+        let mut up_acc = vec![0i16; t.d_ff];
+        let mut down_acc16 = vec![0i16; t.d_model];
+        let mut down_acc24 = vec![0i32; t.d_model];
         for (block_idx, (up, down)) in self.blocks.iter().enumerate() {
             let q = int_norm_quant24(&x, &mut stats.ffn);
             for (a, qv) in act.iter_mut().zip(q.iter()) {
                 *a = (qv + 128) as u8;
             }
             if block_idx == 0 {
-                block0_norm_act.copy_from_slice(&act[..D_MODEL]);
+                block0_norm_act.copy_from_slice(&act[..t.d_model]);
             }
 
             int_matvec(
                 &up.layer,
                 &up.biases,
-                &act[..D_MODEL],
-                &mut acc[..D_FF],
+                &act[..t.d_model],
+                &mut up_acc[..t.d_ff],
                 &mut stats.ffn,
             );
             if block_idx == 0 {
-                block0_up_acc.copy_from_slice(&acc[..D_FF]);
+                block0_up_acc.copy_from_slice(&up_acc[..t.d_ff]);
             }
 
-            for row in 0..D_FF {
-                let p = int_scale_to_grid(acc[row], up.layer.scale_raw(row), &mut stats.ffn);
+            for row in 0..t.d_ff {
+                let p = int_scale_to_grid(up_acc[row], up.layer.scale_raw(row), &mut stats.ffn);
                 act[row] = self.gelu_lut[(p + QMAX) as usize];
             }
             if block_idx == 0 {
-                block0_gelu_act.copy_from_slice(&act[..D_FF]);
+                block0_gelu_act.copy_from_slice(&act[..t.d_ff]);
             }
 
-            int_matvec(
-                &down.layer,
-                &down.biases,
-                &act[..D_FF],
-                &mut acc[..D_MODEL],
-                &mut stats.ffn,
-            );
+            match self.down_width {
+                AccWidth::I16 => {
+                    int_matvec(
+                        &down.layer,
+                        &down.biases,
+                        &act[..t.d_ff],
+                        &mut down_acc16[..t.d_model],
+                        &mut stats.ffn,
+                    );
+                    for (wide, narrow) in down_acc24.iter_mut().zip(down_acc16.iter()) {
+                        *wide = i32::from(*narrow);
+                    }
+                }
+                AccWidth::I24 => {
+                    int_matvec_i24(&down.layer, &act[..t.d_ff], &mut down_acc24, &mut stats);
+                }
+            }
             if block_idx == 0 {
-                block0_down_acc.copy_from_slice(&acc[..D_MODEL]);
+                block0_down_acc.copy_from_slice(&down_acc24);
             }
 
-            for row in 0..D_MODEL {
-                let d_raw = int_down_delta(acc[row], down.layer.scale_raw(row), &mut stats.ffn);
+            for row in 0..t.d_model {
+                let d_raw = match self.down_width {
+                    AccWidth::I16 => {
+                        int_down_delta(down_acc16[row], down.layer.scale_raw(row), &mut stats.ffn)
+                    }
+                    AccWidth::I24 => int_down_delta_i24(
+                        down_acc24[row],
+                        down.layer.scale_raw(row),
+                        &mut stats.ffn,
+                    ),
+                };
                 let wide = x[row] + d_raw;
                 let wrapped = wrap_i24(wide);
                 if wrapped != wide {
@@ -713,12 +1000,12 @@ impl IntStateLoweredModel {
                 x[row] = wrapped;
                 stats.ffn.max_abs_residual = stats.ffn.max_abs_residual.max(x[row].unsigned_abs());
             }
-            block_residuals[block_idx] = x;
+            block_residuals.push(x.clone());
         }
 
         // --- final norm + head ---
         let final_q = int_norm_quant24(&x, &mut stats.ffn);
-        let mut logits = [0i32; STATE_VOCAB];
+        let mut logits = vec![0i32; t.vocab];
         for (id, logit) in logits.iter_mut().enumerate() {
             let row = self.head_i8_row(id as u8);
             let mut acc32: i32 = 0;
@@ -760,10 +1047,12 @@ impl IntStateLoweredModel {
 // deterministic synthetic checkpoint (tests / smoke)
 // ---------------------------------------------------------------------------
 
-/// Deterministic synthetic stateful checkpoint for tests that must not
-/// depend on the committed experiment files.
+/// Deterministic synthetic stateful checkpoint at an arbitrary topology.
+/// Mirrors the real export's weight statistics (ternary with ~30% zeros,
+/// scale raws 4..84, MT4 decay bands) so device range behavior is
+/// representative; used by the d192 readiness gates.
 #[must_use]
-pub fn synthetic_state_checkpoint(seed: u64) -> StateCheckpoint {
+pub fn synthetic_state_checkpoint_with(topology: StateTopology, seed: u64) -> StateCheckpoint {
     let mut state = seed ^ 0x5bd1_e995_9e37_79b9;
     let mut next = move || {
         state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -773,7 +1062,7 @@ pub fn synthetic_state_checkpoint(seed: u64) -> StateCheckpoint {
         z ^ (z >> 31)
     };
 
-    let embedding: Vec<f32> = (0..STATE_VOCAB * D_MODEL)
+    let embedding: Vec<f32> = (0..topology.vocab * topology.d_model)
         .map(|_| {
             let unit = (next() >> 40) as f32 / (1u64 << 24) as f32;
             (unit * 2.0 - 1.0) * 3.0
@@ -792,25 +1081,33 @@ pub fn synthetic_state_checkpoint(seed: u64) -> StateCheckpoint {
         TernaryLayer::new(rows, cols, weights, scales).expect("synthetic layer is valid")
     };
 
-    let state_in = layer(STATE_SLOTS, D_MODEL);
-    let state_out = layer(D_MODEL, STATE_SLOTS);
+    let state_in = layer(topology.state_slots, topology.d_model);
+    let state_out = layer(topology.d_model, topology.state_slots);
     // MT4 band layout: 4 equal contiguous bands.
-    let decay_raw: Vec<u16> = (0..STATE_SLOTS)
-        .map(|slot| [128u16, 192, 224, 240][slot / (STATE_SLOTS / 4)])
+    let band = (topology.state_slots / 4).max(1);
+    let decay_raw: Vec<u16> = (0..topology.state_slots)
+        .map(|slot| [128u16, 192, 224, 240][(slot / band).min(3)])
         .collect();
-    let blocks = (0..N_BLOCKS)
+    let blocks = (0..topology.n_blocks)
         .map(|_| BlockWeights {
-            up: layer(D_FF, D_MODEL),
-            down: layer(D_MODEL, D_FF),
+            up: layer(topology.d_ff, topology.d_model),
+            down: layer(topology.d_model, topology.d_ff),
         })
         .collect();
-    StateCheckpoint::new(embedding, state_in, state_out, decay_raw, blocks)
+    StateCheckpoint::new(topology, embedding, state_in, state_out, decay_raw, blocks)
         .expect("synthetic state checkpoint is valid")
+}
+
+/// Deterministic synthetic arm-B-topology checkpoint (legacy tests).
+#[must_use]
+pub fn synthetic_state_checkpoint(seed: u64) -> StateCheckpoint {
+    synthetic_state_checkpoint_with(StateTopology::ARM_B, seed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_ref::D_MODEL;
 
     #[test]
     fn isqrt48_matches_f64_sqrt_floor_over_samples() {
@@ -859,25 +1156,38 @@ mod tests {
         let mut s24 = IntForwardStats::new();
         let q16 = crate::model_ref::int_norm_quant(&x16a, &mut s16);
         let q24 = int_norm_quant24(&x24, &mut s24);
-        assert_eq!(q16, q24);
+        assert_eq!(q16.to_vec(), q24);
+    }
+
+    #[test]
+    fn norm24_mean_uses_floor_division_for_non_pow2_lanes() {
+        // 192 lanes: mean = floor(ss / 192) must equal the shift-then-odd
+        // factorization the device uses (ss >> 6, then / 3).
+        let x: Vec<i32> = (0..192).map(|i| (i as i32 - 96) * 1234).collect();
+        let ss: u64 = x.iter().map(|&v| u64::from(v.unsigned_abs()).pow(2)).sum();
+        assert_eq!(ss / 192, (ss >> 6) / 3);
+        let mut stats = IntForwardStats::new();
+        let q = int_norm_quant24(&x, &mut stats);
+        assert_eq!(q.len(), 192);
+        assert!(q.iter().all(|&v| (-127..=127).contains(&v)));
     }
 
     #[test]
     fn state_delta_accumulates_exactly_and_decays_with_rounding() {
         let ck = synthetic_state_checkpoint(3);
         let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
-        let mut state = [0i32; STATE_SLOTS];
+        let mut state = lowered.zero_state();
         let t = lowered.forward(5, &mut state);
         // From zero state, h = m exactly (decay of zero is zero).
-        for slot in 0..STATE_SLOTS {
+        for slot in 0..lowered.topology.state_slots {
             let m =
                 i32::from(lowered.state_in.layer.scale_raw(slot)) * i32::from(t.state_in_acc[slot]);
             assert_eq!(t.state_after[slot], m, "slot {slot}");
         }
         // A second token decays the carried state with round-half-away.
-        let carried = state;
+        let carried = state.clone();
         let t2 = lowered.forward(6, &mut state);
-        for slot in 0..STATE_SLOTS {
+        for slot in 0..lowered.topology.state_slots {
             let decayed_abs =
                 (u64::from(carried[slot].unsigned_abs()) * u64::from(lowered.decay_u8[slot]) + 128)
                     >> 8;
@@ -897,8 +1207,8 @@ mod tests {
     fn int_state_forward_is_deterministic_and_state_dependent() {
         let ck = synthetic_state_checkpoint(7);
         let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
-        let mut s1 = [0i32; STATE_SLOTS];
-        let mut s2 = [0i32; STATE_SLOTS];
+        let mut s1 = lowered.zero_state();
+        let mut s2 = lowered.zero_state();
         let a = lowered.forward(10, &mut s1);
         let b = lowered.forward(10, &mut s2);
         assert_eq!(a.logits, b.logits);
@@ -918,13 +1228,41 @@ mod tests {
     }
 
     #[test]
+    fn d192_topology_lowers_with_wide_down_accumulators() {
+        let ck = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        // ~70% nonzero synthetic rows at fan-in 384 structurally exceed i16.
+        assert_eq!(lowered.down_width, AccWidth::I24);
+        assert!(lowered.down_acc_structural_bound > 32767);
+        let mut state = lowered.zero_state();
+        let a = lowered.forward(19, &mut state);
+        let b_state = state.clone();
+        let b = lowered.forward(a.argmax, &mut state);
+        assert_eq!(a.logits.len(), 80);
+        assert_eq!(a.state_after.len(), 192);
+        assert_eq!(b.state_after.len(), 192);
+        assert_ne!(b_state, state, "state evolves");
+        // Deterministic replay.
+        let mut s2 = lowered.zero_state();
+        let a2 = lowered.forward(19, &mut s2);
+        assert_eq!(a.logits, a2.logits);
+    }
+
+    #[test]
+    fn arm_b_topology_keeps_i16_down_accumulators() {
+        let ck = synthetic_state_checkpoint(11);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        assert_eq!(lowered.down_width, AccWidth::I16);
+    }
+
+    #[test]
     fn int_and_f32_state_forward_mostly_agree_on_synthetic_model() {
         // Not a strict gate (fidelity is measured on the real checkpoint);
         // this catches gross semantic porting errors.
         let ck = synthetic_state_checkpoint(11);
         let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
-        let mut fs = [0.0f32; STATE_SLOTS];
-        let mut is = [0i32; STATE_SLOTS];
+        let mut fs = vec![0.0f32; STATE_SLOTS];
+        let mut is = lowered.zero_state();
         let mut agree = 0usize;
         let mut input = 1u8;
         let n = 64usize;
@@ -961,7 +1299,7 @@ mod tests {
     fn state_saturates_at_the_i24_bound() {
         let ck = synthetic_state_checkpoint(2);
         let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
-        let mut state = [STATE_CLAMP; STATE_SLOTS];
+        let mut state = vec![STATE_CLAMP; STATE_SLOTS];
         let t = lowered.forward(0, &mut state);
         for (slot, &h) in state.iter().enumerate() {
             assert!(
@@ -976,6 +1314,7 @@ mod tests {
     fn decay_wider_than_u8_is_rejected() {
         let ck = synthetic_state_checkpoint(4);
         let bad = StateCheckpoint::new(
+            StateTopology::ARM_B,
             ck.embedding.clone(),
             ck.state_in.clone(),
             ck.state_out.clone(),
@@ -988,5 +1327,30 @@ mod tests {
             bad,
             Err(StateModelError::DecayRawTooWide { slot: 0, raw: 256 })
         ));
+    }
+
+    #[test]
+    fn topology_out_of_device_range_is_rejected() {
+        let too_wide = StateTopology {
+            d_model: 256,
+            ..StateTopology::ARM_B
+        };
+        assert!(matches!(
+            too_wide.validate(),
+            Err(StateModelError::Topology { .. })
+        ));
+        let too_many_ids = StateTopology {
+            vocab: 86,
+            ..StateTopology::ARM_B
+        };
+        assert!(too_many_ids.validate().is_err());
+        assert!(StateTopology::D192.validate().is_ok());
+    }
+
+    #[test]
+    fn row_acc_bounds_are_exact() {
+        // pos=2 neg=1: hi = 127*2 + 128 = 382, lo = -(128*2 + 127) = -383.
+        assert_eq!(row_acc_bounds(&[1, 1, -1, 0]), (-383, 382));
+        assert_eq!(row_acc_bounds(&[0, 0]), (0, 0));
     }
 }

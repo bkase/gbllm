@@ -26,13 +26,13 @@ use gbf_emu::{
 };
 use gbf_foundation::sha256;
 use gbf_kernel::asm_impl_state::{
-    S_DONE_ADDR, S_INPUT_ADDR, S_OUT_BASE, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP,
-    StateMultiTokenRom, build_state_multi_token_rom, build_state_multi_token_sampling_rom,
+    S_DONE_ADDR, S_INPUT_ADDR, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP, StateMultiTokenRom,
+    StateWramLayout, build_state_multi_token_rom, build_state_multi_token_sampling_rom,
 };
 use gbf_kernel::decode::{
     EXP2_LUT_ALPHA, SamplerConfig, XORSHIFT16_SHIFTS, XorShift16, build_exp2_lut, sample_topk_trace,
 };
-use gbf_kernel::state_model_ref::{IntStateForwardTrace, IntStateLoweredModel, STATE_SLOTS};
+use gbf_kernel::state_model_ref::{IntStateForwardTrace, IntStateLoweredModel};
 use serde::Serialize;
 
 use crate::multi_token::{CycleStats, WramViolation};
@@ -56,22 +56,9 @@ pub const SAMPLING_GATE_COMBOS: [(u8, u16); 5] = [
     (19, 0x0000), // 'T' with the canonicalized zero seed
 ];
 
-/// WRAM regions the sampling token loop must never write, as `[start,
-/// end)`. The argmax list (`stateful::STATE_UNTOUCHED_WRAM_REGIONS`) minus
-/// the sampler's own scratch/tables: scratch-B tail now ends at 0xC4C2,
-/// the control gap starts after the RNG state, and the 0xD120..0xD180
-/// page holds the used flags + candidate tables.
-pub const SAMPLING_UNTOUCHED_WRAM_REGIONS: &[(u16, u16)] = &[
-    (0xC080, 0xC100),
-    (0xC200, 0xC280),
-    (0xC2E0, 0xC300),
-    (0xC3C0, 0xC400),
-    (0xC4C2, 0xC500),
-    (0xCAF0, 0xCB00),
-    (0xD106, 0xD110),
-    (0xD3C0, 0xDFC0),
-    (0xDFF0, 0xE000),
-];
+// The untouched-WRAM regions are computed from the ROM's own
+// `StateWramLayout` (`layout.untouched_regions()`), so the sampler tables
+// and scratch are excluded automatically.
 
 // ---------------------------------------------------------------------------
 // host mirror
@@ -98,7 +85,7 @@ pub fn sampling_host_generate(
 ) -> SamplingHostGeneration {
     assert!(n_tokens >= 1, "host generation needs at least one token");
     let mut rng = XorShift16::new(rng_seed);
-    let mut state = [0i32; STATE_SLOTS];
+    let mut state = lowered.zero_state();
     let mut input = seed;
     let mut sequence = Vec::with_capacity(usize::from(n_tokens));
     let mut first = None;
@@ -171,11 +158,12 @@ impl SamplingComboRun {
 fn compare_dumps(
     emu: &Emulator,
     trace: &IntStateForwardTrace,
+    layout: &StateWramLayout,
     token: u16,
     mismatches: &mut Vec<SegmentMismatch>,
 ) -> Result<bool, OneTokenError> {
     let mut all_ok = true;
-    for (name, addr, expected) in state_expected_segments(trace) {
+    for (name, addr, expected) in state_expected_segments(trace, layout) {
         let actual = emu
             .peek_range(addr, expected.len())
             .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
@@ -225,7 +213,8 @@ pub fn run_sampling_combo(
     emu.poke(S_RNG_ADDR + 1, seed_bytes[1])
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
 
-    let baseline: Vec<Vec<u8>> = SAMPLING_UNTOUCHED_WRAM_REGIONS
+    let untouched_regions = rom.layout.untouched_regions();
+    let baseline: Vec<Vec<u8>> = untouched_regions
         .iter()
         .map(|&(start, end)| emu.peek_range(start, usize::from(end - start)))
         .collect::<Result<_, _>>()
@@ -269,7 +258,7 @@ pub fn run_sampling_combo(
             } else {
                 (&host.last_trace, host.last_pick)
             };
-            let ok = compare_dumps(&emu, trace, t, &mut checkpoint_mismatches)?;
+            let ok = compare_dumps(&emu, trace, &rom.layout, t, &mut checkpoint_mismatches)?;
             if t == 0 {
                 first_token_ok = ok;
             } else {
@@ -298,7 +287,7 @@ pub fn run_sampling_combo(
         == 1;
 
     let rom_sequence = emu
-        .peek_range(S_OUT_BASE, usize::from(rom.n_tokens))
+        .peek_range(rom.layout.out, usize::from(rom.n_tokens))
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
     let first_divergence_index = host
         .sequence
@@ -309,7 +298,7 @@ pub fn run_sampling_combo(
         first_divergence_index.is_none() && host.sequence.len() == rom_sequence.len();
 
     let mut wram_violations = Vec::new();
-    for (&(start, end), before) in SAMPLING_UNTOUCHED_WRAM_REGIONS.iter().zip(baseline.iter()) {
+    for (&(start, end), before) in untouched_regions.iter().zip(baseline.iter()) {
         let after = emu
             .peek_range(start, usize::from(end - start))
             .map_err(|e| OneTokenError::Emulator(e.to_string()))?;

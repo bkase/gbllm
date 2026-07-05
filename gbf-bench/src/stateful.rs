@@ -25,15 +25,13 @@ use gbf_emu::{
 };
 use gbf_foundation::sha256;
 use gbf_kernel::asm_impl_state::{
-    S_ARGMAX_ADDR, S_DONE_ADDR, S_DUMP_DOWNACC0, S_DUMP_GELU0, S_DUMP_INACC, S_DUMP_NORM0,
-    S_DUMP_SNORM, S_DUMP_UPACC0, S_DUMP_YACT, S_INPUT_ADDR, S_LOGITS_BASE, S_OUT_BASE,
-    S_QDUMP_BASE, S_SACC_BASE, S_STACK_TOP, S_STATE_BASE, S_XDUMP_BASE, StateMultiTokenRom,
-    StateOneTokenRom, build_state_multi_token_rom, build_state_one_token_rom,
+    S_ARGMAX_ADDR, S_DONE_ADDR, S_INPUT_ADDR, S_STACK_TOP, StateMultiTokenRom, StateOneTokenRom,
+    StateWramLayout, build_state_multi_token_rom, build_state_one_token_rom,
 };
-use gbf_kernel::model_ref::{D_FF, D_MODEL, N_BLOCKS, TernaryLayer};
+use gbf_kernel::model_ref::TernaryLayer;
 use gbf_kernel::state_model_ref::{
-    IntStateForwardTrace, IntStateLoweredModel, STATE_INT_SEMANTIC_DIVERGENCES, STATE_SLOTS,
-    STATE_VOCAB, StateCheckpoint, StateForwardStats, f32_state_forward,
+    AccWidth, IntStateForwardTrace, IntStateLoweredModel, STATE_INT_SEMANTIC_DIVERGENCES,
+    StateCheckpoint, StateForwardStats, StateTopology, f32_state_forward,
 };
 use serde::Serialize;
 
@@ -59,20 +57,9 @@ pub const ONE_TOKEN_STATE_POSITIONS: [usize; 16] = [
 /// Lane count of the committed A/B eval (`s5_state_ab.rs --eval-lanes`).
 pub const EVAL_LANES: usize = 8;
 
-/// WRAM regions the stateful token loop must never write, as `[start, end)`.
-/// Snapshotted before the run and re-read after the last token.
-pub const STATE_UNTOUCHED_WRAM_REGIONS: &[(u16, u16)] = &[
-    (0xC080, 0xC100), // between activations and matvec accumulators
-    (0xC200, 0xC280), // free page below scratch A
-    (0xC2E0, 0xC300), // scratch A tail
-    (0xC3C0, 0xC400), // between the i24 residual and scratch B
-    (0xC4A0, 0xC500), // scratch B tail
-    (0xCAF0, 0xCB00), // between the 80-id logits and the residual dumps
-    (0xD104, 0xD110), // control-byte gap
-    (0xD120, 0xD180), // between control bytes and the in-acc dump
-    (0xD3C0, 0xDFC0), // between the |x| buffer and the stack arena
-    (0xDFF0, 0xE000), // above the stack home
-];
+// The untouched-WRAM gate regions are no longer a hand-maintained list:
+// they are computed from the ROM's own `StateWramLayout` (the complement of
+// every allocation over the 8 KiB arena) via `layout.untouched_regions()`.
 
 // ---------------------------------------------------------------------------
 // checkpoint loading
@@ -81,6 +68,7 @@ pub const STATE_UNTOUCHED_WRAM_REGIONS: &[(u16, u16)] = &[
 /// Loaded stateful checkpoint plus provenance facts for the report.
 pub struct StateCheckpointBundle {
     pub checkpoint: StateCheckpoint,
+    pub topology: StateTopology,
     pub manifest_schema: String,
     pub manifest_git_sha: String,
     pub manifest_sha256: String,
@@ -105,6 +93,32 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
         });
     }
     let git_sha = manifest["git_sha"].as_str().unwrap_or_default().to_string();
+
+    // Topology is declared by the manifest; the pipeline no longer assumes
+    // the arm-B d64/ff128/4blk/slots64 shape.
+    let topo = &manifest["topology"];
+    let dim = |v: &serde_json::Value, what: &str| -> Result<usize, OneTokenError> {
+        v.as_u64()
+            .map(|n| n as usize)
+            .ok_or_else(|| OneTokenError::Manifest {
+                reason: format!("topology.{what} missing or non-integer"),
+            })
+    };
+    if topo["moe"].as_bool() == Some(true) {
+        return Err(OneTokenError::Manifest {
+            reason: "MoE checkpoints are not supported by the stateful ROM pipeline".into(),
+        });
+    }
+    let topology = StateTopology {
+        d_model: dim(&topo["d_model"], "d_model")?,
+        d_ff: dim(&topo["d_ff"], "d_ff")?,
+        n_blocks: dim(&topo["n_blocks"], "n_blocks")?,
+        state_slots: dim(
+            &topo["sequence_state_params"]["state_slots"],
+            "sequence_state_params.state_slots",
+        )?,
+        vocab: dim(&topo["vocab"], "vocab")?,
+    };
 
     let tensors = manifest["tensors"]
         .as_array()
@@ -140,7 +154,7 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
     };
 
     let emb_bytes = load("embedding")?;
-    if emb_bytes.len() != STATE_VOCAB * D_MODEL * 4 {
+    if emb_bytes.len() != topology.vocab * topology.d_model * 4 {
         return Err(OneTokenError::Manifest {
             reason: format!("embedding byte length {}", emb_bytes.len()),
         });
@@ -169,21 +183,31 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
                 .map_err(|e| OneTokenError::Model(e.to_string()))
         };
 
-    let state_in = ternary("state_input_to_state", STATE_SLOTS, D_MODEL)?;
-    let state_out = ternary("state_state_to_output", D_MODEL, STATE_SLOTS)?;
+    let state_in = ternary(
+        "state_input_to_state",
+        topology.state_slots,
+        topology.d_model,
+    )?;
+    let state_out = ternary(
+        "state_state_to_output",
+        topology.d_model,
+        topology.state_slots,
+    )?;
 
     let mut blocks = Vec::new();
-    for k in 0..N_BLOCKS {
+    for k in 0..topology.n_blocks {
         blocks.push(gbf_kernel::model_ref::BlockWeights {
-            up: ternary(&format!("block{k}_up"), D_FF, D_MODEL)?,
-            down: ternary(&format!("block{k}_down"), D_MODEL, D_FF)?,
+            up: ternary(&format!("block{k}_up"), topology.d_ff, topology.d_model)?,
+            down: ternary(&format!("block{k}_down"), topology.d_model, topology.d_ff)?,
         });
     }
 
-    let checkpoint = StateCheckpoint::new(embedding, state_in, state_out, decay_raw, blocks)
-        .map_err(|e| OneTokenError::Model(e.to_string()))?;
+    let checkpoint =
+        StateCheckpoint::new(topology, embedding, state_in, state_out, decay_raw, blocks)
+            .map_err(|e| OneTokenError::Model(e.to_string()))?;
     Ok(StateCheckpointBundle {
         checkpoint,
+        topology,
         manifest_schema: schema,
         manifest_git_sha: git_sha,
         manifest_sha256: sha256(&manifest_bytes).to_hex(),
@@ -339,20 +363,16 @@ impl StateIntStatsReport {
     }
 }
 
-fn log_softmax_80(logits: &[f64; STATE_VOCAB]) -> [f64; STATE_VOCAB] {
+fn log_softmax_v(logits: &[f64]) -> Vec<f64> {
     let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let sum: f64 = logits.iter().map(|l| (l - max).exp()).sum();
     let lse = max + sum.ln();
-    let mut out = [0.0f64; STATE_VOCAB];
-    for (o, l) in out.iter_mut().zip(logits.iter()) {
-        *o = l - lse;
-    }
-    out
+    logits.iter().map(|l| l - lse).collect()
 }
 
-fn argmax_80(v: &[f64; STATE_VOCAB]) -> u8 {
+fn argmax_v(v: &[f64]) -> u8 {
     let mut best = 0usize;
-    for i in 1..STATE_VOCAB {
+    for i in 1..v.len() {
         if v[i] > v[best] {
             best = i;
         }
@@ -415,28 +435,22 @@ pub fn run_state_fidelity(
     let mut merged = StateForwardStats::new();
     for lane in 0..EVAL_LANES {
         let base = lane * lane_len;
-        let mut f_state = [0.0f32; STATE_SLOTS];
-        let mut i_state = [0i32; STATE_SLOTS];
+        let mut f_state = vec![0.0f32; ck.topology().state_slots];
+        let mut i_state = lowered.zero_state();
         for t in 0..pairs_per_lane {
             let ctx = ids[base + t];
             let tgt = usize::from(ids[base + t + 1]);
 
             let f_logits = f32_state_forward(ck, ctx, &mut f_state);
-            let mut f64_logits = [0.0f64; STATE_VOCAB];
-            for (o, l) in f64_logits.iter_mut().zip(f_logits.iter()) {
-                *o = f64::from(*l);
-            }
-            let f_lp = log_softmax_80(&f64_logits);
+            let f64_logits: Vec<f64> = f_logits.iter().map(|l| f64::from(*l)).collect();
+            let f_lp = log_softmax_v(&f64_logits);
             bits_f += -f_lp[tgt] / ln2;
-            let f_arg = argmax_80(&f64_logits);
+            let f_arg = argmax_v(&f64_logits);
 
             let trace = lowered.forward(ctx, &mut i_state);
             merged.merge(&trace.stats);
-            let mut i_logits = [0.0f64; STATE_VOCAB];
-            for (o, l) in i_logits.iter_mut().zip(trace.logits.iter()) {
-                *o = f64::from(*l) * step;
-            }
-            let i_lp = log_softmax_80(&i_logits);
+            let i_logits: Vec<f64> = trace.logits.iter().map(|l| f64::from(*l) * step).collect();
+            let i_lp = log_softmax_v(&i_logits);
             bits_i += -i_lp[tgt] / ln2;
             if f_arg == trace.argmax {
                 agree += 1;
@@ -467,8 +481,16 @@ pub fn run_state_fidelity(
 // phase 3a: one-token ROM gate (host-poked input + carried state)
 // ---------------------------------------------------------------------------
 
-/// Expected WRAM segments for one host trace: (name, address, bytes).
-pub(crate) fn state_expected_segments(trace: &IntStateForwardTrace) -> Vec<(String, u16, Vec<u8>)> {
+/// Expected WRAM segments for one host trace: (name, address, bytes). The
+/// segment set follows the ROM's own layout: per-block residual dumps only
+/// when the budget kept them, the out-projection accumulators only when
+/// they do not overlay the matvec arena, and the down accumulators at the
+/// lowered width. The final residual is always gated from the live `x`
+/// buffer.
+pub(crate) fn state_expected_segments(
+    trace: &IntStateForwardTrace,
+    l: &StateWramLayout,
+) -> Vec<(String, u16, Vec<u8>)> {
     let i16s = |v: &[i16]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     let i32s = |v: &[i32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     let i24s = |v: &[i32]| -> Vec<u8> {
@@ -476,66 +498,81 @@ pub(crate) fn state_expected_segments(trace: &IntStateForwardTrace) -> Vec<(Stri
             .flat_map(|x| x.to_le_bytes().into_iter().take(3))
             .collect()
     };
+    let d = l.topology.d_model;
     let mut segments = vec![
         (
             "state_norm_act".to_string(),
-            S_DUMP_SNORM,
+            l.dump_snorm,
             trace.state_norm_act.to_vec(),
         ),
         (
             "state_in_acc".to_string(),
-            S_DUMP_INACC,
+            l.dump_inacc,
             i16s(&trace.state_in_acc),
         ),
-        (
-            "state_after".to_string(),
-            S_STATE_BASE,
-            i32s(&trace.state_after),
-        ),
-        (
+        ("state_after".to_string(), l.state, i32s(&trace.state_after)),
+    ];
+    if l.sacc_separate {
+        segments.push((
             "state_out_acc".to_string(),
-            S_SACC_BASE,
+            l.sacc,
             i32s(&trace.state_out_acc),
-        ),
-        ("y_act".to_string(), S_DUMP_YACT, trace.y_act.to_vec()),
+        ));
+    }
+    segments.extend([
+        ("y_act".to_string(), l.dump_yact, trace.y_act.to_vec()),
         (
             "block0_norm_act".to_string(),
-            S_DUMP_NORM0,
+            l.dump_norm0,
             trace.block0_norm_act.to_vec(),
         ),
         (
             "block0_up_acc".to_string(),
-            S_DUMP_UPACC0,
+            l.dump_upacc0,
             i16s(&trace.block0_up_acc),
         ),
         (
             "block0_gelu_act".to_string(),
-            S_DUMP_GELU0,
+            l.dump_gelu0,
             trace.block0_gelu_act.to_vec(),
         ),
         (
             "block0_down_acc".to_string(),
-            S_DUMP_DOWNACC0,
-            i16s(&trace.block0_down_acc),
+            l.dump_downacc0,
+            match l.down_width {
+                AccWidth::I16 => i16s(
+                    &trace
+                        .block0_down_acc
+                        .iter()
+                        .map(|&v| v as i16)
+                        .collect::<Vec<_>>(),
+                ),
+                AccWidth::I24 => i24s(&trace.block0_down_acc),
+            },
         ),
-    ];
-    for (k, res) in trace.block_residuals.iter().enumerate() {
-        segments.push((
-            format!("block{k}_residual_i24"),
-            S_XDUMP_BASE + 192 * k as u16,
-            i24s(res),
-        ));
+    ]);
+    if let Some(xdump) = l.xdump {
+        for (k, res) in trace.block_residuals.iter().enumerate() {
+            segments.push((
+                format!("block{k}_residual_i24"),
+                xdump + (3 * d * k) as u16,
+                i24s(res),
+            ));
+        }
+    }
+    if let Some(final_res) = trace.block_residuals.last() {
+        segments.push(("final_residual_i24".to_string(), l.x, i24s(final_res)));
     }
     segments.push((
         "final_norm_act".to_string(),
-        S_QDUMP_BASE,
+        l.dump_qdump,
         trace.final_q.iter().map(|&q| (q + 128) as u8).collect(),
     ));
-    let mut logit_bytes = Vec::with_capacity(STATE_VOCAB * 3);
-    for &l in &trace.logits {
-        logit_bytes.extend_from_slice(&l.to_le_bytes()[..3]);
+    let mut logit_bytes = Vec::with_capacity(l.topology.vocab * 3);
+    for &v in &trace.logits {
+        logit_bytes.extend_from_slice(&v.to_le_bytes()[..3]);
     }
-    segments.push(("logits_i24".to_string(), S_LOGITS_BASE, logit_bytes));
+    segments.push(("logits_i24".to_string(), l.logits, logit_bytes));
     segments.push(("argmax".to_string(), S_ARGMAX_ADDR, vec![trace.argmax]));
     segments
 }
@@ -581,13 +618,13 @@ pub fn harvest_state_cases(
     lowered: &IntStateLoweredModel,
     ids: &[u8],
     positions: &[usize],
-) -> Vec<(usize, u8, [i32; STATE_SLOTS])> {
+) -> Vec<(usize, u8, Vec<i32>)> {
     let max_pos = positions.iter().copied().max().unwrap_or(0);
-    let mut state = [0i32; STATE_SLOTS];
+    let mut state = lowered.zero_state();
     let mut cases = Vec::with_capacity(positions.len());
     for (pos, &id) in ids.iter().enumerate().take(max_pos + 1) {
         if positions.contains(&pos) {
-            cases.push((pos, id, state));
+            cases.push((pos, id, state.clone()));
         }
         let _ = lowered.forward(id, &mut state);
     }
@@ -599,9 +636,9 @@ fn run_one_state_case(
     lowered: &IntStateLoweredModel,
     position: usize,
     input: u8,
-    state: &[i32; STATE_SLOTS],
+    state: &[i32],
 ) -> Result<StateRomRun, OneTokenError> {
-    let mut host_state = *state;
+    let mut host_state = state.to_vec();
     let trace = lowered.forward(input, &mut host_state);
 
     let mut emu = Emulator::builder()
@@ -614,7 +651,7 @@ fn run_one_state_case(
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
     for (slot, h) in state.iter().enumerate() {
         for (k, byte) in h.to_le_bytes().into_iter().enumerate() {
-            emu.poke(S_STATE_BASE + (slot * 4 + k) as u16, byte)
+            emu.poke(rom.layout.state + (slot * 4 + k) as u16, byte)
                 .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
         }
     }
@@ -635,7 +672,7 @@ fn run_one_state_case(
     let end = emu.m_cycle_count_floor().0;
 
     let mut mismatches = Vec::new();
-    for (name, addr, expected) in state_expected_segments(&trace) {
+    for (name, addr, expected) in state_expected_segments(&trace, &rom.layout) {
         let actual = emu
             .peek_range(addr, expected.len())
             .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
@@ -674,7 +711,7 @@ fn run_one_state_case(
 /// harvested (input, state) cases.
 pub fn run_state_rom_gate(
     lowered: &IntStateLoweredModel,
-    cases: &[(usize, u8, [i32; STATE_SLOTS])],
+    cases: &[(usize, u8, Vec<i32>)],
 ) -> Result<StateRomGateReport, OneTokenError> {
     let rom = build_state_one_token_rom(lowered).map_err(|e| OneTokenError::Rom(e.to_string()))?;
     let facts = StateRomFacts {
@@ -722,7 +759,7 @@ pub fn state_host_generate(
     n_tokens: u16,
 ) -> StateHostGeneration {
     assert!(n_tokens >= 1, "host generation needs at least one token");
-    let mut state = [0i32; STATE_SLOTS];
+    let mut state = lowered.zero_state();
     let mut input = seed;
     let mut sequence = Vec::with_capacity(usize::from(n_tokens));
     let mut first_trace = None;
@@ -783,11 +820,12 @@ impl StateSeedRun {
 fn compare_state_dumps(
     emu: &Emulator,
     trace: &IntStateForwardTrace,
+    layout: &StateWramLayout,
     token: u16,
     mismatches: &mut Vec<SegmentMismatch>,
 ) -> Result<bool, OneTokenError> {
     let mut all_ok = true;
-    for (name, addr, expected) in state_expected_segments(trace) {
+    for (name, addr, expected) in state_expected_segments(trace, layout) {
         let actual = emu
             .peek_range(addr, expected.len())
             .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
@@ -829,7 +867,8 @@ pub fn run_state_seed_generation(
     emu.poke(S_INPUT_ADDR, seed)
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
 
-    let baseline: Vec<Vec<u8>> = STATE_UNTOUCHED_WRAM_REGIONS
+    let untouched_regions = rom.layout.untouched_regions();
+    let baseline: Vec<Vec<u8>> = untouched_regions
         .iter()
         .map(|&(start, end)| emu.peek_range(start, usize::from(end - start)))
         .collect::<Result<_, _>>()
@@ -867,12 +906,22 @@ pub fn run_state_seed_generation(
             sp_violation_tokens.push(t);
         }
         if t == 0 {
-            first_token_ok =
-                compare_state_dumps(&emu, &host.first_trace, t, &mut checkpoint_mismatches)?;
+            first_token_ok = compare_state_dumps(
+                &emu,
+                &host.first_trace,
+                &rom.layout,
+                t,
+                &mut checkpoint_mismatches,
+            )?;
         }
         if t == rom.n_tokens - 1 {
-            last_token_ok =
-                compare_state_dumps(&emu, &host.last_trace, t, &mut checkpoint_mismatches)?;
+            last_token_ok = compare_state_dumps(
+                &emu,
+                &host.last_trace,
+                &rom.layout,
+                t,
+                &mut checkpoint_mismatches,
+            )?;
         }
     }
 
@@ -883,7 +932,7 @@ pub fn run_state_seed_generation(
         == 1;
 
     let rom_sequence = emu
-        .peek_range(S_OUT_BASE, usize::from(rom.n_tokens))
+        .peek_range(rom.layout.out, usize::from(rom.n_tokens))
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
     let first_divergence_index = host
         .sequence
@@ -894,7 +943,7 @@ pub fn run_state_seed_generation(
         first_divergence_index.is_none() && host.sequence.len() == rom_sequence.len();
 
     let mut wram_violations = Vec::new();
-    for (&(start, end), before) in STATE_UNTOUCHED_WRAM_REGIONS.iter().zip(baseline.iter()) {
+    for (&(start, end), before) in untouched_regions.iter().zip(baseline.iter()) {
         let after = emu
             .peek_range(start, usize::from(end - start))
             .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
@@ -955,6 +1004,8 @@ pub struct StateCheckpointFacts {
 #[derive(Debug, Clone, Serialize)]
 pub struct StateMultiRomFacts {
     pub rom_bytes: usize,
+    /// WRAM address of the persistent state vector (layout-planned).
+    pub state_wram_addr: u16,
     pub bank_count: u16,
     pub driver_bytes: usize,
     pub weight_code_bytes: usize,
@@ -1030,6 +1081,7 @@ pub fn run_stateful_bringup(
     let multi_token = StateMultiTokenReport {
         rom: StateMultiRomFacts {
             rom_bytes: rom.rom.len(),
+            state_wram_addr: rom.layout.state,
             bank_count: rom.bank_count,
             driver_bytes: rom.driver_bytes,
             weight_code_bytes: rom.weight_code_bytes,
@@ -1241,7 +1293,7 @@ pub fn stateful_report_to_markdown(report: &StatefulRomReport) -> String {
         out,
         "- {} tokens per seed generated entirely on-device (state zeroed once, then evolving \
          in WRAM at 0x{:04X}); token boundary trap at {:#06x}",
-        m.rom.n_tokens, S_STATE_BASE, m.rom.token_boundary_pc
+        m.rom.n_tokens, m.rom.state_wram_addr, m.rom.token_boundary_pc
     );
     let _ = writeln!(
         out,
@@ -1356,11 +1408,11 @@ mod tests {
     fn state_one_token_rom_matches_host_on_synthetic_model() {
         let ck = synthetic_state_checkpoint(21);
         let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
-        let mut nonzero = [0i32; STATE_SLOTS];
+        let mut nonzero = lowered.zero_state();
         for (slot, h) in nonzero.iter_mut().enumerate() {
             *h = (slot as i32 - 32) * 4093; // mixed signs, multi-byte values
         }
-        let cases = vec![(0usize, 7u8, [0i32; STATE_SLOTS]), (1usize, 42u8, nonzero)];
+        let cases = vec![(0usize, 7u8, lowered.zero_state()), (1usize, 42u8, nonzero)];
         let report = run_state_rom_gate(&lowered, &cases).expect("gate runs");
         for run in &report.runs {
             assert!(

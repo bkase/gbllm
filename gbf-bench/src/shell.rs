@@ -34,9 +34,9 @@ use gbf_kernel::asm_impl_shell::{
     SHELL_NEWLINE_ID, SHELL_PROMPT_CAP, SHELL_SPACE_ID, SHELL_STATUS_TEXT_IDS, STATUS_ROW,
     ShellRom, TRANSCRIPT_CELLS, TRANSCRIPT_COLS, TRANSCRIPT_ROWS, build_state_shell_rom,
 };
-use gbf_kernel::asm_impl_state::{S_OUT_BASE, S_RNG_ADDR};
+use gbf_kernel::asm_impl_state::S_RNG_ADDR;
 use gbf_kernel::decode::{SamplerConfig, XorShift16, sample_topk_trace};
-use gbf_kernel::state_model_ref::{IntStateLoweredModel, STATE_SLOTS};
+use gbf_kernel::state_model_ref::IntStateLoweredModel;
 use serde::Serialize;
 
 use crate::one_token::{DMG_M_CYCLES_PER_SECOND, OneTokenError};
@@ -143,7 +143,7 @@ pub fn shell_host_generate(
 ) -> Vec<u8> {
     assert!(!prompt_ids.is_empty(), "shell ignores empty submits");
     let mut rng = XorShift16::new(rng_seed);
-    let mut state = [0i32; STATE_SLOTS];
+    let mut state = lowered.zero_state();
     let mut trace = None;
     for &c in prompt_ids {
         trace = Some(lowered.forward(c, &mut state));
@@ -487,7 +487,9 @@ pub fn run_shell_session(
     }
     step_run_to(&mut emu, rom.gen_done_pc, token_budget, "generation done")?;
 
-    let rom_sequence = emu.peek_range(S_OUT_BASE, n_expected).map_err(emu_err)?;
+    let rom_sequence = emu
+        .peek_range(rom.layout.out, n_expected)
+        .map_err(emu_err)?;
     let first_divergence_index = host_sequence
         .iter()
         .zip(rom_sequence.iter())

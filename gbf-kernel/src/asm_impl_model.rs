@@ -42,7 +42,9 @@ use gbf_asm::layout::{AddressSpace, BankIndex, LayoutPlan, PlacedSection};
 use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, RomAssemblyError, RomSize, assemble_rom};
 use gbf_asm::section::SectionId;
 
-use crate::model_ref::{D_FF, D_MODEL, IntLoweredModel, LoweredLayer, N_BLOCKS, VOCAB};
+use crate::model_ref::{
+    D_FF, D_MODEL, IntLoweredModel, LoweredLayer, N_BLOCKS, TernaryLayer, VOCAB,
+};
 
 // ---------------------------------------------------------------------------
 // WRAM map (all one-token addresses; the runner reads these)
@@ -111,6 +113,9 @@ pub(crate) const ARG_CAND: u16 = 0xC2D4; // 3 bytes
 
 /// MBC5 low ROM bank register.
 pub(crate) const MBC5_ROMB0: u16 = 0x2000;
+/// MBC5 high ROM-bank bit register (bit 8 of the bank number); required
+/// once a model needs more than 256 banks (up to 512 on MBC5).
+pub(crate) const MBC5_ROMB1: u16 = 0x3000;
 /// Banked chunk entry point (all switchable-bank code starts here).
 pub(crate) const CHUNK_ENTRY: u16 = 0x4000;
 /// Per-bank code budget for weight chunks.
@@ -170,14 +175,46 @@ pub struct MultiTokenRom {
 pub enum ModelRomError {
     Encode(EncodeError),
     RomAssembly(RomAssemblyError),
-    DuplicateLabel { name: String },
-    UndefinedLabel { name: String },
-    JrOutOfRange { label: String, offset: i32 },
-    RowTooLargeForBank { row_bytes: usize },
-    DriverOverflowsBank0 { bytes: usize },
-    TooManyBanks { banks: usize },
-    BadTokenCount { n_tokens: u16 },
-    UiBankOverflow { bytes: usize },
+    DuplicateLabel {
+        name: String,
+    },
+    UndefinedLabel {
+        name: String,
+    },
+    JrOutOfRange {
+        label: String,
+        offset: i32,
+    },
+    RowTooLargeForBank {
+        row_bytes: usize,
+    },
+    DriverOverflowsBank0 {
+        bytes: usize,
+    },
+    TooManyBanks {
+        banks: usize,
+    },
+    BadTokenCount {
+        n_tokens: u16,
+    },
+    UiBankOverflow {
+        bytes: usize,
+    },
+    /// The topology's WRAM working set does not fit the 8 KiB arena even
+    /// after dropping optional debug dumps and overlaying scratch buffers.
+    WramOverflow {
+        needed: usize,
+        budget: usize,
+        detail: String,
+    },
+    /// The per-row scale/decay parameter tables exceed one ROM bank.
+    ParamsBankOverflow {
+        bytes: usize,
+    },
+    /// A banked data table's padded row stride exceeds one ROM bank.
+    TableRowTooWide {
+        stride: usize,
+    },
 }
 
 impl fmt::Display for ModelRomError {
@@ -208,6 +245,25 @@ impl fmt::Display for ModelRomError {
                     f,
                     "shell UI bank needs {bytes} bytes, exceeding one ROM bank"
                 )
+            }
+            Self::WramOverflow {
+                needed,
+                budget,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "WRAM working set needs {needed} bytes of the {budget}-byte arena: {detail}"
+                )
+            }
+            Self::ParamsBankOverflow { bytes } => {
+                write!(
+                    f,
+                    "scale/decay parameter tables need {bytes} bytes (> one bank)"
+                )
+            }
+            Self::TableRowTooWide { stride } => {
+                write!(f, "banked table row stride {stride} exceeds one ROM bank")
             }
         }
     }
@@ -1444,7 +1500,15 @@ fn emit_emb_copy(asm: &mut ModelAsm, emb_bank_first: u8) {
 // ---------------------------------------------------------------------------
 
 /// One matvec row as raw encoded bytes (no labels; purely straight-line).
-fn encode_row(layer: &LoweredLayer, row: usize, acc_out: u16) -> Result<Vec<u8>, ModelRomError> {
+/// `act_base` is the activation buffer the pop stream walks; the bias seed
+/// is embedded mod 2^16 (exact whenever the true accumulator fits i16,
+/// which the lowering's structural row bound guarantees for i16 layers).
+fn encode_row(
+    layer: &LoweredLayer,
+    row: usize,
+    act_base: u16,
+    acc_out: u16,
+) -> Result<Vec<u8>, ModelRomError> {
     let mut bytes = Vec::new();
     let mut push = |instr: Instr| -> Result<(), ModelRomError> {
         bytes.extend_from_slice(&encode_instr(&instr)?);
@@ -1452,7 +1516,7 @@ fn encode_row(layer: &LoweredLayer, row: usize, acc_out: u16) -> Result<Vec<u8>,
     };
     push(Instr::Ld16Imm {
         dst: Reg16Data::DE,
-        imm: layer.biases[row] as u16,
+        imm: (layer.biases[row] & 0xFFFF) as u16,
     })?;
     push(Instr::Ld16Imm {
         dst: Reg16Data::BC,
@@ -1460,12 +1524,45 @@ fn encode_row(layer: &LoweredLayer, row: usize, acc_out: u16) -> Result<Vec<u8>,
     })?;
     push(Instr::Ld16Imm {
         dst: Reg16Data::SP,
-        imm: ACT_BASE,
+        imm: act_base,
     })?;
 
-    let row_weights = layer.layer.row(row);
+    encode_pop_accumulate(&mut push, layer.layer.row(row))?;
+
+    // y = P - N -> ACC (i16 LE at a static address)
+    push(Instr::Ld8Reg {
+        dst: Reg8::A,
+        src: Reg8::E,
+    })?;
+    push(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::C),
+    })?;
+    push(Instr::LdDirectFromA {
+        addr: direct(acc_out),
+    })?;
+    push(Instr::Ld8Reg {
+        dst: Reg8::A,
+        src: Reg8::D,
+    })?;
+    push(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    })?;
+    push(Instr::LdDirectFromA {
+        addr: direct(acc_out + 1),
+    })?;
+    Ok(bytes)
+}
+
+/// The V3 pop-stream accumulate body over one contiguous (even-length)
+/// weight run: positives into DE, negatives into BC, zero pairs skipped via
+/// `add sp`. The caller owns the DE/BC/SP seeds and the epilogue.
+fn encode_pop_accumulate(
+    push: &mut impl FnMut(Instr) -> Result<(), ModelRomError>,
+    weights: &[i8],
+) -> Result<(), ModelRomError> {
+    debug_assert_eq!(weights.len() % 2, 0, "pop stream consumes column pairs");
     let mut pending_skip: u16 = 0;
-    for pair in row_weights.chunks_exact(2) {
+    for pair in weights.chunks_exact(2) {
         if pair[0] == 0 && pair[1] == 0 {
             pending_skip += 2;
             continue;
@@ -1538,28 +1635,145 @@ fn encode_row(layer: &LoweredLayer, row: usize, acc_out: u16) -> Result<Vec<u8>,
             }
         }
     }
+    Ok(())
+}
 
-    // y = P - N -> ACC (i16 LE at a static address)
-    push(Instr::Ld8Reg {
-        dst: Reg8::A,
-        src: Reg8::E,
-    })?;
-    push(Instr::SubA {
-        src: AluSrc8::Reg(Reg8::C),
-    })?;
-    push(Instr::LdDirectFromA {
-        addr: direct(acc_out),
-    })?;
-    push(Instr::Ld8Reg {
-        dst: Reg8::A,
-        src: Reg8::D,
-    })?;
-    push(Instr::SbcA {
-        src: AluSrc8::Reg(Reg8::B),
-    })?;
-    push(Instr::LdDirectFromA {
-        addr: direct(acc_out + 1),
-    })?;
+/// Column-segment width for wide (i24) rows: any 192-column segment's
+/// partial accumulator fits i16 structurally (worst case 128 * 192 =
+/// 24,576), so each segment runs the proven V3 i16 stream and the segments
+/// combine into a 3-byte accumulator with byte-serial adds.
+pub(crate) const WIDE_SEGMENT_COLS: usize = 192;
+
+/// One wide matvec row: column-segmented pop streams combined into a 3-byte
+/// (i24) little-endian accumulator at `acc_out`. Exact mod-2^24 arithmetic;
+/// the lowering's structural bound guarantees the true value fits i24.
+fn encode_row_wide(
+    layer: &TernaryLayer,
+    row: usize,
+    act_base: u16,
+    acc_out: u16,
+) -> Result<Vec<u8>, ModelRomError> {
+    let mut bytes = Vec::new();
+    let mut push = |instr: Instr| -> Result<(), ModelRomError> {
+        bytes.extend_from_slice(&encode_instr(&instr)?);
+        Ok(())
+    };
+    let weights = layer.row(row);
+    debug_assert_eq!(weights.len() % 2, 0, "pop stream consumes column pairs");
+
+    for (seg_idx, seg_start) in (0..weights.len()).step_by(WIDE_SEGMENT_COLS).enumerate() {
+        let seg_end = (seg_start + WIDE_SEGMENT_COLS).min(weights.len());
+        let seg = &weights[seg_start..seg_end];
+        let seg_bias: i32 = seg.iter().map(|&w| -128 * i32::from(w)).sum();
+        push(Instr::Ld16Imm {
+            dst: Reg16Data::DE,
+            imm: (seg_bias & 0xFFFF) as u16,
+        })?;
+        push(Instr::Ld16Imm {
+            dst: Reg16Data::BC,
+            imm: 0,
+        })?;
+        push(Instr::Ld16Imm {
+            dst: Reg16Data::SP,
+            imm: act_base + seg_start as u16,
+        })?;
+        encode_pop_accumulate(&mut push, seg)?;
+
+        if seg_idx == 0 {
+            // acc = sx24(P - N)
+            push(Instr::Ld8Reg {
+                dst: Reg8::A,
+                src: Reg8::E,
+            })?;
+            push(Instr::SubA {
+                src: AluSrc8::Reg(Reg8::C),
+            })?;
+            push(Instr::LdDirectFromA {
+                addr: direct(acc_out),
+            })?;
+            push(Instr::Ld8Reg {
+                dst: Reg8::A,
+                src: Reg8::D,
+            })?;
+            push(Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::B),
+            })?;
+            push(Instr::LdDirectFromA {
+                addr: direct(acc_out + 1),
+            })?;
+            // sign-extend the hi byte still in A: add a,a; sbc a,a
+            push(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            })?;
+            push(Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::A),
+            })?;
+            push(Instr::LdDirectFromA {
+                addr: direct(acc_out + 2),
+            })?;
+        } else {
+            // acc += sx24(P - N), byte-serial with carry
+            push(Instr::Ld8Reg {
+                dst: Reg8::A,
+                src: Reg8::E,
+            })?;
+            push(Instr::SubA {
+                src: AluSrc8::Reg(Reg8::C),
+            })?;
+            push(Instr::Ld8Reg {
+                dst: Reg8::E,
+                src: Reg8::A,
+            })?;
+            push(Instr::Ld8Reg {
+                dst: Reg8::A,
+                src: Reg8::D,
+            })?;
+            push(Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::B),
+            })?;
+            push(Instr::Ld8Reg {
+                dst: Reg8::D,
+                src: Reg8::A,
+            })?;
+            push(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            })?;
+            push(Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::A),
+            })?;
+            push(Instr::Ld8Reg {
+                dst: Reg8::B,
+                src: Reg8::A,
+            })?;
+            push(Instr::LdAFromDirect {
+                addr: direct(acc_out),
+            })?;
+            push(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::E),
+            })?;
+            push(Instr::LdDirectFromA {
+                addr: direct(acc_out),
+            })?;
+            push(Instr::LdAFromDirect {
+                addr: direct(acc_out + 1),
+            })?;
+            push(Instr::AdcA {
+                src: AluSrc8::Reg(Reg8::D),
+            })?;
+            push(Instr::LdDirectFromA {
+                addr: direct(acc_out + 1),
+            })?;
+            push(Instr::LdAFromDirect {
+                addr: direct(acc_out + 2),
+            })?;
+            push(Instr::AdcA {
+                src: AluSrc8::Reg(Reg8::B),
+            })?;
+            push(Instr::LdDirectFromA {
+                addr: direct(acc_out + 2),
+            })?;
+        }
+    }
     Ok(bytes)
 }
 
@@ -1592,18 +1806,19 @@ fn chunk_epilogue() -> Result<Vec<u8>, ModelRomError> {
     Ok(bytes)
 }
 
-/// Pack one matvec's rows into as few bank chunks as fit; returns the chunk
-/// byte bodies (each a complete callable program at `CHUNK_ENTRY`).
-pub(crate) fn build_matvec_chunks(layer: &LoweredLayer) -> Result<Vec<Vec<u8>>, ModelRomError> {
+/// Pack encoded rows into as few bank chunks as fit; each chunk is a
+/// complete callable program at `CHUNK_ENTRY`.
+fn pack_row_chunks(
+    rows: impl Iterator<Item = Result<Vec<u8>, ModelRomError>>,
+) -> Result<Vec<Vec<u8>>, ModelRomError> {
     let prologue = chunk_prologue()?;
     let epilogue = chunk_epilogue()?;
     let overhead = prologue.len() + epilogue.len();
 
     let mut chunks = Vec::new();
     let mut current: Vec<u8> = prologue.clone();
-    for row in 0..layer.layer.rows() {
-        let acc_out = ACC_BASE + 2 * row as u16;
-        let row_bytes = encode_row(layer, row, acc_out)?;
+    for row_bytes in rows {
+        let row_bytes = row_bytes?;
         if row_bytes.len() + overhead > BANK_BYTES {
             return Err(ModelRomError::RowTooLargeForBank {
                 row_bytes: row_bytes.len(),
@@ -1618,6 +1833,38 @@ pub(crate) fn build_matvec_chunks(layer: &LoweredLayer) -> Result<Vec<Vec<u8>>, 
     current.extend_from_slice(&epilogue);
     chunks.push(current);
     Ok(chunks)
+}
+
+/// Pack one i16 matvec's rows into bank chunks: activations popped from
+/// `act_base`, 2-byte accumulators written from `acc_base` up.
+pub(crate) fn build_matvec_chunks_at(
+    layer: &LoweredLayer,
+    act_base: u16,
+    acc_base: u16,
+) -> Result<Vec<Vec<u8>>, ModelRomError> {
+    pack_row_chunks(
+        (0..layer.layer.rows())
+            .map(|row| encode_row(layer, row, act_base, acc_base + 2 * row as u16)),
+    )
+}
+
+/// Pack one wide (i24) matvec's rows into bank chunks: column-segmented
+/// pop streams, 3-byte accumulators written from `acc_base` up.
+pub(crate) fn build_matvec_chunks_wide(
+    layer: &TernaryLayer,
+    act_base: u16,
+    acc_base: u16,
+) -> Result<Vec<Vec<u8>>, ModelRomError> {
+    pack_row_chunks(
+        (0..layer.rows())
+            .map(|row| encode_row_wide(layer, row, act_base, acc_base + 3 * row as u16)),
+    )
+}
+
+/// Dense-convention chunks at the fixed v0 addresses ([`ACT_BASE`],
+/// [`ACC_BASE`]).
+pub(crate) fn build_matvec_chunks(layer: &LoweredLayer) -> Result<Vec<Vec<u8>>, ModelRomError> {
+    build_matvec_chunks_at(layer, ACT_BASE, ACC_BASE)
 }
 
 // ---------------------------------------------------------------------------

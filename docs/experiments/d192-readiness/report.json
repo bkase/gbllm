@@ -1,0 +1,193 @@
+{
+  "schema": "d192_readiness.v1",
+  "bead": "bd-pp43d",
+  "target_checkpoint_bead": "bd-3771m",
+  "git_sha": "600c0aed37217c9ca5769af39e1f3ce45047cb08",
+  "topology": {
+    "d_model": 192,
+    "d_ff": 384,
+    "n_blocks": 6,
+    "state_slots": 192,
+    "vocab": 80
+  },
+  "synthetic_export": {
+    "schema": "f_s5_state_checkpoint_export.v1",
+    "seed": 20260702,
+    "tensors_verified_sha256": 30,
+    "manifest_sha256": "54d1e8dfb4e5f856023f40a78700f89a98b8ae4aa264b9a1ece292ff46b6beaa",
+    "loader": "gbf_bench::stateful::load_state_checkpoint (production path: manifest topology block + per-tensor sha256 verification)"
+  },
+  "width": {
+    "down_acc_width": "I24",
+    "down_acc_structural_bound": 38271,
+    "i16_bound": 32767,
+    "decision_source": "structural per-row worst case over the actual ternary weights (the f_s5_state_checkpoint_export.v1 manifest declares no measured activation ranges, so lowering never relies on unmeasured statistics)"
+  },
+  "layout": {
+    "wram_bytes_allocated": 7208,
+    "wram_budget_bytes": 8192,
+    "per_block_residual_dumps_kept": false,
+    "out_acc_dump_kept": false,
+    "scratch_overlaid_on_matvec_arena": true,
+    "untouched_regions": [
+      [
+        49728,
+        49792
+      ],
+      [
+        49896,
+        49920
+      ],
+      [
+        50112,
+        50176
+      ],
+      [
+        56512,
+        57088
+      ]
+    ]
+  },
+  "rom": {
+    "rom_bytes": 8388608,
+    "bank_count": 307,
+    "uses_romb1_9bit_banking": true,
+    "driver_bytes": 14735,
+    "weight_code_bytes": 4455077,
+    "weight_chunk_count": 294,
+    "table_bytes": 188096
+  },
+  "one_token_gate": {
+    "rom": {
+      "rom_bytes": 8388608,
+      "bank_count": 307,
+      "driver_bytes": 14735,
+      "weight_code_bytes": 4455077,
+      "weight_chunk_count": 294,
+      "table_bytes": 188096,
+      "token_start_pc": 340,
+      "token_end_pc": 3367
+    },
+    "cases": 4,
+    "all_byte_exact": true,
+    "runs": [
+      {
+        "input_id": 19,
+        "state_from_position": 0,
+        "state_is_zero": true,
+        "host_argmax": 39,
+        "rom_argmax": 39,
+        "byte_exact": true,
+        "m_cycles": 19340507,
+        "mismatches": []
+      },
+      {
+        "input_id": 39,
+        "state_from_position": 1,
+        "state_is_zero": false,
+        "host_argmax": 39,
+        "rom_argmax": 39,
+        "byte_exact": true,
+        "m_cycles": 19358396,
+        "mismatches": []
+      },
+      {
+        "input_id": 39,
+        "state_from_position": 5,
+        "state_is_zero": false,
+        "host_argmax": 39,
+        "rom_argmax": 39,
+        "byte_exact": true,
+        "m_cycles": 19361634,
+        "mismatches": []
+      },
+      {
+        "input_id": 39,
+        "state_from_position": 13,
+        "state_is_zero": false,
+        "host_argmax": 39,
+        "rom_argmax": 39,
+        "byte_exact": true,
+        "m_cycles": 19357594,
+        "mismatches": []
+      }
+    ],
+    "mean_m_cycles": 19354532,
+    "seconds_per_token_dmg": 18.45792007446289
+  },
+  "multi_token": {
+    "n_tokens": 64,
+    "seeds": [
+      19,
+      62
+    ],
+    "all_sequences_match": true,
+    "all_health_checks_pass": true,
+    "runs": [
+      {
+        "seed_id": 19,
+        "n_tokens": 64,
+        "host_sequence_sha256": "59af513c29d2fc3728126da90c84905c6ea451840a3099a3e3959e753b38a2fc",
+        "rom_sequence_sha256": "59af513c29d2fc3728126da90c84905c6ea451840a3099a3e3959e753b38a2fc",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 19340529,
+          "median": 19357642,
+          "max": 19361660,
+          "mean": 19357517,
+          "max_over_min": 1.001092576113094,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_19_T.txt"
+      },
+      {
+        "seed_id": 62,
+        "n_tokens": 64,
+        "host_sequence_sha256": "59af513c29d2fc3728126da90c84905c6ea451840a3099a3e3959e753b38a2fc",
+        "rom_sequence_sha256": "59af513c29d2fc3728126da90c84905c6ea451840a3099a3e3959e753b38a2fc",
+        "sequences_match": true,
+        "first_divergence_index": null,
+        "first_token_checkpoints_byte_exact": true,
+        "last_token_checkpoints_byte_exact": true,
+        "checkpoint_mismatches": [],
+        "cycles": {
+          "min": 19337732,
+          "median": 19357357,
+          "max": 19360347,
+          "mean": 19357043,
+          "max_over_min": 1.0011694753035154,
+          "stable_within_5pct": true
+        },
+        "sp_home_every_token": true,
+        "sp_violation_tokens": [],
+        "wram_untouched_regions_ok": true,
+        "wram_violations": [],
+        "done_flag_set": true,
+        "sample_file": "sample_seed_62_space.txt"
+      }
+    ]
+  },
+  "cycles": {
+    "macs_per_token": 973824,
+    "one_token_mean_m_cycles": 19354532,
+    "multi_token_mean_m_cycles": 19357280,
+    "seconds_per_token_dmg": 18.460540771484375,
+    "projected_seconds_per_token": 7.1,
+    "measured_over_projected": 2.6000761649977995
+  },
+  "arm_b_regression_note": "All committed arm-B d64 gates (dense one-token/multi-token, stateful one/multi-token, sampling, interactive shell, compile gate) run on the same parameterized builders and stay green; see cargo test -p gbf-bench --lib.",
+  "caveats": [
+    "The gate model is SYNTHETIC (deterministic seeded weights mirroring the export format and weight statistics), not tonight's real distilled student; the real checkpoint may differ in accumulator ranges. The width decision is structural (worst case over actual weights), so a real checkpoint can only be safer, but its per-row scale magnitudes must still pass the lowering's u32 epilogue bound.",
+    "Per-block residual dumps and the out-projection accumulator dump are dropped at this topology (WRAM budget); the gate still pins the final residual, all block-0 dumps, state vector, in-projection accumulators, y activations, final norm, logits, and argmax byte-exactly.",
+    "Fidelity vs the trainer's f32 forward is meaningless on synthetic weights and is deferred to the real-checkpoint bring-up."
+  ]
+}
