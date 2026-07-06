@@ -31,18 +31,21 @@
           "eval_pairs": 1042400,
           "fp_val_bits_per_raw_byte": 2.286768975095475,
           "fp_val_bpc_per_normalized_char": 2.3002844978532666,
+          "loaded_from": "experiments/S8/sweep/teacher-CUSTOM",
           "n_blocks": 6,
-          "saved_to": "/Users/bkase/Documents/gbllm/experiments/S8/sweep/teacher-CUSTOM",
-          "source": "trained_this_run",
+          "source": "loaded",
           "state_slots": 384,
-          "steps": 75000,
-          "steps_per_second": 4.253274207577088,
-          "train_wall_clock_seconds": 17633.47396375
+          "steps": 75000
         },
         "temperature": 2.0,
-        "weight": 0.5
+        "weight": 0.5,
+        "weight_hard_final": 0.65,
+        "weight_schedule": "warmup (hardness Off) at `weight`; linear ramp from `weight` at the hardness flip to `weight_hard_final` at the last step"
       }
     },
+    "hard_lr_decay": "cosine",
+    "hard_lr_final_factor": 0.1,
+    "lambda_weight_l1": 0.0,
     "lanes": 4,
     "lr": 0.01,
     "n_blocks": 6,
@@ -55,10 +58,11 @@
     "state_slots": 192,
     "steps": 130000,
     "tbptt": "state carried across chunks detached; lane reset to zero state on stream wrap",
+    "ternary_threshold_init": 0.0,
     "tied_head": true,
     "tokens_per_step": 512,
     "vocab": 80,
-    "warmup_frac_hardness_off": 0.25
+    "warmup_frac_hardness_off": 0.4
   },
   "corpus": {
     "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
@@ -118,31 +122,31 @@
     }
   },
   "description": "custom topology from CLI flags",
-  "git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
+  "git_sha": "7fc04c1b648833db383816be8ded3bb45a58aae0",
   "measurement": {
     "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
     "eval_lanes": 8,
     "eval_pairs": 1042400,
-    "eval_wall_clock_seconds": 232.167970375,
+    "eval_wall_clock_seconds": 233.552725292,
     "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling)",
-    "fp_val_bits_per_raw_byte": 2.65956441552134,
-    "fp_val_bpc_per_normalized_char": 2.67528327640115,
-    "gap_bpc_per_normalized_char": 0.10326834254037243,
-    "state_block_scalar_parity_max_abs_diff": 5.7220458984375e-6,
+    "fp_val_bits_per_raw_byte": 2.654189380226125,
+    "fp_val_bpc_per_normalized_char": 2.6698764729594155,
+    "gap_bpc_per_normalized_char": 0.010791233108108589,
+    "state_block_scalar_parity_max_abs_diff": 4.76837158203125e-6,
     "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
-    "ternary_val_bits_per_raw_byte": 2.7622259958829183,
-    "ternary_val_bpc_per_normalized_char": 2.7785516189415222
+    "ternary_val_bits_per_raw_byte": 2.664917208500269,
+    "ternary_val_bpc_per_normalized_char": 2.680667706067524
   },
   "sample": {
-    "greedy_continuation": " the streated to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was ",
+    "greedy_continuation": " the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the",
     "prompt_normalized": "The children walked down to the river in the morning, and",
     "sample_path": "experiments/S8/sweep/sample_CUSTOM_distill.txt"
   },
   "status": "ok",
   "training": {
     "expert_usage_fraction_last_log_window_per_block": null,
-    "final_logged_train_ce_bpc": 2.4900908446386425,
-    "steps_per_second": 4.335598072247669,
-    "train_wall_clock_seconds": 29984.329228333
+    "final_logged_train_ce_bpc": 2.3936760008951206,
+    "steps_per_second": 4.47431110106145,
+    "train_wall_clock_seconds": 29054.752131375
   }
 }

@@ -2,4 +2,4 @@ PROMPT (charset_v1-normalized):
 The children walked down to the river in the morning, and
 
 GREEDY CONTINUATION (256 chars, hard ternary):
- the streated to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was 
+ the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the secured the

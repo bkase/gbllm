@@ -1,6 +1,6 @@
 {
   "bead": "bd-3771m",
-  "git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
+  "git_sha": "7fc04c1b648833db383816be8ded3bb45a58aae0",
   "layers": [
     {
       "down_scales": "block0_down.scales",
@@ -141,7 +141,7 @@
       "layout": "row_major",
       "name": "embedding",
       "role": "token_embedding_and_tied_head",
-      "sha256": "d088eec8a50ae6b78788e1922627ec130ce21a4b8dd2079a14471cb2bc4a3f2b",
+      "sha256": "3250fefb05ee610bafda8f3ee8a6012eb33a5cddc66cb7e6de6d622e853495ce",
       "shape": [
         80,
         192
@@ -153,7 +153,7 @@
       "layout": "row_major",
       "name": "state_input_to_state.ternary",
       "role": "linear_state_input_projection_ternary_weights",
-      "sha256": "39d271f80686c9a5441e0f0a0d8090b00eba910cccbeeb7f9e30769b417eef11",
+      "sha256": "c33fead4055d372714e85b00b6477040b58e64875d76aab6141fdf2259e14289",
       "shape": [
         192,
         192
@@ -164,7 +164,7 @@
       "file": "tensors/state_input_to_state.scales.q8_8_u16le.bin",
       "name": "state_input_to_state.scales",
       "role": "linear_state_input_projection_per_output_row_scale",
-      "sha256": "116d67dfc910c82f5ba74354cb108a860bc3aefd0330018028a5b854110af26d",
+      "sha256": "c8ed8fec8258262f63c594118021eba8ec2a8a3017e49a153e211da010491acd",
       "shape": [
         192
       ]
@@ -175,7 +175,7 @@
       "layout": "row_major",
       "name": "state_state_to_output.ternary",
       "role": "linear_state_output_projection_ternary_weights",
-      "sha256": "696ab20a771a42835c1e583fa58b6f403d16334743d8b6748cecae7e7b3fc1b9",
+      "sha256": "b8bcf00320ad4e6dfa13102e74040b17182a2343b6d2f459d191c3b336972edd",
       "shape": [
         192,
         192
@@ -186,7 +186,7 @@
       "file": "tensors/state_state_to_output.scales.q8_8_u16le.bin",
       "name": "state_state_to_output.scales",
       "role": "linear_state_output_projection_per_output_row_scale",
-      "sha256": "313eabac1204d2648ba629a66a9cc8899d6d8d9b1bce51f32342ad0d5c947b64",
+      "sha256": "97bfd16393506397b0cd432d4ef0ade6d49e0e1f0857869c3352546448779bd1",
       "shape": [
         192
       ]
@@ -197,7 +197,7 @@
       "layout": "row_major",
       "name": "block0_up.ternary",
       "role": "up_projection_ternary_weights",
-      "sha256": "61da7ab01600f41e8e4c31496a12467822b8deb2ce79271cd0346cf17232724b",
+      "sha256": "45d9b7dc183f91997cb082c79a404c4947f6f3305b929632a3f6c898a4ff7d45",
       "shape": [
         384,
         192
@@ -208,7 +208,7 @@
       "file": "tensors/block0_up.scales.q8_8_u16le.bin",
       "name": "block0_up.scales",
       "role": "up_projection_per_output_row_scale",
-      "sha256": "dacf358b655ee89248288f9c01dd04e89752fd743a06444cbe5da5781e8e6df1",
+      "sha256": "efeaf69a455535c31ceebc4ca951782579357ce75fea067927f1e750be2193ef",
       "shape": [
         384
       ]
@@ -219,7 +219,7 @@
       "layout": "row_major",
       "name": "block0_down.ternary",
       "role": "down_projection_ternary_weights",
-      "sha256": "1b491c4075ce294d48edca4db5b1911595640538e00ef2aa207abe5eb9862bb5",
+      "sha256": "2f86039e6fb1c0d752c01f23669b6eaca14ac0aa8e57460632ccacc2281e13ce",
       "shape": [
         192,
         384
@@ -230,7 +230,7 @@
       "file": "tensors/block0_down.scales.q8_8_u16le.bin",
       "name": "block0_down.scales",
       "role": "down_projection_per_output_row_scale",
-      "sha256": "594395b0ca69ba9534dbe167b1c20b5152610e0fe538e0ea7fdd353b3fc12891",
+      "sha256": "a9176f53fae175836323773a093d17078c4cc3e2838503bcac22174f5ce73d83",
       "shape": [
         192
       ]
@@ -241,7 +241,7 @@
       "layout": "row_major",
       "name": "block1_up.ternary",
       "role": "up_projection_ternary_weights",
-      "sha256": "520ef99eb1c88a67fb5d980ae8892ac72beda4537fc2c1f6742c2d8a9d9a6135",
+      "sha256": "029f3011244a89eac6f507b986a3d10acfb7553a61fe96ba8b69de796dc0f1b3",
       "shape": [
         384,
         192
@@ -252,7 +252,7 @@
       "file": "tensors/block1_up.scales.q8_8_u16le.bin",
       "name": "block1_up.scales",
       "role": "up_projection_per_output_row_scale",
-      "sha256": "ba40b811de79f0b4b2b1a4b5591961ecfa537a3d50fdd3521d4a6832fa87d7e3",
+      "sha256": "4a40b7b3aebbbbcea78d5fd2d20cfe303d4587c64c0ee8be4e288dcdf9390a36",
       "shape": [
         384
       ]
@@ -263,7 +263,7 @@
       "layout": "row_major",
       "name": "block1_down.ternary",
       "role": "down_projection_ternary_weights",
-      "sha256": "19b5a37ef15cc08112d3112cc5754728293f27e7208a21288a04def898316c0d",
+      "sha256": "68b152f6e09ba9fc861d8b4fb63d1c97bedd01110db312b8b88a655d43f83548",
       "shape": [
         192,
         384
@@ -274,7 +274,7 @@
       "file": "tensors/block1_down.scales.q8_8_u16le.bin",
       "name": "block1_down.scales",
       "role": "down_projection_per_output_row_scale",
-      "sha256": "81e599ec04491a1c280558b1eb8d522a6c8f400addbdf5b5f5ec6009e4bf2834",
+      "sha256": "d362f87e81ab9a2b92635047b78347cec810c62fe7cd1ee5008fbd1ddf49751b",
       "shape": [
         192
       ]
@@ -285,7 +285,7 @@
       "layout": "row_major",
       "name": "block2_up.ternary",
       "role": "up_projection_ternary_weights",
-      "sha256": "3465c904b6a09c9865927686a8b08e7d2d99ad918b74bf6ac236a16f7b782ae2",
+      "sha256": "f6905eecb6e07890609745613b4a1d815864dde6e937d2ec80ec00ee766b2e08",
       "shape": [
         384,
         192
@@ -296,7 +296,7 @@
       "file": "tensors/block2_up.scales.q8_8_u16le.bin",
       "name": "block2_up.scales",
       "role": "up_projection_per_output_row_scale",
-      "sha256": "8719fedf617c9ae7fe711e40c0a5813341eb3862d01f3de6928e7472f60cb045",
+      "sha256": "7f564b80fe4477a277e802d27040556129dda3ebfb3d1ce345b9c6e41547c7e6",
       "shape": [
         384
       ]
@@ -307,7 +307,7 @@
       "layout": "row_major",
       "name": "block2_down.ternary",
       "role": "down_projection_ternary_weights",
-      "sha256": "db586397e84c0fedd1d26674e53c8751fbc15514fd3909aaa5b34ac4da4d0c24",
+      "sha256": "9fe553332103ca538671a6906ebd1b171859d607890f87019629e98ca443a7a5",
       "shape": [
         192,
         384
@@ -318,7 +318,7 @@
       "file": "tensors/block2_down.scales.q8_8_u16le.bin",
       "name": "block2_down.scales",
       "role": "down_projection_per_output_row_scale",
-      "sha256": "b1ef7a776c82f20338219c640dca65625dc38b459a66b45b9547b08fa08cd020",
+      "sha256": "a53652c72a829ccb4b5da0ebf2d1e001445186d1f10f86c2d2f2a8df51529a24",
       "shape": [
         192
       ]
@@ -329,7 +329,7 @@
       "layout": "row_major",
       "name": "block3_up.ternary",
       "role": "up_projection_ternary_weights",
-      "sha256": "0832d03a80cec9533ee60af6ebbc4ff1ffc2826cad57a4e55306aaa8ec801cbc",
+      "sha256": "9818517cc525675d0f07bf88b7ec6446dfa918fdf49c6bceadafb14b355caeb0",
       "shape": [
         384,
         192
@@ -340,7 +340,7 @@
       "file": "tensors/block3_up.scales.q8_8_u16le.bin",
       "name": "block3_up.scales",
       "role": "up_projection_per_output_row_scale",
-      "sha256": "37faada7c1784ca8c91c115c3f7dcd16e50809bfd081d683fa054f3f5ddae35e",
+      "sha256": "6c7db0bf7904e83c27a906a499e8f00c3db17151c0692ff7d960475134ae3533",
       "shape": [
         384
       ]
@@ -351,7 +351,7 @@
       "layout": "row_major",
       "name": "block3_down.ternary",
       "role": "down_projection_ternary_weights",
-      "sha256": "798a78e8e2fd05e3c867394930e31e39dd24948e7882abea80891e1ff7aaeb9e",
+      "sha256": "37fcb708d0f48769942e208beb226eb34a7634525f22ef03d7d2c012fa48231a",
       "shape": [
         192,
         384
@@ -362,7 +362,7 @@
       "file": "tensors/block3_down.scales.q8_8_u16le.bin",
       "name": "block3_down.scales",
       "role": "down_projection_per_output_row_scale",
-      "sha256": "f3e9b25a0284d787a5c183bddc33757b33d12a9b17a5e9b60b3451c8ac386e41",
+      "sha256": "03b537382114bf30116cf02666ef9472b63286ca8a739f8c9b7a5375c9f629e1",
       "shape": [
         192
       ]
@@ -373,7 +373,7 @@
       "layout": "row_major",
       "name": "block4_up.ternary",
       "role": "up_projection_ternary_weights",
-      "sha256": "cc6f6d1f3a2bc2063d9b2bccedf6058229d42ddf0a701f129d7403ecde68024a",
+      "sha256": "e4b5621b0c9a1bb23ff623ddaabad4ddf56aebeaa98e23dce1914e55c16bd9cf",
       "shape": [
         384,
         192
@@ -384,7 +384,7 @@
       "file": "tensors/block4_up.scales.q8_8_u16le.bin",
       "name": "block4_up.scales",
       "role": "up_projection_per_output_row_scale",
-      "sha256": "3c948797e351f9bd394086d0c223431e06eb724417c21538b6ff4d18c0508003",
+      "sha256": "8ab243db4b5401519d51d2ca63ea3d06e734e0faf49df2368c2bdad2bb4d6e05",
       "shape": [
         384
       ]
@@ -395,7 +395,7 @@
       "layout": "row_major",
       "name": "block4_down.ternary",
       "role": "down_projection_ternary_weights",
-      "sha256": "5864a8a81d0fc783f79f29094e2c84d6ac20a1983a0a5999cac0ba4a1fca6e0a",
+      "sha256": "b3438438f471e49ae0018cf4d7f3a977fc94042464a6b1a94b540d7995b75f9e",
       "shape": [
         192,
         384
@@ -406,7 +406,7 @@
       "file": "tensors/block4_down.scales.q8_8_u16le.bin",
       "name": "block4_down.scales",
       "role": "down_projection_per_output_row_scale",
-      "sha256": "3f0c272635fe34b0468cfff11c168e8f4bf7c08f2ea70e8fa47cdeda7314dc59",
+      "sha256": "f0f602085bcdbe48380d61694baa7bca1cc2e71944d527017fbc060b5bc023c7",
       "shape": [
         192
       ]
@@ -417,7 +417,7 @@
       "layout": "row_major",
       "name": "block5_up.ternary",
       "role": "up_projection_ternary_weights",
-      "sha256": "f0608de4a0d19d39d3d0d6179f8ae81238ea080eb90e91771c002a9279620f4a",
+      "sha256": "122d3faa992e23fc350b50b2d6c4cc10ffc68d78a68c7d24a58ec1400d588bde",
       "shape": [
         384,
         192
@@ -428,7 +428,7 @@
       "file": "tensors/block5_up.scales.q8_8_u16le.bin",
       "name": "block5_up.scales",
       "role": "up_projection_per_output_row_scale",
-      "sha256": "7ed57184993e90298e214f6e6912df1ff718b8400c90f04fccfc17225c9283b4",
+      "sha256": "82bdfc56c76f765562b48fa68e3f277dfc1b4cc500ced36d2979a3cdcd79132f",
       "shape": [
         384
       ]
@@ -439,7 +439,7 @@
       "layout": "row_major",
       "name": "block5_down.ternary",
       "role": "down_projection_ternary_weights",
-      "sha256": "733215f574a2e1b41044c0f69e089319d2fb523d7002e6d520642adfce803ba6",
+      "sha256": "c635cbacb0991ca548b50b938da3886655c32bf1b34c0ef5d5a7032795e5bcfb",
       "shape": [
         192,
         384
@@ -450,7 +450,7 @@
       "file": "tensors/block5_down.scales.q8_8_u16le.bin",
       "name": "block5_down.scales",
       "role": "down_projection_per_output_row_scale",
-      "sha256": "bd62ca73c37f94c195265a040e9c70094a0cd8eb91abf34360a81dc9a38bcd14",
+      "sha256": "c1d0a3dd77fc9892bb2cc528bf955b8d760479a3e82379900e1c4e6742255487",
       "shape": [
         192
       ]
