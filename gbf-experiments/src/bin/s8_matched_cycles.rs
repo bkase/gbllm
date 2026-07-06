@@ -165,6 +165,37 @@ struct Args {
     /// Fraction of steps trained with QAT hardness OFF before Hard.
     #[arg(long, default_value_t = 0.25)]
     warmup_frac: f64,
+    /// Hard-phase lr decay mode: "none" (constant lr for the whole run,
+    /// legacy behavior), "cosine" (cosine anneal from 1.0x at the hardness
+    /// flip to --hard-lr-final-factor x at the last step), or "step"
+    /// (hard-phase quartile staircase 1.0 -> f^(1/3) -> f^(2/3) -> f with
+    /// f = --hard-lr-final-factor). Warmup (hardness Off) always runs at
+    /// the base --lr. Ignored for the fp teacher (it never hardens).
+    #[arg(long, default_value = "none")]
+    hard_lr_decay: String,
+    /// lr multiplier reached at the final hard-phase step (used only when
+    /// --hard-lr-decay is not "none").
+    #[arg(long, default_value_t = 0.1)]
+    hard_lr_final_factor: f64,
+    /// Distill-weight schedule: when >= 0, the distillation weight ramps
+    /// linearly across the hard phase from --distill-weight (at the flip)
+    /// to this value (at the last step). Negative = constant
+    /// --distill-weight for the whole run (legacy behavior).
+    #[arg(long, default_value_t = -1.0)]
+    distill_weight_hard_final: f64,
+    /// Optional sparsity encouragement: adds lambda * mean(|w|) (mean per
+    /// ternary core, averaged over all state + FFN cores) of the fp shadow
+    /// weights to the training loss, pushing weights below their trainable
+    /// Q8.8 ternary thresholds -> more stored zeros -> less ROM + fewer
+    /// cycles. 0 = off (legacy behavior). Not applied to the fp teacher.
+    #[arg(long, default_value_t = 0.0)]
+    lambda_weight_l1: f64,
+    /// Initial per-output-row ternary threshold for all QAT cores at model
+    /// init (legacy behavior = 0.0). Weights init at ~U(-0.08, 0.08), so a
+    /// nonzero value starts training with |w| <= value quantizing to zero.
+    /// Thresholds remain trainable (Q8.8 fake-quantized) afterwards.
+    #[arg(long, default_value_t = 0.0)]
+    ternary_threshold_init: f32,
     #[arg(long, default_value_t = 0)]
     seed: u64,
     // CUSTOM arm topology overrides.
@@ -413,15 +444,21 @@ struct ArmModel<B: BurnBackend> {
     blocks: Vec<MixBlock<B>>,
 }
 
-fn make_ternary_core(out_rows: usize, in_cols: usize, weights: Vec<f32>) -> TernaryLinearQat {
+fn make_ternary_core(
+    out_rows: usize,
+    in_cols: usize,
+    weights: Vec<f32>,
+    threshold_init: f32,
+) -> TernaryLinearQat {
     let shape = MatrixShape::new(out_rows, in_cols).expect("nonzero shape");
-    let thresholds = vec![TernaryThreshold::new(0.0).expect("zero threshold"); out_rows];
+    let thresholds =
+        vec![TernaryThreshold::new(threshold_init).expect("valid init threshold"); out_rows];
     TernaryLinearQat::with_derived_per_row_scales(shape, weights, None, thresholds)
         .expect("valid ternary core")
 }
 
 impl ArmModel<Adiff> {
-    fn init(spec: &ArmSpec, seed: u64, device: &BurnDevice<Adiff>) -> Self {
+    fn init(spec: &ArmSpec, seed: u64, threshold_init: f32, device: &BurnDevice<Adiff>) -> Self {
         let d_model = spec.d_model;
         let d_ff = spec.d_ff;
         let embedding = float_tensor_from_vec::<Adiff, 2>(
@@ -435,11 +472,13 @@ impl ArmModel<Adiff> {
             spec.state_slots,
             d_model,
             init_weights(seed, 0x2001, spec.state_slots * d_model, 0.08),
+            threshold_init,
         );
         let out_core = make_ternary_core(
             d_model,
             spec.state_slots,
             init_weights(seed, 0x2002, d_model * spec.state_slots, 0.08),
+            threshold_init,
         );
         let state = StateBlock {
             input_to_state: TernaryLinearBurnQat::from_core(in_core, device)
@@ -457,11 +496,13 @@ impl ArmModel<Adiff> {
                             d_ff,
                             d_model,
                             init_weights(seed, salt * 7 + 1, d_ff * d_model, 0.08),
+                            threshold_init,
                         );
                         let down_core = make_ternary_core(
                             d_model,
                             d_ff,
                             init_weights(seed, salt * 7 + 2, d_model * d_ff, 0.08),
+                            threshold_init,
                         );
                         FfnExpert {
                             up: TernaryLinearBurnQat::from_core(up_core, device)
@@ -1822,6 +1863,40 @@ struct TrainOutcome {
     expert_usage_last_window: Option<Vec<Vec<f64>>>,
 }
 
+/// Hard-phase lr decay mode (see the `--hard-lr-decay` flag docs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HardLrDecay {
+    None,
+    Cosine,
+    Step,
+}
+
+fn parse_hard_lr_decay(raw: &str) -> Result<HardLrDecay, Box<dyn std::error::Error>> {
+    match raw {
+        "none" => Ok(HardLrDecay::None),
+        "cosine" => Ok(HardLrDecay::Cosine),
+        "step" => Ok(HardLrDecay::Step),
+        other => Err(format!("unknown --hard-lr-decay {other:?} (none|cosine|step)").into()),
+    }
+}
+
+/// lr multiplier at hard-phase progress `p` in (0, 1]: 1.0 at the hardness
+/// flip, `final_factor` at the last step.
+fn hard_lr_factor(mode: HardLrDecay, final_factor: f64, hard_progress: f64) -> f64 {
+    let p = hard_progress.clamp(0.0, 1.0);
+    match mode {
+        HardLrDecay::None => 1.0,
+        HardLrDecay::Cosine => {
+            final_factor + (1.0 - final_factor) * 0.5 * (1.0 + (std::f64::consts::PI * p).cos())
+        }
+        HardLrDecay::Step => {
+            // Quartile staircase: 1.0, f^(1/3), f^(2/3), f.
+            let stage = (p * 4.0).floor().min(3.0);
+            final_factor.powf(stage / 3.0)
+        }
+    }
+}
+
 /// Train one arm. `fp_only` keeps QAT hardness Off and activation fake-quant
 /// passthrough for ALL steps (used for the distillation teacher).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1837,7 +1912,7 @@ fn train_arm(
     plain_device: &BurnDevice<Plain>,
 ) -> Result<TrainOutcome, Box<dyn std::error::Error>> {
     let started = Instant::now();
-    let mut model = ArmModel::init(spec, args.seed, device);
+    let mut model = ArmModel::init(spec, args.seed, args.ternary_threshold_init, device);
     let mut optimizer = adamw_config()
         .with_weight_decay(0.0)
         .init::<Adiff, ArmModel<Adiff>>();
@@ -1847,6 +1922,57 @@ fn train_arm(
     } else {
         (steps as f64 * args.warmup_frac) as u64
     };
+
+    // --- QAT-schedule options (all defaults preserve legacy behavior) ---
+    let hard_lr_mode = parse_hard_lr_decay(&args.hard_lr_decay)?;
+    if !(args.hard_lr_final_factor.is_finite()
+        && args.hard_lr_final_factor > 0.0
+        && args.hard_lr_final_factor <= 1.0)
+    {
+        return Err(format!(
+            "--hard-lr-final-factor must be finite in (0, 1], got {}",
+            args.hard_lr_final_factor
+        )
+        .into());
+    }
+    if !args.distill_weight_hard_final.is_finite() {
+        return Err(format!(
+            "--distill-weight-hard-final must be finite (negative = constant), got {}",
+            args.distill_weight_hard_final
+        )
+        .into());
+    }
+    if !(args.lambda_weight_l1.is_finite() && args.lambda_weight_l1 >= 0.0) {
+        return Err(format!(
+            "--lambda-weight-l1 must be finite and >= 0, got {}",
+            args.lambda_weight_l1
+        )
+        .into());
+    }
+    let distill_ramp = args.distill_weight_hard_final >= 0.0;
+    let weight_l1_enabled = args.lambda_weight_l1 > 0.0 && !fp_only;
+    let hard_total_steps = steps.saturating_sub(warmup_steps).max(1) as f64;
+    if !fp_only
+        && (hard_lr_mode != HardLrDecay::None
+            || distill_ramp
+            || weight_l1_enabled
+            || args.ternary_threshold_init != 0.0)
+    {
+        println!(
+            "[{}] qat schedule: warmup_steps={warmup_steps} hard_steps={} hard_lr_decay={:?} hard_lr_final_factor={} distill_weight_hard_final={} lambda_weight_l1={} ternary_threshold_init={}",
+            spec.name,
+            steps.saturating_sub(warmup_steps),
+            hard_lr_mode,
+            args.hard_lr_final_factor,
+            if distill_ramp {
+                args.distill_weight_hard_final.to_string()
+            } else {
+                "constant".to_string()
+            },
+            args.lambda_weight_l1,
+            args.ternary_threshold_init,
+        );
+    }
 
     let seq_len = args.seq_len;
     let lanes = args.lanes;
@@ -1898,6 +2024,16 @@ fn train_arm(
             );
         }
         let act_enabled = want_hard;
+        let hard_progress = if want_hard {
+            (step - warmup_steps) as f64 / hard_total_steps
+        } else {
+            0.0
+        };
+        let lr_now = if want_hard {
+            args.lr * hard_lr_factor(hard_lr_mode, args.hard_lr_final_factor, hard_progress)
+        } else {
+            args.lr
+        };
 
         let mut ctx = Vec::with_capacity(tokens_per_step);
         let mut tgt = Vec::with_capacity(tokens_per_step);
@@ -1960,6 +2096,7 @@ fn train_arm(
         }
 
         // Distillation: soft cross-entropy against fp teacher logits.
+        let mut distill_w_now = f64::NAN;
         if let Some(t) = teacher.as_deref_mut() {
             let t_ctx = BurnTensor::<Plain, 1, BurnInt>::from_ints(ctx.as_slice(), plain_device);
             let t_init = float_tensor_from_vec::<Plain, 2>(
@@ -1988,8 +2125,50 @@ fn train_arm(
             let q = burn_softmax(t_logits / temp, 1); // constant (from data)
             let s_logp = burn_log_softmax(out.logits / temp, 1);
             let soft_ce = (q * s_logp).sum_dim(1).mean() * -1.0;
-            let distill = soft_ce * (temp * temp) * (t.weight as f32);
+            // Hard-phase distill-weight ramp (constant t.weight when the
+            // schedule is disabled or during warmup).
+            distill_w_now = if want_hard && distill_ramp {
+                t.weight + (args.distill_weight_hard_final - t.weight) * hard_progress
+            } else {
+                t.weight
+            };
+            let distill = soft_ce * (temp * temp) * (distill_w_now as f32);
             loss = loss + distill;
+        }
+
+        // Optional sparsity encouragement: L1 on the fp shadow weights of
+        // every ternary core (mean |w| per core, averaged over cores).
+        let mut weight_l1_raw = f64::NAN;
+        if weight_l1_enabled {
+            let mut cores: Vec<&TernaryLinearBurnQat<Adiff>> = vec![refs.state.0, refs.state.1];
+            for block in &refs.blocks {
+                match block {
+                    BlockRefs::Dense(up, down) => {
+                        cores.push(up);
+                        cores.push(down);
+                    }
+                    BlockRefs::Moe { experts, .. } => {
+                        for &(up, down) in experts {
+                            cores.push(up);
+                            cores.push(down);
+                        }
+                    }
+                }
+            }
+            let mut l1 = cores[0].full_precision_weights().abs().mean();
+            for core in &cores[1..] {
+                l1 = l1 + core.full_precision_weights().abs().mean();
+            }
+            let l1 = l1 / cores.len() as f32;
+            weight_l1_raw = f64::from(float_tensor_into_vec(l1.clone().inner())?[0]);
+            if !weight_l1_raw.is_finite() {
+                return Err(format!(
+                    "[{}] non-finite weight-L1 diagnostic at step {step}",
+                    spec.name
+                )
+                .into());
+            }
+            loss = loss + l1 * (args.lambda_weight_l1 as f32);
         }
 
         let ce_nats = float_tensor_into_vec(ce.inner())?[0];
@@ -2004,7 +2183,7 @@ fn train_arm(
 
         let grads = loss.backward();
         let grads = BurnGradientsParams::from_grads(grads, &model);
-        model = optimizer.step(args.lr, model, grads);
+        model = optimizer.step(lr_now, model, grads);
 
         if step % args.log_every == 0 || step == 1 {
             let elapsed = started.elapsed().as_secs_f64();
@@ -2034,8 +2213,18 @@ fn train_arm(
             } else {
                 String::new()
             };
+            let mut sched_str = String::new();
+            if hard_lr_mode != HardLrDecay::None && want_hard {
+                sched_str.push_str(&format!(" lr={lr_now:.6}"));
+            }
+            if distill_ramp && distill_w_now.is_finite() && want_hard {
+                sched_str.push_str(&format!(" distill_w={distill_w_now:.4}"));
+            }
+            if weight_l1_enabled {
+                sched_str.push_str(&format!(" weight_l1={weight_l1_raw:.5}"));
+            }
             println!(
-                "[{}] step {step}/{steps} ce_bpc~={:.4} {:.2} steps/s elapsed={:.0}s{usage_str}",
+                "[{}] step {step}/{steps} ce_bpc~={:.4} {:.2} steps/s elapsed={:.0}s{sched_str}{usage_str}",
                 spec.name, last_logged_loss, rate, elapsed
             );
             running_loss = 0.0;
@@ -2275,6 +2464,10 @@ fn measure_arm(
             "steps": args.steps,
             "lr": args.lr,
             "warmup_frac_hardness_off": args.warmup_frac,
+            "hard_lr_decay": args.hard_lr_decay,
+            "hard_lr_final_factor": (args.hard_lr_decay != "none").then_some(args.hard_lr_final_factor),
+            "lambda_weight_l1": args.lambda_weight_l1,
+            "ternary_threshold_init": args.ternary_threshold_init,
             "qat_recipe": "warmup Off then Hard, act Int8 fake-quant when hard (identical to s5_state_ab)",
             "tbptt": "state carried across chunks detached; lane reset to zero state on stream wrap",
             "router": spec.is_moe().then_some(
@@ -2561,6 +2754,12 @@ fn phase_distill(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 "teacher": teacher_json,
                 "temperature": args.distill_temperature,
                 "weight": args.distill_weight,
+                "weight_hard_final": (args.distill_weight_hard_final >= 0.0).then_some(args.distill_weight_hard_final),
+                "weight_schedule": if args.distill_weight_hard_final >= 0.0 {
+                    "warmup (hardness Off) at `weight`; linear ramp from `weight` at the hardness flip to `weight_hard_final` at the last step"
+                } else {
+                    "constant `weight` for all steps"
+                },
                 "loss": "CE + weight * T^2 * softCE(softmax(teacher/T) || softmax(student/T)), teacher logits recomputed per step on the training batch with per-lane teacher state carry",
             },
         }),

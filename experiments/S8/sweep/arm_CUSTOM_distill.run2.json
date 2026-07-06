@@ -1,0 +1,148 @@
+{
+  "arm": "CUSTOM_distill",
+  "checkpoint_export": {
+    "exported": true,
+    "manifest": "experiments/S8/sweep/checkpoint-export-CUSTOM_distill/manifest.json",
+    "n_tensors": 30,
+    "schema": "f_s5_state_checkpoint_export.v1",
+    "verification": {
+      "method": "re-read every tensor file and check manifest sha256; bitwise embedding/decay/router round-trip; per-matrix exact ternary symbol + Q8.8 scale raw agreement; rebuild hard cores from exported bytes alone and compare hard inference_forward on a deterministic probe input",
+      "reload_probe_max_abs_diff": 0.0,
+      "tensors_sha256_checked": 30,
+      "verified": true
+    }
+  },
+  "config": {
+    "d_ff": 384,
+    "d_model": 192,
+    "decay_rates_by_band": [
+      0.5,
+      0.75,
+      0.875,
+      0.9375
+    ],
+    "extra": {
+      "distillation": {
+        "loss": "CE + weight * T^2 * softCE(softmax(teacher/T) || softmax(student/T)), teacher logits recomputed per step on the training batch with per-lane teacher state carry",
+        "teacher": {
+          "d_ff": 768,
+          "d_model": 384,
+          "description": "fp dense teacher for CUSTOM: 2x width, QAT hardness Off + act passthrough for all steps",
+          "eval_pairs": 1042400,
+          "fp_val_bits_per_raw_byte": 2.286768975095475,
+          "fp_val_bpc_per_normalized_char": 2.3002844978532666,
+          "n_blocks": 6,
+          "saved_to": "/Users/bkase/Documents/gbllm/experiments/S8/sweep/teacher-CUSTOM",
+          "source": "trained_this_run",
+          "state_slots": 384,
+          "steps": 75000,
+          "steps_per_second": 4.253274207577088,
+          "train_wall_clock_seconds": 17633.47396375
+        },
+        "temperature": 2.0,
+        "weight": 0.5
+      }
+    },
+    "lanes": 4,
+    "lr": 0.01,
+    "n_blocks": 6,
+    "n_experts_per_block": 1,
+    "qat_recipe": "warmup Off then Hard, act Int8 fake-quant when hard (identical to s5_state_ab)",
+    "router": null,
+    "router_aux_weight": null,
+    "seq_len": 128,
+    "sequence_state_kind": "linear_state_multi_timescale",
+    "state_slots": 192,
+    "steps": 130000,
+    "tbptt": "state carried across chunks detached; lane reset to zero state on stream wrap",
+    "tied_head": true,
+    "tokens_per_step": 512,
+    "vocab": 80,
+    "warmup_frac_hardness_off": 0.25
+  },
+  "corpus": {
+    "train_bin_path": "corpus/gutenberg/gutenberg_train_concatenated.bin",
+    "train_bytes_trimmed_at_utf8_boundary": 0,
+    "train_cap_bytes": 488636416,
+    "train_chars_normalized": 478858358,
+    "train_norm_tokens_sha256": "d67b0716ed8e270fee0a5c07178fcde10239c0fa0857ac47a74d357c8d2fce86",
+    "train_prefix_raw_sha256": "a539a19a2325b4a476a1f0b95faf4cf5a9767165becef660ea76de772a5aa49e",
+    "train_raw_bytes_used": 488636416,
+    "train_unk_count": 1824029,
+    "val_book_ids_used": [
+      1017,
+      1233,
+      1475,
+      2105,
+      2156,
+      3440
+    ],
+    "val_bytes_trimmed_at_utf8_boundary": 0,
+    "val_chars_normalized": 1042415,
+    "val_norm_tokens_sha256": "d9c492299a1ecaa309ebbe15d1e10d624e3b3a2dade08acf70c9104661f7544c",
+    "val_raw_bytes_sha256": "e31abc36189a319d452ba2516e1944bc0e82ea31fb6cb4c4e5a4ce997b8d8e70",
+    "val_raw_bytes_used": 1048576,
+    "val_source": "corpus/gutenberg/splits.json val-split book bodies, same assembly as s2/s4/s5",
+    "val_unk_count": 1491
+  },
+  "deployment": {
+    "constants": {
+      "cpu_fraction": 0.7,
+      "rom_budget_bytes": 7340032,
+      "source": "docs/experiments/kernel-bakeoff/kernel_bakeoff.json @ 40% zeros",
+      "v2_bytes_per_weight": 0.25,
+      "v2_cy_per_mac": 10.261,
+      "v2_shared_code_bytes": 2699.0,
+      "v3_bytes_per_weight": 4.40087890625,
+      "v3_cy_per_mac": 5.385
+    },
+    "decay_bytes_q8_8": 384,
+    "embedding_bytes_f32": 61440,
+    "macs_per_token": 973824,
+    "router_bytes_int8_assumed": 0,
+    "scale_bytes_q8_8": 7680,
+    "stored_ternary_weights": 958464,
+    "v2_dispatch_data": {
+      "cycles_per_token": 9992408,
+      "fits_rom_budget_7mib": true,
+      "rom_bytes": 311819,
+      "rom_mib": 0.29737377166748047,
+      "s_per_char_at_70pct_cpu": 13.613575613839286
+    },
+    "v3_weights_as_code": {
+      "cycles_per_token": 5244042,
+      "fits_rom_budget_7mib": true,
+      "rom_bytes": 4287588,
+      "rom_mib": 4.088962554931641,
+      "s_per_char_at_70pct_cpu": 7.144440569196429
+    }
+  },
+  "description": "custom topology from CLI flags",
+  "git_sha": "92b55d15840e3e2fdbe7d1f22d2573481f803e6b",
+  "measurement": {
+    "bits_per_raw_byte_method": "bpc_per_normalized_char * (val_chars_total / val_raw_bytes_total), the same total-bits-over-raw-byte-count re-expression as the KN-5 artifact",
+    "eval_lanes": 8,
+    "eval_pairs": 1042400,
+    "eval_wall_clock_seconds": 232.167970375,
+    "fp_semantics": "SOFT continuous ternary relaxation with the same learned per-output-row Q8.8 scales + Int8 act fake-quant (the calibrated STE ceiling)",
+    "fp_val_bits_per_raw_byte": 2.65956441552134,
+    "fp_val_bpc_per_normalized_char": 2.67528327640115,
+    "gap_bpc_per_normalized_char": 0.10326834254037243,
+    "state_block_scalar_parity_max_abs_diff": 5.7220458984375e-6,
+    "ternary_semantics": "HARD ternary projection {-1,0,+1} with the same per-row Q8.8 scales + Int8 act fake-quant",
+    "ternary_val_bits_per_raw_byte": 2.7622259958829183,
+    "ternary_val_bpc_per_normalized_char": 2.7785516189415222
+  },
+  "sample": {
+    "greedy_continuation": " the streated to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was to the was ",
+    "prompt_normalized": "The children walked down to the river in the morning, and",
+    "sample_path": "experiments/S8/sweep/sample_CUSTOM_distill.txt"
+  },
+  "status": "ok",
+  "training": {
+    "expert_usage_fraction_last_log_window_per_block": null,
+    "final_logged_train_ce_bpc": 2.4900908446386425,
+    "steps_per_second": 4.335598072247669,
+    "train_wall_clock_seconds": 29984.329228333
+  }
+}
