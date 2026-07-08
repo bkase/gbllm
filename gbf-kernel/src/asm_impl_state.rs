@@ -54,7 +54,7 @@ use std::collections::BTreeMap;
 
 use gbf_asm::encoder::EncodedSection;
 use gbf_asm::isa::{
-    AluSrc8, BitIndex, CbTarget, Cond, IncDec8Target, Instr, Reg8, Reg16Addr, Reg16Data,
+    AluSrc8, BitIndex, CbTarget, Cond, IncDec8Target, Instr, Reg8, Reg16Addr, Reg16Data, Reg16Stack,
 };
 use gbf_asm::layout::{AddressSpace, BankIndex, LayoutPlan, PlacedSection};
 use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, RomSize, assemble_rom};
@@ -62,10 +62,12 @@ use gbf_asm::section::SectionId;
 
 use crate::asm_impl_model::{
     BANK_BYTES, CHUNK_ENTRY, DIV_NUM, DIV_T1, DIV_T2, IPTR, LANE, MBC5_ROMB0, MBC5_ROMB1,
-    MODEL_STACK_TOP, ModelAsm, ModelRomError, OPTR, PTR, ROWCNT, SIGN, SPTR, XPTR, a_from, a_to,
-    abs_de_store_sign, build_matvec_chunks_at, build_matvec_chunks_wide, emit_copy_bytes,
-    emit_mul16, emit_mul16x8, emit_udiv254, ld_r_imm, ld_rr, ld16, load_de_via_ptr, mem_add,
-    mem_copy, mem_shl1, mem_shr1, mem_sub_into, smallest_rom_size, zero_mem,
+    MODEL_STACK_TOP, ModelAsm, ModelRomError, OPTR, PTR, ROWCNT, SIGN, SPSAVE, SPTR,
+    V2_MATRIX_END_WIDE, V2_ROW_END_WIDE, V2_SEG_MID, V2_TABLE_LEN, XPTR, a_from, a_to,
+    abs_de_store_sign, build_matvec_chunks_at, build_matvec_chunks_wide, build_matvec_stream_i16,
+    build_matvec_stream_wide, emit_copy_bytes, emit_mul16, emit_mul16x8, emit_udiv254, ld_r_imm,
+    ld_rr, ld16, load_de_via_ptr, mem_add, mem_copy, mem_shl1, mem_shr1, mem_sub_into,
+    smallest_rom_size, zero_mem,
 };
 use crate::state_model_ref::{AccWidth, IntStateLoweredModel, StateTopology};
 
@@ -134,6 +136,12 @@ const SC2: u16 = 0xC396; // 2 bytes out-epilogue scale
 const ROWCNT2: u16 = 0xC398; // 2 bytes 16-bit row counter (d_ff rows)
 const CHUNK_CNT: u16 = 0xC39A; // 1 byte chunk-run loop counter
 const CHUNK_BANK: u16 = 0xC39C; // 2 bytes chunk-run bank number (lo, hi)
+// V2 dispatch scratch (only live during a `matvec_v2` walk; the handlers never
+// touch anything else here). CHUNK_BANK doubles as the V2 stream bank; SPSAVE
+// holds the caller's return-address stack while SP walks the activations.
+const WV2_ACC: u16 = 0xC384; // 3 bytes wide (i24) row accumulator (free gap)
+const WV2_PK: u16 = 0xC39B; // 1 byte packed-trit decode temp (free gap)
+const WV2_OUT: u16 = 0xC39E; // 2 bytes output pointer (free gap after CHUNK_BANK)
 
 // sampling-decode scratch (same fixed page)
 const SMP_M: u16 = 0xC3A0; // 3 bytes max logit (hi byte sign-flipped)
@@ -2567,11 +2575,47 @@ pub(crate) struct ParamsBlob {
     pub(crate) blocks: Vec<(u16, u16)>,
 }
 
+/// How a stateful ROM emits its matvec weights.
+///
+/// `V3` (default) emits each weight as straight-line `add`/`sub` machine code
+/// (~6.6 B/weight), one matvec per bank chunk. `V2Dispatch` packs each weight
+/// as a base-81 dispatch index (~0.25 B/weight, ~26x denser) walked by a
+/// shared bank-0 handler, laying the packed streams contiguously across banks.
+/// Both are byte-exact against the canonical integer evaluator; see
+/// `docs/design/v2-dispatch-stateful.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WeightLowering {
+    /// Weights-as-code, straight-line add/sub (the deployable default).
+    #[default]
+    V3,
+    /// Weights-as-data, threaded base-81 dispatch (dense; opt-in).
+    V2Dispatch,
+}
+
+/// One V2 matvec's placement in the packed weight banks.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct V2MatvecPlacement {
+    /// 9-bit start bank of this matvec's stream.
+    pub(crate) start_bank: u16,
+    /// Byte offset of the stream start within `start_bank` (0..BANK_BYTES).
+    pub(crate) start_offset: u16,
+    /// True when this matvec uses the wide (i24) segment sentinels.
+    pub(crate) wide: bool,
+}
+
 /// Weight-chunk plan and bank numbering shared by every stateful ROM
 /// variant (one-token, multi-token, sampling, interactive shell).
 pub(crate) struct StateRomPlan {
+    pub(crate) lowering: WeightLowering,
     pub(crate) layout: StateWramLayout,
+    /// V3 weight code: one `Vec<u8>` chunk per bank, grouped per matvec. Empty
+    /// under `V2Dispatch`.
     pub(crate) per_matvec_chunks: Vec<Vec<Vec<u8>>>,
+    /// V2 packed weight banks (each up to `BANK_BYTES`), laid contiguously.
+    /// Empty under `V3`.
+    pub(crate) v2_weight_banks: Vec<Vec<u8>>,
+    /// V2 per-matvec placement, in forward-pass call order. Empty under `V3`.
+    pub(crate) v2_placements: Vec<V2MatvecPlacement>,
     pub(crate) weight_chunk_count: usize,
     pub(crate) weight_code_bytes: usize,
     pub(crate) params: ParamsBlob,
@@ -2598,34 +2642,100 @@ fn push_scales(bytes: &mut Vec<u8>, layer: &crate::model_ref::TernaryLayer) -> u
     off
 }
 
-/// Build the weight chunks, params blob, and bank numbering: chunks 1..=W,
-/// the params bank, the state weight-table banks, the embedding banks, the
-/// head banks, and finally `extra_banks` variant-owned banks.
-pub(crate) fn plan_state_rom(
+/// Build the weight chunks/streams, params blob, and bank numbering: weight
+/// banks 1..=W, the params bank, the state weight-table banks, the embedding
+/// banks, the head banks, and finally `extra_banks` variant-owned banks. V3
+/// keeps the exact pre-existing plan; V2 packs the base-81 dispatch streams
+/// contiguously and numbers `ceil(total_stream_bytes / BANK_BYTES)` weight
+/// banks.
+pub(crate) fn plan_state_rom_with(
     model: &IntStateLoweredModel,
     layout: StateWramLayout,
     extra_banks: usize,
+    lowering: WeightLowering,
 ) -> Result<StateRomPlan, ModelRomError> {
     let t = model.topology;
     let l = &layout;
+
+    // Both lowerings enumerate matvecs in the same forward-pass order:
+    // state_in, then (up, down) per block.
     let mut per_matvec_chunks: Vec<Vec<Vec<u8>>> = Vec::new();
-    per_matvec_chunks.push(build_matvec_chunks_at(&model.state_in, l.act, l.acc)?);
-    for (up, down) in &model.blocks {
-        per_matvec_chunks.push(build_matvec_chunks_at(up, l.act, l.acc)?);
-        match model.down_width {
-            AccWidth::I16 => {
-                per_matvec_chunks.push(build_matvec_chunks_at(down, l.act, l.acc)?);
+    let mut v2_streams: Vec<(Vec<u8>, bool)> = Vec::new();
+    match lowering {
+        WeightLowering::V3 => {
+            per_matvec_chunks.push(build_matvec_chunks_at(&model.state_in, l.act, l.acc)?);
+            for (up, down) in &model.blocks {
+                per_matvec_chunks.push(build_matvec_chunks_at(up, l.act, l.acc)?);
+                match model.down_width {
+                    AccWidth::I16 => {
+                        per_matvec_chunks.push(build_matvec_chunks_at(down, l.act, l.acc)?);
+                    }
+                    AccWidth::I24 => {
+                        per_matvec_chunks.push(build_matvec_chunks_wide(
+                            &down.layer,
+                            l.act,
+                            l.acc,
+                        )?);
+                    }
+                }
             }
-            AccWidth::I24 => {
-                per_matvec_chunks.push(build_matvec_chunks_wide(&down.layer, l.act, l.acc)?);
+        }
+        WeightLowering::V2Dispatch => {
+            v2_streams.push((build_matvec_stream_i16(&model.state_in)?, false));
+            for (up, down) in &model.blocks {
+                v2_streams.push((build_matvec_stream_i16(up)?, false));
+                match model.down_width {
+                    AccWidth::I16 => {
+                        v2_streams.push((build_matvec_stream_i16(down)?, false));
+                    }
+                    AccWidth::I24 => {
+                        v2_streams.push((build_matvec_stream_wide(&down.layer)?, true));
+                    }
+                }
             }
         }
     }
-    let weight_chunk_count: usize = per_matvec_chunks.iter().map(Vec::len).sum();
-    let weight_code_bytes: usize = per_matvec_chunks
-        .iter()
-        .flat_map(|chunks| chunks.iter().map(Vec::len))
-        .sum();
+
+    // Pack V2 streams contiguously into weight banks and record each matvec's
+    // (start_bank, start_offset). Weight banks are numbered 1..=weight_banks.
+    let mut v2_weight_banks: Vec<Vec<u8>> = Vec::new();
+    let mut v2_placements: Vec<V2MatvecPlacement> = Vec::new();
+    if lowering == WeightLowering::V2Dispatch {
+        v2_weight_banks.push(Vec::with_capacity(BANK_BYTES));
+        for (stream, wide) in &v2_streams {
+            let start_bank = 1 + v2_weight_banks.len() as u16 - 1;
+            let start_offset = v2_weight_banks.last().unwrap().len() as u16;
+            v2_placements.push(V2MatvecPlacement {
+                start_bank,
+                start_offset,
+                wide: *wide,
+            });
+            for &byte in stream {
+                if v2_weight_banks.last().unwrap().len() == BANK_BYTES {
+                    v2_weight_banks.push(Vec::with_capacity(BANK_BYTES));
+                }
+                v2_weight_banks.last_mut().unwrap().push(byte);
+            }
+        }
+        // Drop a trailing empty bank if the last stream ended exactly on a
+        // bank boundary (the loop only allocates the next bank lazily, so this
+        // is defensive).
+        if v2_weight_banks.last().is_some_and(Vec::is_empty) {
+            v2_weight_banks.pop();
+        }
+    }
+
+    let weight_chunk_count: usize = match lowering {
+        WeightLowering::V3 => per_matvec_chunks.iter().map(Vec::len).sum(),
+        WeightLowering::V2Dispatch => v2_weight_banks.len(),
+    };
+    let weight_code_bytes: usize = match lowering {
+        WeightLowering::V3 => per_matvec_chunks
+            .iter()
+            .flat_map(|chunks| chunks.iter().map(Vec::len))
+            .sum(),
+        WeightLowering::V2Dispatch => v2_weight_banks.iter().map(Vec::len).sum(),
+    };
 
     // Params blob (one bank).
     let mut bytes = Vec::new();
@@ -2690,8 +2800,11 @@ pub(crate) fn plan_state_rom(
         return Err(ModelRomError::TooManyBanks { banks: bank_count });
     }
     Ok(StateRomPlan {
+        lowering,
         layout,
         per_matvec_chunks,
+        v2_weight_banks,
+        v2_placements,
         weight_chunk_count,
         weight_code_bytes,
         params,
@@ -2776,6 +2889,411 @@ fn emit_chunk_run(asm: &mut ModelAsm) {
     asm.i(Instr::Ret { cond: None });
 }
 
+// ---------------------------------------------------------------------------
+// V2 dispatch: shared threaded-handler matvec routine
+// ---------------------------------------------------------------------------
+//
+// A matvec's weights are a base-81 dispatch stream packed contiguously in the
+// switchable-bank window (0x4000..0x8000). `matvec_v2`/`matvec_v2w` thread it,
+// reproducing V3's per-row/segment accumulator `acc = bias + sum(+/- act)` mod
+// 2^16 bit-for-bit and writing the SAME bytes to WRAM `l.acc` (design:
+// docs/design/v2-dispatch-stateful.md). Register file during the walk:
+//   DE = i16 accumulator     BC = stream pointer (0x4000..0x8000)
+//   SP = activation pointer   HL/A = scratch (pop + dispatch + fetch)
+//   CHUNK_BANK = 9-bit stream bank   SPSAVE = caller's return-address stack
+//   WV2_OUT = output pointer   WV2_ACC = i24 wide-row accumulator
+// Interrupts stay off for the whole ROM (the driver `di`s), as the V3 chunks
+// already require, so SP-as-data is safe.
+
+/// Emit one matvec's accumulation: V3 chunk-call run or a V2 dispatch call.
+fn emit_state_matvec(
+    asm: &mut ModelAsm,
+    plan: &StateRomPlan,
+    mv: &mut usize,
+    chunk_iter: &mut std::slice::Iter<'_, Vec<Vec<u8>>>,
+    next_bank: &mut u16,
+) {
+    match plan.lowering {
+        WeightLowering::V3 => {
+            let chunks = chunk_iter.next().expect("matvec chunks exist");
+            emit_call_chunks(asm, chunks.len(), next_bank);
+        }
+        WeightLowering::V2Dispatch => {
+            emit_v2_matvec_call(asm, plan.v2_placements[*mv]);
+        }
+    }
+    *mv += 1;
+}
+
+/// Program the MBC5 bank + `CHUNK_BANK` + stream pointer for one V2 matvec and
+/// call the shared handler routine.
+fn emit_v2_matvec_call(asm: &mut ModelAsm, p: V2MatvecPlacement) {
+    set_bank(asm, p.start_bank);
+    ld_r_imm(asm, Reg8::A, (p.start_bank & 0xFF) as u8);
+    a_to(asm, CHUNK_BANK);
+    ld_r_imm(asm, Reg8::A, (p.start_bank >> 8) as u8);
+    a_to(asm, CHUNK_BANK + 1);
+    ld16(asm, Reg16Data::BC, CHUNK_ENTRY + p.start_offset);
+    asm.call(if p.wide { "matvec_v2w" } else { "matvec_v2" });
+}
+
+/// Inline "fetch next stream byte": `A = *BC`, advance `BC`, and cross to the
+/// next 9-bit bank (reprogramming MBC5, resetting `BC = 0x4000`) when the
+/// pointer reaches 0x8000. Clobbers `A`, `HL`; preserves `DE`; leaves the byte
+/// in `A`. Inlined (never `call`ed) because `SP` is the activation buffer
+/// during the walk.
+fn emit_v2_fetch(asm: &mut ModelAsm) {
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+    asm.i(Instr::Inc16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::L, Reg8::A); // stash byte
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    let done = asm.fresh("v2fetch_done");
+    asm.jr(Some(Cond::NZ), &done);
+    // Cross bank: advance the 9-bit CHUNK_BANK (lo wrap carries into hi) and
+    // reprogram MBC5 as we go. ROMB1 (hi bit) persists across bank switches, so
+    // it only needs rewriting when the low byte wraps.
+    a_from(asm, CHUNK_BANK);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, CHUNK_BANK);
+    a_to(asm, MBC5_ROMB0); // A still holds the new low byte
+    let nohi = asm.fresh("v2fetch_nohi");
+    asm.jr(Some(Cond::NZ), &nohi);
+    a_from(asm, CHUNK_BANK + 1);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, CHUNK_BANK + 1);
+    a_to(asm, MBC5_ROMB1);
+    asm.label(&nohi);
+    ld16(asm, Reg16Data::BC, CHUNK_ENTRY); // reset pointer to 0x4000
+    asm.label(&done);
+    ld_rr(asm, Reg8::A, Reg8::L); // restore byte
+}
+
+/// `DE := next 2 stream bytes (LE)`.
+fn emit_v2_bias_load(asm: &mut ModelAsm) {
+    emit_v2_fetch(asm);
+    ld_rr(asm, Reg8::E, Reg8::A);
+    emit_v2_fetch(asm);
+    ld_rr(asm, Reg8::D, Reg8::A);
+}
+
+/// `DE += reg` (unsigned byte, carry into D) — the branchless bake-off idiom.
+fn emit_v2_add_de(asm: &mut ModelAsm, reg: Reg8) {
+    ld_rr(asm, Reg8::A, reg);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::D),
+    });
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+}
+
+/// `DE -= reg` (unsigned byte, borrow out of D). Computed from E directly so
+/// no leading `ld a,reg` is needed: `a=e-reg`, then `d-=borrow`.
+fn emit_v2_sub_de(asm: &mut ModelAsm, reg: Reg8) {
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(reg),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+}
+
+/// `HL := (ptr)` (2-byte LE WRAM pointer).
+fn emit_load_hl_from(asm: &mut ModelAsm, ptr: u16) {
+    a_from(asm, ptr);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, ptr + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+}
+
+/// `(ptr) := HL`.
+fn emit_store_hl_to(asm: &mut ModelAsm, ptr: u16) {
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, ptr);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, ptr + 1);
+}
+
+/// `SP := (SPSAVE); ret` — restore the caller's stack and return.
+fn emit_v2_restore_sp_ret(asm: &mut ModelAsm) {
+    emit_load_hl_from(asm, SPSAVE);
+    asm.i(Instr::LdSpFromHl);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `WV2_ACC (i24) += sx24(DE)` — sign-extend the i16 segment partial and add
+/// it byte-serially, exactly as `encode_row_wide` combines segments.
+fn emit_v2_wide_combine(asm: &mut ModelAsm) {
+    // L := 0x00/0xFF sign extension of D.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    // Byte-serial add with carry (LD does not disturb the carry flag).
+    a_from(asm, WV2_ACC);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    a_to(asm, WV2_ACC);
+    a_from(asm, WV2_ACC + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::D),
+    });
+    a_to(asm, WV2_ACC + 1);
+    a_from(asm, WV2_ACC + 2);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::L),
+    });
+    a_to(asm, WV2_ACC + 2);
+}
+
+/// Emit the shared V2 dispatch matvec routine, its 81 pattern handlers, the
+/// five sentinel handlers, and the 86-entry handler table. Emitted once, in
+/// bank 0, only when the plan's lowering is `V2Dispatch`.
+fn emit_matvec_v2(asm: &mut ModelAsm, l: &StateWramLayout) {
+    let act = l.act;
+    let acc = l.acc;
+
+    // --- entry points -------------------------------------------------------
+    // i16 entry: save caller SP, seed out pointer + first bias, SP := act.
+    asm.label("matvec_v2");
+    asm.i(Instr::LdDirectFromSp { addr: SPSAVE });
+    ptr_init(asm, WV2_OUT, acc);
+    emit_v2_bias_load(asm);
+    ld16(asm, Reg16Data::SP, act);
+    asm.jp(None, "v2_dispatch");
+
+    // wide entry: same, plus zero the i24 row accumulator.
+    asm.label("matvec_v2w");
+    asm.i(Instr::LdDirectFromSp { addr: SPSAVE });
+    ptr_init(asm, WV2_OUT, acc);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, WV2_ACC);
+    a_to(asm, WV2_ACC + 1);
+    a_to(asm, WV2_ACC + 2);
+    emit_v2_bias_load(asm);
+    ld16(asm, Reg16Data::SP, act);
+    asm.jp(None, "v2_dispatch");
+
+    // --- dispatch tail ------------------------------------------------------
+    // Fetch the next stream byte. A base-81 index (< 81) falls through to the
+    // shared computed apply; a sentinel (>= 81) vectors through the 5-entry
+    // sentinel table. Decoding trits at runtime (via the `v2_pack` LUT) instead
+    // of 81 unrolled handlers keeps the bank-0 routine ~1.5 KiB smaller, which
+    // the dense d192 driver needs; the extra cycles are affordable under the
+    // 120 s/char budget.
+    asm.label("v2_dispatch");
+    emit_v2_fetch(asm);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(81),
+    });
+    asm.jp(Some(Cond::NC), "v2_sentinel");
+
+    // --- computed apply (A = base-81 index, 0..80) --------------------------
+    // HL := v2_pack + A; load the 2-bit-packed trits; apply the four columns.
+    asm.ld16_label(Reg16Data::HL, "v2_pack", 0);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::L),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    a_to(asm, WV2_PK);
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::HL,
+    });
+    emit_v2_apply_col(asm, Reg8::L, 0);
+    emit_v2_apply_col(asm, Reg8::H, 1);
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::HL,
+    });
+    emit_v2_apply_col(asm, Reg8::L, 2);
+    emit_v2_apply_col(asm, Reg8::H, 3);
+    asm.jp(None, "v2_dispatch");
+
+    // --- sentinel vector (A = sentinel byte, 81..85) ------------------------
+    asm.label("v2_sentinel");
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(81),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.ld16_label(Reg16Data::HL, "v2_sent_table", 0);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::L),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::H });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    asm.i(Instr::JpHl);
+
+    // --- i16 sentinels ------------------------------------------------------
+    // ROW_END: store DE, advance out ptr by 2, re-seed bias + SP, keep going.
+    asm.label("v2_row_end");
+    emit_load_hl_from(asm, WV2_OUT);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    emit_store_hl_to(asm, WV2_OUT);
+    ld16(asm, Reg16Data::SP, act);
+    emit_v2_bias_load(asm);
+    asm.jp(None, "v2_dispatch");
+
+    // MATRIX_END: store the final DE, restore SP, return.
+    asm.label("v2_matrix_end");
+    emit_load_hl_from(asm, WV2_OUT);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    emit_v2_restore_sp_ret(asm);
+
+    // --- wide sentinels -----------------------------------------------------
+    // SEG_MID: combine this segment, load the next segment bias, keep the SP
+    // walking into the next column block (do NOT re-seed SP).
+    asm.label("v2_seg_mid");
+    emit_v2_wide_combine(asm);
+    emit_v2_bias_load(asm);
+    asm.jp(None, "v2_dispatch");
+
+    // ROW_END_WIDE: combine, store the i24 accumulator, advance out ptr by 3,
+    // zero the accumulator, re-seed SP + next-row bias.
+    asm.label("v2_row_end_wide");
+    emit_v2_wide_combine(asm);
+    emit_v2_store_wacc(asm, true);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, WV2_ACC);
+    a_to(asm, WV2_ACC + 1);
+    a_to(asm, WV2_ACC + 2);
+    ld16(asm, Reg16Data::SP, act);
+    emit_v2_bias_load(asm);
+    asm.jp(None, "v2_dispatch");
+
+    // MATRIX_END_WIDE: combine, store the final i24 accumulator, return.
+    asm.label("v2_matrix_end_wide");
+    emit_v2_wide_combine(asm);
+    emit_v2_store_wacc(asm, false);
+    emit_v2_restore_sp_ret(asm);
+
+    // --- sentinel vector table (5 entries, LE addresses) --------------------
+    asm.label("v2_sent_table");
+    asm.word_label("v2_row_end"); // 81 (BASE81_ROW_END)
+    asm.word_label("v2_matrix_end"); // 82 (BASE81_MATRIX_END)
+    asm.word_label("v2_seg_mid"); // 83 (V2_SEG_MID)
+    asm.word_label("v2_row_end_wide"); // 84 (V2_ROW_END_WIDE)
+    asm.word_label("v2_matrix_end_wide"); // 85 (V2_MATRIX_END_WIDE)
+    // Table length pinned: 81 pattern indices + 5 sentinels.
+    debug_assert_eq!(V2_TABLE_LEN, 86);
+    let _ = (V2_SEG_MID, V2_ROW_END_WIDE, V2_MATRIX_END_WIDE);
+
+    // --- base-81 -> 2-bit trit pack LUT (81 bytes) --------------------------
+    // v2_pack[i] packs base81_pattern(i) as 2 bits per column (00 zero, 01 +1,
+    // 10 -1), column k in bits [2k+1:2k].
+    asm.label("v2_pack");
+    let pack: Vec<u8> = (0..=80_u8)
+        .map(|index| {
+            let mut byte = 0u8;
+            for (k, &w) in crate::spec::base81_pattern(index).iter().enumerate() {
+                let field = match w {
+                    1 => 0b01,
+                    -1 => 0b10,
+                    _ => 0b00,
+                };
+                byte |= field << (2 * k);
+            }
+            byte
+        })
+        .collect();
+    asm.bytes(pack);
+}
+
+/// Apply one packed trit column to the accumulator: extract the 2-bit field
+/// `k` from `WV2_PK`, then `DE += reg` (field 01), `DE -= reg` (field 10), or
+/// nothing (field 00). `reg` holds the popped activation byte.
+fn emit_v2_apply_col(asm: &mut ModelAsm, reg: Reg8, k: u8) {
+    a_from(asm, WV2_PK);
+    for _ in 0..(2 * k) {
+        asm.i(Instr::Rrca);
+    }
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0b11),
+    });
+    // A: 0 -> skip (carry after `sub 1`), 1 -> plus (zero), 2 -> minus.
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    let done = asm.fresh("v2col_done");
+    asm.jr(Some(Cond::C), &done);
+    let plus = asm.fresh("v2col_plus");
+    asm.jr(Some(Cond::Z), &plus);
+    emit_v2_sub_de(asm, reg);
+    asm.jr(None, &done);
+    asm.label(&plus);
+    emit_v2_add_de(asm, reg);
+    asm.label(&done);
+}
+
+/// Store `WV2_ACC` (3 bytes) through `WV2_OUT`; when `advance`, bump the out
+/// pointer by 3 (row continues); otherwise leave it (final store).
+fn emit_v2_store_wacc(asm: &mut ModelAsm, advance: bool) {
+    emit_load_hl_from(asm, WV2_OUT);
+    for k in 0..3u16 {
+        a_from(asm, WV2_ACC + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    if advance {
+        emit_store_hl_to(asm, WV2_OUT);
+    }
+}
+
 /// Emit the per-token forward pass (embedding copy through `argmax_v`),
 /// leaving the argmax at [`S_ARGMAX_ADDR`] and the i24 logits at
 /// `layout.logits`. The caller owns the surrounding labels and any decode
@@ -2791,12 +3309,12 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
 
     let mut chunk_iter = plan.per_matvec_chunks.iter();
     let mut next_bank: u16 = 1;
+    let mut mv: usize = 0;
 
     // --- state stage ---
     asm.call("norm24");
     emit_copy16(asm, l.act, l.dump_snorm, t.d_model);
-    let in_chunks = chunk_iter.next().expect("state in-proj chunks exist");
-    emit_call_chunks(asm, in_chunks.len(), &mut next_bank);
+    emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
     emit_copy16(asm, l.acc, l.dump_inacc, 2 * t.state_slots);
     set_bank(asm, params_bank);
     asm.call("state_update");
@@ -2818,8 +3336,7 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
         if block == 0 {
             emit_copy16(asm, l.act, l.dump_norm0, t.d_model);
         }
-        let up_chunks = chunk_iter.next().expect("up chunks exist");
-        emit_call_chunks(asm, up_chunks.len(), &mut next_bank);
+        emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
         if block == 0 {
             emit_copy16(asm, l.acc, l.dump_upacc0, 2 * t.d_ff);
         }
@@ -2834,8 +3351,7 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
         if block == 0 {
             emit_copy16(asm, l.act, l.dump_gelu0, t.d_ff);
         }
-        let down_chunks = chunk_iter.next().expect("down chunks exist");
-        emit_call_chunks(asm, down_chunks.len(), &mut next_bank);
+        emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
         if block == 0 {
             emit_copy16(
                 asm,
@@ -2883,7 +3399,10 @@ pub(crate) fn emit_state_routines_and_tables(
 ) {
     let l = &plan.layout;
     let t = &l.topology;
-    emit_chunk_run(asm);
+    match plan.lowering {
+        WeightLowering::V3 => emit_chunk_run(asm),
+        WeightLowering::V2Dispatch => emit_matvec_v2(asm, l),
+    }
     emit_copy_bytes(asm);
     emit_emb_copy24(asm, l, plan.emb_bank0 as u16, plan.emb_stride);
     emit_mul16x8(asm);
@@ -3048,10 +3567,20 @@ pub(crate) fn assemble_state_rom(
 
     push_section(&mut pairs, 0, ENTRY_POINT, driver);
     let mut bank = 1usize;
-    for chunks in &plan.per_matvec_chunks {
-        for chunk in chunks {
-            push_section(&mut pairs, bank, CHUNK_ENTRY, chunk.clone());
-            bank += 1;
+    match plan.lowering {
+        WeightLowering::V3 => {
+            for chunks in &plan.per_matvec_chunks {
+                for chunk in chunks {
+                    push_section(&mut pairs, bank, CHUNK_ENTRY, chunk.clone());
+                    bank += 1;
+                }
+            }
+        }
+        WeightLowering::V2Dispatch => {
+            for packed in &plan.v2_weight_banks {
+                push_section(&mut pairs, bank, CHUNK_ENTRY, packed.clone());
+                bank += 1;
+            }
         }
     }
     debug_assert_eq!(bank, plan.params_bank);
@@ -3091,9 +3620,10 @@ fn build_state_model_rom(
     model: &IntStateLoweredModel,
     loop_tokens: Option<u16>,
     sampler: Option<&crate::decode::SamplerConfig>,
+    lowering: WeightLowering,
 ) -> Result<BuiltStateRom, ModelRomError> {
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let plan = plan_state_rom(model, layout, 0)?;
+    let plan = plan_state_rom_with(model, layout, 0, lowering)?;
     let l = &plan.layout;
 
     // Bank-0 driver.
@@ -3185,8 +3715,18 @@ fn build_state_model_rom(
 pub fn build_state_one_token_rom(
     model: &IntStateLoweredModel,
 ) -> Result<StateOneTokenRom, ModelRomError> {
+    build_state_one_token_rom_lowered(model, WeightLowering::V3)
+}
+
+/// [`build_state_one_token_rom`] with an explicit weight lowering. V3 is the
+/// deployable default; `V2Dispatch` packs the base-81 dispatch streams and is
+/// byte-exact against the same host evaluator.
+pub fn build_state_one_token_rom_lowered(
+    model: &IntStateLoweredModel,
+    lowering: WeightLowering,
+) -> Result<StateOneTokenRom, ModelRomError> {
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let built = build_state_model_rom(model, None, None)?;
+    let built = build_state_model_rom(model, None, None, lowering)?;
     Ok(StateOneTokenRom {
         layout,
         token_start_pc: built.labels["token_start"],
@@ -3209,11 +3749,20 @@ pub fn build_state_multi_token_rom(
     model: &IntStateLoweredModel,
     n_tokens: u16,
 ) -> Result<StateMultiTokenRom, ModelRomError> {
+    build_state_multi_token_rom_lowered(model, n_tokens, WeightLowering::V3)
+}
+
+/// [`build_state_multi_token_rom`] with an explicit weight lowering.
+pub fn build_state_multi_token_rom_lowered(
+    model: &IntStateLoweredModel,
+    n_tokens: u16,
+    lowering: WeightLowering,
+) -> Result<StateMultiTokenRom, ModelRomError> {
     if n_tokens == 0 || n_tokens > 256 {
         return Err(ModelRomError::BadTokenCount { n_tokens });
     }
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let built = build_state_model_rom(model, Some(n_tokens), None)?;
+    let built = build_state_model_rom(model, Some(n_tokens), None, lowering)?;
     Ok(StateMultiTokenRom {
         layout,
         token_start_pc: built.labels["token_start"],
@@ -3244,11 +3793,23 @@ pub fn build_state_multi_token_sampling_rom(
     n_tokens: u16,
     sampler: &crate::decode::SamplerConfig,
 ) -> Result<StateMultiTokenRom, ModelRomError> {
+    build_state_multi_token_sampling_rom_lowered(model, n_tokens, sampler, WeightLowering::V3)
+}
+
+/// [`build_state_multi_token_sampling_rom`] with an explicit weight lowering.
+/// The sampler routines add bank-0 code on top of the multi-token driver, so
+/// this is where V2's shared-handler footprint is stressed hardest.
+pub fn build_state_multi_token_sampling_rom_lowered(
+    model: &IntStateLoweredModel,
+    n_tokens: u16,
+    sampler: &crate::decode::SamplerConfig,
+    lowering: WeightLowering,
+) -> Result<StateMultiTokenRom, ModelRomError> {
     if n_tokens == 0 || n_tokens > 256 {
         return Err(ModelRomError::BadTokenCount { n_tokens });
     }
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let built = build_state_model_rom(model, Some(n_tokens), Some(sampler))?;
+    let built = build_state_model_rom(model, Some(n_tokens), Some(sampler), lowering)?;
     Ok(StateMultiTokenRom {
         layout,
         token_start_pc: built.labels["token_start"],

@@ -215,6 +215,11 @@ pub enum ModelRomError {
     TableRowTooWide {
         stride: usize,
     },
+    /// V2 dispatch requires each matvec/segment column count to be a multiple
+    /// of four (the base-81 packing groups four trits per byte).
+    V2FanInNotMultipleOfFour {
+        cols: usize,
+    },
 }
 
 impl fmt::Display for ModelRomError {
@@ -265,6 +270,12 @@ impl fmt::Display for ModelRomError {
             Self::TableRowTooWide { stride } => {
                 write!(f, "banked table row stride {stride} exceeds one ROM bank")
             }
+            Self::V2FanInNotMultipleOfFour { cols } => {
+                write!(
+                    f,
+                    "v2 dispatch needs a column count multiple of 4 (got {cols})"
+                )
+            }
         }
     }
 }
@@ -308,6 +319,10 @@ pub(crate) enum ModelOp {
         off: i32,
     },
     Bytes(Vec<u8>),
+    /// Two data bytes: the resolved little-endian address of `label`.
+    WordLabel {
+        label: String,
+    },
 }
 
 pub(crate) struct ModelAsm {
@@ -370,12 +385,21 @@ impl ModelAsm {
         self.ops.push(ModelOp::Bytes(bytes));
     }
 
+    /// Emit the resolved little-endian address of `label` as two data bytes
+    /// (used to build the V2 dispatch handler table).
+    pub(crate) fn word_label(&mut self, label: &str) {
+        self.ops.push(ModelOp::WordLabel {
+            label: label.to_owned(),
+        });
+    }
+
     fn op_len(op: &ModelOp) -> u16 {
         match op {
             ModelOp::Instr(instr) => u16::from(instr.byte_len()),
             ModelOp::Jp { .. } | ModelOp::CallLabel { .. } | ModelOp::Ld16Label { .. } => 3,
             ModelOp::Jr { .. } => 2,
             ModelOp::Bytes(bytes) => bytes.len() as u16,
+            ModelOp::WordLabel { .. } => 2,
             ModelOp::Label(_) => 0,
         }
     }
@@ -440,6 +464,9 @@ impl ModelAsm {
                     })?);
                 }
                 ModelOp::Bytes(data) => bytes.extend_from_slice(data),
+                ModelOp::WordLabel { label } => {
+                    bytes.extend_from_slice(&resolve(label)?.to_le_bytes());
+                }
             }
         }
         Ok((bytes, labels))
@@ -1868,6 +1895,95 @@ pub(crate) fn build_matvec_chunks(layer: &LoweredLayer) -> Result<Vec<Vec<u8>>, 
 }
 
 // ---------------------------------------------------------------------------
+// V2 dispatch stream codegen (weights-as-data, walked by a shared handler)
+// ---------------------------------------------------------------------------
+//
+// The V2 lowering packs each matvec's weights into a base-81 dispatch stream
+// (~0.25 B/weight vs V3's ~6.6 B/weight) that a shared bank-0 routine threads,
+// reproducing the SAME integer accumulator V3 emits as straight-line code:
+// `acc = (-128*sum(row)) + sum(+/- act_j)` mod 2^16 per row/segment. Only the
+// per-matvec accumulation *emission* changes; every epilogue and the WRAM
+// layout are untouched (design: docs/design/v2-dispatch-stateful.md).
+
+/// V2 dispatch sentinel: end of a wide segment that continues the same row
+/// (combine the i16 partial into the i24 row accumulator, keep threading).
+pub(crate) const V2_SEG_MID: u8 = 83;
+/// V2 dispatch sentinel: end of the last segment of a wide row that is not the
+/// final row (combine, store the i24 accumulator, advance the output pointer).
+pub(crate) const V2_ROW_END_WIDE: u8 = 84;
+/// V2 dispatch sentinel: end of the last segment of the final wide row
+/// (combine, store, return).
+pub(crate) const V2_MATRIX_END_WIDE: u8 = 85;
+/// Number of dispatch-table entries: 81 pattern handlers + i16 row/matrix end
+/// + the three wide sentinels.
+pub(crate) const V2_TABLE_LEN: usize = 86;
+
+/// Pack one i16 matvec into a V2 dispatch stream:
+/// `bias_0 (i16 LE) | row_0 base-81 bytes | ROW_END | ... | bias_last |
+/// row_last | MATRIX_END`. The bias is `layer.biases[row]` mod 2^16 — exactly
+/// the DE seed `encode_row` embeds — so the threaded accumulator matches the
+/// V3 straight-line code bit-for-bit.
+pub(crate) fn build_matvec_stream_i16(layer: &LoweredLayer) -> Result<Vec<u8>, ModelRomError> {
+    let rows = layer.layer.rows();
+    let cols = layer.layer.cols();
+    if !cols.is_multiple_of(4) {
+        return Err(ModelRomError::V2FanInNotMultipleOfFour { cols });
+    }
+    let mut stream = Vec::with_capacity(rows * (cols / 4 + 3));
+    for row in 0..rows {
+        let bias = (layer.biases[row] & 0xFFFF) as u16;
+        stream.extend_from_slice(&bias.to_le_bytes());
+        for chunk in layer.layer.row(row).chunks_exact(4) {
+            stream.push(crate::spec::base81_index(chunk));
+        }
+        stream.push(if row + 1 == rows {
+            crate::spec::BASE81_MATRIX_END
+        } else {
+            crate::spec::BASE81_ROW_END
+        });
+    }
+    Ok(stream)
+}
+
+/// Pack one wide (i24) matvec into a V2 dispatch stream: each row is split into
+/// [`WIDE_SEGMENT_COLS`]-column segments, each framed
+/// `seg_bias (i16 LE) | seg base-81 bytes | SENTINEL`, where the sentinel is
+/// `SEG_MID` (more segments in this row), `ROW_END_WIDE` (last segment of a
+/// non-final row), or `MATRIX_END_WIDE` (last segment of the final row). The
+/// per-segment bias is `-128 * sum(seg)`, matching `encode_row_wide`; the
+/// threaded i16 partials sign-extend and combine into the i24 accumulator
+/// exactly as the V3 wide code does.
+pub(crate) fn build_matvec_stream_wide(layer: &TernaryLayer) -> Result<Vec<u8>, ModelRomError> {
+    let rows = layer.rows();
+    let cols = layer.cols();
+    if !cols.is_multiple_of(4) {
+        return Err(ModelRomError::V2FanInNotMultipleOfFour { cols });
+    }
+    let mut stream = Vec::new();
+    for row in 0..rows {
+        let weights = layer.row(row);
+        let last_row = row + 1 == rows;
+        let n_segments = weights.len().div_ceil(WIDE_SEGMENT_COLS);
+        for (seg_idx, seg_start) in (0..weights.len()).step_by(WIDE_SEGMENT_COLS).enumerate() {
+            let seg_end = (seg_start + WIDE_SEGMENT_COLS).min(weights.len());
+            let seg = &weights[seg_start..seg_end];
+            let seg_bias: i32 = seg.iter().map(|&w| -128 * i32::from(w)).sum();
+            stream.extend_from_slice(&((seg_bias & 0xFFFF) as u16).to_le_bytes());
+            for chunk in seg.chunks_exact(4) {
+                stream.push(crate::spec::base81_index(chunk));
+            }
+            let last_seg = seg_idx + 1 == n_segments;
+            stream.push(match (last_seg, last_row) {
+                (false, _) => V2_SEG_MID,
+                (true, false) => V2_ROW_END_WIDE,
+                (true, true) => V2_MATRIX_END_WIDE,
+            });
+        }
+    }
+    Ok(stream)
+}
+
+// ---------------------------------------------------------------------------
 // top-level build
 // ---------------------------------------------------------------------------
 
@@ -2266,6 +2382,172 @@ mod tests {
             build_multi_token_rom(&lowered, 257),
             Err(ModelRomError::BadTokenCount { n_tokens: 257 })
         ));
+    }
+
+    // -- V2 dispatch stream encoding: pure-Rust executor mirrors the shared
+    //    handler and must reproduce the canonical integer accumulation the V3
+    //    code emits. This is the fast inner-loop check for the stream format;
+    //    the emulated byte-exact ROM gates live in gbf-bench.
+
+    /// Deterministic ternary layer (weights in {-1,0,1}) for stream tests.
+    fn synthetic_ternary(rows: usize, cols: usize, seed: u64) -> TernaryLayer {
+        let mut s = seed;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 33) as u32
+        };
+        let weights: Vec<i8> = (0..rows * cols)
+            .map(|_| match next() % 3 {
+                0 => 0,
+                1 => 1,
+                _ => -1,
+            })
+            .collect();
+        let scales: Vec<u16> = (0..rows).map(|r| 1 + (r as u16 % 7)).collect();
+        TernaryLayer::new(rows, cols, weights, scales).expect("valid layer")
+    }
+
+    fn synthetic_acts(cols: usize, seed: u64) -> Vec<u8> {
+        let mut s = seed ^ 0xA5A5_5A5A;
+        (0..cols)
+            .map(|_| {
+                s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                (s >> 40) as u8
+            })
+            .collect()
+    }
+
+    /// Execute a V2 i16 stream exactly like the shared handler and return each
+    /// row's mod-2^16 accumulator.
+    fn exec_stream_i16(stream: &[u8], acts: &[u8]) -> Vec<u16> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        loop {
+            let bias = u16::from_le_bytes([stream[i], stream[i + 1]]);
+            i += 2;
+            let mut acc = bias;
+            let mut col = 0usize;
+            loop {
+                let b = stream[i];
+                i += 1;
+                if b == crate::spec::BASE81_ROW_END || b == crate::spec::BASE81_MATRIX_END {
+                    out.push(acc);
+                    if b == crate::spec::BASE81_MATRIX_END {
+                        return out;
+                    }
+                    break;
+                }
+                for w in crate::spec::base81_pattern(b) {
+                    let a = u16::from(acts[col]);
+                    match w {
+                        1 => acc = acc.wrapping_add(a),
+                        -1 => acc = acc.wrapping_sub(a),
+                        _ => {}
+                    }
+                    col += 1;
+                }
+            }
+        }
+    }
+
+    /// Execute a V2 wide stream exactly like the shared handler and return each
+    /// row's mod-2^24 accumulator.
+    fn exec_stream_wide(stream: &[u8], acts: &[u8]) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        let mut row_acc: u32 = 0;
+        let mut col = 0usize; // activation cursor; continues across segments
+        loop {
+            let seg_bias = u16::from_le_bytes([stream[i], stream[i + 1]]);
+            i += 2;
+            let mut seg = seg_bias;
+            loop {
+                let b = stream[i];
+                i += 1;
+                if b >= V2_SEG_MID {
+                    // Combine segment partial (sign-extended) into the i24 row.
+                    let sx = i32::from(seg as i16) as u32 & 0xFF_FFFF;
+                    row_acc = row_acc.wrapping_add(sx) & 0xFF_FFFF;
+                    match b {
+                        V2_SEG_MID => break, // next segment, same row, keep col
+                        V2_ROW_END_WIDE => {
+                            out.push(row_acc);
+                            row_acc = 0;
+                            col = 0;
+                            break;
+                        }
+                        V2_MATRIX_END_WIDE => {
+                            out.push(row_acc);
+                            return out;
+                        }
+                        _ => unreachable!("bad wide sentinel {b}"),
+                    }
+                }
+                for w in crate::spec::base81_pattern(b) {
+                    let a = u16::from(acts[col]);
+                    match w {
+                        1 => seg = seg.wrapping_add(a),
+                        -1 => seg = seg.wrapping_sub(a),
+                        _ => {}
+                    }
+                    col += 1;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v2_i16_stream_matches_canonical_accumulation() {
+        let (rows, cols) = (20usize, 64usize);
+        let layer = synthetic_ternary(rows, cols, 7);
+        let lowered = LoweredLayer::new(&layer);
+        let acts = synthetic_acts(cols, 99);
+        let stream = build_matvec_stream_i16(&lowered).expect("stream");
+        let got = exec_stream_i16(&stream, &acts);
+        assert_eq!(got.len(), rows);
+        for row in 0..rows {
+            let canonical: i32 = layer
+                .row(row)
+                .iter()
+                .zip(&acts)
+                .map(|(&w, &a)| i32::from(w) * (i32::from(a) - 128))
+                .sum();
+            assert_eq!(
+                got[row],
+                (canonical & 0xFFFF) as u16,
+                "row {row}: stream {} vs canonical {}",
+                got[row],
+                canonical & 0xFFFF
+            );
+        }
+    }
+
+    #[test]
+    fn v2_wide_stream_matches_canonical_i24_accumulation() {
+        // cols spans multiple 192-column segments (384 = two segments).
+        let (rows, cols) = (12usize, 384usize);
+        let layer = synthetic_ternary(rows, cols, 13);
+        let acts = synthetic_acts(cols, 42);
+        let stream = build_matvec_stream_wide(&layer).expect("wide stream");
+        let got = exec_stream_wide(&stream, &acts);
+        assert_eq!(got.len(), rows);
+        for row in 0..rows {
+            let canonical: i32 = layer
+                .row(row)
+                .iter()
+                .zip(&acts)
+                .map(|(&w, &a)| i32::from(w) * (i32::from(a) - 128))
+                .sum();
+            assert_eq!(
+                got[row],
+                (canonical & 0xFF_FFFF) as u32,
+                "row {row}: stream {:#08x} vs canonical {:#08x}",
+                got[row],
+                canonical & 0xFF_FFFF
+            );
+        }
     }
 
     #[test]

@@ -9,7 +9,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use gbf_bench::d192_real::{D192RealOptions, d192_real_report_to_markdown, run_d192_real_bringup};
+use gbf_bench::d192_real::{
+    D192RealOptions, d192_real_report_to_markdown, run_d192_real_bringup, run_d192_real_v2_parity,
+};
 use gbf_bench::shell::framebuffer_to_pgm;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,9 +68,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_default()
         );
     }
+    // Step 5: V2 dispatch parity on the real checkpoint (byte-exact vs the
+    // committed integer semantics + cycle/capacity accounting). Heavy: emulates
+    // the real ~400-bank ROM under both lowerings.
+    eprintln!("running V2 dispatch parity on the REAL checkpoint (emulates both lowerings)...");
+    let v2 = run_d192_real_v2_parity(&repo_root)?;
+    fs::write(
+        out_dir.join("v2_parity.json"),
+        serde_json::to_vec_pretty(&v2)?,
+    )?;
+    eprintln!(
+        "d192-real V2 parity: one-token {} | generation {} | checkpoints {} | \
+         V2 {} banks / {:.2} MiB (V3 {} banks / {:.2} MiB) | V2 {:.1} M-cyc/token \
+         ({:.2}x V3, {:.1} s/token) | sampling fits {} ({} B) | shell fits {} ({} B)",
+        v2.one_token_byte_exact,
+        v2.multi_token_sequences_match,
+        v2.multi_token_checkpoints_byte_exact,
+        v2.v2_bank_count,
+        v2.v2_rom_mib,
+        v2.v3_bank_count,
+        v2.v3_rom_mib,
+        v2.v2_mean_m_cycles as f64 / 1.0e6,
+        v2.v2_over_v3_cycles,
+        v2.v2_seconds_per_token_dmg,
+        v2.v2_sampling_fits_bank0,
+        v2.v2_sampling_driver_bytes,
+        v2.v2_shell_fits_bank0,
+        v2.v2_shell_driver_bytes,
+    );
+
     eprintln!("evidence: {}", out_dir.display());
     if !report.all_gates_pass {
         return Err("d192 real bring-up gates FAILED (see report)".into());
+    }
+    if !v2.pass() {
+        return Err("d192-real V2 dispatch parity gate FAILED".into());
     }
     Ok(())
 }

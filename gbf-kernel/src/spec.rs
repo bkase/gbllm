@@ -183,6 +183,17 @@ impl TernaryWeights {
     }
 }
 
+/// Base-81 dispatch index for one four-column trit chunk
+/// (`t0 + 3*t1 + 9*t2 + 27*t3`). Inverse of [`base81_pattern`].
+#[must_use]
+pub fn base81_index(chunk: &[i8]) -> u8 {
+    debug_assert_eq!(chunk.len(), 4, "base-81 packs four trits per byte");
+    chunk
+        .iter()
+        .rev()
+        .fold(0_u8, |acc, &weight| acc * 3 + trit_of(weight))
+}
+
 /// Decode a base-81 dispatch index back into four trit weights.
 #[must_use]
 pub fn base81_pattern(index: u8) -> [i8; 4] {

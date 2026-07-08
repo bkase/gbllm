@@ -21,9 +21,13 @@ use std::path::Path;
 
 use gbf_emu::Framebuffer;
 use gbf_foundation::sha256;
-use gbf_kernel::asm_impl_shell::build_state_shell_rom;
+use gbf_kernel::asm_impl_shell::{
+    build_state_shell_rom, build_state_shell_rom_lowered, synthetic_font_tiles,
+};
 use gbf_kernel::asm_impl_state::{
-    STATE_DRIVER_BANK_CAPACITY, StateWramLayout, build_state_multi_token_rom,
+    STATE_DRIVER_BANK_CAPACITY, StateWramLayout, WeightLowering, build_state_multi_token_rom,
+    build_state_multi_token_rom_lowered, build_state_multi_token_sampling_rom_lowered,
+    build_state_one_token_rom,
 };
 use gbf_kernel::decode::{SamplerConfig, XorShift16, sample_topk_trace};
 use gbf_kernel::model_ref::TernaryLayer;
@@ -42,7 +46,7 @@ use crate::shell::{char_to_id, run_shell_bringup, run_shell_session, shell_font_
 use crate::stateful::{
     STATE_GENERATION_SEEDS, StateCheckpointFacts, StateIntStatsReport, StateRomGateReport,
     argmax_v, build_val_char_ids, harvest_state_cases, load_state_checkpoint, log_softmax_v,
-    render_char_sample, run_state_rom_gate, run_state_seed_generation,
+    render_char_sample, run_state_rom_gate, run_state_rom_gate_lowered, run_state_seed_generation,
 };
 
 /// The committed real distilled-student export (bd-3771m).
@@ -757,6 +761,118 @@ pub fn run_d192_real_bringup(repo_root: &Path, opts: &D192RealOptions) -> D192Re
     let mut report = run_phases(repo_root, opts);
     finish_caveats(&mut report);
     report
+}
+
+/// V2 dispatch-lowering parity on the REAL committed d192 checkpoint (step 5,
+/// docs/design/v2-dispatch-stateful.md): the V2 ROM must reproduce the
+/// canonical integer semantics byte-for-byte (one-token + on-device
+/// generation), and the sampling/shell driver variants must fit bank 0. Also
+/// reports the V2-vs-V3 cycle and ROM-capacity accounting.
+#[derive(Debug, Clone, Serialize)]
+pub struct D192RealV2Parity {
+    pub one_token_byte_exact: bool,
+    pub multi_token_sequences_match: bool,
+    pub multi_token_checkpoints_byte_exact: bool,
+    pub v2_mean_m_cycles: u64,
+    pub v3_mean_m_cycles: u64,
+    pub v2_over_v3_cycles: f64,
+    pub v2_seconds_per_token_dmg: f64,
+    pub v2_bank_count: u16,
+    pub v3_bank_count: u16,
+    pub v2_rom_mib: f64,
+    pub v3_rom_mib: f64,
+    pub v2_weight_banks: usize,
+    pub v3_weight_banks: usize,
+    pub v2_driver_bytes: usize,
+    pub v2_sampling_driver_bytes: usize,
+    pub v2_sampling_fits_bank0: bool,
+    pub v2_shell_driver_bytes: usize,
+    pub v2_shell_fits_bank0: bool,
+}
+
+impl D192RealV2Parity {
+    #[must_use]
+    pub fn pass(&self) -> bool {
+        self.one_token_byte_exact
+            && self.multi_token_sequences_match
+            && self.multi_token_checkpoints_byte_exact
+            && self.v2_bank_count <= 512
+            && self.v2_sampling_fits_bank0
+            && self.v2_shell_fits_bank0
+    }
+}
+
+/// Run the V2 parity gate on the real committed checkpoint. Heavy (emulates
+/// the ~400-bank real d192 ROM under both lowerings), so it lives in the
+/// `d192-real` bin, not the fast `--lib` suite.
+pub fn run_d192_real_v2_parity(repo_root: &Path) -> Result<D192RealV2Parity, OneTokenError> {
+    let bundle = load_state_checkpoint(&repo_root.join(D192_REAL_EXPORT_DIR))?;
+    let lowered = IntStateLoweredModel::lower(&bundle.checkpoint)
+        .map_err(|e| OneTokenError::Model(e.to_string()))?;
+
+    // One-token cases: zero state + a carried state from a short host stream.
+    let mut cases: Vec<(usize, u8, Vec<i32>)> = vec![(0, 19u8, lowered.zero_state())];
+    let mut state = lowered.zero_state();
+    let mut input = 19u8;
+    for pos in 1..=5usize {
+        let trace = lowered.forward(input, &mut state);
+        input = trace.argmax;
+        if pos == 5 {
+            cases.push((pos, input, state.clone()));
+        }
+    }
+    let v2_gate = run_state_rom_gate_lowered(&lowered, &cases, WeightLowering::V2Dispatch)?;
+    let v3_gate = run_state_rom_gate_lowered(&lowered, &cases, WeightLowering::V3)?;
+
+    // On-device generation under V2 vs the host feedback loop.
+    let mt = build_state_multi_token_rom_lowered(&lowered, 8, WeightLowering::V2Dispatch)
+        .map_err(|e| OneTokenError::Rom(e.to_string()))?;
+    let run = run_state_seed_generation(&mt, &lowered, STATE_GENERATION_SEEDS[0])?;
+
+    // Sampling + shell driver variants must also fit bank 0 under V2.
+    let cfg = SamplerConfig::new(8, 2253).map_err(|e| OneTokenError::Rom(format!("{e:?}")))?;
+    let samp = build_state_multi_token_sampling_rom_lowered(
+        &lowered,
+        32,
+        &cfg,
+        WeightLowering::V2Dispatch,
+    )
+    .map_err(|e| OneTokenError::Rom(e.to_string()))?;
+    let font = synthetic_font_tiles();
+    let shell = build_state_shell_rom_lowered(&lowered, &cfg, 8, &font, WeightLowering::V2Dispatch)
+        .map_err(|e| OneTokenError::Rom(e.to_string()))?;
+
+    // V3 capacity reference (the real d192 does fit V3, ~400 banks / 8 MiB).
+    let v3 = build_state_one_token_rom(&lowered).map_err(|e| OneTokenError::Rom(e.to_string()))?;
+
+    let bank0 = 0x4000 - 0x150;
+    let v2_m = v2_gate.mean_m_cycles;
+    let v3_m = v3_gate.mean_m_cycles;
+    Ok(D192RealV2Parity {
+        one_token_byte_exact: v2_gate.all_byte_exact,
+        multi_token_sequences_match: run.sequences_match,
+        multi_token_checkpoints_byte_exact: run.first_token_checkpoints_byte_exact
+            && run.last_token_checkpoints_byte_exact,
+        v2_mean_m_cycles: v2_m,
+        v3_mean_m_cycles: v3_m,
+        v2_over_v3_cycles: if v3_m == 0 {
+            0.0
+        } else {
+            v2_m as f64 / v3_m as f64
+        },
+        v2_seconds_per_token_dmg: v2_m as f64 / DMG_M_CYCLES_PER_SECOND as f64,
+        v2_bank_count: v2_gate.rom.bank_count,
+        v3_bank_count: v3.bank_count,
+        v2_rom_mib: v2_gate.rom.rom_bytes as f64 / (1024.0 * 1024.0),
+        v3_rom_mib: v3.rom.len() as f64 / (1024.0 * 1024.0),
+        v2_weight_banks: v2_gate.rom.weight_chunk_count,
+        v3_weight_banks: v3.weight_chunk_count,
+        v2_driver_bytes: v2_gate.rom.driver_bytes,
+        v2_sampling_driver_bytes: samp.driver_bytes,
+        v2_sampling_fits_bank0: samp.driver_bytes < bank0,
+        v2_shell_driver_bytes: shell.driver_bytes,
+        v2_shell_fits_bank0: shell.driver_bytes < bank0,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1690,6 +1806,34 @@ mod tests {
         assert!(c.ternary_val_bpc_per_normalized_char < 4.0);
         assert_eq!(c.eval_lanes, 8);
         assert_eq!(c.val_norm_tokens_sha256.len(), 64);
+    }
+
+    /// Step 5: the V2 dispatch lowering must be byte-exact on the REAL
+    /// committed d192 checkpoint (one-token + on-device generation), and the
+    /// sampling/shell driver variants must fit bank 0. Heavy (emulates the
+    /// ~400-bank ROM under both lowerings), so it is `#[ignore]`d and exercised
+    /// explicitly / by the `d192-real` bin.
+    #[test]
+    #[ignore = "slow real-checkpoint emulation under both lowerings; run explicitly"]
+    fn v2_parity_byte_exact_on_real_checkpoint() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let p = run_d192_real_v2_parity(&repo_root).expect("real-checkpoint V2 parity runs");
+        eprintln!("REAL-CKPT V2 PARITY: {p:#?}");
+        assert!(p.one_token_byte_exact, "V2 one-token must be byte-exact");
+        assert!(
+            p.multi_token_sequences_match && p.multi_token_checkpoints_byte_exact,
+            "V2 generation must be byte-exact"
+        );
+        assert!(p.v2_bank_count <= 512, "V2 real ROM must fit 512 banks");
+        assert!(
+            p.v2_sampling_fits_bank0,
+            "V2 sampling driver must fit bank 0"
+        );
+        assert!(p.v2_shell_fits_bank0, "V2 shell driver must fit bank 0");
+        assert!(p.pass());
     }
 
     /// The host prompt-sample stream's prefix must be exactly what a shell

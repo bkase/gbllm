@@ -1,0 +1,11 @@
+{
+  "one_token_byte_exact": true,
+  "multi_token_sequences_match": true,
+  "multi_token_checkpoints_byte_exact": true,
+  "v2_weight_banks": 15,
+  "v3_weight_banks": 294,
+  "v2_weight_stream_bytes": 244800,
+  "v3_weight_code_bytes": 4455077,
+  "v2_bank_count": 28,
+  "v2_driver_bytes": 14297
+}

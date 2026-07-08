@@ -26,8 +26,10 @@ use std::fs;
 use std::path::Path;
 
 use gbf_foundation::sha256;
+use gbf_kernel::asm_impl_model::ModelRomError;
 use gbf_kernel::asm_impl_state::{
-    StateWramLayout, build_state_multi_token_rom, build_state_one_token_rom,
+    StateWramLayout, WeightLowering, build_state_multi_token_rom,
+    build_state_multi_token_rom_lowered, build_state_one_token_rom,
 };
 use gbf_kernel::state_model_ref::{
     IntStateLoweredModel, StateCheckpoint, StateTopology, synthetic_state_checkpoint_with,
@@ -38,7 +40,7 @@ use serde_json::json;
 use crate::one_token::{DMG_M_CYCLES_PER_SECOND, OneTokenError};
 use crate::stateful::{
     StateRomGateReport, StateSeedRun, load_state_checkpoint, run_state_rom_gate,
-    run_state_seed_generation,
+    run_state_rom_gate_lowered, run_state_seed_generation,
 };
 
 /// Multi-token gate length (the mission's 64-token sustained gate).
@@ -467,6 +469,209 @@ pub fn run_d192_readiness(work_dir: &Path) -> Result<D192ReadinessReport, OneTok
              deferred to the real-checkpoint bring-up."
                 .to_string(),
         ],
+    })
+}
+
+/// Result of the V2 dispatch-lowering byte-exact gate on synthetic d192.
+#[derive(Debug, Clone, Serialize)]
+pub struct D192V2GateResult {
+    /// One-token byte-exact across the zero + carried-state cases under V2.
+    pub one_token_byte_exact: bool,
+    /// 64-token on-device generation matches the host feedback loop under V2.
+    pub multi_token_sequences_match: bool,
+    /// First/last-token WRAM checkpoints byte-exact under V2.
+    pub multi_token_checkpoints_byte_exact: bool,
+    /// Weight banks under V2 (packed base-81 streams).
+    pub v2_weight_banks: usize,
+    /// Weight banks under V3 (weights-as-code chunks).
+    pub v3_weight_banks: usize,
+    /// V2 packed weight-stream bytes.
+    pub v2_weight_stream_bytes: usize,
+    /// V3 weight-code bytes.
+    pub v3_weight_code_bytes: usize,
+    /// V2 one-token ROM total bank count.
+    pub v2_bank_count: u16,
+    /// V2 bank-0 driver bytes (must stay below the 0x4000 window).
+    pub v2_driver_bytes: usize,
+}
+
+impl D192V2GateResult {
+    #[must_use]
+    pub fn pass(&self) -> bool {
+        self.one_token_byte_exact
+            && self.multi_token_sequences_match
+            && self.multi_token_checkpoints_byte_exact
+    }
+
+    /// Bytes-per-weight density win of V2 over V3 (weight code/stream only).
+    #[must_use]
+    pub fn density_ratio(&self) -> f64 {
+        if self.v2_weight_stream_bytes == 0 {
+            return 0.0;
+        }
+        self.v3_weight_code_bytes as f64 / self.v2_weight_stream_bytes as f64
+    }
+}
+
+/// Byte-exact gate for the V2 dispatch lowering on the SAME synthetic d192
+/// model the readiness report uses: one-token (zero + carried state) and a
+/// short on-device generation, all compared against the host integer evaluator
+/// (design: docs/design/v2-dispatch-stateful.md).
+pub fn run_d192_v2_gate(work_dir: &Path) -> Result<D192V2GateResult, OneTokenError> {
+    let topology = StateTopology::D192;
+    let export_dir = work_dir.join("synthetic-export-v2");
+    write_synthetic_state_export(&export_dir, topology, D192_SYNTHETIC_SEED)?;
+    let bundle = load_state_checkpoint(&export_dir)?;
+    let lowered = IntStateLoweredModel::lower(&bundle.checkpoint)
+        .map_err(|e| OneTokenError::Model(e.to_string()))?;
+
+    // One-token cases: zero state plus carried states from a short stream.
+    let mut cases: Vec<(usize, u8, Vec<i32>)> = vec![(0, 19u8, lowered.zero_state())];
+    let mut state = lowered.zero_state();
+    let mut input = 19u8;
+    for pos in 1..=13usize {
+        let trace = lowered.forward(input, &mut state);
+        input = trace.argmax;
+        if pos == 1 || pos == 5 || pos == 13 {
+            cases.push((pos, input, state.clone()));
+        }
+    }
+    let v2_gate = run_state_rom_gate_lowered(&lowered, &cases, WeightLowering::V2Dispatch)?;
+
+    // Multi-token: a short on-device generation (byte-exact vs host feedback).
+    let rom = build_state_multi_token_rom_lowered(&lowered, 24, WeightLowering::V2Dispatch)
+        .map_err(|e| OneTokenError::Rom(e.to_string()))?;
+    let run = run_state_seed_generation(&rom, &lowered, D192_GENERATION_SEEDS[0])?;
+
+    let v3 = build_state_one_token_rom(&lowered).map_err(|e| OneTokenError::Rom(e.to_string()))?;
+    Ok(D192V2GateResult {
+        one_token_byte_exact: v2_gate.all_byte_exact,
+        multi_token_sequences_match: run.sequences_match,
+        multi_token_checkpoints_byte_exact: run.first_token_checkpoints_byte_exact
+            && run.last_token_checkpoints_byte_exact,
+        v2_weight_banks: v2_gate.rom.weight_chunk_count,
+        v3_weight_banks: v3.weight_chunk_count,
+        v2_weight_stream_bytes: v2_gate.rom.weight_code_bytes,
+        v3_weight_code_bytes: v3.weight_code_bytes,
+        v2_bank_count: v2_gate.rom.bank_count,
+        v2_driver_bytes: v2_gate.rom.driver_bytes,
+    })
+}
+
+/// A "d256-class" fit topology (step 4, docs/design/v2-dispatch-stateful.md).
+///
+/// Literal d_model=256 exceeds the device's u8 lane-loop / single head
+/// activation-page limit (max 255), and the nearest 4-aligned d256 width
+/// (d252/ff512) overflows the full-debug-dump 8 KiB WRAM surface the byte-exact
+/// gate compares. This topology instead carries **more FFN weight than
+/// d256/ff512/6blk** (10 * 2 * 416 * 208 = 1,730,560 vs 1,572,864) while fitting
+/// the full debug-dump WRAM surface, which lets the gate verify every WRAM
+/// checkpoint byte-exact. Its purpose is to prove the V2 ROM-capacity unlock:
+/// V3 weights-as-code needs 578 ROM banks (> the 512-bank / 8 MiB MBC5 ceiling,
+/// i.e. **unbuildable**), while V2 dispatch packs it into ~45 banks / 1 MiB.
+pub const D256_CLASS_TOPOLOGY: StateTopology = StateTopology {
+    d_model: 208,
+    d_ff: 416,
+    n_blocks: 10,
+    state_slots: 208,
+    vocab: 80,
+};
+
+/// Result of the d256-class V2 fit + byte-exact gate.
+#[derive(Debug, Clone, Serialize)]
+pub struct D256V2GateResult {
+    pub d_model: usize,
+    pub d_ff: usize,
+    pub n_blocks: usize,
+    pub ffn_weights: usize,
+    /// One-token byte-exact (zero + carried state) under V2.
+    pub one_token_byte_exact: bool,
+    /// On-device generation matches the host feedback loop under V2.
+    pub multi_token_sequences_match: bool,
+    /// First/last-token WRAM checkpoints byte-exact under V2.
+    pub multi_token_checkpoints_byte_exact: bool,
+    /// True only if V3 weights-as-code would ALSO fit; the unlock expects false.
+    pub v3_builds: bool,
+    /// ROM banks V3 would need (from the `TooManyBanks` overflow).
+    pub v3_banks_needed: usize,
+    /// V2 one-token ROM total bank count.
+    pub v2_bank_count: u16,
+    /// V2 ROM size in MiB.
+    pub v2_rom_mib: f64,
+    /// V2 packed weight banks.
+    pub v2_weight_banks: usize,
+    /// V2 bank-0 driver bytes (must stay below 0x4000).
+    pub v2_driver_bytes: usize,
+    /// Multi-token V2 bank-0 driver bytes (larger than one-token).
+    pub v2_multi_driver_bytes: usize,
+}
+
+impl D256V2GateResult {
+    #[must_use]
+    pub fn pass(&self) -> bool {
+        self.one_token_byte_exact
+            && self.multi_token_sequences_match
+            && self.multi_token_checkpoints_byte_exact
+            && !self.v3_builds
+            && self.v3_banks_needed > 512
+            && self.v2_bank_count <= 512
+            && self.v2_driver_bytes < 0x4000 - 0x150
+            && self.v2_multi_driver_bytes < 0x4000 - 0x150
+    }
+}
+
+/// Byte-exact gate for the V2 dispatch lowering on the d256-class fit topology:
+/// one-token (zero + carried state) and a short on-device generation compared
+/// against the host integer evaluator, plus the fit facts proving V3 cannot
+/// build this model while V2 can (step 4, docs/design/v2-dispatch-stateful.md).
+pub fn run_d256_v2_gate() -> Result<D256V2GateResult, OneTokenError> {
+    let topology = D256_CLASS_TOPOLOGY;
+    let ck = synthetic_state_checkpoint_with(topology, 0xD256);
+    let lowered =
+        IntStateLoweredModel::lower(&ck).map_err(|e| OneTokenError::Model(e.to_string()))?;
+
+    // One-token cases: zero state plus carried states from a short stream.
+    let mut cases: Vec<(usize, u8, Vec<i32>)> = vec![(0, 19u8, lowered.zero_state())];
+    let mut state = lowered.zero_state();
+    let mut input = 19u8;
+    for pos in 1..=9usize {
+        let trace = lowered.forward(input, &mut state);
+        input = trace.argmax;
+        if pos == 1 || pos == 5 || pos == 9 {
+            cases.push((pos, input, state.clone()));
+        }
+    }
+    let v2_gate = run_state_rom_gate_lowered(&lowered, &cases, WeightLowering::V2Dispatch)?;
+
+    // Multi-token: short on-device generation, byte-exact vs host feedback.
+    let mt = build_state_multi_token_rom_lowered(&lowered, 8, WeightLowering::V2Dispatch)
+        .map_err(|e| OneTokenError::Rom(e.to_string()))?;
+    let run = run_state_seed_generation(&mt, &lowered, D192_GENERATION_SEEDS[0])?;
+
+    // V3 must NOT be able to build this model (exceeds the 512-bank ceiling).
+    let (v3_builds, v3_banks_needed) = match build_state_one_token_rom(&lowered) {
+        Ok(r) => (true, usize::from(r.bank_count)),
+        Err(ModelRomError::TooManyBanks { banks }) => (false, banks),
+        Err(e) => return Err(OneTokenError::Rom(e.to_string())),
+    };
+
+    let ffn_weights = topology.n_blocks * 2 * topology.d_ff * topology.d_model;
+    Ok(D256V2GateResult {
+        d_model: topology.d_model,
+        d_ff: topology.d_ff,
+        n_blocks: topology.n_blocks,
+        ffn_weights,
+        one_token_byte_exact: v2_gate.all_byte_exact,
+        multi_token_sequences_match: run.sequences_match,
+        multi_token_checkpoints_byte_exact: run.first_token_checkpoints_byte_exact
+            && run.last_token_checkpoints_byte_exact,
+        v3_builds,
+        v3_banks_needed,
+        v2_bank_count: v2_gate.rom.bank_count,
+        v2_rom_mib: v2_gate.rom.rom_bytes as f64 / (1024.0 * 1024.0),
+        v2_weight_banks: v2_gate.rom.weight_chunk_count,
+        v2_driver_bytes: v2_gate.rom.driver_bytes,
+        v2_multi_driver_bytes: mt.driver_bytes,
     })
 }
 

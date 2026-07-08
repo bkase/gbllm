@@ -20,13 +20,14 @@ use std::fs;
 use std::path::Path;
 
 use gbf_emu::{
-    BootMode, CycleBudget, DMG_FRAME_CLOCK_CYCLES, DeterminismPolicy, Emulator, RunOutcome,
-    TraceDropPolicy,
+    BootMode, ClockCycles, CycleBudget, DMG_FRAME_CLOCK_CYCLES, DeterminismPolicy, Emulator,
+    RunOutcome, TraceDropPolicy,
 };
 use gbf_foundation::sha256;
 use gbf_kernel::asm_impl_state::{
     S_ARGMAX_ADDR, S_DONE_ADDR, S_INPUT_ADDR, S_STACK_TOP, StateMultiTokenRom, StateOneTokenRom,
-    StateWramLayout, build_state_multi_token_rom, build_state_one_token_rom,
+    StateWramLayout, WeightLowering, build_state_multi_token_rom,
+    build_state_one_token_rom_lowered,
 };
 use gbf_kernel::model_ref::TernaryLayer;
 use gbf_kernel::state_model_ref::{
@@ -631,6 +632,16 @@ pub fn harvest_state_cases(
     cases
 }
 
+/// Per-token emulator budget, scaled with the model's MAC count so the
+/// byte-exact gates never false-timeout on the slower V2 dispatch path or on
+/// bigger topologies. Still far under the 120 s/char design budget; a genuine
+/// hang spins forever and is caught by any finite budget.
+fn state_run_budget(lowered: &IntStateLoweredModel) -> CycleBudget {
+    let macs = lowered.topology.macs_per_token();
+    let floor = DMG_FRAME_CLOCK_CYCLES.saturating_mul(3_000).0;
+    CycleBudget::Clock(ClockCycles(floor.max(macs.saturating_mul(512))))
+}
+
 fn run_one_state_case(
     rom: &StateOneTokenRom,
     lowered: &IntStateLoweredModel,
@@ -656,7 +667,7 @@ fn run_one_state_case(
         }
     }
 
-    let budget = CycleBudget::Clock(DMG_FRAME_CLOCK_CYCLES.saturating_mul(3_000));
+    let budget = state_run_budget(lowered);
     let run_to = |emu: &mut Emulator, pc: u16, phase: &str| -> Result<(), OneTokenError> {
         match emu.run_fast_until_pc(pc, budget) {
             Ok(RunOutcome::TrapHit { .. }) => Ok(()),
@@ -713,7 +724,19 @@ pub fn run_state_rom_gate(
     lowered: &IntStateLoweredModel,
     cases: &[(usize, u8, Vec<i32>)],
 ) -> Result<StateRomGateReport, OneTokenError> {
-    let rom = build_state_one_token_rom(lowered).map_err(|e| OneTokenError::Rom(e.to_string()))?;
+    run_state_rom_gate_lowered(lowered, cases, WeightLowering::V3)
+}
+
+/// [`run_state_rom_gate`] with an explicit weight lowering. The V2 path packs
+/// the base-81 dispatch streams; it must stay byte-exact against the SAME host
+/// integer evaluator, so `all_byte_exact` is the gate for both lowerings.
+pub fn run_state_rom_gate_lowered(
+    lowered: &IntStateLoweredModel,
+    cases: &[(usize, u8, Vec<i32>)],
+    lowering: WeightLowering,
+) -> Result<StateRomGateReport, OneTokenError> {
+    let rom = build_state_one_token_rom_lowered(lowered, lowering)
+        .map_err(|e| OneTokenError::Rom(e.to_string()))?;
     let facts = StateRomFacts {
         rom_bytes: rom.rom.len(),
         bank_count: rom.bank_count,
@@ -874,7 +897,7 @@ pub fn run_state_seed_generation(
         .collect::<Result<_, _>>()
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
 
-    let budget = CycleBudget::Clock(DMG_FRAME_CLOCK_CYCLES.saturating_mul(3_000));
+    let budget = state_run_budget(lowered);
     let run_to = |emu: &mut Emulator, pc: u16, phase: &str| -> Result<(), OneTokenError> {
         match emu.run_fast_until_pc(pc, budget) {
             Ok(RunOutcome::TrapHit { .. }) => Ok(()),
@@ -1541,5 +1564,151 @@ mod tests {
     #[test]
     fn render_char_sample_decodes_ids() {
         assert_eq!(render_char_sample(&[19, 33, 30, 62, 75]), "The \n");
+    }
+
+    // -- V2 dispatch lowering: the packed base-81 stream ROM must be byte-exact
+    //    against the SAME host integer evaluator the V3 gate uses. ARM-B (i16
+    //    down, cross-bank stream) covers step 2; D192 (wide i24 down) covers
+    //    step 3 (design: docs/design/v2-dispatch-stateful.md).
+    //    (`WeightLowering` + the lowered builders come from `super::*`.)
+    use gbf_kernel::asm_impl_state::build_state_one_token_rom;
+
+    #[test]
+    fn v2_one_token_rom_byte_exact_i16_arm_b() {
+        let ck = synthetic_state_checkpoint(21);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        assert_eq!(lowered.down_width, AccWidth::I16, "arm-B is the i16 path");
+        let rom = build_state_one_token_rom_lowered(&lowered, WeightLowering::V2Dispatch)
+            .expect("v2 one-token ROM builds");
+        // Cross-bank streaming must actually be exercised.
+        assert!(
+            rom.bank_count > 1 + rom.weight_chunk_count.max(1) as u16
+                || rom.weight_chunk_count >= 2,
+            "packed weights should span multiple banks (banks={}, weight_banks={})",
+            rom.bank_count,
+            rom.weight_chunk_count
+        );
+
+        let mut nonzero = lowered.zero_state();
+        for (slot, h) in nonzero.iter_mut().enumerate() {
+            *h = (slot as i32 - 32) * 4093;
+        }
+        for (pos, input, state) in [(0usize, 7u8, lowered.zero_state()), (1usize, 42u8, nonzero)] {
+            let run = run_one_state_case(&rom, &lowered, pos, input, &state).expect("case runs");
+            assert!(
+                run.byte_exact,
+                "V2 i16 input {input}: mismatches {:?}",
+                run.mismatches
+            );
+        }
+    }
+
+    #[test]
+    fn v2_one_token_rom_byte_exact_wide_d192() {
+        use gbf_kernel::state_model_ref::{StateTopology, synthetic_state_checkpoint_with};
+        let ck = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        assert_eq!(lowered.down_width, AccWidth::I24, "d192 is the wide path");
+        let rom = build_state_one_token_rom_lowered(&lowered, WeightLowering::V2Dispatch)
+            .expect("v2 wide one-token ROM builds");
+
+        let mut state = lowered.zero_state();
+        let t0 = lowered.forward(19, &mut state);
+        let carried = state.clone();
+        for (pos, input, st) in [
+            (0usize, 19u8, lowered.zero_state()),
+            (1usize, t0.argmax, carried),
+        ] {
+            let run = run_one_state_case(&rom, &lowered, pos, input, &st).expect("case runs");
+            assert!(
+                run.byte_exact,
+                "V2 wide input {input}: mismatches {:?}",
+                run.mismatches
+            );
+        }
+    }
+
+    #[test]
+    fn v2_density_and_bank0_fit_d192() {
+        // V2 packs the weights far denser than V3's weights-as-code, and the
+        // shared handler must still leave the bank-0 driver inside 0x150..0x4000
+        // for both one-token and multi-token drivers.
+        use gbf_kernel::state_model_ref::{StateTopology, synthetic_state_checkpoint_with};
+        let ck = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let v3 = build_state_one_token_rom(&lowered).expect("v3");
+        let v2 =
+            build_state_one_token_rom_lowered(&lowered, WeightLowering::V2Dispatch).expect("v2");
+        assert!(
+            v2.weight_chunk_count * 10 < v3.weight_chunk_count,
+            "V2 should use far fewer weight banks (V3={}, V2={})",
+            v3.weight_chunk_count,
+            v2.weight_chunk_count
+        );
+        assert!(
+            v2.weight_code_bytes * 10 < v3.weight_code_bytes,
+            "V2 stream should be ~an order of magnitude denser (V3={} B, V2={} B)",
+            v3.weight_code_bytes,
+            v2.weight_code_bytes
+        );
+        // The multi-token driver is larger than one-token; it must also fit.
+        let mt = gbf_kernel::asm_impl_state::build_state_multi_token_rom_lowered(
+            &lowered,
+            64,
+            WeightLowering::V2Dispatch,
+        )
+        .expect("V2 multi-token d192 driver must fit bank 0");
+        assert!(mt.driver_bytes < 0x4000 - 0x150);
+        assert!(v2.driver_bytes < 0x4000 - 0x150);
+    }
+
+    #[test]
+    #[ignore = "slow full-model emulation (~3 min); driven by the d192-readiness bin"]
+    fn v2_d256_class_gate_unlocks_a_model_v3_cannot_build() {
+        // Step 4: a d256-class model (more FFN weight than d256/ff512/6blk) that
+        // V3 weights-as-code cannot fit (> 512 banks) but V2 packs into ~45
+        // banks / 1 MiB, running byte-exact one-token + multi-token.
+        let r = crate::d192::run_d256_v2_gate().expect("d256-class gate runs");
+        assert!(
+            r.ffn_weights > 6 * 2 * 512 * 256,
+            "gate topology should carry >= d256/ff512/6blk FFN weight (got {})",
+            r.ffn_weights
+        );
+        assert!(!r.v3_builds, "V3 must NOT fit this model (the unlock)");
+        assert!(
+            r.v3_banks_needed > 512,
+            "V3 should overflow the 512-bank ceiling (needs {})",
+            r.v3_banks_needed
+        );
+        assert!(r.v2_bank_count <= 512, "V2 must fit the 512-bank ceiling");
+        assert!(r.one_token_byte_exact, "V2 one-token must be byte-exact");
+        assert!(
+            r.multi_token_sequences_match && r.multi_token_checkpoints_byte_exact,
+            "V2 multi-token must be byte-exact"
+        );
+        assert!(r.pass());
+    }
+
+    #[test]
+    fn v2_multi_token_rom_matches_host_generation_arm_b() {
+        let ck = synthetic_state_checkpoint(21);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let rom = gbf_kernel::asm_impl_state::build_state_multi_token_rom_lowered(
+            &lowered,
+            8,
+            WeightLowering::V2Dispatch,
+        )
+        .expect("v2 multi-token ROM builds");
+        let run = run_state_seed_generation(&rom, &lowered, 19).expect("runs");
+        assert!(
+            run.sequences_match,
+            "V2 ROM sequence diverged at {:?} ({:?})",
+            run.first_divergence_index, run.checkpoint_mismatches
+        );
+        assert!(
+            run.first_token_checkpoints_byte_exact && run.last_token_checkpoints_byte_exact,
+            "V2 dump mismatches {:?}",
+            run.checkpoint_mismatches
+        );
     }
 }

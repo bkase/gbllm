@@ -824,6 +824,78 @@ mod tests {
         }
     }
 
+    /// V2 dispatch lowering must reproduce the sampling ROM byte-exactly too:
+    /// the sampler routines sit on top of the multi-token driver, so this also
+    /// confirms the V2 shared handler still fits bank 0 with the sampler.
+    #[test]
+    fn v2_sampling_rom_matches_host_on_synthetic_model() {
+        use gbf_kernel::asm_impl_state::{
+            WeightLowering, build_state_multi_token_sampling_rom_lowered,
+        };
+        let ck = synthetic_state_checkpoint(21);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let cfg = SamplerConfig::new(8, 2253).expect("valid sampler");
+        let rom = build_state_multi_token_sampling_rom_lowered(
+            &lowered,
+            6,
+            &cfg,
+            WeightLowering::V2Dispatch,
+        )
+        .expect("v2 sampling ROM builds");
+        for &(seed, rng_seed) in &[(19u8, 0xBEEFu16), (42, 0x0000)] {
+            let run = run_sampling_combo(&rom, &lowered, &cfg, seed, rng_seed).expect("runs");
+            assert!(
+                run.sequences_match,
+                "V2 seed {seed} rng {rng_seed:#06x}: ROM diverged at {:?} ({:?})",
+                run.first_divergence_index, run.checkpoint_mismatches
+            );
+            assert!(
+                run.first_token_checkpoints_byte_exact
+                    && run.last_token_checkpoints_byte_exact
+                    && run.sampled_id_matches_first_and_last,
+                "V2 dump mismatches {:?}",
+                run.checkpoint_mismatches
+            );
+            assert!(run.done_flag_set);
+        }
+    }
+
+    /// d192 sampling + shell drivers must still fit bank 0 (0x150..0x4000)
+    /// under V2 — they carry the most bank-0 code (sampler / UI) on top of the
+    /// shared handler.
+    #[test]
+    fn v2_d192_sampling_and_shell_fit_bank0() {
+        use gbf_kernel::asm_impl_shell::{build_state_shell_rom_lowered, synthetic_font_tiles};
+        use gbf_kernel::asm_impl_state::{
+            WeightLowering, build_state_multi_token_sampling_rom_lowered,
+        };
+        use gbf_kernel::state_model_ref::{StateTopology, synthetic_state_checkpoint_with};
+        let ck = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let cfg = SamplerConfig::new(8, 2253).expect("valid sampler");
+        let samp = build_state_multi_token_sampling_rom_lowered(
+            &lowered,
+            32,
+            &cfg,
+            WeightLowering::V2Dispatch,
+        )
+        .expect("v2 d192 sampling ROM builds within bank 0");
+        assert!(
+            samp.driver_bytes < 0x4000 - 0x150,
+            "v2 d192 sampling driver {} must fit bank 0",
+            samp.driver_bytes
+        );
+        let font = synthetic_font_tiles();
+        let shell =
+            build_state_shell_rom_lowered(&lowered, &cfg, 6, &font, WeightLowering::V2Dispatch)
+                .expect("v2 d192 shell ROM builds within bank 0");
+        assert!(
+            shell.driver_bytes < 0x4000 - 0x150,
+            "v2 d192 shell driver {} must fit bank 0",
+            shell.driver_bytes
+        );
+    }
+
     /// The host mirror is deterministic and differs across rng seeds
     /// (generically) while the argmax path is seed-independent.
     #[test]

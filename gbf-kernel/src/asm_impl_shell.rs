@@ -75,8 +75,8 @@ use crate::asm_impl_model::{
 };
 use crate::asm_impl_state::{
     S_INPUT_ADDR, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP, ShellWram, StateWramLayout,
-    assemble_state_rom, emit_state_forward_body, emit_state_routines_and_tables, emit_zero16,
-    plan_state_rom, set_bank,
+    WeightLowering, assemble_state_rom, emit_state_forward_body, emit_state_routines_and_tables,
+    emit_zero16, plan_state_rom_with, set_bank,
 };
 use crate::state_model_ref::IntStateLoweredModel;
 
@@ -919,6 +919,19 @@ pub fn build_state_shell_rom(
     n_gen_tokens: u8,
     font_tiles: &[u8],
 ) -> Result<ShellRom, ModelRomError> {
+    build_state_shell_rom_lowered(model, sampler, n_gen_tokens, font_tiles, WeightLowering::V3)
+}
+
+/// [`build_state_shell_rom`] with an explicit weight lowering. The shell driver
+/// (UI + sampler + forward pass) is the largest bank-0 driver, so this is the
+/// tightest bank-0 fit check for the V2 shared handler.
+pub fn build_state_shell_rom_lowered(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    lowering: WeightLowering,
+) -> Result<ShellRom, ModelRomError> {
     if n_gen_tokens == 0 || n_gen_tokens > SHELL_MAX_GEN_TOKENS {
         return Err(ModelRomError::BadTokenCount {
             n_tokens: u16::from(n_gen_tokens),
@@ -934,7 +947,7 @@ pub fn build_state_shell_rom(
     let sh = layout
         .shell
         .expect("shell layout allocates the shell block");
-    let plan = plan_state_rom(model, layout, 1)?;
+    let plan = plan_state_rom_with(model, layout, 1, lowering)?;
     let ui_bank = plan.head_bank0 + plan.head_groups.len();
     let (ui_bytes, ui) = build_ui_bank(font_tiles, &sh)?;
     let ui_bank_bytes = ui_bytes.len();
