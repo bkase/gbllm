@@ -123,7 +123,40 @@ dwarfed by the ~40 cycles saved per zero call.
 the only input it short-circuits. Byte-exact: d192 + arm-B regressions and all
 63 kernel unit tests pass.
 
-## Remaining levers (profiled, not yet done)
+## Floor analysis — why 17.782 s/char is the practical byte-exact floor
+
+After entries 1–3 (21.695 → 17.782, −18.0%), every remaining block was traced to
+its algorithmic limit for byte-exact integer work on the LR35902:
+
+- **V3 matvec — 37.7%, the largest block, at its floor.** Each nonzero ternary
+  weight adds an 8-bit activation into a 16-bit accumulator. That is 6 M-cycles
+  and cannot be fewer: the LR35902 has no "add 16-bit += 8-bit" instruction, so
+  the branchless `add/ld/adc/sub/ld` idiom (or any equivalent) is 6 ops. With
+  real weights only 0.59% zero there is no sparsity to skip. 37.7% is just the
+  irreducible cost of ~974k ternary MACs + the `pop`-per-pair activation fetch.
+- **State out-projection — ~10%.** Optimized twice (entries 1–2); now register-
+  resident cursors + HRAM accumulator. At its floor for an i24-activation matvec.
+- **RMS norm — ~10%.** Dominated by the 24-bit sum-of-squares (a genuine square
+  per lane, 3 sub-multiplies). The multiplier-zero early-out (entry 3) already
+  collapses the hi-byte products for small lanes; the 7-byte i48 accumulator is
+  the minimum width for 192 summed i24 squares; the `isqrt48` is a fixed 24-step.
+- **Tied head — ~9%.** Already register-pointer-tight: the per-lane product LUT is
+  built with adds (not multiplies) and the 256×d_model logit accumulate uses
+  `add a,(hl)` against `(bc)`/`(de)` cursors. No addressing slack.
+- **Per-row epilogues (up/down/state-out) — small.** They keep read/write cursors
+  in scratch RAM, but the reload is only ~0.5% combined and is forced by the
+  `mul16` call in the loop body clobbering the register file — reward below risk.
+
+Considered and rejected: a **quarter-square multiply table** (`a·b = f(a+b) −
+f(|a−b|)`). It is exact, but it does *not* win here — `mul16x8` already does the
+full 8×16 product in one 8-iteration pass, whereas the table form needs two 8×8
+products plus 9-bit-index address arithmetic, i.e. more work, especially now that
+the zero early-out is in.
+
+Further byte-exact speedups exist only as sub-1% micro-opts with rising risk. The
+real next levers are strategic, not micro:
+
+## Remaining levers (strategic — each a deliberate choice, not a micro-step)
 
 - **RMS norm cluster** (`n24_*` / `udn5_rot_*` / `udiv_norm5`, ~10%): runs ~8×/token.
   The 24-bit sum-of-squares (three software multiplies per lane) is intrinsic;
