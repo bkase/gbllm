@@ -54,7 +54,8 @@ use std::collections::BTreeMap;
 
 use gbf_asm::encoder::EncodedSection;
 use gbf_asm::isa::{
-    AluSrc8, BitIndex, CbTarget, Cond, IncDec8Target, Instr, Reg8, Reg16Addr, Reg16Data, Reg16Stack,
+    AluSrc8, BitIndex, CbTarget, Cond, HighDirectOffset, IncDec8Target, Instr, Reg8, Reg16Addr,
+    Reg16Data, Reg16Stack,
 };
 use gbf_asm::layout::{AddressSpace, BankIndex, LayoutPlan, PlacedSection};
 use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, RomSize, assemble_rom};
@@ -127,7 +128,7 @@ const HI8: u16 = 0xC379; // 1 byte (norm squaring high byte)
 const DPTR: u16 = 0xC37A; // 2 bytes decay table pointer
 const HPTR: u16 = 0xC37C; // 2 bytes state pointer
 const WPTR: u16 = 0xC37E; // 2 bytes weight pointer
-const ACC4: u16 = 0xC380; // 4 bytes out-matvec accumulator
+const ACC4_HI: u8 = 0x80; // smv out-matvec accumulator, HRAM 0xFF80..=0xFF83 (LDH: 3-cycle)
 const OEP_A: u16 = 0xC388; // 5 bytes out-epilogue product
 const XP2: u16 = 0xC390; // 2 bytes secondary pointer
 const YPTR: u16 = 0xC394; // 2 bytes y dump pointer
@@ -1249,25 +1250,29 @@ fn emit_state_update(asm: &mut ModelAsm, l: &StateWramLayout, scales_addr: u16, 
 /// into SACC via the persistent OPTR. The weight table rows are
 /// `state_slots` i8 entries padded to `pad` extra bytes (power-of-two
 /// stride), so the caller can walk multiple banks.
-/// `ACC4 += (DE..DE+4)` (or `-=` when `sub`) over the carried i24 state slot,
-/// advancing `DE` by 4. Byte 0 uses `add`/`sub`, bytes 1..4 chain the carry
-/// with `adc`/`sbc` — identical integer result to the old
-/// `load h -> ST_H; mem_add/mem_sub_into(ACC4, ST_H)` pair, but the state byte
-/// is consumed straight from the `DE` cursor with no scratch round-trip.
+/// `ACC4 += (HL..HL+4)` (or `-=` when `sub`) over the carried i24 state slot,
+/// advancing the `HL` state cursor by 4. The accumulator lives in HRAM, so each
+/// byte is `ldh a,(acc); add/adc a,(hl); ldh (acc),a; inc hl` — the state byte
+/// is folded straight into the ALU op via `(hl)` (no temp register) and the
+/// accumulator load/store use the 3-cycle `LDH` form. Byte 0 uses `add`/`sub`,
+/// bytes 1..4 chain the carry with `adc`/`sbc`. Integer result is identical to
+/// the WRAM/absolute version; only the addressing is cheaper.
 fn emit_acc4_state_pm(asm: &mut ModelAsm, sub: bool) {
-    for k in 0..4u16 {
-        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
-        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
-        ld_rr(asm, Reg8::B, Reg8::A);
-        a_from(asm, ACC4 + k);
-        let src = AluSrc8::Reg(Reg8::B);
+    for k in 0..4u8 {
+        asm.i(Instr::LdAFromHighDirect {
+            offset: HighDirectOffset::new(ACC4_HI + k),
+        });
+        let src = AluSrc8::HlIndirect;
         match (sub, k) {
             (false, 0) => asm.i(Instr::AddA { src }),
             (false, _) => asm.i(Instr::AdcA { src }),
             (true, 0) => asm.i(Instr::SubA { src }),
             (true, _) => asm.i(Instr::SbcA { src }),
         }
-        a_to(asm, ACC4 + k);
+        asm.i(Instr::LdHighDirectFromA {
+            offset: HighDirectOffset::new(ACC4_HI + k),
+        });
+        asm.i(Instr::Inc16 { dst: Reg16Data::HL });
     }
 }
 
@@ -1275,28 +1280,36 @@ fn emit_acc4_state_pm(asm: &mut ModelAsm, sub: bool) {
 /// (see the caller), dots each ternary out-projection row with the carried i24
 /// state into `ACC4`, storing the i32 result through the persistent `OPTR`.
 ///
-/// Both cursors are register-resident across the hot inner loop: `HL` walks the
-/// row's weight bytes in the mapped ROM window with `ld a,(hl+)`, and `DE` walks
-/// the WRAM state slots. This replaces the previous interpreter that reloaded
-/// and rewrote *both* pointers from scratch memory on every column and copied
-/// each state slot into `ST_H` before adding — the integer result is byte-for-
-/// byte identical (same ordered ternary add/sub; encoding `1 => +1`,
-/// other-nonzero `=> -1`, `0 => skip`), only far cheaper per weight.
+/// Register-resident hot loop: `HL` walks the WRAM state slots (so the state
+/// byte feeds the accumulate directly as `add a,(hl)` — no temp register), `DE`
+/// walks the row's weight bytes in the mapped ROM window, and the 4-byte
+/// accumulator lives in HRAM for 3-cycle `LDH` access. This replaces the
+/// original interpreter that reloaded and rewrote *both* pointers from scratch
+/// memory every column and copied each state slot into `ST_H` before adding.
+/// The integer result is byte-for-byte identical (same ordered ternary add/sub;
+/// encoding `1 => +1`, other-nonzero `=> -1`, `0 => skip`), only far cheaper.
 fn emit_state_out_matvec(asm: &mut ModelAsm, l: &StateWramLayout, pad: u8) {
     asm.label("state_out_mv");
-    // HL := (WPTR) once per bank; the caller preset WPTR := CHUNK_ENTRY.
+    // DE := (WPTR) weight cursor, once per bank; caller preset WPTR := CHUNK_ENTRY.
     a_from(asm, WPTR);
-    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_rr(asm, Reg8::E, Reg8::A);
     a_from(asm, WPTR + 1);
-    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_rr(asm, Reg8::D, Reg8::A);
     asm.label("smv_row");
-    zero_mem(asm, ACC4, 4);
-    ld16(asm, Reg16Data::DE, l.state);
+    // ACC4 := 0 (HRAM).
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    for k in 0..4u8 {
+        asm.i(Instr::LdHighDirectFromA {
+            offset: HighDirectOffset::new(ACC4_HI + k),
+        });
+    }
+    ld16(asm, Reg16Data::HL, l.state); // state cursor
     ld_r_imm(asm, Reg8::C, l.topology.state_slots as u8);
     asm.label("smv_col");
-    asm.i(Instr::LdAFromReg16Addr {
-        src: Reg16Addr::Hli,
-    }); // w = *HL++
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE }); // w = *DE
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -1312,33 +1325,43 @@ fn emit_state_out_matvec(asm: &mut ModelAsm, l: &StateWramLayout, pad: u8) {
     asm.jr(None, "smv_next");
     asm.label("smv_skip");
     for _ in 0..4 {
-        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+        asm.i(Instr::Inc16 { dst: Reg16Data::HL });
     }
     asm.label("smv_next");
     asm.i(Instr::Dec8 {
         dst: IncDec8Target::Reg(Reg8::C),
     });
     asm.jr(Some(Cond::NZ), "smv_col");
-    // Row epilogue: store ACC4 -> (OPTR) (advances OPTR, clobbers HL), restore
-    // the weight cursor, then skip any inter-row padding in the weight stream.
-    asm.i(Instr::Push {
-        src: Reg16Stack::HL,
-    });
-    store_via_ptr_from(asm, OPTR, ACC4, 4);
-    asm.i(Instr::Pop {
-        dst: Reg16Stack::HL,
-    });
+    // Row epilogue: store ACC4 (HRAM) -> (OPTR), advancing OPTR. HL (state
+    // cursor) is free to clobber (reset next row); DE (weight cursor) untouched.
+    a_from(asm, OPTR);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, OPTR + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    for k in 0..4u8 {
+        asm.i(Instr::LdAFromHighDirect {
+            offset: HighDirectOffset::new(ACC4_HI + k),
+        });
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, OPTR);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, OPTR + 1);
+    // Skip inter-row padding in the weight stream (advance DE weight cursor).
     if pad > 0 {
-        ld_rr(asm, Reg8::A, Reg8::L);
+        ld_rr(asm, Reg8::A, Reg8::E);
         asm.i(Instr::AddA {
             src: AluSrc8::Imm(pad),
         });
-        ld_rr(asm, Reg8::L, Reg8::A);
-        ld_rr(asm, Reg8::A, Reg8::H);
+        ld_rr(asm, Reg8::E, Reg8::A);
+        ld_rr(asm, Reg8::A, Reg8::D);
         asm.i(Instr::AdcA {
             src: AluSrc8::Imm(0),
         });
-        ld_rr(asm, Reg8::H, Reg8::A);
+        ld_rr(asm, Reg8::D, Reg8::A);
     }
     a_from(asm, ROWCNT);
     asm.i(Instr::Dec8 {

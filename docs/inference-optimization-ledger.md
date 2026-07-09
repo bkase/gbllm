@@ -1,0 +1,113 @@
+# Game Boy inference speed — optimization ledger
+
+Running log of every speed optimization applied to the deployed **dense d192
+state model** running on DMG (`artifacts/builds/gbllm-shell-d192.gb`). One entry
+per landed change: what it was, *why it worked*, the measured effect, and how it
+was proven safe.
+
+## Ground rules (invariants held by every entry)
+
+- **Numerics never change.** Every entry is byte-for-byte identical output vs the
+  host integer evaluator. The generated token stream, all WRAM dumps, and the
+  logits are unchanged — only the cycle cost moves.
+- **Proof of safety:** `cargo test --release -p gbf-bench --test d192_generation_regression`
+  (byte-exact one-token + 12-token on-device generation on the real d192, ~7s)
+  must pass, and the arm-B regression (`state_arm_b_regression`) must stay green
+  since the state kernel is shared across topologies.
+- **Measurement:** `cargo run --release -p gbf-bench --bin cycle-profile` single-
+  steps one token in the cycle-accurate emulator and attributes M-cycles by PC
+  region (`>=0x4000` = switched weight-code banks / V3 matvec; `<0x4000` = fixed
+  driver bank) and by named driver routine. DMG runs at 1,048,576 M-cycles/sec.
+
+## The key insight that drives this work
+
+The kernel-bakeoff established V3 "weights-as-code" as the fastest matvec and the
+project treated ~21.7 s/char as near the floor. The profiler showed otherwise:
+**per token, the V3 matvec is only ~31% of cycles; the driver bank is ~69%.**
+The matvec was already tuned; the driver never was. So the wins are in the
+driver: the interpreted state out-projection, the RMS norm, the tied head, and
+the software multiplies.
+
+## Progress
+
+| # | change | s/char | Δ vs prev | cum. vs 21.695 |
+|---|--------|-------:|----------:|---------------:|
+| 0 | baseline (committed d192-real) | 21.695 | — | — |
+| 1 | out-projection: register-resident cursors | 18.707 | −13.8% | −13.8% |
+| 2 | out-projection: HRAM accumulator + `add a,(hl)` | 18.214 | −2.6% | −16.0% |
+
+---
+
+## Entry 1 — state out-projection matvec: register-resident cursors
+
+**Commit:** `2a966c3` · **File:** `gbf-kernel/src/asm_impl_state.rs` (`emit_state_out_matvec`)
+**Effect:** 21.695 → 18.707 s/char (−13.8%). `smv_col` 18.5% → 7.3% of the token.
+
+**What it was.** The state out-projection (ternary weights × carried i24 state,
+~36,864 MACs) was the single biggest driver cost (~25% of the token) and the one
+matvec *not* done as weights-as-code — because it multiplies against **i24 state
+activations**, not i8, which won't fit the V3 pop-based dispatch. So it was a
+memory-to-memory interpreter: it kept the weight cursor and the state cursor as
+2-byte pointers **in scratch RAM**, and every single column reloaded both
+pointers into `HL`, dereferenced, and wrote them back — plus it copied each
+4-byte state slot into a scratch (`ST_H`) before adding it to the accumulator.
+
+**Why the fix worked.** Two software pointers reloaded/rewritten per column is
+~30 cycles/weight of pure bookkeeping on an 8-bit CPU with only one 16-bit
+indirect register. Holding the weight cursor in `HL` (walked with `ld a,(hl+)`,
+which auto-increments for free) and the state cursor in `DE` keeps both live
+across the whole inner loop — the per-column pointer save/restore vanishes. Folding
+the state read directly into the 4-byte accumulate also drops the `ST_H` scratch
+round-trip (a whole redundant pass over 4 bytes per weight). Net ~157 → ~68
+cycles/MAC on this matvec, same integer result.
+
+**Why it's safe.** The weights for a bank are laid out contiguously in the mapped
+`[0x4000,0x8000)` window (the caller switches banks between calls, never mid-
+matvec), so a simple incrementing `HL` cursor walks them correctly. Same ordered
+ternary add/sub, same skip-on-zero, same encoding (`1 => +1`, other `=> -1`).
+
+---
+
+## Entry 2 — state out-projection: HRAM accumulator + `add a,(hl)`
+
+**File:** `gbf-kernel/src/asm_impl_state.rs` (`emit_state_out_matvec`, `emit_acc4_state_pm`)
+**Effect:** 18.707 → 18.214 s/char (−2.6%). `smv_col` 7.3% → 6.4%.
+
+**What it was.** After entry 1 the inner loop still (a) read each state byte into
+a temp register before adding it to the accumulator, and (b) accessed the 4-byte
+accumulator with absolute addressing (`ld a,(nnnn)` / `ld (nnnn),a` = 4 M-cycles
+each).
+
+**Why the fix worked.** Two independent addressing wins, both numerics-neutral:
+- **Swap the cursors** so the *state* cursor is in `HL`. Then the state byte is
+  consumed directly by the ALU as `add a,(hl)` / `adc a,(hl)` (and `sub`/`sbc`),
+  eliminating the separate `ld a,(de); ld b,a` load+move per byte. The weight
+  cursor moves to `DE` (`ld a,(de); inc de`), costing +2 cycles/weight on the
+  fetch but saving more on the accumulate.
+- **Move the accumulator into HRAM** (`0xFF80..=0xFF83`). High RAM has the
+  shorter `LDH` encoding (3 M-cycles vs 4 for absolute), so all 8 accumulator
+  touches per weight get cheaper. HRAM is otherwise unused by the kernel and the
+  stack lives at `0xDFF0` (WRAM), so there's no collision.
+
+Together: ~68 → ~53 cycles/weight on this matvec. Bonus simplification — the
+row-end store to `(OPTR)` no longer needs to preserve a cursor (it clobbers the
+`HL` state cursor, which is reset next row anyway; `DE` is untouched), so the
+`push/pop hl` from entry 1 is gone.
+
+**Why it's safe.** Same adds in the same order; only the operand addressing
+changed. Guarded by the byte-exact regression + arm-B regression.
+
+---
+
+## Remaining levers (profiled, not yet done)
+
+- **RMS norm cluster** (`n24_*` / `udn5_rot_*` / `udiv_norm5`, ~10%): runs ~8×/token.
+  The 24-bit sum-of-squares (three software multiplies per lane) is intrinsic;
+  gains would need a squaring-specific routine — higher risk.
+- **Tied-head logits** (`emit_head` / `hg_*`, ~8%): builds a per-lane product LUT
+  then accumulates 256 logits.
+- **Software multiplies** (`mul16` / `mul16x8`, ~3%): decay/scale; mostly the norm.
+- **V3 matvec** (~37%, largest single block): already near its floor; the zero-skip
+  machinery is near-useless on the real 0.59%-zero weights but removing it saves
+  little. Bigger structural change would be the V2-dispatch path (trades speed for
+  capacity — out of scope for pure speed).
