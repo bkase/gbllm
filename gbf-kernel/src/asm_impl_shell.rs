@@ -139,6 +139,79 @@ const LCDC_ON: u8 = 0x91;
 /// Standard DMG palette (3=darkest .. 0=lightest).
 const BGP_STANDARD: u8 = 0xE4;
 
+// ---------------------------------------------------------------------------
+// Inference "thinking" animation (Aurora Plasma Drift)
+// ---------------------------------------------------------------------------
+//
+// During a token's ~18s compute the screen would otherwise be frozen. The
+// weight-chunk loop calls `anim_tick` once per chunk (~22 Hz); it writes only
+// PPU registers (never VRAM, no VBlank wait) so it is safe mid-compute. We fill
+// the keyboard rows (idle during generation) with a seamless plasma field built
+// from pixel values 1 and 2 ONLY, then shimmer it by rotating those two shades
+// in BGP. Every LUT entry keeps pixel value 0 -> shade 0 (white paper) and
+// value 3 -> shade 3 (black ink), so the transcript text stays black-on-white
+// and perfectly legible the whole time.
+
+/// First plasma tile index (52 free tiles 76..=127 available; we use 16).
+const ANIM_TILE0: u8 = 76;
+const ANIM_TILES: u8 = 16;
+/// Plasma panel rows in the BG map (the keyboard grid, unused during compute).
+const ANIM_ROW_LO: u8 = KB_ORIGIN_ROW; // 13
+const ANIM_ROW_HI: u8 = KB_ORIGIN_ROW + KB_ROWS; // 17 (exclusive)
+
+/// 8-step BGP shimmer. Text-safe: bits 0-1 (value 0) stay 00 and bits 6-7
+/// (value 3) stay 11 in every entry; only values 1 and 2 rotate.
+const ANIM_BGP_LUT: [u8; 8] = [0xE4, 0xD8, 0xD4, 0xF8, 0xEC, 0xE8, 0xC4, 0xD0];
+
+/// 16 plasma tiles: a seamless 32x32 (4x4-tile) interference cell, 2bpp planar,
+/// using only pixel values 1 and 2. Tile (tr,tc) -> index ANIM_TILE0+tr*4+tc.
+fn anim_plasma_tiles() -> Vec<u8> {
+    use core::f64::consts::TAU;
+    let field = |x: i32, y: i32| -> f64 {
+        let hyp = (((x - 16).pow(2) + (y - 16).pow(2)) as f64).sqrt();
+        (TAU * x as f64 / 32.0).sin()
+            + (TAU * y as f64 / 32.0).sin()
+            + (TAU * (x + y) as f64 / 32.0).sin()
+            + (TAU * hyp / 32.0).sin()
+    };
+    let mut out = Vec::with_capacity(ANIM_TILES as usize * 16);
+    for tr in 0..4i32 {
+        for tc in 0..4i32 {
+            for r in 0..8i32 {
+                let (mut lo, mut hi) = (0u8, 0u8);
+                for c in 0..8i32 {
+                    let pix = if field(tc * 8 + c, tr * 8 + r) >= 0.0 {
+                        1
+                    } else {
+                        2
+                    };
+                    let bit = 7 - c;
+                    if pix == 1 {
+                        lo |= 1 << bit;
+                    } else {
+                        hi |= 1 << bit;
+                    }
+                }
+                out.push(lo);
+                out.push(hi);
+            }
+        }
+    }
+    out
+}
+
+/// BG-map bytes for the plasma panel: rows ANIM_ROW_LO..ANIM_ROW_HI x 20 cols,
+/// each cell = ANIM_TILE0 + (row&3)*4 + (col&3) so the field tiles seamlessly.
+fn anim_plasma_map() -> Vec<u8> {
+    let mut m = Vec::new();
+    for row in ANIM_ROW_LO..ANIM_ROW_HI {
+        for col in 0..TRANSCRIPT_COLS {
+            m.push(ANIM_TILE0 + (row & 3) * 4 + (col & 3));
+        }
+    }
+    m
+}
+
 /// A fully assembled interactive shell ROM plus the facts and trap PCs the
 /// runner needs.
 #[derive(Debug, Clone)]
@@ -859,6 +932,122 @@ fn emit_ui_init(asm: &mut ModelAsm, sh: &ShellWram) {
     asm.i(Instr::Ret { cond: None });
 }
 
+/// `anim_setup` / `anim_restore` (UI bank) + plasma tile/map data. Setup paints
+/// the plasma field over the keyboard rows (LCD off for the bulk VRAM write);
+/// restore repaints the keyboard and resets palette/scroll when generation ends.
+/// The transcript rows are never touched, so the generated text is untouched.
+fn emit_anim_ui(asm: &mut ModelAsm, sh: &ShellWram) {
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+    asm.label("anim_setup");
+    asm.call("ui_wait_vbl");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_LCDC); // LCD off for the bulk VRAM write
+    // plasma tiles -> VRAM at tile ANIM_TILE0 (0x8000 + 76*16 = 0x84C0)
+    asm.ld16_label(Reg16Data::HL, "anim_tiles", 0);
+    ld16(asm, Reg16Data::DE, 0x8000 + (ANIM_TILE0 as u16) * 16);
+    ld16(asm, Reg16Data::BC, (ANIM_TILES as u16) * 16);
+    asm.label("as_ct");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "as_ct");
+    // plasma map: ANIM_ROW_LO..ANIM_ROW_HI, 20 cols, +12 gap to next map row
+    asm.ld16_label(Reg16Data::HL, "anim_map", 0);
+    ld16(
+        asm,
+        Reg16Data::DE,
+        BG_MAP_BASE + (ANIM_ROW_LO as u16) * BG_MAP_STRIDE,
+    );
+    ld_r_imm(asm, Reg8::B, ANIM_ROW_HI - ANIM_ROW_LO);
+    asm.label("as_row");
+    ld_r_imm(asm, Reg8::C, TRANSCRIPT_COLS);
+    asm.label("as_col");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "as_col");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(BG_MAP_STRIDE as u8 - TRANSCRIPT_COLS),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "as_row");
+    ld_r_imm(asm, Reg8::A, BGP_STANDARD);
+    ldh_a_to(asm, IO_BGP);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_SCX);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_SCY);
+    ld_r_imm(asm, Reg8::A, LCDC_ON);
+    ldh_a_to(asm, IO_LCDC);
+    asm.i(Instr::Ret { cond: None });
+
+    asm.label("anim_restore");
+    asm.call("ui_wait_vbl");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_LCDC); // LCD off
+    // repaint keyboard cells 0..KB_CELLS (cell index == charset id == tile id)
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("ar_kb");
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.call("ui_kb_addr");
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::C });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(KB_CELLS),
+    });
+    asm.jr(Some(Cond::NZ), "ar_kb");
+    // redraw the keyboard cursor (inverted tile) at the current cell
+    a_from(asm, sh.kbcur);
+    asm.call("ui_kb_addr"); // HL = cell BG address (takes A = cell)
+    a_from(asm, sh.kbcur);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(SHELL_INVERT_TILE_OFFSET),
+    });
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    ld_r_imm(asm, Reg8::A, BGP_STANDARD);
+    ldh_a_to(asm, IO_BGP);
+    ld_r_imm(asm, Reg8::A, LCDC_ON);
+    ldh_a_to(asm, IO_LCDC);
+    asm.i(Instr::Ret { cond: None });
+
+    asm.label("anim_tiles");
+    asm.bytes(anim_plasma_tiles());
+    asm.label("anim_map");
+    asm.bytes(anim_plasma_map());
+}
+
 /// Build the UI bank image (routines + font + text data) and return its
 /// bytes plus the entry addresses bank-0 code calls.
 fn build_ui_bank(font_tiles: &[u8], sh: &ShellWram) -> Result<(Vec<u8>, UiEntries), ModelRomError> {
@@ -875,6 +1064,7 @@ fn build_ui_bank(font_tiles: &[u8], sh: &ShellWram) -> Result<(Vec<u8>, UiEntrie
     emit_ui_kb_addr(&mut asm);
     emit_ui_cell_addr(&mut asm);
     emit_ui_kb_move(&mut asm, sh);
+    emit_anim_ui(&mut asm, sh);
     asm.label("shell_font");
     asm.bytes(font_tiles.to_vec());
     asm.label("shell_status_txt");
@@ -892,6 +1082,8 @@ fn build_ui_bank(font_tiles: &[u8], sh: &ShellWram) -> Result<(Vec<u8>, UiEntrie
         render_token: labels["ui_render_token"],
         gen_begin: labels["ui_gen_begin"],
         gen_end: labels["ui_gen_end"],
+        anim_setup: labels["anim_setup"],
+        anim_restore: labels["anim_restore"],
     };
     Ok((bytes, entries))
 }
@@ -903,6 +1095,8 @@ struct UiEntries {
     render_token: u16,
     gen_begin: u16,
     gen_end: u16,
+    anim_setup: u16,
+    anim_restore: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -947,8 +1141,13 @@ pub fn build_state_shell_rom_lowered(
     let sh = layout
         .shell
         .expect("shell layout allocates the shell block");
-    let plan = plan_state_rom_with(model, layout, 1, lowering)?;
+    let mut plan = plan_state_rom_with(model, layout, 1, lowering)?;
+    // Drive the inference animation: `chunk_run` calls `anim_tick` once per
+    // weight chunk (SP-safe between chunks). Only the shell enables this.
+    plan.animate = true;
     let ui_bank = plan.head_bank0 + plan.head_groups.len();
+    // Animation frame counter, in the zeroed shell block (free byte prompt+0x2A).
+    let anim_fc = sh.prompt + 0x2A;
     let (ui_bytes, ui) = build_ui_bank(font_tiles, &sh)?;
     let ui_bank_bytes = ui_bytes.len();
 
@@ -1002,6 +1201,7 @@ pub fn build_state_shell_rom_lowered(
 
     // --- generation run ---
     call_abs(&mut asm, ui.gen_begin); // UI bank still mapped
+    call_abs(&mut asm, ui.anim_setup); // paint the plasma "thinking" panel
     // zero the recurrent state (trained initial-state contract, fresh
     // context per submit)
     emit_zero16(
@@ -1084,6 +1284,7 @@ pub fn build_state_shell_rom_lowered(
 
     asm.label("shell_gen_done");
     map_ui(&mut asm);
+    call_abs(&mut asm, ui.anim_restore); // repaint keyboard, reset palette
     call_abs(&mut asm, ui.gen_end);
     asm.jp(None, "shell_idle");
 
@@ -1091,6 +1292,33 @@ pub fn build_state_shell_rom_lowered(
     asm.label("forward_pass");
     emit_state_forward_body(&mut asm, &plan);
     asm.i(Instr::Ret { cond: None });
+
+    // `anim_tick`: called by `chunk_run` once per weight chunk (SP home, all
+    // registers free). Writes ONLY the BGP register (never VRAM, never waits for
+    // VBlank), so it is safe mid-compute. Advance a frame counter and rotate the
+    // two plasma shades: BGP = ANIM_BGP_LUT[(FC>>1) & 7]. Text (values 0/3) is
+    // untouched by every LUT entry, so it stays black-on-white.
+    asm.label("anim_tick");
+    a_from(&mut asm, anim_fc);
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(&mut asm, anim_fc);
+    asm.i(Instr::Srl {
+        target: CbTarget::Reg(Reg8::A),
+    });
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x07),
+    });
+    ld_rr(&mut asm, Reg8::E, Reg8::A);
+    ld_r_imm(&mut asm, Reg8::D, 0);
+    asm.ld16_label(Reg16Data::HL, "anim_bgp", 0);
+    asm.i(Instr::AddHl { src: Reg16Data::DE });
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    ldh_a_to(&mut asm, IO_BGP);
+    asm.i(Instr::Ret { cond: None });
+    asm.label("anim_bgp");
+    asm.bytes(ANIM_BGP_LUT.to_vec());
 
     emit_state_routines_and_tables(&mut asm, model, &plan, Some(sampler));
 

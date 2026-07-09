@@ -2675,6 +2675,11 @@ pub(crate) struct StateRomPlan {
     pub(crate) head_groups: Vec<(usize, usize)>,
     /// Total banks including `extra_banks` appended after the head banks.
     pub(crate) bank_count: usize,
+    /// When true, `chunk_run` calls a caller-emitted `anim_tick` routine once
+    /// per weight chunk (SP is home between chunk calls). Only the interactive
+    /// shell sets this and emits `anim_tick`; every other ROM leaves it false
+    /// so `chunk_run` is byte-identical to the pre-animation emission.
+    pub(crate) animate: bool,
 }
 
 fn push_scales(bytes: &mut Vec<u8>, layer: &crate::model_ref::TernaryLayer) -> u16 {
@@ -2861,6 +2866,7 @@ pub(crate) fn plan_state_rom_with(
         head_bank0,
         head_groups,
         bank_count,
+        animate: false,
     })
 }
 
@@ -2899,7 +2905,7 @@ fn emit_call_chunks(asm: &mut ModelAsm, n_chunks: usize, next_bank: &mut u16) {
 /// registers are rewritten every iteration; weight chunks clobber all
 /// registers and repurpose SP, so the loop state lives in the fixed
 /// scratch page the chunks never touch.
-fn emit_chunk_run(asm: &mut ModelAsm) {
+fn emit_chunk_run(asm: &mut ModelAsm, animate: bool) {
     let inc_a = |asm: &mut ModelAsm| {
         asm.i(Instr::Inc8 {
             dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
@@ -2914,6 +2920,14 @@ fn emit_chunk_run(asm: &mut ModelAsm) {
         cond: None,
         addr: CHUNK_ENTRY,
     });
+    // The chunk restored SP before returning (call/ret), so between chunks SP is
+    // home and every register is free (chunk_run reloads its loop state from
+    // scratch WRAM). The shell uses this window to advance a per-chunk animation
+    // tick; `anim_tick` writes only PPU registers (SCX/SCY/BGP), never VRAM, and
+    // is emitted by the shell builder. No other ROM sets `animate`.
+    if animate {
+        asm.call("anim_tick");
+    }
     // Advance the 9-bit bank number (lo wrap carries into the ROMB1 bit).
     a_from(asm, CHUNK_BANK);
     inc_a(asm);
@@ -3443,7 +3457,7 @@ pub(crate) fn emit_state_routines_and_tables(
     let l = &plan.layout;
     let t = &l.topology;
     match plan.lowering {
-        WeightLowering::V3 => emit_chunk_run(asm),
+        WeightLowering::V3 => emit_chunk_run(asm, plan.animate),
         WeightLowering::V2Dispatch => emit_matvec_v2(asm, l),
     }
     emit_copy_bytes(asm);
