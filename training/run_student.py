@@ -116,6 +116,9 @@ def main() -> None:
     ap.add_argument("--out", default="artifacts/student_moe_d192x8")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-distill", action="store_true", help="ablate the teacher (control)")
+    ap.add_argument("--n-experts", type=int, default=None,
+                    help="override expert count (1 = dense d192 baseline for the MoE-vs-dense A/B)")
+    ap.add_argument("--d-ff", type=int, default=None, help="override FFN width")
     args = ap.parse_args()
 
     mx.random.seed(args.seed)
@@ -148,7 +151,12 @@ def main() -> None:
         )
 
     # --- student (ternary MoE; QAT flags flip via the schedule) ---
-    scfg = ModelConfig(**STUDENT, qat_weights=False, qat_acts=False)
+    topo = dict(STUDENT)
+    if args.n_experts is not None:
+        topo["n_experts"] = args.n_experts
+    if args.d_ff is not None:
+        topo["d_ff"] = args.d_ff
+    scfg = ModelConfig(**topo, qat_weights=False, qat_acts=False)
     student = GBModel(scfg)
     mx.eval(student.parameters())
     nparams = sum(v.size for _, v in _flat(student.parameters()))
