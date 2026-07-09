@@ -130,7 +130,6 @@ const WPTR: u16 = 0xC37E; // 2 bytes weight pointer
 const ACC4: u16 = 0xC380; // 4 bytes out-matvec accumulator
 const OEP_A: u16 = 0xC388; // 5 bytes out-epilogue product
 const XP2: u16 = 0xC390; // 2 bytes secondary pointer
-const CNT2: u16 = 0xC392; // 1 byte inner counter
 const YPTR: u16 = 0xC394; // 2 bytes y dump pointer
 const SC2: u16 = 0xC396; // 2 bytes out-epilogue scale
 const ROWCNT2: u16 = 0xC398; // 2 bytes 16-bit row counter (d_ff rows)
@@ -563,19 +562,6 @@ pub(crate) fn set_bank(asm: &mut ModelAsm, bank: u16) {
 }
 
 /// `ptr` variable += `k` (16-bit).
-fn ptr_advance(asm: &mut ModelAsm, ptr: u16, k: u8) {
-    a_from(asm, ptr);
-    asm.i(Instr::AddA {
-        src: AluSrc8::Imm(k),
-    });
-    a_to(asm, ptr);
-    a_from(asm, ptr + 1);
-    asm.i(Instr::AdcA {
-        src: AluSrc8::Imm(0),
-    });
-    a_to(asm, ptr + 1);
-}
-
 /// Initialize a pointer variable with an immediate address.
 fn ptr_init(asm: &mut ModelAsm, ptr: u16, value: u16) {
     ld_r_imm(asm, Reg8::A, (value & 0xFF) as u8);
@@ -1263,62 +1249,96 @@ fn emit_state_update(asm: &mut ModelAsm, l: &StateWramLayout, scales_addr: u16, 
 /// into SACC via the persistent OPTR. The weight table rows are
 /// `state_slots` i8 entries padded to `pad` extra bytes (power-of-two
 /// stride), so the caller can walk multiple banks.
+/// `ACC4 += (DE..DE+4)` (or `-=` when `sub`) over the carried i24 state slot,
+/// advancing `DE` by 4. Byte 0 uses `add`/`sub`, bytes 1..4 chain the carry
+/// with `adc`/`sbc` — identical integer result to the old
+/// `load h -> ST_H; mem_add/mem_sub_into(ACC4, ST_H)` pair, but the state byte
+/// is consumed straight from the `DE` cursor with no scratch round-trip.
+fn emit_acc4_state_pm(asm: &mut ModelAsm, sub: bool) {
+    for k in 0..4u16 {
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, ACC4 + k);
+        let src = AluSrc8::Reg(Reg8::B);
+        match (sub, k) {
+            (false, 0) => asm.i(Instr::AddA { src }),
+            (false, _) => asm.i(Instr::AdcA { src }),
+            (true, 0) => asm.i(Instr::SubA { src }),
+            (true, _) => asm.i(Instr::SbcA { src }),
+        }
+        a_to(asm, ACC4 + k);
+    }
+}
+
+/// `state_out_mv`: with a state-table bank mapped and `ROWCNT`/`WPTR` preset
+/// (see the caller), dots each ternary out-projection row with the carried i24
+/// state into `ACC4`, storing the i32 result through the persistent `OPTR`.
+///
+/// Both cursors are register-resident across the hot inner loop: `HL` walks the
+/// row's weight bytes in the mapped ROM window with `ld a,(hl+)`, and `DE` walks
+/// the WRAM state slots. This replaces the previous interpreter that reloaded
+/// and rewrote *both* pointers from scratch memory on every column and copied
+/// each state slot into `ST_H` before adding — the integer result is byte-for-
+/// byte identical (same ordered ternary add/sub; encoding `1 => +1`,
+/// other-nonzero `=> -1`, `0 => skip`), only far cheaper per weight.
 fn emit_state_out_matvec(asm: &mut ModelAsm, l: &StateWramLayout, pad: u8) {
     asm.label("state_out_mv");
-    asm.label("smv_row");
-    zero_mem(asm, ACC4, 4);
-    ptr_init(asm, XP2, l.state);
-    ld_r_imm(asm, Reg8::A, l.topology.state_slots as u8);
-    a_to(asm, CNT2);
-    asm.label("smv_col");
-    // w = *WPTR++
+    // HL := (WPTR) once per bank; the caller preset WPTR := CHUNK_ENTRY.
     a_from(asm, WPTR);
     ld_rr(asm, Reg8::L, Reg8::A);
     a_from(asm, WPTR + 1);
     ld_rr(asm, Reg8::H, Reg8::A);
+    asm.label("smv_row");
+    zero_mem(asm, ACC4, 4);
+    ld16(asm, Reg16Data::DE, l.state);
+    ld_r_imm(asm, Reg8::C, l.topology.state_slots as u8);
+    asm.label("smv_col");
     asm.i(Instr::LdAFromReg16Addr {
         src: Reg16Addr::Hli,
-    });
-    ld_rr(asm, Reg8::B, Reg8::A);
-    ld_rr(asm, Reg8::A, Reg8::L);
-    a_to(asm, WPTR);
-    ld_rr(asm, Reg8::A, Reg8::H);
-    a_to(asm, WPTR + 1);
-    ld_rr(asm, Reg8::A, Reg8::B);
+    }); // w = *HL++
     asm.i(Instr::OrA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    asm.jp(Some(Cond::Z), "smv_skip");
-    // load h (4 bytes via XP2, advancing)
-    asm.i(Instr::Push {
-        src: gbf_asm::isa::Reg16Stack::BC,
-    });
-    load_via_ptr_to(asm, XP2, ST_H, 4);
-    asm.i(Instr::Pop {
-        dst: gbf_asm::isa::Reg16Stack::BC,
-    });
-    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.jr(Some(Cond::Z), "smv_skip");
     asm.i(Instr::CpA {
         src: AluSrc8::Imm(1),
     });
     asm.jr(Some(Cond::NZ), "smv_sub");
-    mem_add(asm, ACC4, ST_H, 4);
-    asm.jp(None, "smv_next");
+    emit_acc4_state_pm(asm, false); // w == +1
+    asm.jr(None, "smv_next");
     asm.label("smv_sub");
-    mem_sub_into(asm, ACC4, ACC4, ST_H, 4);
-    asm.jp(None, "smv_next");
+    emit_acc4_state_pm(asm, true); // w == -1
+    asm.jr(None, "smv_next");
     asm.label("smv_skip");
-    ptr_advance(asm, XP2, 4);
+    for _ in 0..4 {
+        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    }
     asm.label("smv_next");
-    a_from(asm, CNT2);
     asm.i(Instr::Dec8 {
-        dst: IncDec8Target::Reg(Reg8::A),
+        dst: IncDec8Target::Reg(Reg8::C),
     });
-    a_to(asm, CNT2);
-    asm.jp(Some(Cond::NZ), "smv_col");
+    asm.jr(Some(Cond::NZ), "smv_col");
+    // Row epilogue: store ACC4 -> (OPTR) (advances OPTR, clobbers HL), restore
+    // the weight cursor, then skip any inter-row padding in the weight stream.
+    asm.i(Instr::Push {
+        src: Reg16Stack::HL,
+    });
     store_via_ptr_from(asm, OPTR, ACC4, 4);
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::HL,
+    });
     if pad > 0 {
-        ptr_advance(asm, WPTR, pad);
+        ld_rr(asm, Reg8::A, Reg8::L);
+        asm.i(Instr::AddA {
+            src: AluSrc8::Imm(pad),
+        });
+        ld_rr(asm, Reg8::L, Reg8::A);
+        ld_rr(asm, Reg8::A, Reg8::H);
+        asm.i(Instr::AdcA {
+            src: AluSrc8::Imm(0),
+        });
+        ld_rr(asm, Reg8::H, Reg8::A);
     }
     a_from(asm, ROWCNT);
     asm.i(Instr::Dec8 {
@@ -3725,9 +3745,21 @@ pub fn build_state_one_token_rom_lowered(
     model: &IntStateLoweredModel,
     lowering: WeightLowering,
 ) -> Result<StateOneTokenRom, ModelRomError> {
+    build_state_one_token_rom_debug(model, lowering).map(|(rom, _labels)| rom)
+}
+
+/// Same as [`build_state_one_token_rom_lowered`] but also returns the resolved
+/// label -> address map. Intended for cycle-profiling and disassembly tooling
+/// that needs to attribute an executing PC to a named driver routine; the ROM
+/// bytes are identical to the non-debug builder.
+pub fn build_state_one_token_rom_debug(
+    model: &IntStateLoweredModel,
+    lowering: WeightLowering,
+) -> Result<(StateOneTokenRom, BTreeMap<String, u16>), ModelRomError> {
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
     let built = build_state_model_rom(model, None, None, lowering)?;
-    Ok(StateOneTokenRom {
+    let labels = built.labels.clone();
+    let rom = StateOneTokenRom {
         layout,
         token_start_pc: built.labels["token_start"],
         token_end_pc: built.labels["token_end"],
@@ -3738,7 +3770,8 @@ pub fn build_state_one_token_rom_lowered(
         weight_code_bytes: built.weight_code_bytes,
         weight_chunk_count: built.weight_chunk_count,
         table_bytes: built.table_bytes,
-    })
+    };
+    Ok((rom, labels))
 }
 
 /// Assemble the stateful multi-token generation ROM: zeroes the WRAM state
