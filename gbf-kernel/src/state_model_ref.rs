@@ -129,6 +129,41 @@ pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 13] = [
 ];
 
 // ---------------------------------------------------------------------------
+// logit paging capability (deploy step 2)
+// ---------------------------------------------------------------------------
+
+/// Ids that fit one 256-byte i24 logit page (`floor(255 / 3) = 85`).
+pub const LOGIT_PAGE_IDS: usize = 85;
+/// Paged-logit vocab ceiling: 255 pages of [`LOGIT_PAGE_IDS`] ids. Sized so the
+/// per-page id count fits a u8 loop counter AND the page count fits a u8 loop
+/// counter, which is what the ROM's paged epilogue needs.
+pub const LOGIT_PAGED_VOCAB_MAX: usize = 255 * LOGIT_PAGE_IDS;
+/// Maximum running top-k heap size the paged sampler supports (heap tables are
+/// held in one WRAM sampler page alongside the candidate id/weight arrays).
+pub const HEAP_K_MAX: usize = 40;
+
+/// How the head/argmax/sampler epilogue reads the tied-head logits.
+///
+/// [`LogitPaging::SinglePage`] is the pinned, byte-identical legacy path: the
+/// whole `vocab` i24 logit vector materializes in one 256-byte WRAM page, so
+/// `vocab <= 85`. Every existing dense ROM (arm-B, D192, D192-real) is
+/// `SinglePage` and its ROM bytes are unchanged.
+///
+/// [`LogitPaging::Paged`] streams the head in `ceil(vocab / 85)` pages of
+/// `<= 85` ids, folding each page into a running top-1 argmax (u16) and a
+/// running top-k heap, so V=1024 subword MoE students need only one logit page
+/// plus the heap resident at once. Gated behind this flag: `SinglePage` emits
+/// the current epilogue verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogitPaging {
+    /// One resident 256-byte logit page; `vocab <= 85` (the pinned legacy path).
+    #[default]
+    SinglePage,
+    /// Streamed `<= 85`-id pages with a running top-1 + top-k heap fold.
+    Paged,
+}
+
+// ---------------------------------------------------------------------------
 // topology
 // ---------------------------------------------------------------------------
 
@@ -144,6 +179,10 @@ pub struct StateTopology {
     /// existing dense pipeline is exactly `n_experts == 1`). Top-1 routing runs
     /// exactly one expert per block per token, so active MACs are unchanged.
     pub n_experts: usize,
+    /// How the head/argmax/sampler epilogue reads the logits. `SinglePage`
+    /// (default) is the byte-identical legacy path (`vocab <= 85`); `Paged`
+    /// streams `<= 85`-id pages for wide-vocab subword students.
+    pub logit_paging: LogitPaging,
 }
 
 impl StateTopology {
@@ -155,6 +194,7 @@ impl StateTopology {
         state_slots: 64,
         vocab: STATE_VOCAB,
         n_experts: 1,
+        logit_paging: LogitPaging::SinglePage,
     };
 
     /// Tonight's S8 distilled student (bd-3771m).
@@ -165,18 +205,16 @@ impl StateTopology {
         state_slots: 192,
         vocab: STATE_VOCAB,
         n_experts: 1,
+        ..Self::ARM_B
     };
 
     /// The trained subword MoE student (student_moe_d192x8): 8 experts, subword
-    /// vocab 1024. NOTE: `vocab = 1024` fails `validate()` until logit paging
-    /// (Step 2) relaxes the single-page cap; this const documents the target.
+    /// vocab 1024, streamed logit paging (deploy step 2).
     pub const D192_MOE: Self = Self {
-        d_model: 192,
-        d_ff: 384,
-        n_blocks: 6,
-        state_slots: 192,
         vocab: 1024,
         n_experts: 8,
+        logit_paging: LogitPaging::Paged,
+        ..Self::D192
     };
 
     /// A `validate()`-clean MoE topology for the host evaluator unit tests:
@@ -184,21 +222,39 @@ impl StateTopology {
     /// expert bank. Distinct from [`Self::D192_MOE`] (whose 1024 vocab needs
     /// logit paging, deploy step 2).
     pub const D192_MOE_TEST: Self = Self {
-        d_model: 192,
-        d_ff: 384,
-        n_blocks: 6,
-        state_slots: 192,
-        vocab: STATE_VOCAB,
         n_experts: 4,
+        ..Self::D192
+    };
+
+    /// A synthetic DENSE vocab-1024 topology (orthogonal to MoE) that gates the
+    /// V=1024 logit paging path: `Paged` epilogue, `n_experts = 1`, so the head/
+    /// argmax/sampler paging is exercised without any MoE routing. Smaller
+    /// d_model/d_ff than D192 keeps the paged ROM banks and cycle budget modest.
+    pub const D1024_DENSE: Self = Self {
+        d_model: 64,
+        d_ff: 128,
+        n_blocks: 2,
+        state_slots: 64,
+        vocab: 1024,
+        n_experts: 1,
+        logit_paging: LogitPaging::Paged,
     };
 
     /// Validate the device structural limits this pipeline supports. These
     /// are ROM-code constraints (8-bit loop counters, single-page tables),
     /// not arbitrary caps; each names the device structure that pins it.
+    ///
+    /// The vocab cap is keyed off [`Self::logit_paging`]:
+    /// - [`LogitPaging::SinglePage`]: one 256-byte i24 logit page, so
+    ///   `vocab <= LOGIT_PAGE_IDS` (85). This is the pinned legacy path.
+    /// - [`LogitPaging::Paged`]: streamed `<= 85`-id pages folded into a
+    ///   running top-1/top-k, so `vocab <= LOGIT_PAGED_VOCAB_MAX` (255 pages).
     pub fn validate(&self) -> Result<(), StateModelError> {
-        // Strict device validation (the ROM path): logits must fit one 256-byte
-        // page, so vocab is capped at 85 (3-byte i24 logits).
-        self.validate_with_vocab_cap(85)
+        let vocab_cap = match self.logit_paging {
+            LogitPaging::SinglePage => LOGIT_PAGE_IDS,
+            LogitPaging::Paged => LOGIT_PAGED_VOCAB_MAX,
+        };
+        self.validate_with_vocab_cap(vocab_cap)
     }
 
     /// Host-evaluator validation. Identical to [`Self::validate`] except the
@@ -209,7 +265,13 @@ impl StateTopology {
     /// ROM's single-page cap. Every other device structural limit is enforced
     /// unchanged, so dense d192/arm-B (vocab 80) validate identically.
     pub fn validate_host(&self) -> Result<(), StateModelError> {
-        self.validate_with_vocab_cap(HOST_VOCAB_CAP)
+        // The host holds all logits in RAM, so the single-page cap never binds;
+        // a Paged topology still respects the paged ceiling.
+        let cap = match self.logit_paging {
+            LogitPaging::SinglePage => HOST_VOCAB_CAP,
+            LogitPaging::Paged => LOGIT_PAGED_VOCAB_MAX.max(HOST_VOCAB_CAP),
+        };
+        self.validate_with_vocab_cap(cap)
     }
 
     fn validate_with_vocab_cap(&self, vocab_cap: usize) -> Result<(), StateModelError> {
@@ -1394,14 +1456,125 @@ pub struct IntStateForwardTrace {
     pub block0_down_acc: Vec<i32>,
     /// Final norm output on the activation grid (`[-127, 127]`).
     pub final_q: Vec<i16>,
-    /// Tied-head integer logits (i24-range values held in i32).
+    /// Tied-head integer logits (i24-range values held in i32). Under
+    /// [`LogitPaging::SinglePage`] this is the full `vocab` vector (gate-compat,
+    /// exactly as before). Under [`LogitPaging::Paged`] it holds ONLY the last
+    /// resident page (`<= LOGIT_PAGE_IDS` ids) — the full `3 * vocab` vector is
+    /// never materialized; use [`Self::logit_pages`] for per-page views.
     pub logits: Vec<i32>,
+    /// One `Vec<i32>` per streamed logit page (`ceil(vocab / 85)` pages of
+    /// `<= 85` ids each), in ascending id order. Under `SinglePage` this is a
+    /// single page equal to [`Self::logits`]. The ROM gate peeks the WRAM logit
+    /// page against `logit_pages.last()` under `Paged`.
+    pub logit_pages: Vec<Vec<i32>>,
     /// Argmax id truncated to u8 (the charset/dense pipeline token id).
     pub argmax: u8,
     /// Full argmax id (lowest index wins ties). Distinct from [`Self::argmax`]
-    /// only for wide-vocab (V > 256) subword MoE students.
+    /// only for wide-vocab (V > 256) subword MoE students. Fits u16 for every
+    /// paged vocab (`<= LOGIT_PAGED_VOCAB_MAX < 2^16`).
     pub argmax_full: usize,
+    /// Finalized running top-k heap (selection order: logit desc, id asc) over
+    /// all pages, sized `min(k, vocab)` where `k = HEAP_K_MAX`. Under `Paged`
+    /// the ROM's WRAM heap region must equal this. Under `SinglePage` it is the
+    /// top-`HEAP_K_MAX` of the single page (still exact; unused by the legacy
+    /// gate but cheap to fill).
+    pub topk_heap: Vec<HeapEntry>,
     pub stats: StateForwardStats,
+}
+
+/// One finalized top-k candidate from the paged head: `(logit, id)` in the
+/// sampler's selection total order (logit descending, id ascending on ties).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapEntry {
+    pub logit: i32,
+    pub id: usize,
+}
+
+/// A running top-k selector over streamed logit pages. It folds one `(logit,
+/// id)` at a time, retaining the `k` entries with the largest logits under the
+/// EXACT total order the deployed sampler selects with (logit descending; on
+/// equal logits the lower id ranks higher). [`Self::finalize`] returns them in
+/// that selection order, byte-identical to `decode::sample_topk`'s pass-k scan
+/// over the full logit vector.
+///
+/// The ROM mirrors this with an in-WRAM heap of `<= HEAP_K_MAX` entries; the
+/// insertion order is irrelevant because the retained SET and its final order
+/// are a pure function of the `(logit, id)` multiset and `k`.
+#[derive(Debug, Clone)]
+pub struct RunningTopK {
+    k: usize,
+    /// Retained entries, kept sorted ascending in selection order (worst first,
+    /// best last) so eviction pops index 0.
+    entries: Vec<HeapEntry>,
+}
+
+impl RunningTopK {
+    /// A running top-k with capacity `k` (`k >= 1`; `k <= HEAP_K_MAX` on the
+    /// deployed path, but the host helper accepts any `k`).
+    #[must_use]
+    pub fn new(k: usize) -> Self {
+        assert!(k >= 1, "top-k needs k >= 1");
+        Self {
+            k,
+            entries: Vec::with_capacity(k + 1),
+        }
+    }
+
+    /// True when candidate `a` ranks strictly ABOVE candidate `b` in the
+    /// sampler's selection total order: higher logit wins; on equal logits the
+    /// lower id wins (the sampler's strict-`>` scan keeps the lowest index).
+    fn ranks_above(a: HeapEntry, b: HeapEntry) -> bool {
+        a.logit > b.logit || (a.logit == b.logit && a.id < b.id)
+    }
+
+    /// Offer one `(logit, id)` to the running top-k. Retains it iff it ranks
+    /// above the current worst retained entry (or the set is not yet full).
+    pub fn offer(&mut self, logit: i32, id: usize) {
+        let cand = HeapEntry { logit, id };
+        if self.entries.len() < self.k {
+            self.insert_sorted(cand);
+            return;
+        }
+        // `entries[0]` is the current worst. Replace iff the candidate ranks
+        // above it (strictly; an equal candidate cannot beat a lower-id
+        // incumbent, matching the sampler's lowest-index tiebreak).
+        if Self::ranks_above(cand, self.entries[0]) {
+            self.entries.remove(0);
+            self.insert_sorted(cand);
+        }
+    }
+
+    /// Insert keeping `entries` ascending in selection order (worst at 0, best
+    /// last), so eviction pops index 0.
+    fn insert_sorted(&mut self, cand: HeapEntry) {
+        // First index whose incumbent ranks ABOVE `cand`: `cand` slots in just
+        // before it, keeping the worst-first ordering.
+        let pos = self
+            .entries
+            .iter()
+            .position(|&e| Self::ranks_above(e, cand))
+            .unwrap_or(self.entries.len());
+        self.entries.insert(pos, cand);
+    }
+
+    /// The retained entries in selection order (best first): logit descending,
+    /// id ascending on ties — exactly the order `decode::sample_topk` visits.
+    #[must_use]
+    pub fn finalize(&self) -> Vec<HeapEntry> {
+        let mut out = self.entries.clone();
+        out.reverse();
+        out
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Norm+quant over `d_model` i24 Q19.5 residual lanes. Same canonical steps
@@ -2039,26 +2212,55 @@ impl IntStateLoweredModel {
             block_residuals.push(x.clone());
         }
 
-        // --- final norm + head ---
+        // --- final norm + paged head ---
+        // Stream the tied head in pages of <= LOGIT_PAGE_IDS ids. Each page
+        // accumulates its i32 dots into one reused page buffer, then folds into
+        // (a) a running top-1 argmax (strict `>`, lowest id wins ties ACROSS
+        // pages, ascending id order) and (b) a RunningTopK heap whose total
+        // order matches decode::sample_topk selection exactly. Under
+        // SinglePage there is exactly one page and the full logits vector is
+        // produced (n_pages == 1, gate-compat). Under Paged the full 3*vocab
+        // vector is never materialized.
         let final_q = int_norm_quant24(&x, &mut stats.ffn);
-        let mut logits = vec![0i32; t.vocab];
-        for (id, logit) in logits.iter_mut().enumerate() {
-            let row = self.head_i8_row_at(id);
-            let mut acc32: i32 = 0;
-            for (qv, ev) in final_q.iter().zip(row.iter()) {
-                acc32 += i32::from(*qv) * i32::from(*ev);
-            }
-            stats.ffn.max_abs_logit = stats.ffn.max_abs_logit.max(acc32.unsigned_abs());
-            *logit = acc32;
-        }
+        let n_pages = t.vocab.div_ceil(LOGIT_PAGE_IDS).max(1);
+        let mut logit_pages: Vec<Vec<i32>> = Vec::with_capacity(n_pages);
+        let mut last_page: Vec<i32> = Vec::new();
         let mut argmax_full = 0usize;
-        let mut best = logits[0];
-        for (id, &v) in logits.iter().enumerate().skip(1) {
-            if v > best {
-                best = v;
-                argmax_full = id;
+        let mut best: i32 = i32::MIN;
+        let mut seen_any = false;
+        let mut heap = RunningTopK::new(HEAP_K_MAX.min(t.vocab.max(1)));
+        let mut page_buf: Vec<i32> = Vec::with_capacity(LOGIT_PAGE_IDS);
+        for page in 0..n_pages {
+            let lo = page * LOGIT_PAGE_IDS;
+            let hi = ((page + 1) * LOGIT_PAGE_IDS).min(t.vocab);
+            page_buf.clear();
+            for id in lo..hi {
+                let row = self.head_i8_row_at(id);
+                let mut acc32: i32 = 0;
+                for (qv, ev) in final_q.iter().zip(row.iter()) {
+                    acc32 += i32::from(*qv) * i32::from(*ev);
+                }
+                stats.ffn.max_abs_logit = stats.ffn.max_abs_logit.max(acc32.unsigned_abs());
+                page_buf.push(acc32);
+                // running top-1 (strict `>`; ascending id order keeps the
+                // lowest index on ties, across pages)
+                if !seen_any || acc32 > best {
+                    best = acc32;
+                    argmax_full = id;
+                    seen_any = true;
+                }
+                heap.offer(acc32, id);
             }
+            last_page = page_buf.clone();
+            logit_pages.push(page_buf.clone());
         }
+        let topk_heap = heap.finalize();
+        // `logits` stays the full vector under SinglePage (byte-compat with
+        // every existing gate); under Paged it is only the last resident page.
+        let logits = match t.logit_paging {
+            LogitPaging::SinglePage => logit_pages.iter().flatten().copied().collect(),
+            LogitPaging::Paged => last_page,
+        };
         // `argmax` keeps the u8 charset id for the dense/charset pipeline;
         // `argmax_full` carries the true id for wide-vocab (subword) models.
         let argmax = argmax_full as u8;
@@ -2076,8 +2278,10 @@ impl IntStateLoweredModel {
             block0_down_acc,
             final_q,
             logits,
+            logit_pages,
             argmax,
             argmax_full,
+            topk_heap,
             stats,
         }
     }
@@ -2439,6 +2643,117 @@ mod tests {
         }
         assert_eq!(lowered.down_delta_structural_bound, expected);
         assert!(lowered.down_delta_structural_bound <= DOWN_DELTA_WIDE_BOUND);
+    }
+
+    #[test]
+    fn running_topk_matches_k_pass_selection_over_random_logits() {
+        use crate::decode::{SamplerConfig, XorShift16, sample_topk_trace};
+        // The RunningTopK finalize() order must equal decode::sample_topk's
+        // pass-k candidate selection over the full vocab-1024 logit vector, for
+        // k in {1, 4, 8, 40}, on 200 random vectors.
+        let mut lcg: u64 = 0xDEAD_BEEF_CAFE_1234;
+        let mut rand = move || {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (lcg >> 33) as i32
+        };
+        for _ in 0..200 {
+            let vocab = 1024usize;
+            let logits: Vec<i32> = (0..vocab).map(|_| (rand() % 400_000) - 200_000).collect();
+            for k in [1usize, 4, 8, 40] {
+                let mut heap = RunningTopK::new(k);
+                for (id, &l) in logits.iter().enumerate() {
+                    heap.offer(l, id);
+                }
+                let got: Vec<(i32, usize)> =
+                    heap.finalize().iter().map(|e| (e.logit, e.id)).collect();
+                // Reference: decode's pass-k selection (k <= MAX_TOP_K only for
+                // the config; use a large scale so weights don't matter — we
+                // compare the candidate ORDER, not the draw). For k > 8 we build
+                // the reference selection directly with the same rule.
+                let cfg = SamplerConfig::new(k.min(8) as u8, 1000).expect("cfg");
+                let mut rng = XorShift16::new(1);
+                let full = sample_topk_trace(&logits, &cfg, &mut rng);
+                let want_prefix: Vec<(i32, usize)> =
+                    full.candidates.iter().map(|c| (c.logit, c.id)).collect();
+                assert_eq!(
+                    &got[..k.min(8)],
+                    &want_prefix[..],
+                    "top-{} prefix mismatch (k={k})",
+                    k.min(8)
+                );
+                // Full-order cross-check via an independent sort with the exact
+                // sampler total order (logit desc, id asc).
+                let mut sorted: Vec<(i32, usize)> =
+                    logits.iter().enumerate().map(|(i, &l)| (l, i)).collect();
+                sorted.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+                assert_eq!(got, sorted[..k].to_vec(), "full top-{k} order");
+            }
+        }
+    }
+
+    #[test]
+    fn paged_head_equals_single_page_on_small_vocab() {
+        // On a <= 85-vocab model the Paged epilogue (one page, n_pages == 1)
+        // must produce the identical logits/argmax/heap as SinglePage.
+        let single = StateTopology {
+            logit_paging: LogitPaging::SinglePage,
+            ..StateTopology::ARM_B
+        };
+        let paged = StateTopology {
+            logit_paging: LogitPaging::Paged,
+            ..StateTopology::ARM_B
+        };
+        let ck_s = synthetic_state_checkpoint_with(single, 77);
+        let ck_p = synthetic_state_checkpoint_with(paged, 77);
+        let ls = IntStateLoweredModel::lower(&ck_s).expect("lowers");
+        let lp = IntStateLoweredModel::lower(&ck_p).expect("lowers");
+        let mut ss = ls.zero_state();
+        let mut sp = lp.zero_state();
+        let mut input = 3u8;
+        for _ in 0..24 {
+            let ts = ls.forward(input, &mut ss);
+            let tp = lp.forward(input, &mut sp);
+            assert_eq!(ts.logits, tp.logits, "logits identical");
+            assert_eq!(ts.logit_pages, tp.logit_pages, "one page each");
+            assert_eq!(tp.logit_pages.len(), 1, "small vocab is one page");
+            assert_eq!(ts.argmax_full, tp.argmax_full);
+            assert_eq!(ts.topk_heap, tp.topk_heap, "heap identical");
+            input = tp.argmax;
+        }
+    }
+
+    #[test]
+    fn vocab_1024_paged_topology_validates() {
+        // D192_MOE (Paged, vocab 1024) must validate; a SinglePage vocab=86
+        // must be rejected (single page holds only 85 ids).
+        StateTopology::D192_MOE
+            .validate()
+            .expect("Paged vocab 1024 validates");
+        StateTopology::D1024_DENSE
+            .validate()
+            .expect("Paged dense vocab 1024 validates");
+        let over_single = StateTopology {
+            vocab: LOGIT_PAGE_IDS + 1,
+            logit_paging: LogitPaging::SinglePage,
+            ..StateTopology::ARM_B
+        };
+        assert!(
+            matches!(
+                over_single.validate(),
+                Err(StateModelError::Topology { .. })
+            ),
+            "SinglePage vocab 86 must be rejected"
+        );
+        // Paged still enforces the paged ceiling.
+        let over_paged = StateTopology {
+            vocab: LOGIT_PAGED_VOCAB_MAX + 1,
+            logit_paging: LogitPaging::Paged,
+            ..StateTopology::ARM_B
+        };
+        assert!(matches!(
+            over_paged.validate(),
+            Err(StateModelError::Topology { .. })
+        ));
     }
 
     #[test]

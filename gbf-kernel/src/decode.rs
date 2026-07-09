@@ -336,6 +336,84 @@ pub fn sample_topk_trace(logits: &[i32], cfg: &SamplerConfig, rng: &mut XorShift
     }
 }
 
+/// Sample one token id from an ALREADY-SELECTED candidate set (the paged
+/// head's finalized running top-k heap), in selection order (logit descending,
+/// id ascending on ties). Byte-identical to [`sample_topk`] run over the full
+/// logit vector for the same `scale_q16`, `k`, and RNG seed: the two share the
+/// exp-LUT weight, `total`, draw, and cumulative-walk arithmetic; only the
+/// candidate SELECTION differs in provenance (paged heap vs full scan), and the
+/// heap's selected set + order is proven equal to the scan's (see
+/// [`RunningTopK`] and the parity tests).
+///
+/// `candidates` must be in selection order with `candidates[0]` the argmax
+/// (its logit is `logit_max`, so `d = 0 -> u = 0 -> w = EXP2_LUT[0] = 255`).
+/// Advances `rng` exactly once, exactly as [`sample_topk`] does.
+#[must_use]
+pub fn sample_topk_from_candidates(
+    candidates: &[(i32, usize)],
+    scale_q16: u16,
+    rng: &mut XorShift16,
+) -> usize {
+    sample_topk_from_candidates_trace(candidates, scale_q16, rng).picked
+}
+
+/// [`sample_topk_from_candidates`] returning the full integer trace, so gates
+/// can compare the device heap/weights/threshold against the golden.
+#[must_use]
+pub fn sample_topk_from_candidates_trace(
+    candidates: &[(i32, usize)],
+    scale_q16: u16,
+    rng: &mut XorShift16,
+) -> SampleTrace {
+    assert!(
+        !candidates.is_empty(),
+        "sampling needs at least one candidate"
+    );
+    debug_assert!(
+        candidates
+            .iter()
+            .all(|&(l, _)| (-(1 << 23)..(1 << 23)).contains(&l)),
+        "logits must be in the i24 device range"
+    );
+    let lut = build_exp2_lut();
+    let logit_max = i64::from(candidates[0].0);
+    let mut selected = Vec::with_capacity(candidates.len());
+    let mut total: u16 = 0;
+    for &(logit, id) in candidates {
+        let d = u64::try_from(logit_max - i64::from(logit))
+            .expect("candidates are in descending order (candidates[0] is the max)");
+        let u = ((d * u64::from(scale_q16) + 0x8000) >> 16).min(255) as usize;
+        let weight = lut[u];
+        total += u16::from(weight);
+        selected.push(SampleCandidate {
+            id,
+            logit,
+            lut_index: u as u8,
+            weight,
+        });
+    }
+    debug_assert!(total >= 255, "the max logit always contributes LUT[0]");
+
+    let r = rng.next_u16();
+    let threshold = ((u32::from(r) * u32::from(total)) >> 16) as u16;
+    let mut cum: u16 = 0;
+    let mut picked = selected[0].id;
+    for cand in &selected {
+        cum += u16::from(cand.weight);
+        if cum > threshold {
+            picked = cand.id;
+            break;
+        }
+    }
+    SampleTrace {
+        candidates: selected,
+        total,
+        r,
+        threshold,
+        picked,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,6 +586,35 @@ mod tests {
         }
         // All four candidates must actually be reachable at this setting.
         assert!(counts.iter().all(|&c| c > 0), "counts {counts:?}");
+    }
+
+    #[test]
+    fn sample_from_candidates_equals_full_scan() {
+        // The candidate-set sampler must be byte-identical to the full-scan
+        // sampler for the same seed/k when fed the full-scan's own selection.
+        let mut lcg: u64 = 0x1234_5678_9abc_def1;
+        let mut rand = move || {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (lcg >> 33) as i32
+        };
+        for k in [1u8, 4, 8] {
+            for trial in 0..64u16 {
+                let n = 200usize;
+                let logits: Vec<i32> = (0..n).map(|_| (rand() % 200_000) - 100_000).collect();
+                let cfg = SamplerConfig::new(k, 1500).expect("valid cfg");
+                let mut rng_full = XorShift16::new(0xABCD ^ trial);
+                let full = sample_topk_trace(&logits, &cfg, &mut rng_full);
+                let cands: Vec<(i32, usize)> =
+                    full.candidates.iter().map(|c| (c.logit, c.id)).collect();
+                let mut rng_cand = XorShift16::new(0xABCD ^ trial);
+                let cand =
+                    sample_topk_from_candidates_trace(&cands, cfg.scale_q16(), &mut rng_cand);
+                assert_eq!(full.total, cand.total, "total k={k} trial={trial}");
+                assert_eq!(full.threshold, cand.threshold);
+                assert_eq!(full.picked, cand.picked);
+                assert_eq!(rng_full.state(), rng_cand.state(), "one rng step each");
+            }
+        }
     }
 
     #[test]

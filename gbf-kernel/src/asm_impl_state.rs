@@ -187,6 +187,47 @@ pub struct ShellWram {
     pub end: u16,
 }
 
+/// Paged-epilogue WRAM block (allocated ONLY when
+/// `topology.logit_paging == Paged`). One extra page holds the running top-1
+/// argmax id, the top-k heap, and the finalized candidate id/weight arrays; the
+/// single 256-byte logit page at [`StateWramLayout::logits`] is reused per
+/// output-page. SinglePage layouts leave this `None`, so their WRAM map and ROM
+/// bytes are byte-identical to before paging existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PagedSampler {
+    /// Page base (page-aligned; 0x200 bytes reserved).
+    pub page: u16,
+    /// Running top-1 argmax id (u16 LE, global id up to `LOGIT_PAGED_VOCAB_MAX`).
+    pub argmax16: u16,
+    /// Running top-1 best logit (i24 LE, 3 bytes; sign-flipped top byte in the
+    /// compare, mirrored to plain i24 for the gate).
+    pub best_logit: u16,
+    /// Heap logits (`HEAP_K_MAX` * 3 bytes LE i24).
+    pub heap_logit: u16,
+    /// Heap ids (`HEAP_K_MAX` * 2 bytes LE u16).
+    pub heap_id: u16,
+    /// Live heap entry count (u8).
+    pub heap_count: u16,
+    /// Finalized candidate ids in selection order (`HEAP_K_MAX` * 2 bytes u16).
+    pub samp_ids: u16,
+    /// Finalized candidate weights (`HEAP_K_MAX` bytes u8).
+    pub samp_wts: u16,
+    /// Per-output-page loop scratch (all inside the paged page):
+    /// page index (u8), page length (u8), page base id (u16 LE).
+    pub pg_idx: u16,
+    pub pg_len: u16,
+    pub pg_base: u16,
+    /// Scratch for heap offer: candidate id (u16), candidate logit (i24
+    /// sign-flipped top byte), the worst-slot index (u8), worst logit (i24).
+    pub cand_id: u16,
+    pub cand_logit: u16,
+    pub worst_idx: u16,
+    pub worst_logit: u16,
+    /// 2-byte scratch for the heap comparator's "other" id (kept distinct from
+    /// `best_logit`, which holds the persistent running top-1 logit).
+    pub heap_scratch_id: u16,
+}
+
 /// The complete topology-driven WRAM map for one stateful ROM, plus the
 /// budget facts the evidence report cites. Every buffer the runner pokes or
 /// peeks comes from here — nothing about buffer placement is hard-coded
@@ -244,6 +285,8 @@ pub struct StateWramLayout {
     pub xdump: Option<u16>,
     /// Shell block (interactive shell variant only).
     pub shell: Option<ShellWram>,
+    /// Paged-epilogue block (`Some` only when `logit_paging == Paged`).
+    pub paged: Option<PagedSampler>,
     /// Total bytes allocated (excluding gaps), for the budget report.
     pub bytes_allocated: usize,
     /// Named allocations, for the untouched-WRAM gate.
@@ -372,6 +415,56 @@ impl StateWramLayout {
             .ok_or_else(|| fail("sampler page"))?;
         let samp_ids = samp_used + t.vocab as u16;
         let samp_wts = samp_ids + 8;
+        // Paged epilogue: one extra page holds the running argmax16, the top-k
+        // heap, and the finalized candidate arrays (the single logit page is
+        // reused per output-page). Allocated only under Paged, so SinglePage
+        // layouts are byte-identical.
+        let paged = if t.logit_paging == crate::state_model_ref::LogitPaging::Paged {
+            let page = bump.alloc(0x200, 0x100).ok_or_else(|| fail("paged page"))?;
+            let hk = crate::state_model_ref::HEAP_K_MAX as u16;
+            // Layout within the 0x200 block:
+            //   argmax16(2) best_logit(3) heap_count(1) | heap_logit(3*40=120)
+            //   heap_id(2*40=80) samp_ids(2*40=80) samp_wts(1*40=40)  => 326 B
+            let argmax16 = page;
+            let best_logit = argmax16 + 2;
+            let heap_count = best_logit + 3;
+            let heap_logit = heap_count + 1;
+            let heap_id = heap_logit + 3 * hk;
+            let samp_ids = heap_id + 2 * hk;
+            let samp_wts = samp_ids + 2 * hk;
+            let pg_idx = samp_wts + hk;
+            let pg_len = pg_idx + 1;
+            let pg_base = pg_len + 1;
+            let cand_id = pg_base + 2;
+            let cand_logit = cand_id + 2;
+            let worst_idx = cand_logit + 3;
+            let worst_logit = worst_idx + 1;
+            let heap_scratch_id = worst_logit + 3;
+            debug_assert!(
+                heap_scratch_id + 2 <= page + 0x200,
+                "paged sampler page overflow"
+            );
+            Some(PagedSampler {
+                page,
+                argmax16,
+                best_logit,
+                heap_logit,
+                heap_id,
+                heap_count,
+                samp_ids,
+                samp_wts,
+                pg_idx,
+                pg_len,
+                pg_base,
+                cand_id,
+                cand_logit,
+                worst_idx,
+                worst_logit,
+                heap_scratch_id,
+            })
+        } else {
+            None
+        };
         let shell = if with_shell {
             let prompt = bump.alloc(0x100, 0x100).ok_or_else(|| fail("shell page"))?;
             Some(ShellWram {
@@ -476,6 +569,7 @@ impl StateWramLayout {
             dump_qdump,
             xdump,
             shell,
+            paged,
             bytes_allocated: bump.bytes
                 + usize::from(act_end - S_ACT_BASE)
                 + usize::from(SCRATCH_A_END - SCRATCH_A_BASE)
@@ -2252,6 +2346,225 @@ fn emit_argmax(asm: &mut ModelAsm, l: &StateWramLayout) {
     asm.i(Instr::Ret { cond: None });
 }
 
+/// Heap capacity for the paged running top-k: `min(HEAP_K_MAX, vocab)`. Fits
+/// u8 (`HEAP_K_MAX = 40`).
+fn paged_heap_k(t: &StateTopology) -> u8 {
+    crate::state_model_ref::HEAP_K_MAX.min(t.vocab).max(1) as u8
+}
+
+/// Paged twin of [`emit_head_group`]: identical per-lane product-LUT build and
+/// i24 accumulate, but the accumulate loop runs over the `<= LOGIT_PAGE_IDS`
+/// page-local ids of the CURRENT output-page (count read from `pg.pg_len`)
+/// rather than the full `vocab`. The head weight bank mapped by the caller is
+/// this `(page, group)` combo, so `[DE]` (head page, local id) still lands on
+/// `head_i8_row_at(page_base + local_id)[lane]`, and the WRAM logit page is
+/// indexed by page-local id (reset per output-page). Emitted only under
+/// [`LogitPaging::Paged`]; the SinglePage `head_grp_g` bytes are unchanged.
+fn emit_head_group_paged(
+    asm: &mut ModelAsm,
+    l: &StateWramLayout,
+    g: usize,
+    lane_lo: usize,
+    lane_hi: usize,
+) {
+    let pg = l.paged.expect("paged layout");
+    let lut_hi = (l.lut_lo_page >> 8) as u8;
+    let act_hi = (l.act >> 8) as u8;
+    debug_assert_eq!(l.act & 0xFF, 0, "activation page-aligned");
+    let lbl = |s: &str| format!("{s}_pg_{g}");
+    asm.label(&lbl("head_grp"));
+    ld_r_imm(asm, Reg8::A, lane_lo as u8);
+    a_to(asm, LANE);
+    asm.label(&lbl("hg_lane"));
+    // q = ACT[lane] - 128
+    a_from(asm, LANE);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, act_hi);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(128),
+    });
+    a_to(asm, SIGN); // q byte
+    ld_rr(asm, Reg8::C, Reg8::A);
+    ld_r_imm(asm, Reg8::B, 0);
+    asm.i(Instr::Bit {
+        bit: BitIndex::new(7).expect("bit 7"),
+        target: CbTarget::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), &lbl("hg_qpos"));
+    ld_r_imm(asm, Reg8::B, 0xFF);
+    asm.label(&lbl("hg_qpos"));
+    // ascending half: entries 0..=127
+    ld16(asm, Reg16Data::DE, 0);
+    ld16(asm, Reg16Data::HL, l.lut_lo_page);
+    asm.label(&lbl("hg_asc"));
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::L),
+    });
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::NZ), &lbl("hg_asc"));
+    // descending half: entries 255 down to 128
+    ld16(asm, Reg16Data::DE, 0);
+    ld_r_imm(asm, Reg8::L, 0xFF);
+    asm.label(&lbl("hg_desc"));
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::Z), &lbl("hg_desc_done"));
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::L),
+    });
+    asm.jr(None, &lbl("hg_desc"));
+    asm.label(&lbl("hg_desc_done"));
+    // sign-extension page
+    a_from(asm, SIGN);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.jr(Some(Cond::Z), &lbl("hg_sx"));
+    asm.i(Instr::Cpl);
+    asm.label(&lbl("hg_sx"));
+    ld_rr(asm, Reg8::C, Reg8::A);
+    ld16(asm, Reg16Data::HL, l.lut_lo_page + 0x200);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.label(&lbl("hg_fillp"));
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::NZ), &lbl("hg_fillp"));
+    asm.label(&lbl("hg_filln"));
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::NZ), &lbl("hg_filln"));
+    // accumulate: D = head page (0x40 + lane - lane_lo), E over 0..pg_len,
+    // HL walks the WRAM logit page (3 bytes per page-local id).
+    a_from(asm, LANE);
+    if lane_lo > 0 {
+        asm.i(Instr::SubA {
+            src: AluSrc8::Imm(lane_lo as u8),
+        });
+    }
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((CHUNK_ENTRY >> 8) as u8),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_r_imm(asm, Reg8::E, 0);
+    ld16(asm, Reg16Data::HL, l.logits);
+    asm.label(&lbl("hg_acc"));
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    ld_r_imm(asm, Reg8::B, lut_hi);
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+    asm.i(Instr::AddA {
+        src: AluSrc8::HlIndirect,
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+    asm.i(Instr::AdcA {
+        src: AluSrc8::HlIndirect,
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+    asm.i(Instr::AdcA {
+        src: AluSrc8::HlIndirect,
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::E),
+    });
+    // loop while E != pg_len (dynamic per-page bound). Save E in B, load
+    // pg_len into A, CP A,B; B is reloaded to lut_hi at the loop top.
+    ld_rr(asm, Reg8::B, Reg8::E);
+    a_from(asm, pg.pg_len);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), &lbl("hg_acc"));
+    a_from(asm, LANE);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, LANE);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(lane_hi as u8),
+    });
+    asm.jp(Some(Cond::NZ), &lbl("hg_lane"));
+    asm.i(Instr::Ret { cond: None });
+}
+
 /// `rng_step`: advance the XorShift16 state at [`S_RNG_ADDR`] by one step
 /// of the pinned (7, 9, 8) triple: `x ^= x << 7; x ^= x >> 9; x ^= x << 8`
 /// (byte-serial shifts on the 2-byte LE state).
@@ -2603,6 +2916,990 @@ fn emit_sample_topk(asm: &mut ModelAsm, l: &StateWramLayout, k: u8) {
     asm.i(Instr::Ret { cond: None });
 }
 
+/// `argmax_fold_pg`: fold the current output-page's `pg_len` logits (at
+/// [`StateWramLayout::logits`], page-local ids) into the running top-1 at
+/// `paged.argmax16` / `paged.best_logit`. Ascending page-local ids, strict `>`
+/// (lowest global id wins ties across pages, because pages and page-local ids
+/// both ascend). `best_logit` is seeded to the i24 minimum by the driver, so
+/// the very first candidate always wins — exactly the host's `!seen_any` rule.
+/// The raw i24 best logit is stored at `paged.best_logit`; the sign flip is
+/// transient (in the compare registers only).
+fn emit_argmax_fold_pg(asm: &mut ModelAsm, l: &StateWramLayout) {
+    use crate::asm_impl_model::ARG_CAND;
+    let pg = l.paged.expect("paged layout");
+    let logits_hi = (l.logits >> 8) as u8;
+    debug_assert_eq!(l.logits & 0xFF, 0, "logits page-aligned");
+    asm.label("argmax_fold_pg");
+    // C = page-local id (0..pg_len)
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("axf_loop");
+    // load candidate raw i24 from logits + 3*C
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, logits_hi);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_CAND);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_CAND + 1);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, ARG_CAND + 2);
+    // ARG_BEST = best_logit (raw); compare sign-flipped copies in registers.
+    // 3-byte signed compare: take iff CAND > BEST.
+    for k in [2u16, 1, 0] {
+        a_from(asm, ARG_CAND + k);
+        if k == 2 {
+            asm.i(Instr::XorA {
+                src: AluSrc8::Imm(0x80),
+            });
+        }
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, pg.best_logit + k);
+        if k == 2 {
+            asm.i(Instr::XorA {
+                src: AluSrc8::Imm(0x80),
+            });
+        }
+        asm.i(Instr::CpA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        asm.jr(Some(Cond::C), "axf_upd");
+        if k > 0 {
+            asm.jr(Some(Cond::NZ), "axf_next");
+        } else {
+            asm.jr(None, "axf_next");
+        }
+    }
+    asm.label("axf_upd");
+    // best_logit := candidate (raw i24)
+    mem_copy(asm, pg.best_logit, ARG_CAND, 3);
+    // argmax16 := pg_base + C
+    a_from(asm, pg.pg_base);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    a_to(asm, pg.argmax16);
+    a_from(asm, pg.pg_base + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, pg.argmax16 + 1);
+    asm.label("axf_next");
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    a_from(asm, pg.pg_len);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::NZ), "axf_loop");
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `heap_offer_pg`: offer each of the current output-page's `pg_len` logits to
+/// the running top-k heap (`paged.heap_logit` / `paged.heap_id`, count at
+/// `paged.heap_count`), retaining the `k` entries best under the sampler total
+/// order (logit desc, id asc). The heap is kept INSERTION-SORTED ascending in
+/// selection order (worst at index 0), mirroring `RunningTopK::insert_sorted`,
+/// so eviction pops index 0 and finalize is a pure reversal. `k` is the
+/// compile-time heap size (`min(HEAP_K_MAX, vocab)`).
+fn emit_heap_offer_pg(asm: &mut ModelAsm, l: &StateWramLayout, k: u8) {
+    let pg = l.paged.expect("paged layout");
+    let logits_hi = (l.logits >> 8) as u8;
+    asm.label("heap_offer_pg");
+    // C = page-local id (0..pg_len)
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("ho_loop");
+    // cand_logit (raw i24) := logits + 3*C
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, logits_hi);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.cand_logit);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.cand_logit + 1);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.cand_logit + 2);
+    // cand_id := pg_base + C (u16)
+    a_from(asm, pg.pg_base);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    a_to(asm, pg.cand_id);
+    a_from(asm, pg.pg_base + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, pg.cand_id + 1);
+    // save C (page-local id) across the offer call
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::Push {
+        src: Reg16Stack::BC,
+    });
+    asm.call("heap_offer_one");
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::BC,
+    });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    a_from(asm, pg.pg_len);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::NZ), "ho_loop");
+    asm.i(Instr::Ret { cond: None });
+
+    // heap_offer_one: offer (cand_logit, cand_id) to the sorted heap.
+    emit_heap_offer_one(asm, l, k);
+}
+
+/// `heap_offer_one`: the [`RunningTopK::offer`] step. If the heap is not full,
+/// insert the candidate keeping ascending selection order (worst at 0). If
+/// full, replace slot 0 (the worst) with the candidate iff the candidate ranks
+/// above it, then re-sort by sifting up. Uses `worst_idx`/`worst_logit` as
+/// scratch. `k` is the heap capacity.
+fn emit_heap_offer_one(asm: &mut ModelAsm, l: &StateWramLayout, k: u8) {
+    let pg = l.paged.expect("paged layout");
+    asm.label("heap_offer_one");
+    // if count < k -> append then sift up.  else compare with slot 0 (worst).
+    a_from(asm, pg.heap_count);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(k),
+    });
+    asm.jr(Some(Cond::NZ), "ho1_append");
+    // full: cand vs slot 0 (worst). take iff ranks_above(cand, heap[0]).
+    // ranks_above(a,b): a.logit > b.logit || (a.logit==b.logit && a.id<b.id)
+    // heap[0] worst is at heap_logit+0 / heap_id+0.
+    asm.call("heap_cmp_cand_slot0"); // carry set iff cand ranks ABOVE slot 0
+    asm.jr(Some(Cond::C), "ho1_replace0");
+    asm.i(Instr::Ret { cond: None });
+    asm.label("ho1_replace0");
+    // overwrite slot 0 (the worst) with cand, then sift FORWARD (toward higher
+    // indices) while cand ranks above its successor — restoring ascending order
+    // (worst at 0). worst_idx is the forward-sift cursor, starting at 0.
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, pg.worst_idx);
+    asm.call("heap_write_slot_cand"); // heap[0] := cand
+    asm.label("ho1_fwd");
+    // stop if worst_idx == count-1 (no successor).
+    a_from(asm, pg.heap_count);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, pg.worst_idx);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::Z), "ho1_done");
+    // swap iff heap[worst_idx] ranks ABOVE heap[worst_idx+1] (out of order).
+    asm.call("heap_cmp_fwd");
+    asm.jr(Some(Cond::C), "ho1_fwd_swap");
+    asm.i(Instr::Ret { cond: None });
+    asm.label("ho1_fwd_swap");
+    asm.call("heap_swap_fwd");
+    a_from(asm, pg.worst_idx);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, pg.worst_idx);
+    asm.jr(None, "ho1_fwd");
+
+    asm.label("ho1_append");
+    // heap[count] := cand; worst_idx := count; count += 1; sift up toward 0.
+    a_from(asm, pg.heap_count);
+    a_to(asm, pg.worst_idx);
+    asm.call("heap_write_slot_cand");
+    a_from(asm, pg.heap_count);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, pg.heap_count);
+    asm.label("ho1_sift");
+    // sift up: while worst_idx>0 and heap[worst_idx-1] ranks_above heap[worst_idx], swap.
+    a_from(asm, pg.worst_idx);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "ho1_done");
+    asm.call("heap_cmp_up"); // carry set iff heap[i-1] ranks ABOVE heap[i]
+    asm.jr(Some(Cond::C), "ho1_swap");
+    asm.i(Instr::Ret { cond: None });
+    asm.label("ho1_swap");
+    asm.call("heap_swap_up"); // swap heap[i] and heap[i-1]
+    a_from(asm, pg.worst_idx);
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, pg.worst_idx);
+    asm.jr(None, "ho1_sift");
+    asm.label("ho1_done");
+    asm.i(Instr::Ret { cond: None });
+
+    // --- heap helper routines ---
+    emit_heap_helpers(asm, l);
+}
+
+/// The low-level heap helpers shared by [`emit_heap_offer_one`]:
+/// `heap_write_slot_cand` (heap[worst_idx] := cand), `heap_cmp_cand_slot0`
+/// (carry iff cand ranks above heap[0]), `heap_cmp_up` (carry iff heap[i] ranks
+/// above heap[i-1]), `heap_swap_up` (swap heap[i], heap[i-1]). All indices are
+/// u8 slot numbers; logits are i24 (3 B), ids u16 (2 B). "ranks above" is
+/// logit-desc / id-asc, computed as a signed 3-byte logit compare with a u16
+/// id tiebreak.
+fn emit_heap_helpers(asm: &mut ModelAsm, l: &StateWramLayout) {
+    let pg = l.paged.expect("paged layout");
+    // heap_write_slot_cand: heap[worst_idx] := (cand_logit, cand_id).
+    asm.label("heap_write_slot_cand");
+    // HL = heap_logit + 3*worst_idx
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        a_from(asm, pg.cand_logit + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    // HL = heap_id + 2*worst_idx
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        a_from(asm, pg.cand_id + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    asm.i(Instr::Ret { cond: None });
+
+    // heap_cmp_cand_slot0: carry := ranks_above(cand, heap[0]).
+    asm.label("heap_cmp_cand_slot0");
+    // load heap[0] logit -> worst_logit, id -> (worst scratch via regs).
+    // Compare cand_logit vs heap[0].logit (3-byte signed). Then tiebreak id.
+    heap_load_slot_logit(asm, pg, 0u8);
+    // compare cand vs worst_logit as ranks_above
+    heap_ranks_above_cand(asm, pg, /*slot=*/ 0);
+    asm.i(Instr::Ret { cond: None });
+
+    // heap_cmp_up: carry := ranks_above(heap[worst_idx], heap[worst_idx-1]).
+    asm.label("heap_cmp_up");
+    heap_ranks_above_slots(asm, pg);
+    asm.i(Instr::Ret { cond: None });
+
+    // heap_swap_up: swap heap[worst_idx] and heap[worst_idx-1] (logit+id).
+    asm.label("heap_swap_up");
+    heap_swap_up_body(asm, pg);
+    asm.i(Instr::Ret { cond: None });
+
+    // heap_cmp_fwd: carry := ranks_above(heap[worst_idx], heap[worst_idx+1]).
+    asm.label("heap_cmp_fwd");
+    heap_ranks_above_fwd(asm, pg);
+    asm.i(Instr::Ret { cond: None });
+
+    // heap_swap_fwd: swap heap[worst_idx] and heap[worst_idx+1] (logit+id).
+    asm.label("heap_swap_fwd");
+    heap_swap_fwd_body(asm, pg);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// carry := ranks_above(heap[worst_idx], heap[worst_idx+1]): stage cur into
+/// cand, next into worst/best scratch, compute ranks_above(cur, next).
+fn heap_ranks_above_fwd(asm: &mut ModelAsm, pg: PagedSampler) {
+    // cur = heap[worst_idx] -> cand_logit/cand_id
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_logit + k);
+    }
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_id + k);
+    }
+    // next = heap[worst_idx+1] -> worst_logit (logit) / heap_scratch_id (id)
+    next_slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.worst_logit + k);
+    }
+    next_slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.heap_scratch_id);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.heap_scratch_id + 1);
+    ranks_above_3b_then_id(
+        asm,
+        pg.cand_logit,
+        pg.worst_logit,
+        pg.cand_id,
+        pg.heap_scratch_id,
+    );
+}
+
+/// swap heap[worst_idx] and heap[worst_idx+1] (logit 3 B, id 2 B).
+fn heap_swap_fwd_body(asm: &mut ModelAsm, pg: PagedSampler) {
+    // stage cur logit -> cand_logit, next logit -> worst_logit, write swapped.
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_logit + k);
+    }
+    next_slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.worst_logit + k);
+    }
+    next_slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        a_from(asm, pg.cand_logit + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        a_from(asm, pg.worst_logit + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    // id swap
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_id + k);
+    }
+    next_slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.heap_scratch_id + k);
+    }
+    next_slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        a_from(asm, pg.cand_id + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        a_from(asm, pg.heap_scratch_id + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+}
+
+/// HL := base + stride * (`idx` + 1).
+fn next_slot_ptr(asm: &mut ModelAsm, base: u16, idx_addr: u16, stride: u8) {
+    a_from(asm, idx_addr);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(1),
+    });
+    match stride {
+        2 => {
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            });
+        }
+        3 => {
+            ld_rr(asm, Reg8::B, Reg8::A);
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            });
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::B),
+            });
+        }
+        _ => unreachable!("heap strides are 2 or 3"),
+    }
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((base & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (base >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+}
+
+/// HL := base + stride * (`idx`), where `idx` is a u8 at WRAM `idx_addr`.
+fn slot_ptr(asm: &mut ModelAsm, base: u16, idx_addr: u16, stride: u8) {
+    a_from(asm, idx_addr);
+    // A := idx * stride (stride in {2,3}); use adds.
+    match stride {
+        2 => {
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            });
+        }
+        3 => {
+            ld_rr(asm, Reg8::B, Reg8::A);
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            });
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::B),
+            });
+        }
+        _ => unreachable!("heap strides are 2 or 3"),
+    }
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((base & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (base >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+}
+
+/// Stage heap[`slot`].logit (3 B, raw i24) into `worst_logit`. The slot's id
+/// is read on demand by the comparator (`heap_id + 2*slot`), so this function
+/// only stages the LOGIT. `slot` is a small immediate.
+fn heap_load_slot_logit(asm: &mut ModelAsm, pg: PagedSampler, slot: u8) {
+    // HL = heap_logit + 3*slot (slot is a small immediate here)
+    let addr = pg.heap_logit + 3 * u16::from(slot);
+    ld16(asm, Reg16Data::HL, addr);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.worst_logit + k);
+    }
+}
+
+/// carry := ranks_above(cand, heap[`slot`]) where the slot logit is already in
+/// `worst_logit`. logit-desc then id-asc. `slot` is a small immediate id
+/// address `heap_id + 2*slot`.
+fn heap_ranks_above_cand(asm: &mut ModelAsm, pg: PagedSampler, slot: u16) {
+    // 3-byte signed compare cand_logit vs worst_logit.
+    // carry-out contract: set carry iff cand ranks strictly above.
+    let id_addr = pg.heap_id + 2 * slot;
+    ranks_above_3b_then_id(asm, pg.cand_logit, pg.worst_logit, pg.cand_id, id_addr);
+}
+
+/// carry := ranks_above(heap[worst_idx], heap[worst_idx-1]).
+fn heap_ranks_above_slots(asm: &mut ModelAsm, pg: PagedSampler) {
+    // Stage heap[worst_idx] logit into cand_logit, id into cand_id; stage
+    // heap[worst_idx-1] logit into worst_logit; id compared via pointer.
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_logit + k);
+    }
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_id + k);
+    }
+    // worst_idx-1 into a temp: we need heap[worst_idx-1]. Compute (worst_idx-1)
+    // pointer by loading worst_idx, dec, into a scratch byte reuse of pg.heap_count?
+    // Use pg.worst_logit region for the previous logit; previous id via pointer.
+    // Build previous-slot logit pointer.
+    a_from(asm, pg.worst_idx);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    // A = prev idx; HL = heap_logit + 3*prev
+    ld_rr(asm, Reg8::B, Reg8::A);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((pg.heap_logit & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (pg.heap_logit >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.worst_logit + k);
+    }
+    // previous id pointer: heap_id + 2*(worst_idx-1) -> store into best_logit
+    // scratch (2 bytes) to compare against cand_id.
+    a_from(asm, pg.worst_idx);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((pg.heap_id & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (pg.heap_id >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.heap_scratch_id); // prev id lo
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.heap_scratch_id + 1); // prev id hi
+    // Ascending heap (worst at 0): swap on sift-up iff the PREDECESSOR
+    // heap[i-1] ranks ABOVE the current heap[i], i.e. heap[i] is out of place
+    // below a better entry. So compute ranks_above(prev, cur):
+    //   a = prev = (worst_logit, heap_scratch_id),  b = cur = (cand_logit, cand_id).
+    ranks_above_3b_then_id(
+        asm,
+        pg.worst_logit,
+        pg.cand_logit,
+        pg.heap_scratch_id,
+        pg.cand_id,
+    );
+}
+
+/// carry := ranks_above((`a_logit`,`a_id`), (`b_logit`,`b_id_addr`)):
+/// a.logit > b.logit  OR  (a.logit == b.logit  AND  a.id < b.id).
+/// All logits are raw i24 (3 B LE); ids u16 (2 B LE). Leaves carry set iff a
+/// ranks strictly above b; clears carry otherwise.
+fn ranks_above_3b_then_id(asm: &mut ModelAsm, a_logit: u16, b_logit: u16, a_id: u16, b_id: u16) {
+    // Signed 3-byte compare of a_logit vs b_logit. Determine >, <, or ==.
+    // We compute a - b (as signed via sign-flip on top byte) from the top byte
+    // down. Result flags: if a > b -> set carry (rank above), ret. if a < b ->
+    // clear carry, ret. if equal -> fall to id tiebreak.
+    let lbl = asm.fresh("rka");
+    let above = format!("{lbl}_above");
+    let below = format!("{lbl}_below");
+    let idtb = format!("{lbl}_id");
+    let done = format!("{lbl}_done");
+    for k in [2u16, 1, 0] {
+        // B := b byte (top byte sign-flipped)
+        a_from(asm, b_logit + k);
+        if k == 2 {
+            asm.i(Instr::XorA {
+                src: AluSrc8::Imm(0x80),
+            });
+        }
+        ld_rr(asm, Reg8::B, Reg8::A);
+        // A := a byte (top byte sign-flipped)
+        a_from(asm, a_logit + k);
+        if k == 2 {
+            asm.i(Instr::XorA {
+                src: AluSrc8::Imm(0x80),
+            });
+        }
+        asm.i(Instr::CpA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        // A < B (carry) => a_byte < b_byte => a below at this byte => a<b.
+        asm.jr(Some(Cond::C), &below);
+        // A != B and not carry => a_byte > b_byte => a>b.
+        asm.jr(Some(Cond::NZ), &above);
+        // equal: continue to next byte
+    }
+    // all three equal -> tiebreak on id (a.id < b.id -> above)
+    asm.jr(None, &idtb);
+    asm.label(&above);
+    asm.i(Instr::Scf); // set carry = rank above
+    asm.jr(None, &done);
+    asm.label(&below);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    // clear carry: A xor A sets Z, clears carry.
+    asm.jr(None, &done);
+    asm.label(&idtb);
+    // u16 compare a.id < b.id : compute a.id - b.id, carry iff a<b.
+    a_from(asm, b_id);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, a_id);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    a_from(asm, b_id + 1);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, a_id + 1);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    // carry set iff a.id < b.id -> rank above. Leave carry as-is.
+    asm.label(&done);
+}
+
+/// swap heap[worst_idx] and heap[worst_idx-1] (both logit 3 B and id 2 B),
+/// byte-wise through the A register.
+fn heap_swap_up_body(asm: &mut ModelAsm, pg: PagedSampler) {
+    // logit swap
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    // stage cur logit into cand_logit
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_logit + k);
+    }
+    // prev logit pointer
+    prev_slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.worst_logit + k);
+    }
+    // write cur->prev
+    prev_slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        a_from(asm, pg.cand_logit + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    // write prev->cur
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        a_from(asm, pg.worst_logit + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    // id swap (2 B), stage into cand_id / heap_scratch_id scratch
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_id + k);
+    }
+    prev_slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.heap_scratch_id + k);
+    }
+    prev_slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        a_from(asm, pg.cand_id + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    for k in 0..2u16 {
+        a_from(asm, pg.heap_scratch_id + k);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+}
+
+/// HL := base + stride * (`idx` - 1).
+fn prev_slot_ptr(asm: &mut ModelAsm, base: u16, idx_addr: u16, stride: u8) {
+    a_from(asm, idx_addr);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    match stride {
+        2 => {
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            });
+        }
+        3 => {
+            ld_rr(asm, Reg8::B, Reg8::A);
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::A),
+            });
+            asm.i(Instr::AddA {
+                src: AluSrc8::Reg(Reg8::B),
+            });
+        }
+        _ => unreachable!("heap strides are 2 or 3"),
+    }
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((base & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (base >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+}
+
+/// `sample_paged`: finalize the running top-k heap and draw one token
+/// (`S_SAMPLED_ADDR`). Byte-identical to
+/// `decode::sample_topk_from_candidates` on the host's finalized heap.
+///
+/// The heap is insertion-sorted ascending (worst at 0), so selection order
+/// (best first) is the reversed heap: candidate `j` = heap slot `count-1-j`.
+/// For each candidate `j`, `d = logit_max - logit_j` (u24) with
+/// `logit_max = heap_logit[count-1]`, weight = `smp_weight(d)`, and
+/// `samp_ids[j]` (u16) / `samp_wts[j]` (u8) are filled. Then draw: `r =
+/// rng_step()`, `threshold = (r * total) >> 16`, cumulative walk picks the
+/// first candidate with `cum > threshold`. Uses SMP_* scratch (shared with the
+/// single-page sampler; only one is emitted per ROM).
+fn emit_sample_paged(asm: &mut ModelAsm, l: &StateWramLayout) {
+    let pg = l.paged.expect("paged layout");
+    asm.label("sample_paged");
+    // logit_max := heap_logit[count-1]  -> SMP_M (raw i24, used for deficit)
+    a_from(asm, pg.heap_count);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    a_to(asm, pg.worst_idx); // reuse worst_idx as the top-slot index
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, SMP_M + k);
+    }
+    // total := 0
+    zero_mem(asm, SMP_TOT, 2);
+    // j := 0 ; heap cursor slot := count-1 (descending)
+    ld_r_imm(asm, Reg8::C, 0); // C = candidate index j
+    asm.label("spg_fill");
+    ld_rr(asm, Reg8::A, Reg8::C);
+    a_from(asm, pg.heap_count);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "spg_draw");
+    // slot := count-1-j  -> worst_idx
+    a_from(asm, pg.heap_count);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    a_to(asm, pg.worst_idx);
+    // samp_ids[j] := heap_id[slot]  (u16)
+    slot_ptr(asm, pg.heap_id, pg.worst_idx, 2);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.cand_id);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, pg.cand_id + 1);
+    // write samp_ids[j] = samp_ids + 2*j
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((pg.samp_ids & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (pg.samp_ids >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    a_from(asm, pg.cand_id);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    a_from(asm, pg.cand_id + 1);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    // d := SMP_M - heap_logit[slot]  (u24)  -> SMP_D
+    slot_ptr(asm, pg.heap_logit, pg.worst_idx, 3);
+    for k in 0..3u16 {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, pg.cand_logit + k);
+    }
+    mem_sub_into(asm, SMP_D, SMP_M, pg.cand_logit, 3);
+    // save C across the smp_weight call
+    asm.i(Instr::Push {
+        src: Reg16Stack::BC,
+    });
+    asm.call("smp_weight"); // A = w
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::BC,
+    });
+    ld_rr(asm, Reg8::E, Reg8::A); // E = w (survives; B/C used below carefully)
+    // samp_wts[j] := w  (samp_wts + j)
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((pg.samp_wts & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (pg.samp_wts >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    // total += w
+    a_from(asm, SMP_TOT);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    a_to(asm, SMP_TOT);
+    a_from(asm, SMP_TOT + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, SMP_TOT + 1);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.jp(None, "spg_fill");
+
+    // draw: r = rng_step(); threshold = (r * total) >> 16
+    asm.label("spg_draw");
+    asm.call("rng_step");
+    a_from(asm, S_RNG_ADDR);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, S_RNG_ADDR + 1);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_TOT);
+    ld_rr(asm, Reg8::E, Reg8::A);
+    a_from(asm, SMP_TOT + 1);
+    ld_rr(asm, Reg8::D, Reg8::A);
+    asm.call("mul16"); // MUL_R = r * total (u32)
+    mem_copy(asm, SMP_THR, crate::asm_impl_model::MUL_R + 2, 2);
+    zero_mem(asm, SMP_CUM, 2);
+    ld_r_imm(asm, Reg8::C, 0); // C = candidate index
+    asm.label("spg_walk");
+    // cum += samp_wts[C]
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((pg.samp_wts & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (pg.samp_wts >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_CUM);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    a_to(asm, SMP_CUM);
+    a_from(asm, SMP_CUM + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, SMP_CUM + 1);
+    // pick iff cum > threshold  (borrow on threshold - cum)
+    a_from(asm, SMP_CUM);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_THR);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    a_from(asm, SMP_CUM + 1);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, SMP_THR + 1);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::C), "spg_pick");
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    // stop when C == heap_count (defensive; threshold < total guarantees a hit)
+    ld_rr(asm, Reg8::A, Reg8::C);
+    a_from(asm, pg.heap_count);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::NZ), "spg_walk");
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.label("spg_pick");
+    // S_SAMPLED := low byte of samp_ids[C] (charset feedback is u8; the ring
+    // stores the low id byte, mirroring the host argmax u8 accessor).
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((pg.samp_ids & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (pg.samp_ids >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    a_to(asm, S_SAMPLED_ADDR);
+    asm.i(Instr::Ret { cond: None });
+}
+
 // ---------------------------------------------------------------------------
 // bank plan + params blob
 // ---------------------------------------------------------------------------
@@ -2673,6 +3970,9 @@ pub(crate) struct StateRomPlan {
     pub(crate) head_bank0: usize,
     /// (lane_lo, lane_hi) per head bank.
     pub(crate) head_groups: Vec<(usize, usize)>,
+    /// Number of streamed logit output-pages (`ceil(vocab / 85)` under Paged,
+    /// else 1). Head banks are laid out as `n_logit_pages` sets, one per group.
+    pub(crate) n_logit_pages: usize,
     /// Total banks including `extra_banks` appended after the head banks.
     pub(crate) bank_count: usize,
     /// When true, `chunk_run` calls a caller-emitted `anim_tick` routine once
@@ -2839,11 +4139,24 @@ pub(crate) fn plan_state_rom_with(
         .map(|lo| (lo, (lo + 64).min(t.d_model)))
         .collect();
 
+    // Under Paged, each of the `n_logit_pages` output-pages gets its own set
+    // of head banks (one per lane group), so a page's `<= LOGIT_PAGE_IDS` head
+    // weights are addressable by page-local id 0..84 within a 256-byte lane
+    // page. SinglePage keeps one head bank set (n_logit_pages == 1).
+    let n_logit_pages = match t.logit_paging {
+        crate::state_model_ref::LogitPaging::SinglePage => 1,
+        crate::state_model_ref::LogitPaging::Paged => t
+            .vocab
+            .div_ceil(crate::state_model_ref::LOGIT_PAGE_IDS)
+            .max(1),
+    };
+
     let params_bank = 1 + weight_chunk_count;
     let state_bank0 = params_bank + 1;
     let emb_bank0 = state_bank0 + state_bank_rows.len();
     let head_bank0 = emb_bank0 + emb_bank_count;
-    let bank_count = head_bank0 + head_groups.len() + extra_banks;
+    let head_bank_count = head_groups.len() * n_logit_pages;
+    let bank_count = head_bank0 + head_bank_count + extra_banks;
     if bank_count > 512 {
         return Err(ModelRomError::TooManyBanks { banks: bank_count });
     }
@@ -2865,6 +4178,7 @@ pub(crate) fn plan_state_rom_with(
         emb_bank_count,
         head_bank0,
         head_groups,
+        n_logit_pages,
         bank_count,
         animate: false,
     })
@@ -3436,13 +4750,73 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
     asm.call("norm24");
     emit_copy16(asm, l.act, l.dump_qdump, t.d_model);
 
-    // zero the i24 logits, then accumulate the head lane groups
-    emit_zero16(asm, l.logits, (3 * t.vocab) as u16);
-    for (g, _) in plan.head_groups.iter().enumerate() {
-        set_bank(asm, (plan.head_bank0 + g) as u16);
-        asm.call(&format!("head_grp_{g}"));
+    match t.logit_paging {
+        crate::state_model_ref::LogitPaging::SinglePage => {
+            // zero the i24 logits, then accumulate the head lane groups
+            emit_zero16(asm, l.logits, (3 * t.vocab) as u16);
+            for (g, _) in plan.head_groups.iter().enumerate() {
+                set_bank(asm, (plan.head_bank0 + g) as u16);
+                asm.call(&format!("head_grp_{g}"));
+            }
+            asm.call("argmax_v");
+        }
+        crate::state_model_ref::LogitPaging::Paged => {
+            emit_state_paged_epilogue(asm, plan);
+        }
     }
-    asm.call("argmax_v");
+}
+
+/// Emit the paged head/argmax epilogue (deploy step 2): stream
+/// `n_logit_pages` output-pages of `<= LOGIT_PAGE_IDS` ids, folding each page
+/// into the running top-1 (`argmax16`) and the running top-k heap. The single
+/// 256-byte logit page is reused per page; the full `3 * vocab` logit vector is
+/// never materialized. Leaves the argmax id at `paged.argmax16` and the sorted
+/// heap ready for `sample_paged`.
+fn emit_state_paged_epilogue(asm: &mut ModelAsm, plan: &StateRomPlan) {
+    let l = &plan.layout;
+    let t = &l.topology;
+    let pg = l.paged.expect("paged layout");
+    let n_groups = plan.head_groups.len();
+    // Seed the running top-1: best_logit := i24 minimum (raw -2^23 =
+    // 0x00_00_80 LE), argmax16 := 0, heap_count := 0.
+    ld_r_imm(asm, Reg8::A, 0x00);
+    a_to(asm, pg.best_logit);
+    a_to(asm, pg.best_logit + 1);
+    ld_r_imm(asm, Reg8::A, 0x80);
+    a_to(asm, pg.best_logit + 2);
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, pg.argmax16);
+    a_to(asm, pg.argmax16 + 1);
+    a_to(asm, pg.heap_count);
+
+    for page in 0..plan.n_logit_pages {
+        let base_id = (page * crate::state_model_ref::LOGIT_PAGE_IDS) as u16;
+        let page_len = ((page + 1) * crate::state_model_ref::LOGIT_PAGE_IDS)
+            .min(t.vocab)
+            .saturating_sub(page * crate::state_model_ref::LOGIT_PAGE_IDS);
+        // pg_idx := page ; pg_len := page_len ; pg_base := base_id
+        ld_r_imm(asm, Reg8::A, page as u8);
+        a_to(asm, pg.pg_idx);
+        ld_r_imm(asm, Reg8::A, page_len as u8);
+        a_to(asm, pg.pg_len);
+        ld_r_imm(asm, Reg8::A, (base_id & 0xFF) as u8);
+        a_to(asm, pg.pg_base);
+        ld_r_imm(asm, Reg8::A, (base_id >> 8) as u8);
+        a_to(asm, pg.pg_base + 1);
+        // zero this output-page's logits (3 * page_len bytes)
+        emit_zero16(asm, l.logits, (3 * page_len) as u16);
+        // accumulate the head lane groups for THIS page's banks
+        for (g, _) in plan.head_groups.iter().enumerate() {
+            let bank = plan.head_bank0 + page * n_groups + g;
+            set_bank(asm, bank as u16);
+            asm.call(&format!("head_grp_pg_{g}"));
+        }
+        asm.call("argmax_fold_pg");
+        asm.call("heap_offer_pg");
+    }
+    // finalize + argmax id -> S_ARGMAX_ADDR low byte (charset feedback)
+    a_from(asm, pg.argmax16);
+    a_to(asm, S_ARGMAX_ADDR);
 }
 
 /// Emit every shared routine body plus the bank-0 data tables (GELU/y LUTs
@@ -3494,14 +4868,31 @@ pub(crate) fn emit_state_routines_and_tables(
         AccWidth::I16 => emit_down_epilogue24(asm, l),
         AccWidth::I24 => emit_down_epilogue24_wide(asm, l),
     }
-    for (g, &(lo, hi)) in plan.head_groups.iter().enumerate() {
-        emit_head_group(asm, l, g, lo, hi);
-    }
-    emit_argmax(asm, l);
-    if let Some(cfg) = sampler {
-        emit_rng_step(asm);
-        emit_smp_weight(asm, cfg.scale_q16());
-        emit_sample_topk(asm, l, cfg.k());
+    match t.logit_paging {
+        crate::state_model_ref::LogitPaging::SinglePage => {
+            for (g, &(lo, hi)) in plan.head_groups.iter().enumerate() {
+                emit_head_group(asm, l, g, lo, hi);
+            }
+            emit_argmax(asm, l);
+            if let Some(cfg) = sampler {
+                emit_rng_step(asm);
+                emit_smp_weight(asm, cfg.scale_q16());
+                emit_sample_topk(asm, l, cfg.k());
+            }
+        }
+        crate::state_model_ref::LogitPaging::Paged => {
+            for (g, &(lo, hi)) in plan.head_groups.iter().enumerate() {
+                emit_head_group_paged(asm, l, g, lo, hi);
+            }
+            emit_argmax_fold_pg(asm, l);
+            let heap_k = paged_heap_k(t);
+            emit_heap_offer_pg(asm, l, heap_k);
+            if let Some(cfg) = sampler {
+                emit_rng_step(asm);
+                emit_smp_weight(asm, cfg.scale_q16());
+                emit_sample_paged(asm, l);
+            }
+        }
     }
 
     // bank-0 data: GELU LUT, y LUT, exp2 LUT
@@ -3573,16 +4964,27 @@ pub(crate) fn assemble_state_rom(
         }
         emb_tables.push(bank);
     }
-    // Head banks: 64 lane pages of 256 bytes each (entries 0..vocab valid).
+    // Head banks: 64 lane pages of 256 bytes each. SinglePage lays one bank set
+    // (page 0 = all `vocab` ids), byte-identical to before paging existed.
+    // Paged lays `n_logit_pages` bank sets in page-major order (page, group):
+    // set `pg`'s bank for group g holds head weights for lanes [lo..hi) and the
+    // <=85 ids [pg*85 .. pg*85+len), stored at lane-page-local offset local_id.
+    // The full `usize` id lookup (`head_i8_row_at`) is REQUIRED: `id as u8`
+    // would alias ids >= 256 to rows 0..255.
+    const PAGE_IDS: usize = crate::state_model_ref::LOGIT_PAGE_IDS;
     let mut head_tables: Vec<Vec<u8>> = Vec::new();
-    for &(lo, hi) in &plan.head_groups {
-        let mut bank = vec![0u8; (hi - lo) * 256];
-        for (p, lane) in (lo..hi).enumerate() {
-            for id in 0..t.vocab {
-                bank[p * 256 + id] = model.head_i8_row(id as u8)[lane] as u8;
+    for page in 0..plan.n_logit_pages {
+        let id_lo = page * PAGE_IDS;
+        let id_hi = ((page + 1) * PAGE_IDS).min(t.vocab);
+        for &(lo, hi) in &plan.head_groups {
+            let mut bank = vec![0u8; (hi - lo) * 256];
+            for (p, lane) in (lo..hi).enumerate() {
+                for (local, global) in (id_lo..id_hi).enumerate() {
+                    bank[p * 256 + local] = model.head_i8_row_at(global)[lane] as u8;
+                }
             }
+            head_tables.push(bank);
         }
-        head_tables.push(bank);
     }
     let table_bytes = plan.params.bytes.len()
         + state_tables.iter().map(Vec::len).sum::<usize>()
@@ -3656,7 +5058,7 @@ pub(crate) fn assemble_state_rom(
     for (i, table) in head_tables.into_iter().enumerate() {
         push_section(&mut pairs, plan.head_bank0 + i, CHUNK_ENTRY, table);
     }
-    let extras_bank0 = plan.head_bank0 + plan.head_groups.len();
+    let extras_bank0 = plan.head_bank0 + plan.head_groups.len() * plan.n_logit_pages;
     for (k, payload) in extra_bank_payloads.iter().enumerate() {
         push_section(&mut pairs, extras_bank0 + k, CHUNK_ENTRY, payload.clone());
     }
@@ -3712,7 +5114,10 @@ fn build_state_model_rom(
     asm.label("token_start");
     emit_state_forward_body(&mut asm, &plan);
     let picked_addr = if sampler.is_some() {
-        asm.call("sample_v");
+        match model.topology.logit_paging {
+            crate::state_model_ref::LogitPaging::SinglePage => asm.call("sample_v"),
+            crate::state_model_ref::LogitPaging::Paged => asm.call("sample_paged"),
+        }
         S_SAMPLED_ADDR
     } else {
         S_ARGMAX_ADDR

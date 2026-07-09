@@ -129,6 +129,14 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
     } else {
         1
     };
+    let vocab = dim(&topo["vocab"], "vocab")?;
+    // Wide-vocab (subword) students exceed the single 256-byte i24 logit page
+    // (85 ids); they use the streamed paged head/argmax/sampler epilogue.
+    let logit_paging = if vocab > gbf_kernel::state_model_ref::LOGIT_PAGE_IDS {
+        gbf_kernel::state_model_ref::LogitPaging::Paged
+    } else {
+        gbf_kernel::state_model_ref::LogitPaging::SinglePage
+    };
     let topology = StateTopology {
         d_model: dim(&topo["d_model"], "d_model")?,
         d_ff: dim(&topo["d_ff"], "d_ff")?,
@@ -137,8 +145,9 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
             &topo["sequence_state_params"]["state_slots"],
             "sequence_state_params.state_slots",
         )?,
-        vocab: dim(&topo["vocab"], "vocab")?,
+        vocab,
         n_experts,
+        logit_paging,
     };
 
     let tensors = manifest["tensors"]
@@ -664,12 +673,36 @@ pub(crate) fn state_expected_segments(
         l.dump_qdump,
         trace.final_q.iter().map(|&q| (q + 128) as u8).collect(),
     ));
-    let mut logit_bytes = Vec::with_capacity(l.topology.vocab * 3);
+    // `trace.logits` is the full vector under SinglePage and the LAST resident
+    // output-page under Paged — both equal what sits in `l.logits` at token end.
+    let mut logit_bytes = Vec::with_capacity(trace.logits.len() * 3);
     for &v in &trace.logits {
         logit_bytes.extend_from_slice(&v.to_le_bytes()[..3]);
     }
     segments.push(("logits_i24".to_string(), l.logits, logit_bytes));
     segments.push(("argmax".to_string(), S_ARGMAX_ADDR, vec![trace.argmax]));
+    if let Some(pg) = l.paged {
+        // Running top-1 argmax id as a u16 (global id).
+        segments.push((
+            "argmax16".to_string(),
+            pg.argmax16,
+            (trace.argmax_full as u16).to_le_bytes().to_vec(),
+        ));
+        // Finalized top-k heap: the ROM keeps it insertion-sorted ASCENDING
+        // (worst at slot 0), so slot j holds host selection-order entry
+        // (count-1-j). Compare heap_logit (i24 LE) and heap_id (u16 LE).
+        let count = trace.topk_heap.len();
+        let mut heap_logit_bytes = Vec::with_capacity(count * 3);
+        let mut heap_id_bytes = Vec::with_capacity(count * 2);
+        for j in 0..count {
+            let e = trace.topk_heap[count - 1 - j]; // ascending: worst first
+            heap_logit_bytes.extend_from_slice(&e.logit.to_le_bytes()[..3]);
+            heap_id_bytes.extend_from_slice(&(e.id as u16).to_le_bytes());
+        }
+        segments.push(("heap_logit".to_string(), pg.heap_logit, heap_logit_bytes));
+        segments.push(("heap_id".to_string(), pg.heap_id, heap_id_bytes));
+        segments.push(("heap_count".to_string(), pg.heap_count, vec![count as u8]));
+    }
     segments
 }
 

@@ -579,6 +579,7 @@ pub const D256_CLASS_TOPOLOGY: StateTopology = StateTopology {
     state_slots: 208,
     vocab: 80,
     n_experts: 1,
+    logit_paging: gbf_kernel::state_model_ref::LogitPaging::SinglePage,
 };
 
 /// Result of the d256-class V2 fit + byte-exact gate.
