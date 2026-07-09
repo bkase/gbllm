@@ -78,7 +78,9 @@ fn real_moe_student_loads_and_forwards_deterministically() {
     assert_eq!(lowered.block_ffns.len(), topo.n_blocks);
     for (bi, b) in lowered.block_ffns.iter().enumerate() {
         match b {
-            LoweredBlockFfn::Moe { experts, router } => {
+            LoweredBlockFfn::Moe {
+                experts, router, ..
+            } => {
                 assert_eq!(experts.len(), topo.n_experts, "block {bi} expert count");
                 assert_eq!(router.n_experts(), topo.n_experts, "block {bi} router");
             }

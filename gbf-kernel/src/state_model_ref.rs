@@ -112,7 +112,7 @@ pub const DOWN_DELTA_WIDE_BOUND: u64 = (1 << 23) - 1;
 
 /// Documented places where the canonical integer semantics diverge from the
 /// trainer's f32 semantics. Reproduced verbatim in the evidence report.
-pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 12] = [
+pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 13] = [
     "Residual stream is i24 Q19.5 (resolution 1/32, range +/-262143.97) with mod-2^24 wrapping adds (trainer: f32). i24 replaces the dense bring-up's i16 Q11.5 because the arm-B checkpoint's residual measurably reaches |x| ~ 2,600 real (8.4e4 raw at 1/32), which no 16-bit split of range/resolution can hold without wrapping. Embedding rows are quantized to Q19.5 at lowering time (round-half-even).",
     "State slots are saturating-i24 integers in units of (ACT_RANGE/QMAX)/256 real, so the in-projection delta m = scale_raw * acc accumulates exactly; the trainer carries f32 state. Saturation at +/-(2^23 - 1) is canonical and counted.",
     "The per-token decay multiply is sign(h) * ((|h| * decay_raw + 128) >> 8) (round-half-away on the Q8.8 product); the trainer multiplies f32 state by decay_raw/256 exactly. Rounding error is at most 0.5 state units (~1.2e-4 real) per slot per token.",
@@ -125,6 +125,7 @@ pub const STATE_INT_SEMANTIC_DIVERGENCES: [&str; 12] = [
     "Down-projection matvec accumulators widen from i16 to i24 (3 bytes on device) when the structural per-row worst case over the actual ternary weights exceeds i16 (possible from fan-in 257 up; certain worst-case at the d192 student's fan-in 384). The manifest declares no measured activation ranges, so the width decision uses the exact structural bound, never unmeasured statistics. The value is exact either way; only the carrier width changes. The wide path also widens the residual-delta carrier from u16 to i24 (see the down-projection delta entry).",
     "The final norm output is activation-quantized to the [-8,8]/127 grid before the tied head; tied-head weights are the embedding quantized per-tensor to i8 (scale = max|emb|/127, round-ties-even); logits are integer dot products in i32 (i24 on device).",
     "Integer rounding is round-half-away-from-zero throughout the runtime path; the trainer/Burn rounds ties to even. Because the recurrence carries state across tokens, per-token rounding differences accumulate: fidelity (bpc delta, argmax agreement) is therefore measured over long sequential streams, not per-context.",
+    "MoE routing (router-fx.v1) is PURELY INTEGER on the deployed path: no f32 enters the forward. The raw pre-norm residual i24 Q19.5 x is viewed as Q16.16 via xr = i64(x_i24) << 11 (exact; 5 frac bits + 11 = 16). Weight tables are built once at lowering time (round-ties-even, f64 only there): win_q = rte(w_input_projection * 2^16) and wout_q = rte(w_expert_projection * 2^16), each asserted to fit i32 (RouterWeightEscapesI32 otherwise). hidden_acc[k] = bin_q[k] + sum_c win_q[k,c] * xr[c] accumulates at Q32.32 in an i64 (structural bound proven <= i62, RouterHiddenEscapesI62 otherwise), then shifts back to Q16.16 with round-half-away-from-zero: hidden_q[k] = sign * ((|hidden_acc| + 2^15) >> 16). raw_acc[e] = bout_q[e] + sum_k wout_q[e,k] * hidden_q[k] accumulates at Q32.32 in an i64 (structural bound proven <= i62, RouterRawLogitEscapesI62 otherwise). expert = argmax_e raw_acc[e] with a strict `>` scan from index 0 (lowest-index tiebreak). bin_q = rte(input_bias * 2^32), bout_q = rte(expert_bias * 2^32) (Option -> 0). The router output is ONLY the selected expert index; it never re-enters the integer stream, so the per-expert FFN math is byte-identical to the dense block. The f32 LowRankRouter::route_f32 stays the reference the fixed-point router is gated against (0 divergences required on the real d192x8 student across all blocks/positions). NOTE: the design named i48 for the hidden carrier, but the real student's structural hidden bound under the mandated Q16.16 xr and the full i24 saturation bound is ~1.92e16, so the proven carrier was widened to i62 (still an exact i64 accumulator); the numeric result is width-independent.",
 ];
 
 // ---------------------------------------------------------------------------
@@ -364,6 +365,14 @@ impl LowRankRouter {
     /// uses a strict `>` (ties keep the lowest index).
     #[must_use]
     pub fn route_f32(&self, x: &[f32]) -> usize {
+        self.route_f32_with_logits(x).0
+    }
+
+    /// [`Self::route_f32`] returning the selected expert index and the raw f32
+    /// logits, so the fixed-point gate can log the `raw[top1] - raw[top2]`
+    /// margin on any divergence.
+    #[must_use]
+    pub fn route_f32_with_logits(&self, x: &[f32]) -> (usize, Vec<f32>) {
         debug_assert_eq!(x.len(), self.d_model, "router input width");
         let hid: Vec<f32> = self
             .input_projection
@@ -376,6 +385,7 @@ impl LowRankRouter {
                     .fold(bias, |acc, p| acc + p)
             })
             .collect();
+        let mut raw = vec![0f32; self.n_experts];
         let mut best_e = 0usize;
         let mut best_v = f32::NEG_INFINITY;
         for (e, (row, &bias)) in self
@@ -389,12 +399,241 @@ impl LowRankRouter {
                 .zip(hid.iter())
                 .map(|(&w, &hk)| w * hk)
                 .fold(bias, |a, p| a + p);
+            raw[e] = acc;
             if acc > best_v {
                 best_v = acc;
                 best_e = e;
             }
         }
-        best_e
+        (best_e, raw)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fixed-point MoE router (router-fx.v1)
+// ---------------------------------------------------------------------------
+
+/// `xr[c] = i64(x_i24[c]) << XR_SHIFT` reinterprets the i24 Q19.5 residual as
+/// Q16.16 (5 frac bits + 11 = 16). Exact left shift, no rounding.
+const ROUTER_XR_SHIFT: u32 = 11;
+/// Fixed-point router weight scale: `win_q/wout_q = rte(w * 2^ROUTER_WEIGHT_SHIFT)`.
+const ROUTER_WEIGHT_SHIFT: u32 = 16;
+/// Shift that returns the Q32.32 hidden accumulator to the Q16.16 hidden grid.
+const ROUTER_HIDDEN_SHIFT: u32 = 16;
+/// Proven i62 carrier ceiling for both the hidden and raw-logit accumulators
+/// (the design targeted i48 for the hidden carrier; the real d192x8 student's
+/// structural hidden bound under the mandated Q16.16 `xr` and the full i24
+/// saturation bound is ~1.92e16, so the proven width was widened to i62 — still
+/// an exact i64 accumulator with >2 bits of headroom). The value is
+/// width-independent; only the honesty check widens.
+const ROUTER_ACC_I62_BOUND: u64 = (1 << 62) - 1;
+/// Maximum magnitude of `xr[c]`: `(2^23 - 1) << ROUTER_XR_SHIFT`, from the i24
+/// residual saturation bound. Used for the structural hidden-accumulator proof.
+const ROUTER_XR_MAX: u64 = ((1u64 << 23) - 1) << ROUTER_XR_SHIFT;
+
+/// The **purely integer** deployed twin of [`LowRankRouter`] (`router-fx.v1`).
+///
+/// It reproduces [`LowRankRouter::route_f32`]'s argmax **without any f32 in the
+/// forward**, so host and ROM route identically by construction. Weight tables
+/// are built once at lowering time (round-ties-even, f64 there only) and mirror
+/// bit-for-bit into ROM data (deploy step 4). The forward is all `i32`/`i64`.
+///
+/// Fixed-point contract (see [`STATE_INT_SEMANTIC_DIVERGENCES`] entry
+/// `router-fx.v1`):
+/// - Input: the raw pre-norm residual `x_i24` (i24 Q19.5). `xr[c] =
+///   i64(x_i24[c]) << 11` is the exact Q16.16 view.
+/// - `win_q[k*d_model+c] = rte(input_projection * 2^16)` (i32),
+///   `wout_q[e*rank+k] = rte(expert_projection * 2^16)` (i32).
+/// - `bin_q[k] = rte(input_bias * 2^32)`, `bout_q[e] = rte(expert_bias * 2^32)`
+///   at the Q32.32 accumulator scale (missing bias -> 0).
+/// - `hidden_acc[k] = bin_q[k] + sum_c win_q * xr[c]` (i64, Q32.32),
+///   `hidden_q[k] = sign * ((|hidden_acc| + 2^15) >> 16)` (round-half-away).
+/// - `raw_acc[e] = bout_q[e] + sum_k wout_q * hidden_q[k]` (i64, Q32.32).
+/// - `expert = argmax_e raw_acc[e]`, strict `>` scan from 0 (lowest index).
+#[derive(Debug, Clone)]
+pub struct FixedRouter {
+    rank: usize,
+    d_model: usize,
+    n_experts: usize,
+    /// `win_q`, shape `[rank, d_model]`, row-major (i32, scale `2^16`).
+    win_q: Vec<i32>,
+    /// `bin_q`, shape `[rank]` (i64, scale `2^32`).
+    bin_q: Vec<i64>,
+    /// `wout_q`, shape `[n_experts, rank]`, row-major (i32, scale `2^16`).
+    wout_q: Vec<i32>,
+    /// `bout_q`, shape `[n_experts]` (i64, scale `2^32`).
+    bout_q: Vec<i64>,
+    /// Reported structural hidden-accumulator bound (proven `<= i62`).
+    hidden_structural_bound: u64,
+    /// Reported structural raw-logit-accumulator bound (proven `<= i62`).
+    raw_structural_bound: u64,
+}
+
+impl FixedRouter {
+    /// Build the fixed-point router from the f32 [`LowRankRouter`] at lowering
+    /// time. `block` is used only for error reporting. Proves the i32 weight
+    /// fit and the i62 accumulator bounds structurally from the actual
+    /// `|weights|` and the i24 saturation bound; fails loud (never clamps).
+    pub fn lower(router: &LowRankRouter, block: usize) -> Result<Self, StateModelError> {
+        let rank = router.rank;
+        let d_model = router.d_model;
+        let n_experts = router.n_experts;
+
+        // Weight quantization at scale 2^16, i32 fit check.
+        let quant_weight = |what: &'static str, w: &[f32]| -> Result<Vec<i32>, StateModelError> {
+            w.iter()
+                .enumerate()
+                .map(|(index, &v)| {
+                    let q = rte_i64(f64::from(v) * f64::from(1u32 << ROUTER_WEIGHT_SHIFT));
+                    i32::try_from(q).map_err(|_| StateModelError::RouterWeightEscapesI32 {
+                        block,
+                        what,
+                        index,
+                        quantized: q,
+                    })
+                })
+                .collect()
+        };
+        // Biases quantize at the Q32.32 accumulator scale (2^32).
+        let quant_bias = |b: &[f32]| -> Vec<i64> {
+            b.iter()
+                .map(|&v| rte_i64(f64::from(v) * 4_294_967_296.0_f64))
+                .collect()
+        };
+
+        let win_q = quant_weight("input_projection", &router.input_projection)?;
+        let bin_q = quant_bias(&router.input_bias);
+        let wout_q = quant_weight("expert_projection", &router.expert_projection)?;
+        let bout_q = quant_bias(&router.expert_bias);
+
+        // Structural hidden bound: |bin_q[k]| + (sum_c |win_q[k,c]|) * XR_MAX.
+        let mut hidden_structural_bound: u64 = 0;
+        let mut hidden_q_bound = vec![0u64; rank];
+        for k in 0..rank {
+            let abssum: u64 = win_q[k * d_model..(k + 1) * d_model]
+                .iter()
+                .map(|&w| u64::from(w.unsigned_abs()))
+                .sum();
+            let bound = bin_q[k]
+                .unsigned_abs()
+                .saturating_add(abssum.saturating_mul(ROUTER_XR_MAX));
+            if bound > ROUTER_ACC_I62_BOUND {
+                return Err(StateModelError::RouterHiddenEscapesI62 {
+                    block,
+                    row: k,
+                    bound,
+                });
+            }
+            hidden_structural_bound = hidden_structural_bound.max(bound);
+            // Max |hidden_q[k]| = (bound + 2^15) >> 16 (round-half-away ceiling).
+            hidden_q_bound[k] = (bound + (1 << (ROUTER_HIDDEN_SHIFT - 1))) >> ROUTER_HIDDEN_SHIFT;
+        }
+
+        // Structural raw-logit bound: |bout_q[e]| + sum_k |wout_q[e,k]|*hq_bound.
+        let mut raw_structural_bound: u64 = 0;
+        for e in 0..n_experts {
+            let mut bound = bout_q[e].unsigned_abs();
+            for k in 0..rank {
+                bound = bound.saturating_add(
+                    u64::from(wout_q[e * rank + k].unsigned_abs())
+                        .saturating_mul(hidden_q_bound[k]),
+                );
+            }
+            if bound > ROUTER_ACC_I62_BOUND {
+                return Err(StateModelError::RouterRawLogitEscapesI62 {
+                    block,
+                    expert: e,
+                    bound,
+                });
+            }
+            raw_structural_bound = raw_structural_bound.max(bound);
+        }
+
+        Ok(Self {
+            rank,
+            d_model,
+            n_experts,
+            win_q,
+            bin_q,
+            wout_q,
+            bout_q,
+            hidden_structural_bound,
+            raw_structural_bound,
+        })
+    }
+
+    #[must_use]
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    #[must_use]
+    pub fn n_experts(&self) -> usize {
+        self.n_experts
+    }
+
+    /// Reported structural hidden-accumulator bound (proven `<= i62`).
+    #[must_use]
+    pub fn hidden_structural_bound(&self) -> u64 {
+        self.hidden_structural_bound
+    }
+
+    /// Reported structural raw-logit-accumulator bound (proven `<= i62`).
+    #[must_use]
+    pub fn raw_structural_bound(&self) -> u64 {
+        self.raw_structural_bound
+    }
+
+    /// Route the raw pre-norm residual `x_i24` (i24 Q19.5, `d_model` lanes) to
+    /// a top-1 expert index using PURELY INTEGER arithmetic. Deterministic and
+    /// identical on host and ROM. See [`Self::route_with_logits`] for the raw
+    /// logits (margin diagnostics).
+    #[must_use]
+    pub fn route(&self, x_i24: &[i32]) -> usize {
+        self.route_with_logits(x_i24).0
+    }
+
+    /// [`Self::route`] returning the selected expert index and the raw i64
+    /// logits, so callers can log the `raw[top1] - raw[top2]` margin.
+    #[must_use]
+    pub fn route_with_logits(&self, x_i24: &[i32]) -> (usize, Vec<i64>) {
+        debug_assert_eq!(x_i24.len(), self.d_model, "router input width");
+        // Q16.16 view of the residual (exact left shift).
+        let xr: Vec<i64> = x_i24
+            .iter()
+            .map(|&v| i64::from(v) << ROUTER_XR_SHIFT)
+            .collect();
+
+        // hidden_q[k] = round_half_away(hidden_acc >> 16), hidden_acc at Q32.32.
+        let mut hidden_q = vec![0i64; self.rank];
+        for (k, hq) in hidden_q.iter_mut().enumerate() {
+            let mut acc: i64 = self.bin_q[k];
+            let row = &self.win_q[k * self.d_model..(k + 1) * self.d_model];
+            for (&w, &xrv) in row.iter().zip(xr.iter()) {
+                acc += i64::from(w) * xrv;
+            }
+            let mag =
+                (acc.unsigned_abs() + (1 << (ROUTER_HIDDEN_SHIFT - 1))) >> ROUTER_HIDDEN_SHIFT;
+            *hq = if acc < 0 { -(mag as i64) } else { mag as i64 };
+        }
+
+        // raw_acc[e] at Q32.32, argmax with strict `>` (lowest index wins ties).
+        let mut raw = vec![0i64; self.n_experts];
+        let mut best_e = 0usize;
+        let mut best_v = i64::MIN;
+        for (e, rv) in raw.iter_mut().enumerate() {
+            let mut acc: i64 = self.bout_q[e];
+            let row = &self.wout_q[e * self.rank..(e + 1) * self.rank];
+            for (&w, &hk) in row.iter().zip(hidden_q.iter()) {
+                acc += i64::from(w) * hk;
+            }
+            *rv = acc;
+            if acc > best_v {
+                best_v = acc;
+                best_e = e;
+            }
+        }
+        (best_e, raw)
     }
 }
 
@@ -508,6 +747,36 @@ pub enum StateModelError {
         block: usize,
         what: &'static str,
     },
+    /// A fixed-point router weight (`round_ties_even(w * 2^16)`) does not fit a
+    /// signed i32 (`|w| >= 2^15`). The `router-fx.v1` contract quantizes both
+    /// projections at scale `2^16` into i32; a weight this large would need a
+    /// wider carrier, so lowering fails loud rather than clamp.
+    RouterWeightEscapesI32 {
+        block: usize,
+        what: &'static str,
+        index: usize,
+        quantized: i64,
+    },
+    /// The `router-fx.v1` hidden accumulator's structural worst case (from the
+    /// actual `|win_q|` and the i24 saturation bound `+/-(2^23 - 1)`) escapes
+    /// the proven i62 carrier. The design targeted i48, but the real d192x8
+    /// student's structural hidden bound is ~1.92e16 under the mandated Q16.16
+    /// `xr` view, so the proven width was widened to i62 (still an exact i64
+    /// accumulator with >2 bits of headroom); a checkpoint past i62 needs a new
+    /// carrier-width bead, not a silent clamp.
+    RouterHiddenEscapesI62 {
+        block: usize,
+        row: usize,
+        bound: u64,
+    },
+    /// The `router-fx.v1` raw-logit accumulator's structural worst case (from
+    /// `|wout_q|` and the proven `|hidden_q|` bound) escapes the i62 carrier.
+    /// Fails loud rather than clamp.
+    RouterRawLogitEscapesI62 {
+        block: usize,
+        expert: usize,
+        bound: u64,
+    },
     /// A MoE block's expert count does not match the declared `n_experts`
     /// (`experts.len() != topology.n_experts`).
     MoeArityMismatch {
@@ -573,6 +842,29 @@ impl fmt::Display for StateModelError {
             Self::NonFiniteRouter { block, what } => write!(
                 f,
                 "block {block} router {what} contains a non-finite f32 value"
+            ),
+            Self::RouterWeightEscapesI32 {
+                block,
+                what,
+                index,
+                quantized,
+            } => write!(
+                f,
+                "block {block} router-fx.v1 {what}[{index}] quantized to {quantized} \
+                 (round_ties_even(w * 2^16)) escapes signed i32"
+            ),
+            Self::RouterHiddenEscapesI62 { block, row, bound } => write!(
+                f,
+                "block {block} router-fx.v1 hidden row {row} structural bound {bound} escapes i62"
+            ),
+            Self::RouterRawLogitEscapesI62 {
+                block,
+                expert,
+                bound,
+            } => write!(
+                f,
+                "block {block} router-fx.v1 raw logit expert {expert} structural bound {bound} \
+                 escapes i62"
             ),
             Self::MoeArityMismatch {
                 block,
@@ -952,7 +1244,12 @@ pub enum LoweredBlockFfn {
         down: LoweredLayer,
     },
     Moe {
+        /// The f32 reference router (kept for the parity gate; NOT used by the
+        /// deployed integer forward).
         router: LowRankRouter,
+        /// The purely-integer `router-fx.v1` router the integer forward routes
+        /// on (no f32 enters the deployed path).
+        fixed_router: FixedRouter,
         experts: Vec<(LoweredLayer, LoweredLayer)>,
     },
 }
@@ -1422,11 +1719,16 @@ impl IntStateLoweredModel {
                         .iter()
                         .map(|(up, down)| (LoweredLayer::new(up), LoweredLayer::new(down)))
                         .collect();
+                    // Build the deployed purely-integer router (router-fx.v1)
+                    // once at lowering time; the structural width proofs fail
+                    // loud here rather than clamp in the forward.
+                    let fixed_router = FixedRouter::lower(router, block_ffns.len())?;
                     // Dense ROM-facing placeholder: expert 0 (the MoE ROM
                     // builder uses `block_ffns`, deploy step 4).
                     blocks.push(lowered_experts[0].clone());
                     block_ffns.push(LoweredBlockFfn::Moe {
                         router: router.clone(),
+                        fixed_router,
                         experts: lowered_experts,
                     });
                 }
@@ -1523,7 +1825,34 @@ impl IntStateLoweredModel {
         &self,
         prev: usize,
         state: &mut [i32],
+        probe: Option<&mut DownDeltaProbe>,
+    ) -> IntStateForwardTrace {
+        self.forward_at_core(prev, state, probe, None)
+    }
+
+    /// [`Self::forward_at`] that additionally records, for each MoE block, the
+    /// `(block_idx, pre-block raw i24 Q19.5 residual)` the router routes on.
+    /// The trace and state update are byte-identical to `forward_at`; the audit
+    /// only observes. Used by the fixed-point router parity gate to compare the
+    /// deployed `FixedRouter` against the f32 `LowRankRouter` reference on the
+    /// exact residual the forward routes on, at every block, every position.
+    #[must_use]
+    pub fn forward_at_route_audit(
+        &self,
+        prev: usize,
+        state: &mut [i32],
+        route_audit: &mut Vec<(usize, Vec<i32>)>,
+    ) -> IntStateForwardTrace {
+        self.forward_at_core(prev, state, None, Some(route_audit))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn forward_at_core(
+        &self,
+        prev: usize,
+        state: &mut [i32],
         mut probe: Option<&mut DownDeltaProbe>,
+        mut route_audit: Option<&mut Vec<(usize, Vec<i32>)>>,
     ) -> IntStateForwardTrace {
         let t = self.topology;
         assert_eq!(state.len(), t.state_slots, "state width");
@@ -1614,18 +1943,27 @@ impl IntStateLoweredModel {
         let mut down_acc24 = vec![0i32; t.d_model];
         for (block_idx, block) in self.block_ffns.iter().enumerate() {
             // Select the block's up/down pair. Dense blocks use their single
-            // pair (byte-identical to the pre-MoE path). MoE blocks dequantize
-            // the current i24 Q19.5 residual to f32 (x / STATE_RESID_ONE) and
-            // route: the router picks the expert INDEX ONLY and never re-enters
-            // the integer stream, so the FFN math below is unchanged.
+            // pair (byte-identical to the pre-MoE path). MoE blocks route on the
+            // RAW pre-norm residual: the router picks the expert INDEX ONLY and
+            // never re-enters the integer stream, so the FFN math below is
+            // unchanged.
             let (up, down) = match block {
                 LoweredBlockFfn::Dense { up, down } => (up, down),
-                LoweredBlockFfn::Moe { router, experts } => {
-                    let x_f32: Vec<f32> = x
-                        .iter()
-                        .map(|&v| v as f32 / STATE_RESID_ONE as f32)
-                        .collect();
-                    let e = router.route_f32(&x_f32);
+                LoweredBlockFfn::Moe {
+                    fixed_router,
+                    experts,
+                    ..
+                } => {
+                    // PURELY INTEGER routing (router-fx.v1): the fixed-point
+                    // router picks the expert index directly from the raw i24
+                    // Q19.5 residual — no f32 enters the deployed forward. The
+                    // f32 `router` field stays only as the parity reference (the
+                    // gate compares the two). Record the pre-block residual for
+                    // the optional routing audit.
+                    if let Some(sink) = route_audit.as_deref_mut() {
+                        sink.push((block_idx, x.clone()));
+                    }
+                    let e = fixed_router.route(&x);
                     let (u, d) = &experts[e];
                     (u, d)
                 }
@@ -2315,9 +2653,14 @@ mod tests {
         assert_eq!(lowered.block_ffns.len(), topo.n_blocks);
         for b in &lowered.block_ffns {
             match b {
-                LoweredBlockFfn::Moe { experts, router } => {
+                LoweredBlockFfn::Moe {
+                    experts,
+                    router,
+                    fixed_router,
+                } => {
                     assert_eq!(experts.len(), topo.n_experts);
                     assert_eq!(router.n_experts(), topo.n_experts);
+                    assert_eq!(fixed_router.n_experts(), topo.n_experts);
                 }
                 LoweredBlockFfn::Dense { .. } => panic!("expected MoE block"),
             }
@@ -2511,5 +2854,250 @@ mod tests {
         )
         .expect("flat router valid");
         assert_eq!(flat.route_f32(&x), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // fixed-point MoE router (router-fx.v1)
+    // -----------------------------------------------------------------------
+
+    /// Deterministic synthetic rank-2, 8-expert router with small (real-scale)
+    /// weights, plus a matching i24 Q19.5 residual generator.
+    fn synthetic_fixed_router_case(
+        seed: u64,
+        d_model: usize,
+    ) -> (LowRankRouter, FixedRouter, Vec<i32>) {
+        let rank = 2usize;
+        let n_experts = 8usize;
+        let mut rng = seed ^ 0x1234_5678_9abc_def0;
+        let mut next = move || {
+            rng = rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = rng;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        // Router weights in ~[-0.5, 0.5], biases in ~[-1, 1] (real student scale).
+        let mut unit = move || (next() >> 40) as f64 / (1u64 << 24) as f64 * 2.0 - 1.0;
+        let ip: Vec<f32> = (0..rank * d_model).map(|_| (unit() * 0.5) as f32).collect();
+        let ib: Vec<f32> = (0..rank).map(|_| unit() as f32).collect();
+        let ep: Vec<f32> = (0..n_experts * rank)
+            .map(|_| (unit() * 1.5) as f32)
+            .collect();
+        let eb: Vec<f32> = (0..n_experts).map(|_| unit() as f32).collect();
+        let router = LowRankRouter::new(rank, d_model, n_experts, ip, ib, ep, eb)
+            .expect("synthetic router valid");
+        let fixed = FixedRouter::lower(&router, 0).expect("fixed router lowers");
+        // Residual on the Q19.5 grid: |x| up to ~2000 real (64000 raw), the
+        // representative range the real student reaches.
+        let x_i24: Vec<i32> = (0..d_model)
+            .map(|i| ((i as i64 * 6151 % 128001) - 64000) as i32)
+            .collect();
+        (router, fixed, x_i24)
+    }
+
+    #[test]
+    fn fixed_router_matches_f32_router_on_synthetic_rank2_8experts() {
+        // On clear-margin cases the integer router-fx.v1 argmax must equal the
+        // f32 reference argmax for every seed (100% agreement).
+        let d_model = 192usize;
+        let mut checked = 0usize;
+        for seed in 0..64u64 {
+            let (router, fixed, x_i24) = synthetic_fixed_router_case(seed, d_model);
+            let x_f32: Vec<f32> = x_i24
+                .iter()
+                .map(|&v| v as f32 / STATE_RESID_ONE as f32)
+                .collect();
+            let f_e = router.route_f32(&x_f32);
+            let (fx_e, raw) = fixed.route_with_logits(&x_i24);
+            // Only assert on clear-margin cases (integer vs f32 quantization can
+            // legitimately flip a genuine near-tie; the real gate proves 0 such
+            // ties on the deployed student).
+            let mut sorted = raw.clone();
+            sorted.sort_unstable_by(|a, b| b.cmp(a));
+            let margin = sorted[0] - sorted[1];
+            // Q32.32 units: 2^32 ~ one raw-logit real unit. Require a clear gap.
+            if margin > (1i64 << 34) {
+                assert_eq!(fx_e, f_e, "seed {seed}: clear-margin disagreement");
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 48,
+            "too few clear-margin cases exercised: {checked}"
+        );
+    }
+
+    #[test]
+    fn fixed_router_is_host_deterministic_and_shift_is_round_half_away() {
+        // Determinism: identical inputs => identical route and raw logits.
+        let (_, fixed, x_i24) = synthetic_fixed_router_case(7, 192);
+        let a = fixed.route_with_logits(&x_i24);
+        let b = fixed.route_with_logits(&x_i24);
+        assert_eq!(a, b, "fixed router is not host-deterministic");
+
+        // Pin the hidden shift as ROUND-HALF-AWAY-FROM-ZERO (not truncate, not
+        // round-to-even). Build a router whose single hidden accumulator lands
+        // exactly on a .5 boundary in the Q16.16 shift, for both signs.
+        //
+        // hidden_acc = win_q * xr with rank 1, d_model 1. Choose win_q and xr so
+        // that |hidden_acc| = 3 * 2^15 (i.e. 1.5 in Q16.16 -> rounds AWAY to 2).
+        // win_q = rte(w * 2^16). Pick w = 1.5 -> win_q = 98304 = 3*2^15.
+        // xr = x_i24 << 11. Pick x_i24 = 1 -> xr = 2048.
+        // hidden_acc = 98304 * 2048 = 201,326,592 = 3 * 2^26.
+        // >>16 with round-half-away: (|acc| + 2^15) >> 16 = (3*2^26 + 2^15)>>16.
+        // 3*2^26 = 201326592; /2^16 = 3072.0 exactly (not a tie here); construct
+        // a real .5 tie instead: |acc| = k*2^16 + 2^15.
+        let d_model = 1usize;
+        // Want hidden_acc magnitude = 2^16 + 2^15 = 98304 (=> 1.5 in Q16.16).
+        // win_q * xr = 98304. xr = 1<<11 = 2048 (x_i24 = 1) => win_q = 48 = w*2^16
+        // => w = 48/65536.
+        let w = 48.0f32 / 65536.0;
+        let pos = LowRankRouter::new(
+            1,
+            d_model,
+            2,
+            vec![w],
+            vec![0.0],
+            vec![1.0, 0.0], // expert 0 reads +hidden, expert 1 reads 0
+            vec![0.0, 0.0],
+        )
+        .expect("router valid");
+        let fpos = FixedRouter::lower(&pos, 0).expect("lowers");
+        // x_i24 = 1: hidden_acc = 48 * 2048 = 98304; (98304 + 32768)>>16 = 2.
+        let (_, raw_pos) = fpos.route_with_logits(&[1]);
+        // raw[0] = wout_q(1.0)=65536 * hidden_q(2) = 131072; raw[1] = 0.
+        assert_eq!(raw_pos[0], 131_072, "round-half-away up (+1.5 -> +2)");
+        // Negative: x_i24 = -1 => hidden_acc = -98304; magnitude rounds AWAY to
+        // 2 => hidden_q = -2 => raw[0] = -131072.
+        let (_, raw_neg) = fpos.route_with_logits(&[-1]);
+        assert_eq!(raw_neg[0], -131_072, "round-half-away down (-1.5 -> -2)");
+    }
+
+    #[test]
+    fn fixed_router_lower_rejects_overwidth_weight_i32() {
+        // A router weight of 2^15 quantizes to 2^31 which does not fit i32.
+        let router = LowRankRouter::new(
+            1,
+            1,
+            2,
+            vec![32768.0f32], // 2^15 -> win_q = 2^31, escapes i32
+            vec![0.0],
+            vec![0.0, 0.0],
+            vec![0.0, 0.0],
+        )
+        .expect("router valid (finite weights)");
+        match FixedRouter::lower(&router, 3) {
+            Err(StateModelError::RouterWeightEscapesI32 {
+                block: 3,
+                what: "input_projection",
+                index: 0,
+                quantized,
+            }) => assert_eq!(quantized, 1i64 << 31),
+            other => panic!("expected RouterWeightEscapesI32, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixed_router_lower_rejects_overwidth_hidden_i62() {
+        // A wide-fan-in input projection at near-max i32 weights drives the
+        // hidden accumulator's structural bound past i62. d_model such that
+        // sum_c |win_q| * XR_MAX exceeds 2^62. |win_q| ~ 2^30 (w ~ 2^14), XR_MAX
+        // ~ 2^34, so ~2^64 * d_model / ... a handful of columns overflow i62.
+        let d_model = 64usize;
+        let w = 16384.0f32; // win_q = rte(2^14 * 2^16) = 2^30, fits i32
+        let router = LowRankRouter::new(
+            1,
+            d_model,
+            2,
+            vec![w; d_model],
+            vec![0.0],
+            vec![0.0, 0.0],
+            vec![0.0, 0.0],
+        )
+        .expect("router valid");
+        match FixedRouter::lower(&router, 5) {
+            Err(StateModelError::RouterHiddenEscapesI62 {
+                block: 5,
+                row: 0,
+                bound,
+            }) => {
+                assert!(
+                    bound > ROUTER_ACC_I62_BOUND,
+                    "bound {bound} must exceed i62"
+                );
+            }
+            other => panic!("expected RouterHiddenEscapesI62, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixed_router_lower_rejects_overwidth_raw_logit_i62() {
+        // Keep the hidden accumulator inside i62 but drive a single expert's raw
+        // logit past i62 via a large expert_projection weight against a large
+        // (but in-bounds) hidden_q. hidden_q_bound ~ (bound>>16); pick modest
+        // input weights so hidden fits, and a near-max wout_q so raw overflows.
+        let d_model = 192usize;
+        // input: w ~ 2^7 over d_model=192 => win_q = rte(2^7 * 2^16) = 2^23.
+        // sum_c |win_q| = 192 * 2^23 ~ 2^30.6; * XR_MAX(~2^34) ~ 2^64.6 -> hidden
+        // would overflow. Reduce d_model contribution: use a single nonzero col.
+        let mut ip = vec![0.0f32; d_model];
+        ip[0] = 8192.0; // win_q = 2^13 * 2^16 = 2^29 (one column)
+        // hidden bound ~ 2^29 * XR_MAX(~2^34) ~ 2^63 -> still too big; shrink.
+        ip[0] = 64.0; // win_q = 2^6 * 2^16 = 2^22; bound ~ 2^22 * 2^34 = 2^56 (< i62)
+        // hidden_q_bound ~ 2^56 >> 16 = 2^40. Then a wout_q ~ rte(30000*2^16)
+        // ~ 2^31 (fits i32) times 2^40 rank-1 ~ 2^71 -> raw overflows i62.
+        let ep = vec![30000.0f32, 0.0]; // expert 0 big, expert 1 zero
+        let router = LowRankRouter::new(1, d_model, 2, ip, vec![0.0], ep, vec![0.0, 0.0])
+            .expect("router valid");
+        match FixedRouter::lower(&router, 2) {
+            Err(StateModelError::RouterRawLogitEscapesI62 {
+                block: 2,
+                expert: 0,
+                bound,
+            }) => {
+                assert!(
+                    bound > ROUTER_ACC_I62_BOUND,
+                    "bound {bound} must exceed i62"
+                );
+            }
+            // If the hidden bound trips first, the construction is wrong for this
+            // test; surface it explicitly.
+            other => panic!("expected RouterRawLogitEscapesI62, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixed_router_argmax_tiebreak_is_lowest_index() {
+        // All-zero weights and biases => every raw logit is 0 => the strict `>`
+        // scan from 0 keeps expert 0.
+        let router = LowRankRouter::new(
+            2,
+            192,
+            8,
+            vec![0.0f32; 2 * 192],
+            vec![0.0f32; 2],
+            vec![0.0f32; 8 * 2],
+            vec![0.0f32; 8],
+        )
+        .expect("router valid");
+        let fixed = FixedRouter::lower(&router, 0).expect("lowers");
+        let x_i24: Vec<i32> = (0..192i32).map(|i| i * 37 - 3000).collect();
+        let (e, raw) = fixed.route_with_logits(&x_i24);
+        assert!(raw.iter().all(|&v| v == 0), "all raw logits zero");
+        assert_eq!(e, 0, "lowest-index tiebreak selects expert 0");
+
+        // Equal nonzero biases also tie to the lowest index.
+        let tied = LowRankRouter::new(
+            1,
+            192,
+            8,
+            vec![0.0f32; 192],
+            vec![0.0f32; 1],
+            vec![0.0f32; 8],
+            vec![0.75f32; 8],
+        )
+        .expect("router valid");
+        let ftied = FixedRouter::lower(&tied, 0).expect("lowers");
+        assert_eq!(ftied.route(&x_i24), 0);
     }
 }
