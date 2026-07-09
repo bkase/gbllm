@@ -81,6 +81,11 @@ use crate::model_ref::{
 
 /// charset_v1 vocabulary (ids 0..=79) — the arm-B/D192 lexical space.
 pub const STATE_VOCAB: usize = 80;
+/// Host-evaluator vocab ceiling. The host integer forward holds all `vocab`
+/// i32 logits in RAM (no 256-byte page limit), so it accepts the V=1024
+/// subword MoE student ahead of on-device logit paging (deploy step 2). Sized
+/// generously above 1024; the head still fits `u16` id loops.
+pub const HOST_VOCAB_CAP: usize = 4096;
 /// Recurrent state width of the committed arm-B checkpoint.
 pub const STATE_SLOTS: usize = 64;
 /// Residual fixed point: i24 Q19.5 (fractional bits shared with the dense
@@ -173,10 +178,40 @@ impl StateTopology {
         n_experts: 8,
     };
 
+    /// A `validate()`-clean MoE topology for the host evaluator unit tests:
+    /// the d192 shape with charset vocab (single-page logits) and a small
+    /// expert bank. Distinct from [`Self::D192_MOE`] (whose 1024 vocab needs
+    /// logit paging, deploy step 2).
+    pub const D192_MOE_TEST: Self = Self {
+        d_model: 192,
+        d_ff: 384,
+        n_blocks: 6,
+        state_slots: 192,
+        vocab: STATE_VOCAB,
+        n_experts: 4,
+    };
+
     /// Validate the device structural limits this pipeline supports. These
     /// are ROM-code constraints (8-bit loop counters, single-page tables),
     /// not arbitrary caps; each names the device structure that pins it.
     pub fn validate(&self) -> Result<(), StateModelError> {
+        // Strict device validation (the ROM path): logits must fit one 256-byte
+        // page, so vocab is capped at 85 (3-byte i24 logits).
+        self.validate_with_vocab_cap(85)
+    }
+
+    /// Host-evaluator validation. Identical to [`Self::validate`] except the
+    /// single-page vocab cap is relaxed to the paged host ceiling: the host
+    /// integer forward computes `vocab` i32 logits in RAM with no 256-byte
+    /// page limit, so V=1024 subword MoE students load and forward here even
+    /// though on-device logit paging (deploy step 2) has not yet relaxed the
+    /// ROM's single-page cap. Every other device structural limit is enforced
+    /// unchanged, so dense d192/arm-B (vocab 80) validate identically.
+    pub fn validate_host(&self) -> Result<(), StateModelError> {
+        self.validate_with_vocab_cap(HOST_VOCAB_CAP)
+    }
+
+    fn validate_with_vocab_cap(&self, vocab_cap: usize) -> Result<(), StateModelError> {
         let lim = |what: &'static str, value: usize, max: usize| {
             if value == 0 || value > max {
                 Err(StateModelError::Topology { what, value, max })
@@ -191,8 +226,8 @@ impl StateTopology {
         lim("n_blocks", self.n_blocks, 16)?;
         // state_slots: u8 slot loop, i32 slots in WRAM.
         lim("state_slots (u8 slot loops)", self.state_slots, 255)?;
-        // vocab: 3-byte logits in one page, sampler tables in one page.
-        lim("vocab (i24 logits single page)", self.vocab, 85)?;
+        // vocab: 3-byte logits in one page (ROM), or the host paged ceiling.
+        lim("vocab (i24 logits single page)", self.vocab, vocab_cap)?;
         // n_experts: u8 expert index / one bank set per expert in ROM.
         lim("n_experts (u8 expert loop / bank set)", self.n_experts, 255)?;
         Ok(())
@@ -216,6 +251,197 @@ impl StateTopology {
 }
 
 // ---------------------------------------------------------------------------
+// MoE router + FFN block
+// ---------------------------------------------------------------------------
+
+/// The deployed low-rank top-1 router (`gbf-model` `Top1RouterQat`): a
+/// two-stage f32 projection `hidden = input_projection @ x + input_bias`,
+/// `raw = expert_projection @ hidden + expert_bias`, `expert = argmax(raw)`
+/// with a lowest-index tiebreak. It runs on the **raw pre-norm residual**
+/// (dequantized from the i24 Q19.5 stream at forward time) and produces ONLY
+/// the selected expert index — it never re-enters the integer stream.
+///
+/// The `route_f32` summation reproduces `gbf-bench/src/moe_parity.rs`'s
+/// `Router::route` byte-for-byte (bias-seeded folds, `input_projection`
+/// iterated over `d_model` columns for the hidden vector, `expert_projection`
+/// iterated over `router_rank` columns for the raw scores, `argmax` with a
+/// strict `>` so ties keep the lowest expert index).
+#[derive(Debug, Clone)]
+pub struct LowRankRouter {
+    rank: usize,
+    d_model: usize,
+    n_experts: usize,
+    /// input_projection, shape `[rank, d_model]`, row-major.
+    input_projection: Vec<f32>,
+    /// input_bias, shape `[rank]`.
+    input_bias: Vec<f32>,
+    /// expert_projection, shape `[n_experts, rank]`, row-major.
+    expert_projection: Vec<f32>,
+    /// expert_bias, shape `[n_experts]`.
+    expert_bias: Vec<f32>,
+}
+
+impl LowRankRouter {
+    /// Build a router from its four f32 tensors. Shapes are checked against
+    /// `rank`, `d_model` and `n_experts`; non-finite weights are rejected.
+    pub fn new(
+        rank: usize,
+        d_model: usize,
+        n_experts: usize,
+        input_projection: Vec<f32>,
+        input_bias: Vec<f32>,
+        expert_projection: Vec<f32>,
+        expert_bias: Vec<f32>,
+    ) -> Result<Self, StateModelError> {
+        let router = Self {
+            rank,
+            d_model,
+            n_experts,
+            input_projection,
+            input_bias,
+            expert_projection,
+            expert_bias,
+        };
+        router.validate(usize::MAX)?;
+        Ok(router)
+    }
+
+    /// Structural validation. `block` is used only for error reporting (pass
+    /// `usize::MAX` when not building inside a checkpoint).
+    pub fn validate(&self, block: usize) -> Result<(), StateModelError> {
+        let shape = |what: &'static str, actual: usize, expected: usize| {
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(StateModelError::Shape {
+                    what,
+                    expected,
+                    actual,
+                })
+            }
+        };
+        shape(
+            "router input_projection",
+            self.input_projection.len(),
+            self.rank * self.d_model,
+        )?;
+        shape("router input_bias", self.input_bias.len(), self.rank)?;
+        shape(
+            "router expert_projection",
+            self.expert_projection.len(),
+            self.n_experts * self.rank,
+        )?;
+        shape("router expert_bias", self.expert_bias.len(), self.n_experts)?;
+        let finite = |what: &'static str, v: &[f32]| {
+            if v.iter().all(|x| x.is_finite()) {
+                Ok(())
+            } else {
+                Err(StateModelError::NonFiniteRouter { block, what })
+            }
+        };
+        finite("input_projection", &self.input_projection)?;
+        finite("input_bias", &self.input_bias)?;
+        finite("expert_projection", &self.expert_projection)?;
+        finite("expert_bias", &self.expert_bias)?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    #[must_use]
+    pub fn n_experts(&self) -> usize {
+        self.n_experts
+    }
+
+    /// Route the raw pre-norm residual `x` (`d_model` f32) to a top-1 expert
+    /// index. This reproduces `moe_parity.rs`'s `Router::route` exactly: the
+    /// hidden vector folds each `input_projection` row starting from its bias
+    /// over `d_model` columns, the raw scores fold each `expert_projection`
+    /// row starting from its bias over `router_rank` columns, and the argmax
+    /// uses a strict `>` (ties keep the lowest index).
+    #[must_use]
+    pub fn route_f32(&self, x: &[f32]) -> usize {
+        debug_assert_eq!(x.len(), self.d_model, "router input width");
+        let hid: Vec<f32> = self
+            .input_projection
+            .chunks_exact(self.d_model)
+            .zip(self.input_bias.iter())
+            .map(|(row, &bias)| {
+                row.iter()
+                    .zip(x.iter())
+                    .map(|(&w, &xi)| w * xi)
+                    .fold(bias, |acc, p| acc + p)
+            })
+            .collect();
+        let mut best_e = 0usize;
+        let mut best_v = f32::NEG_INFINITY;
+        for (e, (row, &bias)) in self
+            .expert_projection
+            .chunks_exact(self.rank)
+            .zip(self.expert_bias.iter())
+            .enumerate()
+        {
+            let acc = row
+                .iter()
+                .zip(hid.iter())
+                .map(|(&w, &hk)| w * hk)
+                .fold(bias, |a, p| a + p);
+            if acc > best_v {
+                best_v = acc;
+                best_e = e;
+            }
+        }
+        best_e
+    }
+}
+
+/// A single pre-norm residual FFN block: either a dense up/down pair
+/// (`n_experts == 1`, the byte-exact legacy path) or a top-1 MoE bank of
+/// experts fronted by a [`LowRankRouter`]. Top-1 routing runs exactly one
+/// expert per block per token, so the active integer FFN math (and therefore
+/// byte-exactness) is identical to the dense block.
+#[derive(Debug, Clone)]
+pub enum BlockFfn {
+    Dense {
+        up: TernaryLayer,
+        down: TernaryLayer,
+    },
+    Moe {
+        router: LowRankRouter,
+        experts: Vec<(TernaryLayer, TernaryLayer)>,
+    },
+}
+
+impl BlockFfn {
+    #[must_use]
+    pub fn is_moe(&self) -> bool {
+        matches!(self, Self::Moe { .. })
+    }
+
+    /// The dense up/down pair, if this block is dense. Lets the dense export
+    /// pipelines (`d192`, `d192_real`) keep reading `up`/`down` unchanged.
+    #[must_use]
+    pub fn as_dense(&self) -> Option<(&TernaryLayer, &TernaryLayer)> {
+        match self {
+            Self::Dense { up, down } => Some((up, down)),
+            Self::Moe { .. } => None,
+        }
+    }
+
+    /// Every (up, down) pair this block owns (one for Dense, `n_experts` for
+    /// Moe). Used by the lowering's structural down-width/overflow scan.
+    fn ffn_pairs(&self) -> Vec<(&TernaryLayer, &TernaryLayer)> {
+        match self {
+            Self::Dense { up, down } => vec![(up, down)],
+            Self::Moe { experts, .. } => experts.iter().map(|(u, d)| (u, d)).collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // checkpoint container
 // ---------------------------------------------------------------------------
 
@@ -228,7 +454,7 @@ pub struct StateCheckpoint {
     pub state_in: TernaryLayer,
     pub state_out: TernaryLayer,
     decay_raw: Vec<u16>,
-    blocks: Vec<BlockWeights>,
+    blocks: Vec<BlockFfn>,
 }
 
 /// State-checkpoint validation failure.
@@ -274,6 +500,27 @@ pub enum StateModelError {
         scale_raw: u16,
         acc_bound: i64,
         delta_bound: u64,
+    },
+    /// A router tensor (input/expert projection or bias) contains a non-finite
+    /// f32 value. The router runs in f32 to pick the expert index; NaN/Inf
+    /// weights would make the argmax non-deterministic.
+    NonFiniteRouter {
+        block: usize,
+        what: &'static str,
+    },
+    /// A MoE block's expert count does not match the declared `n_experts`
+    /// (`experts.len() != topology.n_experts`).
+    MoeArityMismatch {
+        block: usize,
+        expected: usize,
+        actual: usize,
+    },
+    /// A block's FFN kind disagrees with the topology: a `Dense` block in an
+    /// `n_experts > 1` model, or a `Moe` block in an `n_experts == 1` model.
+    MoeDenseMixup {
+        block: usize,
+        n_experts: usize,
+        block_is_moe: bool,
     },
     Model(ModelRefError),
 }
@@ -323,6 +570,29 @@ impl fmt::Display for StateModelError {
                  (scale {scale_raw}, acc bound {acc_bound}) escapes the signed-i24 delta \
                  carrier ({DOWN_DELTA_WIDE_BOUND})"
             ),
+            Self::NonFiniteRouter { block, what } => write!(
+                f,
+                "block {block} router {what} contains a non-finite f32 value"
+            ),
+            Self::MoeArityMismatch {
+                block,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "block {block} MoE arity mismatch: expected {expected} experts, got {actual}"
+            ),
+            Self::MoeDenseMixup {
+                block,
+                n_experts,
+                block_is_moe,
+            } => write!(
+                f,
+                "block {block} FFN kind disagrees with topology (n_experts = {n_experts}, \
+                 block is {}): dense topologies need Dense blocks and MoE topologies need \
+                 Moe blocks",
+                if *block_is_moe { "Moe" } else { "Dense" }
+            ),
             Self::Model(e) => write!(f, "{e}"),
         }
     }
@@ -337,6 +607,9 @@ impl From<ModelRefError> for StateModelError {
 }
 
 impl StateCheckpoint {
+    /// Build a **dense** checkpoint (`n_experts == 1`). Back-compat entry
+    /// point: every existing caller passes a `Vec<BlockWeights>` and gets the
+    /// byte-identical dense pipeline. Each block becomes a [`BlockFfn::Dense`].
     pub fn new(
         topology: StateTopology,
         embedding: Vec<f32>,
@@ -345,7 +618,41 @@ impl StateCheckpoint {
         decay_raw: Vec<u16>,
         blocks: Vec<BlockWeights>,
     ) -> Result<Self, StateModelError> {
-        topology.validate()?;
+        let ffns = blocks
+            .into_iter()
+            .map(|b| BlockFfn::Dense {
+                up: b.up,
+                down: b.down,
+            })
+            .collect();
+        Self::new_blocks(topology, embedding, state_in, state_out, decay_raw, ffns)
+    }
+
+    /// Build a checkpoint from already-typed [`BlockFfn`] blocks (dense or
+    /// MoE). Used by the `f_s8_moe_state_checkpoint_export.v2` loader.
+    pub fn new_moe(
+        topology: StateTopology,
+        embedding: Vec<f32>,
+        state_in: TernaryLayer,
+        state_out: TernaryLayer,
+        decay_raw: Vec<u16>,
+        blocks: Vec<BlockFfn>,
+    ) -> Result<Self, StateModelError> {
+        Self::new_blocks(topology, embedding, state_in, state_out, decay_raw, blocks)
+    }
+
+    fn new_blocks(
+        topology: StateTopology,
+        embedding: Vec<f32>,
+        state_in: TernaryLayer,
+        state_out: TernaryLayer,
+        decay_raw: Vec<u16>,
+        blocks: Vec<BlockFfn>,
+    ) -> Result<Self, StateModelError> {
+        // Host evaluator: relax only the single-page vocab cap (subword V=1024
+        // students load here; on-device logit paging is deploy step 2). The
+        // ROM planner still enforces the strict cap at build time.
+        topology.validate_host()?;
         let t = &topology;
         if embedding.len() != t.vocab * t.d_model {
             return Err(StateModelError::Shape {
@@ -390,20 +697,67 @@ impl StateCheckpoint {
                 actual: blocks.len(),
             });
         }
-        for block in &blocks {
-            if block.up.rows() != t.d_ff || block.up.cols() != t.d_model {
-                return Err(StateModelError::Shape {
-                    what: "up projection",
-                    expected: t.d_ff * t.d_model,
-                    actual: block.up.rows() * block.up.cols(),
+        let check_up_down =
+            |up: &TernaryLayer, down: &TernaryLayer| -> Result<(), StateModelError> {
+                if up.rows() != t.d_ff || up.cols() != t.d_model {
+                    return Err(StateModelError::Shape {
+                        what: "up projection",
+                        expected: t.d_ff * t.d_model,
+                        actual: up.rows() * up.cols(),
+                    });
+                }
+                if down.rows() != t.d_model || down.cols() != t.d_ff {
+                    return Err(StateModelError::Shape {
+                        what: "down projection",
+                        expected: t.d_model * t.d_ff,
+                        actual: down.rows() * down.cols(),
+                    });
+                }
+                Ok(())
+            };
+        for (bi, block) in blocks.iter().enumerate() {
+            // The FFN kind must agree with the topology. A MoE topology
+            // (n_experts > 1) requires Moe blocks (a Dense block would drop
+            // routing). A dense topology (n_experts == 1) accepts either a
+            // Dense block or a single-expert Moe block — top-1 routing over one
+            // expert always picks expert 0, so it is byte-equivalent to dense
+            // (this is exactly the n_experts == 1 == dense bridge).
+            if t.is_moe() && !block.is_moe() {
+                return Err(StateModelError::MoeDenseMixup {
+                    block: bi,
+                    n_experts: t.n_experts,
+                    block_is_moe: block.is_moe(),
                 });
             }
-            if block.down.rows() != t.d_model || block.down.cols() != t.d_ff {
-                return Err(StateModelError::Shape {
-                    what: "down projection",
-                    expected: t.d_model * t.d_ff,
-                    actual: block.down.rows() * block.down.cols(),
-                });
+            match block {
+                BlockFfn::Dense { up, down } => check_up_down(up, down)?,
+                BlockFfn::Moe { router, experts } => {
+                    if experts.len() != t.n_experts {
+                        return Err(StateModelError::MoeArityMismatch {
+                            block: bi,
+                            expected: t.n_experts,
+                            actual: experts.len(),
+                        });
+                    }
+                    router.validate(bi)?;
+                    if router.rank == 0 {
+                        return Err(StateModelError::Shape {
+                            what: "router rank",
+                            expected: 1,
+                            actual: 0,
+                        });
+                    }
+                    if router.d_model != t.d_model || router.n_experts != t.n_experts {
+                        return Err(StateModelError::Shape {
+                            what: "router topology",
+                            expected: t.d_model * t.n_experts,
+                            actual: router.d_model * router.n_experts,
+                        });
+                    }
+                    for (up, down) in experts {
+                        check_up_down(up, down)?;
+                    }
+                }
             }
         }
         Ok(Self {
@@ -428,7 +782,7 @@ impl StateCheckpoint {
     }
 
     #[must_use]
-    pub fn blocks(&self) -> &[BlockWeights] {
+    pub fn blocks(&self) -> &[BlockFfn] {
         &self.blocks
     }
 
@@ -498,15 +852,26 @@ pub fn f32_state_forward(ck: &StateCheckpoint, prev: u8, state: &mut [f32]) -> V
     let mut hidden = vec![0.0f32; t.d_ff];
     let mut ffn_delta = vec![0.0f32; t.d_model];
     for block in ck.blocks() {
+        // Top-1 MoE: route on the RAW pre-norm residual, then run the selected
+        // expert; dense blocks run their single up/down pair. Either way the
+        // FFN math below is identical.
+        let (up, down) = match block {
+            BlockFfn::Dense { up, down } => (up, down),
+            BlockFfn::Moe { router, experts } => {
+                let e = router.route_f32(&x);
+                let (u, d) = &experts[e];
+                (u, d)
+            }
+        };
         let mut normed = f32_rms_norm_clip(&x);
         for v in &mut normed {
             *v = f32_act_fake_quant(*v);
         }
-        f32_ternary_matvec(&block.up, &normed, &mut hidden);
+        f32_ternary_matvec(up, &normed, &mut hidden);
         for v in &mut hidden {
             *v = f32_act_fake_quant(gelu_approx_f32(*v));
         }
-        f32_ternary_matvec(&block.down, &hidden, &mut ffn_delta);
+        f32_ternary_matvec(down, &hidden, &mut ffn_delta);
         for (xv, dv) in x.iter_mut().zip(ffn_delta.iter()) {
             *xv += dv;
         }
@@ -576,6 +941,22 @@ fn layer_needs_i24(layer: &TernaryLayer) -> bool {
     })
 }
 
+/// A lowered FFN block: dense (one up/down `LoweredLayer` pair) or top-1 MoE
+/// (an f32 [`LowRankRouter`] plus one lowered up/down pair per expert). The
+/// integer FFN kernel run for the selected expert is byte-identical to the
+/// dense block — only the expert *selection* is new.
+#[derive(Debug, Clone)]
+pub enum LoweredBlockFfn {
+    Dense {
+        up: LoweredLayer,
+        down: LoweredLayer,
+    },
+    Moe {
+        router: LowRankRouter,
+        experts: Vec<(LoweredLayer, LoweredLayer)>,
+    },
+}
+
 /// The integer-lowered stateful model: every table the canonical integer
 /// function (and therefore the ROM) needs.
 #[derive(Debug, Clone)]
@@ -600,8 +981,17 @@ pub struct IntStateLoweredModel {
     pub state_out: TernaryLayer,
     /// Per-slot decay raws, validated to fit the u8 device table.
     pub decay_u8: Vec<u8>,
-    /// Lowered FFN blocks (up, down).
+    /// Lowered **dense** FFN blocks (up, down). For a dense checkpoint this is
+    /// the whole model and the ROM builder (`asm_impl_state`) consumes it
+    /// directly, byte-identical to before MoE existed. For a MoE checkpoint
+    /// this holds each block's **expert 0** (dispatch-agnostic placeholder);
+    /// the real per-token dispatch lives in [`Self::block_ffns`]. The MoE ROM
+    /// builder (deploy step 4) reads `block_ffns`, not this field.
     pub blocks: Vec<(LoweredLayer, LoweredLayer)>,
+    /// Lowered FFN blocks with dispatch (dense or top-1 MoE). The host
+    /// [`Self::forward`] routes over these; `n_experts == 1` blocks are
+    /// [`LoweredBlockFfn::Dense`] and forward byte-identically to `blocks`.
+    pub block_ffns: Vec<LoweredBlockFfn>,
     /// Down-projection accumulator width, uniform across blocks (i24 if any
     /// block's down projection structurally requires it).
     pub down_width: AccWidth,
@@ -709,8 +1099,11 @@ pub struct IntStateForwardTrace {
     pub final_q: Vec<i16>,
     /// Tied-head integer logits (i24-range values held in i32).
     pub logits: Vec<i32>,
-    /// Argmax id (lowest index wins ties).
+    /// Argmax id truncated to u8 (the charset/dense pipeline token id).
     pub argmax: u8,
+    /// Full argmax id (lowest index wins ties). Distinct from [`Self::argmax`]
+    /// only for wide-vocab (V > 256) subword MoE students.
+    pub argmax_full: usize,
     pub stats: StateForwardStats,
 }
 
@@ -960,8 +1353,13 @@ impl IntStateLoweredModel {
             }
         }
         // ...and the down projection widens to i24 when any row of any
-        // block structurally requires it (uniform device buffer format).
-        let down_needs_i24 = ck.blocks().iter().any(|b| layer_needs_i24(&b.down));
+        // EXPERT's down of any block structurally requires it (uniform device
+        // buffer format). A dense block contributes exactly one up/down pair.
+        let down_needs_i24 = ck
+            .blocks()
+            .iter()
+            .flat_map(BlockFfn::ffn_pairs)
+            .any(|(_, down)| layer_needs_i24(down));
         let down_width = if down_needs_i24 {
             AccWidth::I24
         } else {
@@ -970,43 +1368,69 @@ impl IntStateLoweredModel {
         let mut down_acc_structural_bound: i64 = 0;
         let mut down_delta_structural_bound: u64 = 0;
         for (block, b) in ck.blocks().iter().enumerate() {
-            // Up projections have fan-in d_model <= 255: always i16 (the
-            // structural bound 128 * 255 = 32640 fits).
-            debug_assert!(!layer_needs_i24(&b.up), "up fan-in <= 255 always fits i16");
-            for row in 0..b.down.rows() {
-                let (lo, hi) = row_acc_bounds(b.down.row(row));
-                let bound = lo.abs().max(hi);
-                down_acc_structural_bound = down_acc_structural_bound.max(bound);
-                let scale = i64::from(b.down.scale_raw(row));
-                let delta_bound = ((2 * scale * bound + 127) / 254).unsigned_abs();
-                down_delta_structural_bound = down_delta_structural_bound.max(delta_bound);
-                if down_width == AccWidth::I24 {
-                    if 2 * scale * bound + 127 >= 1 << 32 {
-                        return Err(StateModelError::DownEpilogueOverflow {
-                            block,
-                            row,
-                            scale_raw: b.down.scale_raw(row),
-                            acc_bound: bound,
-                        });
-                    }
-                    // v2 wide path: the delta is carried exactly in a signed
-                    // i24 with no clamp, so the structural bound must fit.
-                    if delta_bound > DOWN_DELTA_WIDE_BOUND {
-                        return Err(StateModelError::DownDeltaEscapesI24 {
-                            block,
-                            row,
-                            scale_raw: b.down.scale_raw(row),
-                            acc_bound: bound,
-                            delta_bound,
-                        });
+            for (up, down) in b.ffn_pairs() {
+                // Up projections have fan-in d_model <= 255: always i16 (the
+                // structural bound 128 * 255 = 32640 fits).
+                debug_assert!(!layer_needs_i24(up), "up fan-in <= 255 always fits i16");
+                for row in 0..down.rows() {
+                    let (lo, hi) = row_acc_bounds(down.row(row));
+                    let bound = lo.abs().max(hi);
+                    down_acc_structural_bound = down_acc_structural_bound.max(bound);
+                    let scale = i64::from(down.scale_raw(row));
+                    let delta_bound = ((2 * scale * bound + 127) / 254).unsigned_abs();
+                    down_delta_structural_bound = down_delta_structural_bound.max(delta_bound);
+                    if down_width == AccWidth::I24 {
+                        if 2 * scale * bound + 127 >= 1 << 32 {
+                            return Err(StateModelError::DownEpilogueOverflow {
+                                block,
+                                row,
+                                scale_raw: down.scale_raw(row),
+                                acc_bound: bound,
+                            });
+                        }
+                        // v2 wide path: the delta is carried exactly in a signed
+                        // i24 with no clamp, so the structural bound must fit.
+                        if delta_bound > DOWN_DELTA_WIDE_BOUND {
+                            return Err(StateModelError::DownDeltaEscapesI24 {
+                                block,
+                                row,
+                                scale_raw: down.scale_raw(row),
+                                acc_bound: bound,
+                                delta_bound,
+                            });
+                        }
                     }
                 }
             }
         }
 
+        // Lower each block. `blocks` keeps the dense ROM-facing view (dense
+        // pair, or expert 0 for a MoE block); `block_ffns` carries the full
+        // dispatch the host forward routes over.
         let mut blocks = Vec::with_capacity(t.n_blocks);
+        let mut block_ffns = Vec::with_capacity(t.n_blocks);
         for block in ck.blocks() {
-            blocks.push((LoweredLayer::new(&block.up), LoweredLayer::new(&block.down)));
+            match block {
+                BlockFfn::Dense { up, down } => {
+                    let up = LoweredLayer::new(up);
+                    let down = LoweredLayer::new(down);
+                    blocks.push((up.clone(), down.clone()));
+                    block_ffns.push(LoweredBlockFfn::Dense { up, down });
+                }
+                BlockFfn::Moe { router, experts } => {
+                    let lowered_experts: Vec<(LoweredLayer, LoweredLayer)> = experts
+                        .iter()
+                        .map(|(up, down)| (LoweredLayer::new(up), LoweredLayer::new(down)))
+                        .collect();
+                    // Dense ROM-facing placeholder: expert 0 (the MoE ROM
+                    // builder uses `block_ffns`, deploy step 4).
+                    blocks.push(lowered_experts[0].clone());
+                    block_ffns.push(LoweredBlockFfn::Moe {
+                        router: router.clone(),
+                        experts: lowered_experts,
+                    });
+                }
+            }
         }
 
         Ok(Self {
@@ -1020,6 +1444,7 @@ impl IntStateLoweredModel {
             state_out: ck.state_out.clone(),
             decay_u8,
             blocks,
+            block_ffns,
             down_width,
             down_acc_structural_bound,
             down_delta_structural_bound,
@@ -1028,13 +1453,26 @@ impl IntStateLoweredModel {
 
     #[must_use]
     pub fn emb_resid_row(&self, id: u8) -> &[i32] {
-        let start = usize::from(id) * self.topology.d_model;
+        self.emb_resid_row_at(usize::from(id))
+    }
+
+    /// Embedding-residual row for a full `usize` token id (V=1024 subword
+    /// students exceed the u8 charset id space).
+    #[must_use]
+    pub fn emb_resid_row_at(&self, id: usize) -> &[i32] {
+        let start = id * self.topology.d_model;
         &self.emb_resid[start..start + self.topology.d_model]
     }
 
     #[must_use]
     pub fn head_i8_row(&self, id: u8) -> &[i8] {
-        let start = usize::from(id) * self.topology.d_model;
+        self.head_i8_row_at(usize::from(id))
+    }
+
+    /// Tied-head row for a full `usize` token id.
+    #[must_use]
+    pub fn head_i8_row_at(&self, id: usize) -> &[i8] {
+        let start = id * self.topology.d_model;
         &self.head_i8[start..start + self.topology.d_model]
     }
 
@@ -1058,6 +1496,13 @@ impl IntStateLoweredModel {
         self.forward_probed(prev, state, None)
     }
 
+    /// [`Self::forward`] for a full `usize` token id (V > 256 subword MoE
+    /// students). For `prev < 256` this is byte-identical to `forward`.
+    #[must_use]
+    pub fn forward_at(&self, prev: usize, state: &mut [i32]) -> IntStateForwardTrace {
+        self.forward_at_probed(prev, state, None)
+    }
+
     /// [`Self::forward`] with an optional [`DownDeltaProbe`] observing the
     /// unclamped down-projection delta magnitudes. The returned trace and the
     /// state update are byte-identical to `forward`'s regardless of the
@@ -1067,13 +1512,24 @@ impl IntStateLoweredModel {
         &self,
         prev: u8,
         state: &mut [i32],
+        probe: Option<&mut DownDeltaProbe>,
+    ) -> IntStateForwardTrace {
+        self.forward_at_probed(usize::from(prev), state, probe)
+    }
+
+    /// Core forward over a full `usize` token id. See [`Self::forward_probed`].
+    #[must_use]
+    pub fn forward_at_probed(
+        &self,
+        prev: usize,
+        state: &mut [i32],
         mut probe: Option<&mut DownDeltaProbe>,
     ) -> IntStateForwardTrace {
         let t = self.topology;
         assert_eq!(state.len(), t.state_slots, "state width");
         let mut stats = StateForwardStats::new();
 
-        let mut x = self.emb_resid_row(prev).to_vec();
+        let mut x = self.emb_resid_row_at(prev).to_vec();
 
         // --- state block ---
         let q = int_norm_quant24(&x, &mut stats.ffn);
@@ -1156,7 +1612,24 @@ impl IntStateLoweredModel {
         let mut up_acc = vec![0i16; t.d_ff];
         let mut down_acc16 = vec![0i16; t.d_model];
         let mut down_acc24 = vec![0i32; t.d_model];
-        for (block_idx, (up, down)) in self.blocks.iter().enumerate() {
+        for (block_idx, block) in self.block_ffns.iter().enumerate() {
+            // Select the block's up/down pair. Dense blocks use their single
+            // pair (byte-identical to the pre-MoE path). MoE blocks dequantize
+            // the current i24 Q19.5 residual to f32 (x / STATE_RESID_ONE) and
+            // route: the router picks the expert INDEX ONLY and never re-enters
+            // the integer stream, so the FFN math below is unchanged.
+            let (up, down) = match block {
+                LoweredBlockFfn::Dense { up, down } => (up, down),
+                LoweredBlockFfn::Moe { router, experts } => {
+                    let x_f32: Vec<f32> = x
+                        .iter()
+                        .map(|&v| v as f32 / STATE_RESID_ONE as f32)
+                        .collect();
+                    let e = router.route_f32(&x_f32);
+                    let (u, d) = &experts[e];
+                    (u, d)
+                }
+            };
             let q = int_norm_quant24(&x, &mut stats.ffn);
             for (a, qv) in act.iter_mut().zip(q.iter()) {
                 *a = (qv + 128) as u8;
@@ -1232,7 +1705,7 @@ impl IntStateLoweredModel {
         let final_q = int_norm_quant24(&x, &mut stats.ffn);
         let mut logits = vec![0i32; t.vocab];
         for (id, logit) in logits.iter_mut().enumerate() {
-            let row = self.head_i8_row(id as u8);
+            let row = self.head_i8_row_at(id);
             let mut acc32: i32 = 0;
             for (qv, ev) in final_q.iter().zip(row.iter()) {
                 acc32 += i32::from(*qv) * i32::from(*ev);
@@ -1240,14 +1713,17 @@ impl IntStateLoweredModel {
             stats.ffn.max_abs_logit = stats.ffn.max_abs_logit.max(acc32.unsigned_abs());
             *logit = acc32;
         }
-        let mut argmax = 0u8;
+        let mut argmax_full = 0usize;
         let mut best = logits[0];
         for (id, &v) in logits.iter().enumerate().skip(1) {
             if v > best {
                 best = v;
-                argmax = id as u8;
+                argmax_full = id;
             }
         }
+        // `argmax` keeps the u8 charset id for the dense/charset pipeline;
+        // `argmax_full` carries the true id for wide-vocab (subword) models.
+        let argmax = argmax_full as u8;
 
         IntStateForwardTrace {
             state_norm_act,
@@ -1263,6 +1739,7 @@ impl IntStateLoweredModel {
             final_q,
             logits,
             argmax,
+            argmax_full,
             stats,
         }
     }
@@ -1575,13 +2052,16 @@ mod tests {
             .blocks()
             .iter()
             .enumerate()
-            .map(|(i, b)| BlockWeights {
-                up: b.up.clone(),
-                down: if i == 0 {
-                    hostile_down.clone()
-                } else {
-                    b.down.clone()
-                },
+            .map(|(i, b)| {
+                let (up, down) = b.as_dense().expect("synthetic checkpoint is dense");
+                BlockWeights {
+                    up: up.clone(),
+                    down: if i == 0 {
+                        hostile_down.clone()
+                    } else {
+                        down.clone()
+                    },
+                }
             })
             .collect();
         let bad = StateCheckpoint::new(
@@ -1612,10 +2092,11 @@ mod tests {
         // Recompute independently from the raw weights.
         let mut expected = 0u64;
         for b in ck.blocks() {
-            for row in 0..b.down.rows() {
-                let (lo, hi) = row_acc_bounds(b.down.row(row));
+            let (_, down) = b.as_dense().expect("synthetic checkpoint is dense");
+            for row in 0..down.rows() {
+                let (lo, hi) = row_acc_bounds(down.row(row));
                 let bound = lo.unsigned_abs().max(hi.unsigned_abs());
-                expected = expected.max((2 * u64::from(b.down.scale_raw(row)) * bound + 127) / 254);
+                expected = expected.max((2 * u64::from(down.scale_raw(row)) * bound + 127) / 254);
             }
         }
         assert_eq!(lowered.down_delta_structural_bound, expected);
@@ -1640,7 +2121,7 @@ mod tests {
     #[test]
     fn decay_wider_than_u8_is_rejected() {
         let ck = synthetic_state_checkpoint(4);
-        let bad = StateCheckpoint::new(
+        let bad = StateCheckpoint::new_moe(
             StateTopology::ARM_B,
             ck.embedding.clone(),
             ck.state_in.clone(),
@@ -1679,5 +2160,356 @@ mod tests {
         // pos=2 neg=1: hi = 127*2 + 128 = 382, lo = -(128*2 + 127) = -383.
         assert_eq!(row_acc_bounds(&[1, 1, -1, 0]), (-383, 382));
         assert_eq!(row_acc_bounds(&[0, 0]), (0, 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // MoE integer evaluator (deploy step 1)
+    // -----------------------------------------------------------------------
+
+    /// Build a deterministic MoE checkpoint at `topology` with `n_experts`
+    /// experts per block. Experts are drawn from independent seeds so distinct
+    /// experts hold distinct weights; the router tensors are seeded so the
+    /// top-1 argmax exercises every expert across a token window.
+    fn synthetic_moe_checkpoint(topology: StateTopology, seed: u64) -> StateCheckpoint {
+        assert!(topology.n_experts >= 1);
+        // Dense sibling topology (n_experts = 1) for the shared non-FFN tensors
+        // and for drawing per-expert up/down weights.
+        let dense_topo = StateTopology {
+            n_experts: 1,
+            ..topology
+        };
+        // Reuse the dense synthetic for the embedding + state + decay so the
+        // non-FFN path matches the dense checkpoint exactly.
+        let dense = synthetic_state_checkpoint_with(dense_topo, seed);
+        let embedding: Vec<f32> = (0..topology.vocab)
+            .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+            .collect();
+
+        let mut rng = seed ^ 0xa5a5_5a5a_1234_9876;
+        let mut next = move || {
+            rng = rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = rng;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut unit = move || (next() >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0;
+
+        let rank = 2usize;
+        let mut blocks = Vec::with_capacity(topology.n_blocks);
+        for bi in 0..topology.n_blocks {
+            let router = LowRankRouter::new(
+                rank,
+                topology.d_model,
+                topology.n_experts,
+                (0..rank * topology.d_model).map(|_| unit()).collect(),
+                (0..rank).map(|_| unit()).collect(),
+                (0..topology.n_experts * rank).map(|_| unit()).collect(),
+                (0..topology.n_experts).map(|_| unit()).collect(),
+            )
+            .expect("router valid");
+            let experts: Vec<(TernaryLayer, TernaryLayer)> = (0..topology.n_experts)
+                .map(|ei| {
+                    // Distinct per-(block,expert) seed => distinct experts.
+                    let ck = synthetic_state_checkpoint_with(
+                        dense_topo,
+                        seed ^ ((bi as u64) << 32) ^ ((ei as u64 + 1) << 8),
+                    );
+                    let (u, d) = ck.blocks()[0].as_dense().expect("synthetic block is dense");
+                    (u.clone(), d.clone())
+                })
+                .collect();
+            blocks.push(BlockFfn::Moe { router, experts });
+        }
+        StateCheckpoint::new_moe(
+            topology,
+            embedding,
+            dense.state_in.clone(),
+            dense.state_out.clone(),
+            dense.decay_raw().to_vec(),
+            blocks,
+        )
+        .expect("synthetic MoE checkpoint is valid")
+    }
+
+    #[test]
+    fn moe_n_experts_1_is_byte_identical_to_dense() {
+        // A single-expert MoE checkpoint whose one expert IS the dense block
+        // must lower and forward byte-for-byte identically to the dense
+        // checkpoint: top-1 routing over one expert always picks expert 0 and
+        // the integer FFN math is verbatim the dense kernel.
+        let topo1 = StateTopology {
+            n_experts: 1,
+            ..StateTopology::D192
+        };
+        let dense = synthetic_state_checkpoint_with(topo1, 5);
+
+        // Build the equivalent single-expert MoE: same up/down as the dense
+        // block, wrapped in a Moe with one expert.
+        let embedding: Vec<f32> = (0..topo1.vocab)
+            .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+            .collect();
+        let blocks: Vec<BlockFfn> = dense
+            .blocks()
+            .iter()
+            .map(|b| {
+                let (up, down) = b.as_dense().expect("dense");
+                let router = LowRankRouter::new(
+                    2,
+                    topo1.d_model,
+                    1,
+                    vec![0.0f32; 2 * topo1.d_model],
+                    vec![0.0f32; 2],
+                    vec![0.0f32; 2],
+                    vec![0.0f32; 1],
+                )
+                .expect("router valid");
+                BlockFfn::Moe {
+                    router,
+                    experts: vec![(up.clone(), down.clone())],
+                }
+            })
+            .collect();
+        let moe = StateCheckpoint::new_moe(
+            topo1,
+            embedding,
+            dense.state_in.clone(),
+            dense.state_out.clone(),
+            dense.decay_raw().to_vec(),
+            blocks,
+        )
+        .expect("single-expert MoE is valid");
+
+        let lo_dense = IntStateLoweredModel::lower(&dense).expect("dense lowers");
+        let lo_moe = IntStateLoweredModel::lower(&moe).expect("moe lowers");
+        assert_eq!(lo_dense.down_width, lo_moe.down_width);
+        assert_eq!(
+            lo_dense.down_delta_structural_bound,
+            lo_moe.down_delta_structural_bound
+        );
+
+        // Drive a multi-token sequence through both and require byte-identical
+        // traces and identical carried state at every step.
+        let mut sd = lo_dense.zero_state();
+        let mut sm = lo_moe.zero_state();
+        let mut input = 7u8;
+        for _ in 0..48 {
+            let td = lo_dense.forward(input, &mut sd);
+            let tm = lo_moe.forward(input, &mut sm);
+            assert_eq!(td.logits, tm.logits, "logits diverge");
+            assert_eq!(td.argmax, tm.argmax, "argmax diverges");
+            assert_eq!(td.block_residuals, tm.block_residuals, "residuals diverge");
+            assert_eq!(td.final_q, tm.final_q, "final norm diverges");
+            assert_eq!(sd, sm, "carried state diverges");
+            input = td.argmax;
+        }
+    }
+
+    #[test]
+    fn moe_multi_expert_forwards_deterministically_and_routes() {
+        let topo = StateTopology::D192_MOE_TEST;
+        let ck = synthetic_moe_checkpoint(topo, 11);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("moe lowers");
+
+        // block_ffns must actually be MoE with n_experts experts.
+        assert_eq!(lowered.block_ffns.len(), topo.n_blocks);
+        for b in &lowered.block_ffns {
+            match b {
+                LoweredBlockFfn::Moe { experts, router } => {
+                    assert_eq!(experts.len(), topo.n_experts);
+                    assert_eq!(router.n_experts(), topo.n_experts);
+                }
+                LoweredBlockFfn::Dense { .. } => panic!("expected MoE block"),
+            }
+        }
+
+        // Deterministic: same input + same zero state => identical trace.
+        let mut s1 = lowered.zero_state();
+        let mut s2 = lowered.zero_state();
+        let a = lowered.forward(9, &mut s1);
+        let b = lowered.forward(9, &mut s2);
+        assert_eq!(a.logits, b.logits);
+        assert_eq!(s1, s2);
+
+        // The router (running on the dequantized residual) selects an expert;
+        // over a token window at least two distinct experts fire in block 0
+        // (else the router is degenerate and the test would not exercise
+        // dispatch).
+        let LoweredBlockFfn::Moe { router, .. } = &lowered.block_ffns[0] else {
+            panic!("block 0 is MoE");
+        };
+        let mut state = lowered.zero_state();
+        let mut input = 3u8;
+        let mut selected = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            // Recompute the exact residual the forward routes on: emb row on
+            // the Q19.5 grid dequantized to f32.
+            let x: Vec<f32> = lowered
+                .emb_resid_row(input)
+                .iter()
+                .map(|&v| v as f32 / STATE_RESID_ONE as f32)
+                .collect();
+            selected.insert(router.route_f32(&x));
+            let t = lowered.forward(input, &mut state);
+            input = t.argmax;
+        }
+        assert!(
+            selected.len() >= 2,
+            "router degenerate: only experts {selected:?} ever selected"
+        );
+
+        // Different router weights select a different expert on the same input.
+        // Flip the expert_bias to strongly prefer a different expert and check
+        // the top-1 index changes for at least one probe input.
+        let base_input: Vec<f32> = lowered
+            .emb_resid_row(3)
+            .iter()
+            .map(|&v| v as f32 / STATE_RESID_ONE as f32)
+            .collect();
+        let base_e = router.route_f32(&base_input);
+        let other_e = (base_e + 1) % topo.n_experts;
+        let mut biased_expert_bias = vec![0.0f32; topo.n_experts];
+        biased_expert_bias[other_e] = 1e6;
+        let biased = LowRankRouter::new(
+            router.rank(),
+            topo.d_model,
+            topo.n_experts,
+            vec![0.0f32; router.rank() * topo.d_model],
+            vec![0.0f32; router.rank()],
+            vec![0.0f32; topo.n_experts * router.rank()],
+            biased_expert_bias,
+        )
+        .expect("biased router valid");
+        assert_eq!(biased.route_f32(&base_input), other_e);
+        assert_ne!(
+            biased.route_f32(&base_input),
+            base_e,
+            "biasing the router must change the selected expert"
+        );
+    }
+
+    #[test]
+    fn moe_arity_and_mixup_are_rejected() {
+        // A MoE topology with a Dense block is rejected.
+        let topo = StateTopology::D192_MOE_TEST;
+        let dense = synthetic_state_checkpoint_with(
+            StateTopology {
+                n_experts: 1,
+                ..topo
+            },
+            2,
+        );
+        let (up, down) = dense.blocks()[0].as_dense().unwrap();
+        let embedding: Vec<f32> = (0..topo.vocab)
+            .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+            .collect();
+        let dense_blocks: Vec<BlockFfn> = (0..topo.n_blocks)
+            .map(|_| BlockFfn::Dense {
+                up: up.clone(),
+                down: down.clone(),
+            })
+            .collect();
+        let mixup = StateCheckpoint::new_moe(
+            topo,
+            embedding.clone(),
+            dense.state_in.clone(),
+            dense.state_out.clone(),
+            dense.decay_raw().to_vec(),
+            dense_blocks,
+        );
+        assert!(matches!(mixup, Err(StateModelError::MoeDenseMixup { .. })));
+
+        // Wrong expert count is rejected.
+        let good = synthetic_moe_checkpoint(topo, 3);
+        let mut short_blocks = Vec::new();
+        for b in good.blocks() {
+            if let BlockFfn::Moe { router, experts } = b {
+                let mut experts = experts.clone();
+                experts.pop(); // one short
+                short_blocks.push(BlockFfn::Moe {
+                    router: router.clone(),
+                    experts,
+                });
+            }
+        }
+        let short = StateCheckpoint::new_moe(
+            topo,
+            embedding,
+            dense.state_in.clone(),
+            dense.state_out.clone(),
+            dense.decay_raw().to_vec(),
+            short_blocks,
+        );
+        assert!(matches!(
+            short,
+            Err(StateModelError::MoeArityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn router_matches_moe_parity_summation_order() {
+        // Cross-check the route_f32 fold against a hand-rolled reference that
+        // matches gbf-bench/src/moe_parity.rs's Router::route byte-for-byte.
+        let rank = 3;
+        let d_model = 5;
+        let n_experts = 4;
+        let ip: Vec<f32> = (0..rank * d_model)
+            .map(|i| (i as f32 * 0.37).sin())
+            .collect();
+        let ib: Vec<f32> = (0..rank).map(|i| (i as f32 * 1.1).cos()).collect();
+        let ep: Vec<f32> = (0..n_experts * rank)
+            .map(|i| (i as f32 * 0.19).sin() * 0.5)
+            .collect();
+        let eb: Vec<f32> = (0..n_experts).map(|i| (i as f32 * 0.7).cos()).collect();
+        let router = LowRankRouter::new(
+            rank,
+            d_model,
+            n_experts,
+            ip.clone(),
+            ib.clone(),
+            ep.clone(),
+            eb.clone(),
+        )
+        .expect("router valid");
+        let x: Vec<f32> = (0..d_model).map(|i| (i as f32 - 2.0) * 0.3).collect();
+
+        // Reference (identical fold order to moe_parity Router::route).
+        let hid: Vec<f32> = ip
+            .chunks_exact(d_model)
+            .zip(ib.iter())
+            .map(|(row, &bias)| {
+                row.iter()
+                    .zip(x.iter())
+                    .map(|(&w, &xi)| w * xi)
+                    .fold(bias, |acc, p| acc + p)
+            })
+            .collect();
+        let mut best_e = 0usize;
+        let mut best_v = f32::NEG_INFINITY;
+        for (e, (row, &bias)) in ep.chunks_exact(rank).zip(eb.iter()).enumerate() {
+            let acc = row
+                .iter()
+                .zip(hid.iter())
+                .map(|(&w, &hk)| w * hk)
+                .fold(bias, |a, p| a + p);
+            if acc > best_v {
+                best_v = acc;
+                best_e = e;
+            }
+        }
+        assert_eq!(router.route_f32(&x), best_e);
+
+        // Ties keep the lowest index: all-equal raws => expert 0.
+        let flat = LowRankRouter::new(
+            1,
+            d_model,
+            n_experts,
+            vec![0.0f32; d_model],
+            vec![0.0f32; 1],
+            vec![0.0f32; n_experts],
+            vec![2.5f32; n_experts],
+        )
+        .expect("flat router valid");
+        assert_eq!(flat.route_f32(&x), 0);
     }
 }

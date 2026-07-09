@@ -547,8 +547,11 @@ pub fn ternary_zero_fraction(ck: &StateCheckpoint) -> (u64, f64) {
     add(layer_zero_counts(&ck.state_in));
     add(layer_zero_counts(&ck.state_out));
     for block in ck.blocks() {
-        add(layer_zero_counts(&block.up));
-        add(layer_zero_counts(&block.down));
+        let (up, down) = block
+            .as_dense()
+            .expect("ternary_zero_fraction handles only dense checkpoints");
+        add(layer_zero_counts(up));
+        add(layer_zero_counts(down));
     }
     (total, zeros as f64 / total.max(1) as f64)
 }

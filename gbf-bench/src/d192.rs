@@ -166,7 +166,10 @@ pub fn write_synthetic_state_export(
     )?;
 
     for (k, block) in ck.blocks().iter().enumerate() {
-        let (t, s) = ternary_pair(&block.up);
+        let (up, down) = block
+            .as_dense()
+            .expect("d192 dense export path handles only dense checkpoints");
+        let (t, s) = ternary_pair(up);
         write_tensor(
             &format!("block{k}_up.ternary"),
             &format!("tensors/block{k}_up.ternary.bin"),
@@ -181,7 +184,7 @@ pub fn write_synthetic_state_export(
             "u16_le_q8_8",
             &s,
         )?;
-        let (t, s) = ternary_pair(&block.down);
+        let (t, s) = ternary_pair(down);
         write_tensor(
             &format!("block{k}_down.ternary"),
             &format!("tensors/block{k}_down.ternary.bin"),

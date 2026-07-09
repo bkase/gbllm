@@ -31,8 +31,9 @@ use gbf_kernel::asm_impl_state::{
 };
 use gbf_kernel::model_ref::TernaryLayer;
 use gbf_kernel::state_model_ref::{
-    AccWidth, IntStateForwardTrace, IntStateLoweredModel, STATE_INT_SEMANTIC_DIVERGENCES,
-    StateCheckpoint, StateForwardStats, StateTopology, f32_state_forward,
+    AccWidth, BlockFfn, IntStateForwardTrace, IntStateLoweredModel, LowRankRouter,
+    STATE_INT_SEMANTIC_DIVERGENCES, StateCheckpoint, StateForwardStats, StateTopology,
+    f32_state_forward,
 };
 use serde::Serialize;
 
@@ -88,11 +89,21 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
             reason: e.to_string(),
         })?;
     let schema = manifest["schema"].as_str().unwrap_or_default().to_string();
-    if schema != "f_s5_state_checkpoint_export.v1" {
-        return Err(OneTokenError::Manifest {
-            reason: format!("unexpected schema {schema:?}"),
-        });
-    }
+    // Two supported schemas share the tensor-table + topology layout:
+    //   - `f_s5_state_checkpoint_export.v1`: dense (one FFN per block).
+    //   - `f_s8_moe_state_checkpoint_export.v2`: top-1 MoE FFN blocks with a
+    //     low-rank router + `n_experts_per_block` experts per block.
+    const DENSE_SCHEMA: &str = "f_s5_state_checkpoint_export.v1";
+    const MOE_SCHEMA: &str = "f_s8_moe_state_checkpoint_export.v2";
+    let is_moe_schema = match schema.as_str() {
+        DENSE_SCHEMA => false,
+        MOE_SCHEMA => true,
+        _ => {
+            return Err(OneTokenError::Manifest {
+                reason: format!("unexpected schema {schema:?}"),
+            });
+        }
+    };
     let git_sha = manifest["git_sha"].as_str().unwrap_or_default().to_string();
 
     // Topology is declared by the manifest; the pipeline no longer assumes
@@ -105,11 +116,19 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
                 reason: format!("topology.{what} missing or non-integer"),
             })
     };
-    if topo["moe"].as_bool() == Some(true) {
+    // MoE topologies declare experts via `moe: true` + `n_experts_per_block`;
+    // dense manifests are exactly one expert.
+    let manifest_is_moe = topo["moe"].as_bool() == Some(true);
+    if manifest_is_moe != is_moe_schema {
         return Err(OneTokenError::Manifest {
-            reason: "MoE checkpoints are not supported by the stateful ROM pipeline".into(),
+            reason: format!("schema {schema:?} and topology.moe {manifest_is_moe} disagree"),
         });
     }
+    let n_experts = if is_moe_schema {
+        dim(&topo["n_experts_per_block"], "n_experts_per_block")?
+    } else {
+        1
+    };
     let topology = StateTopology {
         d_model: dim(&topo["d_model"], "d_model")?,
         d_ff: dim(&topo["d_ff"], "d_ff")?,
@@ -119,9 +138,7 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
             "sequence_state_params.state_slots",
         )?,
         vocab: dim(&topo["vocab"], "vocab")?,
-        // Dense v1 export path: exactly one expert. The MoE v2 loader (added by
-        // the integer MoE evaluator step) reads n_experts from the manifest.
-        n_experts: 1,
+        n_experts,
     };
 
     let tensors = manifest["tensors"]
@@ -174,41 +191,116 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
 
-    let mut ternary =
-        |base: &str, rows: usize, cols: usize| -> Result<TernaryLayer, OneTokenError> {
+    // Pure ternary decoder (no `load` capture) so router-f32 loads can share
+    // the same `load` closure without a double-mutable-borrow.
+    let decode_ternary = |tern: &[u8],
+                          scales: &[u8],
+                          rows: usize,
+                          cols: usize|
+     -> Result<TernaryLayer, OneTokenError> {
+        let weights: Vec<i8> = tern.iter().map(|&b| b as i8).collect();
+        let scales_raw: Vec<u16> = scales
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        TernaryLayer::new(rows, cols, weights, scales_raw)
+            .map_err(|e| OneTokenError::Model(e.to_string()))
+    };
+    // Load a ternary layer (weights + Q8.8 scales) by base name. Kept as a
+    // macro-free block instead of a closure so router-f32 loads can share the
+    // one `load` closure (no nested double-borrow).
+    macro_rules! ternary {
+        ($base:expr, $rows:expr, $cols:expr) => {{
+            let base: String = $base;
             let tern = load(&format!("{base}.ternary"))?;
             let scales = load(&format!("{base}.scales"))?;
-            let weights: Vec<i8> = tern.iter().map(|&b| b as i8).collect();
-            let scales_raw: Vec<u16> = scales
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            TernaryLayer::new(rows, cols, weights, scales_raw)
-                .map_err(|e| OneTokenError::Model(e.to_string()))
-        };
-
-    let state_in = ternary(
-        "state_input_to_state",
-        topology.state_slots,
-        topology.d_model,
-    )?;
-    let state_out = ternary(
-        "state_state_to_output",
-        topology.d_model,
-        topology.state_slots,
-    )?;
-
-    let mut blocks = Vec::new();
-    for k in 0..topology.n_blocks {
-        blocks.push(gbf_kernel::model_ref::BlockWeights {
-            up: ternary(&format!("block{k}_up"), topology.d_ff, topology.d_model)?,
-            down: ternary(&format!("block{k}_down"), topology.d_model, topology.d_ff)?,
-        });
+            decode_ternary(&tern, &scales, $rows, $cols)
+        }};
     }
 
-    let checkpoint =
-        StateCheckpoint::new(topology, embedding, state_in, state_out, decay_raw, blocks)
+    let state_in = ternary!(
+        "state_input_to_state".to_string(),
+        topology.state_slots,
+        topology.d_model
+    )?;
+    let state_out = ternary!(
+        "state_state_to_output".to_string(),
+        topology.d_model,
+        topology.state_slots
+    )?;
+
+    let checkpoint = if is_moe_schema {
+        // Per-block router_rank lives on each `layers[]` entry.
+        let layers = manifest["layers"]
+            .as_array()
+            .ok_or_else(|| OneTokenError::Manifest {
+                reason: "MoE manifest missing layers array".into(),
+            })?;
+        // Router f32 tensors are LE-f32 in the same sha256-verified table.
+        macro_rules! load_f32 {
+            ($name:expr) => {{
+                let name: String = $name;
+                let bytes = load(&name)?;
+                if bytes.len() % 4 != 0 {
+                    return Err(OneTokenError::Manifest {
+                        reason: format!("router tensor {name} not f32-aligned"),
+                    });
+                }
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect::<Vec<f32>>()
+            }};
+        }
+        let mut blocks = Vec::with_capacity(topology.n_blocks);
+        for k in 0..topology.n_blocks {
+            let router_rank = layers
+                .get(k)
+                .and_then(|l| l["router_rank"].as_u64())
+                .map(|n| n as usize)
+                .ok_or_else(|| OneTokenError::Manifest {
+                    reason: format!("layers[{k}].router_rank missing"),
+                })?;
+            let router = LowRankRouter::new(
+                router_rank,
+                topology.d_model,
+                topology.n_experts,
+                load_f32!(format!("block{k}_router_input_projection")),
+                load_f32!(format!("block{k}_router_input_bias")),
+                load_f32!(format!("block{k}_router_expert_projection")),
+                load_f32!(format!("block{k}_router_expert_bias")),
+            )
             .map_err(|e| OneTokenError::Model(e.to_string()))?;
+            let mut experts = Vec::with_capacity(topology.n_experts);
+            for e in 0..topology.n_experts {
+                experts.push((
+                    ternary!(
+                        format!("block{k}_expert{e}_up"),
+                        topology.d_ff,
+                        topology.d_model
+                    )?,
+                    ternary!(
+                        format!("block{k}_expert{e}_down"),
+                        topology.d_model,
+                        topology.d_ff
+                    )?,
+                ));
+            }
+            blocks.push(BlockFfn::Moe { router, experts });
+        }
+        StateCheckpoint::new_moe(topology, embedding, state_in, state_out, decay_raw, blocks)
+            .map_err(|e| OneTokenError::Model(e.to_string()))?
+    } else {
+        let mut blocks = Vec::new();
+        for k in 0..topology.n_blocks {
+            blocks.push(gbf_kernel::model_ref::BlockWeights {
+                up: ternary!(format!("block{k}_up"), topology.d_ff, topology.d_model)?,
+                down: ternary!(format!("block{k}_down"), topology.d_model, topology.d_ff)?,
+            });
+        }
+        StateCheckpoint::new(topology, embedding, state_in, state_out, decay_raw, blocks)
+            .map_err(|e| OneTokenError::Model(e.to_string()))?
+    };
     Ok(StateCheckpointBundle {
         checkpoint,
         topology,
@@ -1476,9 +1568,12 @@ mod tests {
         let blocks: Vec<BlockWeights> = base
             .blocks()
             .iter()
-            .map(|b| BlockWeights {
-                up: b.up.clone(),
-                down: boost_scales(&b.down, 64),
+            .map(|b| {
+                let (up, down) = b.as_dense().expect("synthetic block is dense");
+                BlockWeights {
+                    up: up.clone(),
+                    down: boost_scales(down, 64),
+                }
             })
             .collect();
         let t = base.topology();
