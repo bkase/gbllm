@@ -1,0 +1,667 @@
+{
+  "schema": "f_s8_moe_state_checkpoint_export.v2",
+  "source_format": "gbllm_student_hardened.v1",
+  "source_meta": {},
+  "topology": {
+    "family": "linear_state_multi_timescale_then_top1_moe_ffn",
+    "moe": true,
+    "n_experts_per_block": 4,
+    "d_model": 16,
+    "d_ff": 32,
+    "n_blocks": 2,
+    "vocab": 48,
+    "tied_head": true,
+    "sequence_state_kind": "linear_state_multi_timescale",
+    "sequence_state_params": {
+      "state_slots": 16,
+      "decay_policy": "MultiTimescale",
+      "decay_raws_by_band": [
+        128,
+        192,
+        224,
+        240
+      ],
+      "band_layout": "state_slots partitioned into len(decay_raws) equal contiguous bands; slot s uses decay_raws[s // (state_slots/len)]"
+    }
+  },
+  "router_semantics": {
+    "kind": "top1_lowrank_router.rs_Top1RouterQat",
+    "note": "hidden = input_projection @ x + input_bias; raw = expert_projection @ hidden + expert_bias; expert = argmax(raw) (lowest-index tiebreak); input x is the RAW pre-norm residual (NOT the fake-quant activation); all router weights are f32 (router is not ternarized). This is the deployed gbf-model router, NOT s8's simplified flat [E,d_model] router."
+  },
+  "numeric_convention": {
+    "weight_encoding": "Ternary {-1,0,+1}",
+    "weight_scale": "per_output_row Q8.8 (u16 raw, f32 = raw/256)",
+    "embedding_dtype": "f32_le",
+    "activation_fake_quant": {
+      "range": 8.0,
+      "qmax": 127,
+      "grid": "Int8 symmetric [-8,8]"
+    },
+    "block_forward": "x' = x + Down(gelu(Up(actq(rms_norm(x))))); logits = rms_norm(x_final) @ embedding^T"
+  },
+  "layers": [
+    {
+      "index": 0,
+      "kind": "prenorm_residual_top1_moe_ffn",
+      "n_experts": 4,
+      "router_rank": 2,
+      "router": {
+        "input_projection": "block0_router_input_projection",
+        "input_bias": "block0_router_input_bias",
+        "expert_projection": "block0_router_expert_projection",
+        "expert_bias": "block0_router_expert_bias"
+      },
+      "experts": [
+        {
+          "up_ternary": "block0_expert0_up.ternary",
+          "up_scales": "block0_expert0_up.scales",
+          "down_ternary": "block0_expert0_down.ternary",
+          "down_scales": "block0_expert0_down.scales"
+        },
+        {
+          "up_ternary": "block0_expert1_up.ternary",
+          "up_scales": "block0_expert1_up.scales",
+          "down_ternary": "block0_expert1_down.ternary",
+          "down_scales": "block0_expert1_down.scales"
+        },
+        {
+          "up_ternary": "block0_expert2_up.ternary",
+          "up_scales": "block0_expert2_up.scales",
+          "down_ternary": "block0_expert2_down.ternary",
+          "down_scales": "block0_expert2_down.scales"
+        },
+        {
+          "up_ternary": "block0_expert3_up.ternary",
+          "up_scales": "block0_expert3_up.scales",
+          "down_ternary": "block0_expert3_down.ternary",
+          "down_scales": "block0_expert3_down.scales"
+        }
+      ],
+      "up_shape": [
+        32,
+        16
+      ],
+      "down_shape": [
+        16,
+        32
+      ]
+    },
+    {
+      "index": 1,
+      "kind": "prenorm_residual_top1_moe_ffn",
+      "n_experts": 4,
+      "router_rank": 2,
+      "router": {
+        "input_projection": "block1_router_input_projection",
+        "input_bias": "block1_router_input_bias",
+        "expert_projection": "block1_router_expert_projection",
+        "expert_bias": "block1_router_expert_bias"
+      },
+      "experts": [
+        {
+          "up_ternary": "block1_expert0_up.ternary",
+          "up_scales": "block1_expert0_up.scales",
+          "down_ternary": "block1_expert0_down.ternary",
+          "down_scales": "block1_expert0_down.scales"
+        },
+        {
+          "up_ternary": "block1_expert1_up.ternary",
+          "up_scales": "block1_expert1_up.scales",
+          "down_ternary": "block1_expert1_down.ternary",
+          "down_scales": "block1_expert1_down.scales"
+        },
+        {
+          "up_ternary": "block1_expert2_up.ternary",
+          "up_scales": "block1_expert2_up.scales",
+          "down_ternary": "block1_expert2_down.ternary",
+          "down_scales": "block1_expert2_down.scales"
+        },
+        {
+          "up_ternary": "block1_expert3_up.ternary",
+          "up_scales": "block1_expert3_up.scales",
+          "down_ternary": "block1_expert3_down.ternary",
+          "down_scales": "block1_expert3_down.scales"
+        }
+      ],
+      "up_shape": [
+        32,
+        16
+      ],
+      "down_shape": [
+        16,
+        32
+      ]
+    }
+  ],
+  "tensors": [
+    {
+      "name": "embedding",
+      "role": "token_embedding_and_tied_head",
+      "dtype": "f32_le",
+      "shape": [
+        48,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/embedding.f32.bin",
+      "sha256": "9f35aa2c7cf4781e5724510e0c68cff6faa34e98dc0c6c4d716577c6d4a0be92"
+    },
+    {
+      "name": "state_input_to_state.ternary",
+      "role": "state_in_projection_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/state_input_to_state.ternary.i8.bin",
+      "sha256": "bf0d5d93d0e35be7373f975deee6833690e940ba5a51e268eb534c916d2adc12"
+    },
+    {
+      "name": "state_input_to_state.scales",
+      "role": "state_in_projection_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/state_input_to_state.scales.q8_8_u16le.bin",
+      "sha256": "99ba9eb9b7f619e610dfeb990683627366c1d9c46b9792329f8ea534b6969507"
+    },
+    {
+      "name": "state_state_to_output.ternary",
+      "role": "state_out_projection_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/state_state_to_output.ternary.i8.bin",
+      "sha256": "0beffbc2f930ec40f858177a611fb3983dc4cdcc6081b721e8e9c1b4f799b530"
+    },
+    {
+      "name": "state_state_to_output.scales",
+      "role": "state_out_projection_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/state_state_to_output.scales.q8_8_u16le.bin",
+      "sha256": "c8b31b232ad5e9d72d4d89b979285491be0bef63e1298df1988d963be62e59db"
+    },
+    {
+      "name": "state_decay",
+      "role": "linear_state_per_slot_decay",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/state_decay.q8_8_u16le.bin",
+      "sha256": "90298ee5eb9351ffa54a88dda04c07ae92841910ce5718d7270b59e92e871aed"
+    },
+    {
+      "name": "block0_router_input_projection",
+      "role": "top1_lowrank_router_input_projection_fp",
+      "dtype": "f32_le",
+      "shape": [
+        2,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_router_input_projection.f32.bin",
+      "sha256": "720cec313f2aaa22f7547a9f74ac8d543c7064c920281da631280316e87d84fc"
+    },
+    {
+      "name": "block0_router_input_bias",
+      "role": "top1_lowrank_router_input_bias_fp",
+      "dtype": "f32_le",
+      "shape": [
+        2
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_router_input_bias.f32.bin",
+      "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
+    },
+    {
+      "name": "block0_router_expert_projection",
+      "role": "top1_lowrank_router_expert_projection_fp",
+      "dtype": "f32_le",
+      "shape": [
+        4,
+        2
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_router_expert_projection.f32.bin",
+      "sha256": "05b15d374693730a02bf02312e7d47f254322c71cf1c6b1e363902d5d781208c"
+    },
+    {
+      "name": "block0_router_expert_bias",
+      "role": "top1_lowrank_router_expert_bias_fp",
+      "dtype": "f32_le",
+      "shape": [
+        4
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_router_expert_bias.f32.bin",
+      "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb"
+    },
+    {
+      "name": "block0_expert0_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert0_up.ternary.i8.bin",
+      "sha256": "7ff92ec4a350dd9a1615ce24576fa113c4e897cb860416a51885cbb978d56100"
+    },
+    {
+      "name": "block0_expert0_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert0_up.scales.q8_8_u16le.bin",
+      "sha256": "0a7c963f9a887a848f304f06d24589ace9f60269bd0382925130f4b3a1e831b8"
+    },
+    {
+      "name": "block0_expert0_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert0_down.ternary.i8.bin",
+      "sha256": "97b62b8044db32fa692b292139ee4028ab081b50bec92096f3170638bc2bb061"
+    },
+    {
+      "name": "block0_expert0_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert0_down.scales.q8_8_u16le.bin",
+      "sha256": "0a54e801f8c1fab21c3ae2c13cada63957ded598a110e4057a57c9a06cb53477"
+    },
+    {
+      "name": "block0_expert1_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert1_up.ternary.i8.bin",
+      "sha256": "501120ad0dd823215801c2a770faabf4f8df09edc358cd9452ebdcdc7f7a0218"
+    },
+    {
+      "name": "block0_expert1_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert1_up.scales.q8_8_u16le.bin",
+      "sha256": "3134277bc7a773fb5c67c1c6f72fa89a32a5fbc37f6c9480a9d8ff363fe70f6a"
+    },
+    {
+      "name": "block0_expert1_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert1_down.ternary.i8.bin",
+      "sha256": "42ddc8637916de357a073c0216ec471c3ef143d3ce6e94819f9460454811e333"
+    },
+    {
+      "name": "block0_expert1_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert1_down.scales.q8_8_u16le.bin",
+      "sha256": "3330ba43cbb680261d5ba070ba31a8b4db2f24e40c5ef23f9346501ee77c4467"
+    },
+    {
+      "name": "block0_expert2_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert2_up.ternary.i8.bin",
+      "sha256": "31ea1c07a29398e9cccb801fd98a40e6149c7484fd5af6d3bf2e3ce9eae428bf"
+    },
+    {
+      "name": "block0_expert2_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert2_up.scales.q8_8_u16le.bin",
+      "sha256": "fbe0c036322fa067f2d132e79562aee71f75fe796ece1fd0cd54bfb55c8f4c29"
+    },
+    {
+      "name": "block0_expert2_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert2_down.ternary.i8.bin",
+      "sha256": "a7bd9cb47c4d91199dbd7516f86a8a57e89542c3c186fd8f534b44a05ad7c326"
+    },
+    {
+      "name": "block0_expert2_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert2_down.scales.q8_8_u16le.bin",
+      "sha256": "2e4105474b78978d2d4f8c1fc824e48fac67bc14b208304aea12aec60f2098f5"
+    },
+    {
+      "name": "block0_expert3_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert3_up.ternary.i8.bin",
+      "sha256": "595be2f0d032110063ed5f819a12159b128bb7a1a5b0f01d288c109943c8e110"
+    },
+    {
+      "name": "block0_expert3_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert3_up.scales.q8_8_u16le.bin",
+      "sha256": "d4b077acd9e291ed0ea5ce28758059f6be610e0aa108612ea7838f8bb1b2485e"
+    },
+    {
+      "name": "block0_expert3_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert3_down.ternary.i8.bin",
+      "sha256": "9416580b6ad305340ff57236acbdc2b48121248f913ec1b243ea018399971668"
+    },
+    {
+      "name": "block0_expert3_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block0_expert3_down.scales.q8_8_u16le.bin",
+      "sha256": "03c36af47df6981300d582f33542d5d53c790d861d34082705f757eee8f0cfae"
+    },
+    {
+      "name": "block1_router_input_projection",
+      "role": "top1_lowrank_router_input_projection_fp",
+      "dtype": "f32_le",
+      "shape": [
+        2,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_router_input_projection.f32.bin",
+      "sha256": "d6d88e14d2da14e24bd3f2167ed3d17ce5d4019a4f3d519a901321e27cd8677a"
+    },
+    {
+      "name": "block1_router_input_bias",
+      "role": "top1_lowrank_router_input_bias_fp",
+      "dtype": "f32_le",
+      "shape": [
+        2
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_router_input_bias.f32.bin",
+      "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
+    },
+    {
+      "name": "block1_router_expert_projection",
+      "role": "top1_lowrank_router_expert_projection_fp",
+      "dtype": "f32_le",
+      "shape": [
+        4,
+        2
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_router_expert_projection.f32.bin",
+      "sha256": "da915edd39d81344161a46f417a1c3d49e3d62a51d8094e74c53c8dcbf4d1146"
+    },
+    {
+      "name": "block1_router_expert_bias",
+      "role": "top1_lowrank_router_expert_bias_fp",
+      "dtype": "f32_le",
+      "shape": [
+        4
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_router_expert_bias.f32.bin",
+      "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb"
+    },
+    {
+      "name": "block1_expert0_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert0_up.ternary.i8.bin",
+      "sha256": "9a66f41744a4f4089df57ce8e12160aba87dddd7b749c97557879aaa8776a17c"
+    },
+    {
+      "name": "block1_expert0_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert0_up.scales.q8_8_u16le.bin",
+      "sha256": "283d29cff29b7f6567e7bc237dca49e7fd4cd30ed5ae0256297f753f879b6aea"
+    },
+    {
+      "name": "block1_expert0_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert0_down.ternary.i8.bin",
+      "sha256": "8c80e12f5de3441669878dd8076c20629442613532bee51f20cd24d13d59b6da"
+    },
+    {
+      "name": "block1_expert0_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert0_down.scales.q8_8_u16le.bin",
+      "sha256": "84f5db469db74ad226605406270be6b3e63570137d8d6b2fa2b3bcb8430fba57"
+    },
+    {
+      "name": "block1_expert1_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert1_up.ternary.i8.bin",
+      "sha256": "d7757ce27472f65aa2ebeeeed442ba0bfbc6d24db25285a45cd25ee3ef591674"
+    },
+    {
+      "name": "block1_expert1_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert1_up.scales.q8_8_u16le.bin",
+      "sha256": "11376bf5a7cfefab4d94ef1279c254871d60b32e9a8a64a062f63180a398e668"
+    },
+    {
+      "name": "block1_expert1_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert1_down.ternary.i8.bin",
+      "sha256": "17edcc9b07863562dacf5e543438f75aefc29f75136954a73e81ddb84c7064f0"
+    },
+    {
+      "name": "block1_expert1_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert1_down.scales.q8_8_u16le.bin",
+      "sha256": "b9dc1ba9bf4df2bffeb08e93874a4e6e512da700a6344146f9aab1fa8ea05a68"
+    },
+    {
+      "name": "block1_expert2_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert2_up.ternary.i8.bin",
+      "sha256": "0d08035bbf46c2b544c16c68070aa8e474ef601b8c150d034fbfa9bc73dcd934"
+    },
+    {
+      "name": "block1_expert2_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert2_up.scales.q8_8_u16le.bin",
+      "sha256": "e0eb0f6b607a5182a9eee4b71ee996d7cf820e26cf87b53dd01eef5e1887745a"
+    },
+    {
+      "name": "block1_expert2_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert2_down.ternary.i8.bin",
+      "sha256": "b245b3f6cdf5ed8a1359c1a79f124a36530ed0bb2a343e70648295ad86c1d1c2"
+    },
+    {
+      "name": "block1_expert2_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert2_down.scales.q8_8_u16le.bin",
+      "sha256": "e6630b804316aad3702661ddfd89a00b4b903b385232006b55869d0775e14718"
+    },
+    {
+      "name": "block1_expert3_up.ternary",
+      "role": "ffn_up_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        32,
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert3_up.ternary.i8.bin",
+      "sha256": "74011641708ae4aa3acf1cc9a89ba276229f42c463a69f5055d155721e09daac"
+    },
+    {
+      "name": "block1_expert3_up.scales",
+      "role": "ffn_up_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert3_up.scales.q8_8_u16le.bin",
+      "sha256": "92580d4d55611ba61c535bedbc938d768531007cafcf06830538e724b0b89567"
+    },
+    {
+      "name": "block1_expert3_down.ternary",
+      "role": "ffn_down_ternary_weights",
+      "dtype": "i8 (values in {-1,0,1})",
+      "shape": [
+        16,
+        32
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert3_down.ternary.i8.bin",
+      "sha256": "2085ca296eb71ff4a4676f7836eee52d376aa7227a5ac4a6f1f592449e7c5e4c"
+    },
+    {
+      "name": "block1_expert3_down.scales",
+      "role": "ffn_down_per_output_row_scale",
+      "dtype": "u16_le (Q8.8; f32 = raw/256)",
+      "shape": [
+        16
+      ],
+      "layout": "row_major",
+      "file": "tensors/block1_expert3_down.scales.q8_8_u16le.bin",
+      "sha256": "0ea14ccdcadd54585e1b305059a1129a489bdadfade651b1d103d7c4df42c60b"
+    }
+  ]
+}
