@@ -651,6 +651,17 @@ pub(crate) fn emit_mul16x8(asm: &mut ModelAsm) {
     asm.label("mul16x8");
     ld16(asm, Reg16Data::HL, 0);
     ld_r_imm(asm, Reg8::C, 0);
+    // Fast path: a zero multiplier yields a zero product. The high byte of the
+    // multiplier is frequently zero (small quantized activations, Q8.8 scales
+    // whose integer part is 0, i24 values under 2^16), so skipping the eight
+    // no-op shift-add iterations pays off on average. Result (C:HL = 0) is
+    // already set, so this is byte-identical to running the loop.
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::Ret {
+        cond: Some(Cond::Z),
+    });
     for step in 0..8 {
         let skip = format!("m8s_{step}");
         asm.i(Instr::AddHl { src: Reg16Data::HL });

@@ -35,6 +35,7 @@ the software multiplies.
 | 0 | baseline (committed d192-real) | 21.695 | — | — |
 | 1 | out-projection: register-resident cursors | 18.707 | −13.8% | −13.8% |
 | 2 | out-projection: HRAM accumulator + `add a,(hl)` | 18.214 | −2.6% | −16.0% |
+| 3 | `mul16x8`: zero-multiplier early-out | 17.782 | −2.4% | −18.0% |
 
 ---
 
@@ -99,6 +100,29 @@ changed. Guarded by the byte-exact regression + arm-B regression.
 
 ---
 
+## Entry 3 — `mul16x8`: zero-multiplier early-out
+
+**File:** `gbf-kernel/src/asm_impl_model.rs` (`emit_mul16x8`)
+**Effect:** 18.214 → 17.782 s/char (−2.4%).
+
+**What it was.** `mul16x8` (the shared 8×16→24 shift-add multiply, called ~4×/lane
+by the norm's sum-of-squares plus decay/scale epilogues — the hottest driver
+*page*) always ran all eight shift-add iterations, even when the multiplier byte
+`A` was 0.
+
+**Why the fix worked.** For a zero multiplier the product is zero and the eight
+iterations are pure no-ops (the loop shifts a zero multiplier, never adding the
+multiplicand). The high byte of the multiplier is frequently zero — small
+quantized activations, Q8.8 scales whose integer part is 0, i24 values under
+2^16 — so an `or a; ret z` at the top (result `C:HL = 0` is already loaded)
+short-circuits those calls. The measured 2.4% drop confirms a meaningful
+fraction of calls hit it; the ~3-cycle test added to the non-zero path is
+dwarfed by the ~40 cycles saved per zero call.
+
+**Why it's safe.** Returns exactly the value the loop would have produced (0) for
+the only input it short-circuits. Byte-exact: d192 + arm-B regressions and all
+63 kernel unit tests pass.
+
 ## Remaining levers (profiled, not yet done)
 
 - **RMS norm cluster** (`n24_*` / `udn5_rot_*` / `udiv_norm5`, ~10%): runs ~8×/token.
@@ -106,7 +130,12 @@ changed. Guarded by the byte-exact regression + arm-B regression.
   gains would need a squaring-specific routine — higher risk.
 - **Tied-head logits** (`emit_head` / `hg_*`, ~8%): builds a per-lane product LUT
   then accumulates 256 logits.
-- **Software multiplies** (`mul16` / `mul16x8`, ~3%): decay/scale; mostly the norm.
+- **Software multiplies** (`mul16` / `mul16x8`): zero-multiplier early-out landed
+  (entry 3). The remaining shift-add cost is the biggest structural prize — a
+  quarter-square table (`a*b = f(a+b) - f(|a-b|)`, `f(n)=floor(n^2/4)`, exact for
+  all bytes; ~1 KB, fits in the always-mapped bank 0) would roughly halve every
+  multiply and help the norm, decay, scales, and head at once. Larger, bank-
+  placement-sensitive change — deserves a dedicated pass, not a micro-step.
 - **V3 matvec** (~37%, largest single block): already near its floor; the zero-skip
   machinery is near-useless on the real 0.59%-zero weights but removing it saves
   little. Bigger structural change would be the V2-dispatch path (trades speed for

@@ -138,11 +138,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pages.sort_by_key(|&(_, clk)| std::cmp::Reverse(clk));
     for (page, clk) in pages.into_iter().take(20) {
         println!(
-            "  {:#06x}-{:#06x} : {:>11} M-cycles  {:5.1}%",
+            "  {:#06x}-{:#06x} : {:>11} M-cycles  {:5.1}%  [{}..]",
             page << 8,
             (page << 8) + 0xff,
             m(clk),
-            pct(clk)
+            pct(clk),
+            routine_of((page << 8) as u16),
         );
     }
     Ok(())
