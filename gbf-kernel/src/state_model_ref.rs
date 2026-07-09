@@ -134,6 +134,10 @@ pub struct StateTopology {
     pub n_blocks: usize,
     pub state_slots: usize,
     pub vocab: usize,
+    /// Number of MoE experts per FFN block. 1 = dense (back-compat: the whole
+    /// existing dense pipeline is exactly `n_experts == 1`). Top-1 routing runs
+    /// exactly one expert per block per token, so active MACs are unchanged.
+    pub n_experts: usize,
 }
 
 impl StateTopology {
@@ -144,6 +148,7 @@ impl StateTopology {
         n_blocks: 4,
         state_slots: 64,
         vocab: STATE_VOCAB,
+        n_experts: 1,
     };
 
     /// Tonight's S8 distilled student (bd-3771m).
@@ -153,6 +158,19 @@ impl StateTopology {
         n_blocks: 6,
         state_slots: 192,
         vocab: STATE_VOCAB,
+        n_experts: 1,
+    };
+
+    /// The trained subword MoE student (student_moe_d192x8): 8 experts, subword
+    /// vocab 1024. NOTE: `vocab = 1024` fails `validate()` until logit paging
+    /// (Step 2) relaxes the single-page cap; this const documents the target.
+    pub const D192_MOE: Self = Self {
+        d_model: 192,
+        d_ff: 384,
+        n_blocks: 6,
+        state_slots: 192,
+        vocab: 1024,
+        n_experts: 8,
     };
 
     /// Validate the device structural limits this pipeline supports. These
@@ -175,7 +193,15 @@ impl StateTopology {
         lim("state_slots (u8 slot loops)", self.state_slots, 255)?;
         // vocab: 3-byte logits in one page, sampler tables in one page.
         lim("vocab (i24 logits single page)", self.vocab, 85)?;
+        // n_experts: u8 expert index / one bank set per expert in ROM.
+        lim("n_experts (u8 expert loop / bank set)", self.n_experts, 255)?;
         Ok(())
+    }
+
+    /// True when the FFN blocks route over more than one expert.
+    #[must_use]
+    pub fn is_moe(&self) -> bool {
+        self.n_experts > 1
     }
 
     /// Multiply-accumulates per token (matvecs plus tied head).

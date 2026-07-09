@@ -119,6 +119,9 @@ pub fn load_state_checkpoint(export_dir: &Path) -> Result<StateCheckpointBundle,
             "sequence_state_params.state_slots",
         )?,
         vocab: dim(&topo["vocab"], "vocab")?,
+        // Dense v1 export path: exactly one expert. The MoE v2 loader (added by
+        // the integer MoE evaluator step) reads n_experts from the manifest.
+        n_experts: 1,
     };
 
     let tensors = manifest["tensors"]

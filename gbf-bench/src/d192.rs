@@ -575,6 +575,7 @@ pub const D256_CLASS_TOPOLOGY: StateTopology = StateTopology {
     n_blocks: 10,
     state_slots: 208,
     vocab: 80,
+    n_experts: 1,
 };
 
 /// Result of the d256-class V2 fit + byte-exact gate.

@@ -1,5 +1,6 @@
 //! Corpus ingestion, normalization, governance, splits, sampling policies, and contamination checks.
 
+pub mod bpe;
 pub mod charset_v1;
 pub mod contamination;
 pub mod corpus;
