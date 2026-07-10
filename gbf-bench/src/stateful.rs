@@ -25,9 +25,9 @@ use gbf_emu::{
 };
 use gbf_foundation::sha256;
 use gbf_kernel::asm_impl_state::{
-    S_ARGMAX_ADDR, S_DONE_ADDR, S_INPUT_ADDR, S_STACK_TOP, StateMultiTokenRom, StateOneTokenRom,
-    StateWramLayout, WeightLowering, build_state_multi_token_rom,
-    build_state_one_token_rom_lowered,
+    S_ARGMAX_ADDR, S_DONE_ADDR, S_EXPERT_SEL_ADDR, S_INPUT_ADDR, S_STACK_TOP, StateMultiTokenRom,
+    StateOneTokenRom, StateWramLayout, WeightLowering, build_state_multi_token_rom,
+    build_state_multi_token_rom_lowered, build_state_one_token_rom_lowered,
 };
 use gbf_kernel::model_ref::TernaryLayer;
 use gbf_kernel::state_model_ref::{
@@ -681,6 +681,17 @@ pub(crate) fn state_expected_segments(
     }
     segments.push(("logits_i24".to_string(), l.logits, logit_bytes));
     segments.push(("argmax".to_string(), S_ARGMAX_ADDR, vec![trace.argmax]));
+    // MoE: the ROM's `EXPERT_SEL` byte is reused per block, so at token end it
+    // holds the LAST MoE block's selected expert. Byte-exact block residuals
+    // already prove per-block routing (a wrong expert diverges the residual);
+    // this pins the final router selection explicitly too.
+    if let Some(&last_e) = trace.selected_experts.last() {
+        segments.push((
+            "expert_sel_last".to_string(),
+            S_EXPERT_SEL_ADDR,
+            vec![last_e as u8],
+        ));
+    }
     if let Some(pg) = l.paged {
         // Running top-1 argmax id as a u16 (global id).
         segments.push((
@@ -767,7 +778,13 @@ pub fn harvest_state_cases(
 fn state_run_budget(lowered: &IntStateLoweredModel) -> CycleBudget {
     let macs = lowered.topology.macs_per_token();
     let floor = DMG_FRAME_CLOCK_CYCLES.saturating_mul(3_000).0;
-    CycleBudget::Clock(ClockCycles(floor.max(macs.saturating_mul(512))))
+    // MoE adds the fixed-point router: per block, rank*d_model magnitude
+    // multiplies (phase 1) + n_experts*rank (phase 2), each a multi-cycle
+    // schoolbook multiply. It is not counted in `macs_per_token`, so give MoE
+    // models a wider per-MAC budget (still far under the 120 s/char design
+    // budget; a genuine hang spins forever and is caught regardless).
+    let per_mac = if lowered.topology.is_moe() { 4096 } else { 512 };
+    CycleBudget::Clock(ClockCycles(floor.max(macs.saturating_mul(per_mac))))
 }
 
 fn run_one_state_case(
@@ -888,6 +905,64 @@ pub fn run_state_rom_gate_lowered(
         runs,
         mean_m_cycles,
         seconds_per_token_dmg: mean_m_cycles as f64 / DMG_M_CYCLES_PER_SECOND as f64,
+    })
+}
+
+/// Combined byte-exact MoE ROM gate report (deploy step 4): the one-token
+/// across-carried-states gate plus the multi-token generated-sequence gate.
+#[derive(Debug, Clone, Serialize)]
+pub struct StateMoeGateReport {
+    pub one_token: StateRomGateReport,
+    /// One multi-token generation run (>= 16 tokens) from a fixed seed.
+    pub generation: StateSeedRun,
+    /// Every one-token WRAM checkpoint AND the generated sequence are byte-exact
+    /// host == ROM, and every one-token `EXPERT_SEL` matched the host router.
+    pub all_byte_exact: bool,
+    pub bank_count: u16,
+    pub wram_bytes: usize,
+}
+
+/// Byte-exact MoE ROM gate (deploy step 4, `docs/design/integer-moe-deploy.md`
+/// build-order step 4a): builds the MoE ROM (top-1 expert dispatch + the
+/// fixed-point router in assembly + the paged head), runs it in the emulator,
+/// and asserts `all_byte_exact` vs the host `IntStateLoweredModel` MoE forward
+/// for BOTH a set of one-token cases (across carried states) and a multi-token
+/// generated sequence (`n_tokens` tokens). MoE requires V2 dispatch (one expert
+/// resident per token via MBC5 bank switch), so the lowering is forced to
+/// [`WeightLowering::V2Dispatch`]. Dense / `n_experts == 1` models take the
+/// unchanged path and are byte-identical to the pre-MoE ROM.
+pub fn run_state_moe_rom_gate_lowered(
+    lowered: &IntStateLoweredModel,
+    cases: &[(usize, u8, Vec<i32>)],
+    seed: u8,
+    n_tokens: u16,
+) -> Result<StateMoeGateReport, OneTokenError> {
+    assert!(
+        lowered.topology.is_moe(),
+        "run_state_moe_rom_gate_lowered expects a MoE topology (n_experts > 1)"
+    );
+    // One-token gate (byte-exact WRAM checkpoints across carried states, plus
+    // EXPERT_SEL agreement folded into `state_expected_segments`).
+    let one_token = run_state_rom_gate_lowered(lowered, cases, WeightLowering::V2Dispatch)?;
+
+    // Multi-token generated-sequence gate.
+    let rom = build_state_multi_token_rom_lowered(lowered, n_tokens, WeightLowering::V2Dispatch)
+        .map_err(|e| OneTokenError::Rom(e.to_string()))?;
+    let bank_count = rom.bank_count;
+    let wram_bytes = rom.layout.bytes_allocated;
+    let generation = run_state_seed_generation(&rom, lowered, seed)?;
+
+    let all_byte_exact = one_token.all_byte_exact
+        && generation.sequences_match
+        && generation.first_token_checkpoints_byte_exact
+        && generation.last_token_checkpoints_byte_exact;
+
+    Ok(StateMoeGateReport {
+        one_token,
+        generation,
+        all_byte_exact,
+        bank_count,
+        wram_bytes,
     })
 }
 

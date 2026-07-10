@@ -105,7 +105,11 @@ pub const S_TOKEN_IDX_ADDR: u16 = 0xC2E3;
 pub const S_SAMPLED_ADDR: u16 = 0xC2E4;
 /// XorShift16 RNG state (2 bytes LE; host pokes the seed; 0 -> 1 on entry).
 pub const S_RNG_ADDR: u16 = 0xC2E6;
-const CTRL_END: u16 = 0xC2E8;
+/// Selected MoE expert index for the current block (u8). Written by the ROM
+/// fixed-point router at each MoE block; read by the runtime expert dispatch.
+/// Reused per block. Zero/unused on dense (non-MoE) models.
+pub const S_EXPERT_SEL_ADDR: u16 = 0xC2E8;
+const CTRL_END: u16 = 0xC2E9;
 
 // scratch page B (state-ROM-owned; fixed block 0xC300..0xC3C0)
 const NORM_SS7: u16 = 0xC300; // 7 bytes sum of squares
@@ -142,6 +146,32 @@ const CHUNK_BANK: u16 = 0xC39C; // 2 bytes chunk-run bank number (lo, hi)
 const WV2_ACC: u16 = 0xC384; // 3 bytes wide (i24) row accumulator (free gap)
 const WV2_PK: u16 = 0xC39B; // 1 byte packed-trit decode temp (free gap)
 const WV2_OUT: u16 = 0xC39E; // 2 bytes output pointer (free gap after CHUNK_BANK)
+
+// MoE fixed-point router scratch (same fixed page; live only during the router
+// routine, which runs at each MoE block BEFORE norm24/up-matvec touch `l.acc`
+// and long before the sampling decode uses this page — disjoint lifetimes, so
+// these overlay the sampling-decode scratch below). The wide i64 accumulators
+// (running acc, product magnitude, argmax best) and the per-rank hidden_q live
+// in the matvec accumulator arena `l.acc`; only these small pointers/counters
+// live in the fixed page.
+const RT_XPTR: u16 = 0xC3A0; // 2 bytes residual (x_i24) pointer
+const RT_WPTR: u16 = 0xC3A2; // 2 bytes weight (win_q/wout_q) pointer
+const RT_CCNT: u16 = 0xC3A4; // 1 byte inner column counter (d_model or rank)
+const RT_SIGN: u16 = 0xC3A5; // 1 byte running term sign (0 = +, 1 = -)
+const RT_K: u16 = 0xC3A6; // 1 byte rank / expert loop counter
+const RT_BESTE: u16 = 0xC3A7; // 1 byte argmax best expert index
+const RT_ROFF: u16 = 0xC3A8; // 2 bytes router-table base (CHUNK_ENTRY + off)
+const RT_SIGN2: u16 = 0xC3AA; // 1 byte second operand sign (x / hidden_q)
+const RT_E: u16 = 0xC3AB; // 1 byte expert loop counter (phase 2)
+const RT_HAVE: u16 = 0xC3AC; // 1 byte "argmax seeded" flag
+// Cached dispatch entry for the selected expert (12 bytes: up_bank, up_bc,
+// up_scale, down_bank, down_bc, down_scale — all 16-bit LE). Read from the
+// bank-0 `moe_disp_b{block}` table after the router picks EXPERT_SEL; survives
+// the up/down matvec + epilogue calls (they touch only lower scratch).
+const RT_DISP: u16 = 0xC3AD; // MOE_DISP_ENTRY bytes (cached selected-expert entry)
+/// Bytes per MoE dispatch-table entry (see the `disp_data` build): up_bank,
+/// up_bc, up_scale, down_bank, down_bc, down_scale, scale_bank — each u16 LE.
+const MOE_DISP_ENTRY: usize = 14;
 
 // sampling-decode scratch (same fixed page)
 const SMP_M: u16 = 0xC3A0; // 3 bytes max logit (hi byte sign-flipped)
@@ -1783,6 +1813,791 @@ fn emit_delta_apply24(asm: &mut ModelAsm, neg_label: &str, add_label: &str, wide
     ld_rr(asm, Reg8::B, Reg8::A);
     asm.label(add_label);
     asm.call("resid_add24");
+}
+
+// ---------------------------------------------------------------------------
+// MoE fixed-point router (deploy step 4)
+// ---------------------------------------------------------------------------
+
+/// `dst[0..n] := 0` (byte fill). Clobbers A.
+fn emit_mem_zero_n(asm: &mut ModelAsm, dst: u16, n: usize) {
+    ld_r_imm(asm, Reg8::A, 0);
+    for i in 0..n {
+        a_to(asm, dst + i as u16);
+    }
+}
+
+/// `dst[0..n] := src[0..n]` (byte copy). Clobbers A.
+fn emit_mem_copy_n(asm: &mut ModelAsm, dst: u16, src: u16, n: usize) {
+    for i in 0..n {
+        let i = i as u16;
+        a_from(asm, src + i);
+        a_to(asm, dst + i);
+    }
+}
+
+/// Call one of the shared 8-byte mem-op routines (`rt_add8`, `rt_sub8`,
+/// `rt_neg8`, `rt_copy8`) with `HL = dst`, `DE = src`. Clobbers A, B, DE, HL.
+fn emit_m8(asm: &mut ModelAsm, routine: &str, dst: u16, src: u16) {
+    ld16(asm, Reg16Data::HL, dst);
+    ld16(asm, Reg16Data::DE, src);
+    asm.call(routine);
+}
+
+/// Call `rt_zero8` with `HL = dst`. Clobbers A, HL.
+fn emit_zero8(asm: &mut ModelAsm, dst: u16) {
+    ld16(asm, Reg16Data::HL, dst);
+    asm.call("rt_zero8");
+}
+
+/// `mag[0..n] := |src[0..n]|` and store the sign (0 = non-negative, 1 =
+/// negative) of the signed `n`-byte little-endian `src` into `sign_addr`.
+/// Two's-complement negate when the top byte's bit 7 is set. Clobbers A, B.
+fn emit_abs_to_mag(asm: &mut ModelAsm, mag: u16, src: u16, n: usize, sign_addr: u16) {
+    let neg = asm.fresh("rt_neg");
+    let done = asm.fresh("rt_absdone");
+    // sign := (src[n-1] & 0x80) ? 1 : 0
+    a_from(asm, src + (n - 1) as u16);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::NZ), &neg);
+    // non-negative: mag := src, sign := 0
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, sign_addr);
+    if n == 8 {
+        emit_m8(asm, "rt_copy8", mag, src);
+    } else {
+        emit_mem_copy_n(asm, mag, src, n);
+    }
+    asm.jr(None, &done);
+    // negative: mag := -src, sign := 1
+    asm.label(&neg);
+    ld_r_imm(asm, Reg8::A, 1);
+    a_to(asm, sign_addr);
+    if n == 8 {
+        emit_m8(asm, "rt_neg8", mag, src);
+    } else {
+        emit_negate_n(asm, mag, src, n);
+    }
+    asm.label(&done);
+}
+
+/// `dst[0..n] := -src[0..n]` (two's complement negate into a separate buffer).
+/// Clobbers A, B. Correct multi-byte: `dst = 0 - src` with a borrow chain,
+/// loading each `src` byte into `B` first so `A` can be zeroed as the minuend
+/// (LD does not touch flags, so the borrow survives).
+fn emit_negate_n(asm: &mut ModelAsm, dst: u16, src: u16, n: usize) {
+    for i in 0..n {
+        let i = i as u16;
+        a_from(asm, src + i);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        ld_r_imm(asm, Reg8::A, 0);
+        asm.i(if i == 0 {
+            Instr::SubA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        } else {
+            Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        });
+        a_to(asm, dst + i);
+    }
+}
+
+/// Load the little-endian 16-bit limb at `addr` into `BC` (`C` = low byte).
+fn emit_load_bc(asm: &mut ModelAsm, addr: u16) {
+    a_from(asm, addr);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, addr + 1);
+    ld_rr(asm, Reg8::B, Reg8::A);
+}
+
+/// Load the little-endian 16-bit limb at `addr` into `DE` (`E` = low byte).
+fn emit_load_de(asm: &mut ModelAsm, addr: u16) {
+    a_from(asm, addr);
+    ld_rr(asm, Reg8::E, Reg8::A);
+    a_from(asm, addr + 1);
+    ld_rr(asm, Reg8::D, Reg8::A);
+}
+
+/// Emit the shared `rt_magmul` routine: `prod[0..8] := mag_a[0..4] *
+/// mag_b[0..8]` keeping only the low 64 bits (mod 2^64, matching the host's
+/// wrapping `i64` product). Unsigned schoolbook over 16-bit limbs using the
+/// shared `mul16` routine (BC*DE -> MUL_R u32). `mag_a` is 2 limbs, `mag_b` is
+/// 4 limbs; partials at limb offset `>= 4` are dropped (they only affect the
+/// bits at or above 64). Emitted ONCE (fixed `l.acc`-relative operands) and
+/// `call`ed from both router phases. Clobbers A, BC, HL; uses `MUL_R`.
+fn emit_mag_mul(asm: &mut ModelAsm, prod: u16, mag_a: u16, mag_b: u16) {
+    use crate::asm_impl_model::MUL_R;
+    asm.label("rt_magmul");
+    emit_mem_zero_n(asm, prod, 8);
+    for i in 0..2usize {
+        for j in 0..4usize {
+            if i + j >= 4 {
+                continue;
+            }
+            // MUL_R (u32) = mag_a_limb[i] * mag_b_limb[j]
+            emit_load_bc(asm, mag_a + (2 * i) as u16);
+            emit_load_de(asm, mag_b + (2 * j) as u16);
+            asm.call("mul16");
+            // prod[2*(i+j)..] += MUL_R (4 bytes), carry to the end (8 bytes).
+            let off = (2 * (i + j)) as u16;
+            let n = 8 - off as usize; // add MUL_R[0..min(4,n)], then ripple carry
+            let add_bytes = n.min(4);
+            for b in 0..add_bytes {
+                a_from(asm, MUL_R + b as u16);
+                ld_rr(asm, Reg8::B, Reg8::A);
+                a_from(asm, prod + off + b as u16);
+                asm.i(if b == 0 {
+                    Instr::AddA {
+                        src: AluSrc8::Reg(Reg8::B),
+                    }
+                } else {
+                    Instr::AdcA {
+                        src: AluSrc8::Reg(Reg8::B),
+                    }
+                });
+                a_to(asm, prod + off + b as u16);
+            }
+            // ripple the final carry through the remaining high bytes
+            for b in add_bytes..n {
+                a_from(asm, prod + off + b as u16);
+                asm.i(Instr::AdcA {
+                    src: AluSrc8::Imm(0),
+                });
+                a_to(asm, prod + off + b as u16);
+            }
+        }
+    }
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// Copy `n` bytes from `(HL)` to fixed `dst`, advancing `HL` by `n` (HLI).
+/// Clobbers A; leaves `HL = HL_in + n` so the caller can store it back as an
+/// advanced pointer. Clobbers A.
+fn emit_copy_hl_to(asm: &mut ModelAsm, dst: u16, n: usize) {
+    for i in 0..n {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, dst + i as u16);
+    }
+}
+
+/// `HL += imm` (16-bit immediate) via `DE`. Clobbers A, DE.
+fn emit_add_hl_imm(asm: &mut ModelAsm, imm: u16) {
+    if imm == 0 {
+        return;
+    }
+    ld16(asm, Reg16Data::DE, imm);
+    asm.i(Instr::AddHl { src: Reg16Data::DE });
+}
+
+/// `HL += stride * (byte at k_addr)` via the shared `rt_addk` routine (`HL +=
+/// DE * B`). Clobbers A, B, DE. Keeps the router body small (7 call sites).
+fn emit_add_hl_k_times(asm: &mut ModelAsm, stride: u16, k_addr: u16) {
+    ld16(asm, Reg16Data::DE, stride);
+    a_from(asm, k_addr);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    asm.call("rt_addk");
+}
+
+/// Emit the shared `rt_addk` routine: `HL += DE * B` (B a small count). Runs
+/// `B` add-DE iterations. Clobbers A, B.
+fn emit_rt_addk(asm: &mut ModelAsm) {
+    asm.label("rt_addk");
+    let loop_l = "rt_addk_loop";
+    let done = "rt_addk_done";
+    asm.label(loop_l);
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), done);
+    asm.i(Instr::AddHl { src: Reg16Data::DE });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(None, loop_l);
+    asm.label(done);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `dst[0..n] <<= sh` (logical multi-byte left shift by `sh` bits) via a
+/// runtime `sh`-iteration loop over a single-bit multi-byte shift (`sla` byte 0,
+/// `rl` the higher bytes). Runtime-looped (not unrolled) to keep the bank-0
+/// driver small: `sh = 11` unrolled is ~260 bytes. Clobbers A, B.
+fn emit_shl_n(asm: &mut ModelAsm, dst: u16, n: usize, sh: u32) {
+    let loop_l = asm.fresh("rt_shl");
+    let done = asm.fresh("rt_shl_done");
+    ld_r_imm(asm, Reg8::B, sh as u8);
+    asm.label(&loop_l);
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), &done);
+    for i in 0..n {
+        a_from(asm, dst + i as u16);
+        if i == 0 {
+            asm.i(Instr::Sla {
+                target: CbTarget::Reg(Reg8::A),
+            });
+        } else {
+            asm.i(Instr::Rl {
+                target: CbTarget::Reg(Reg8::A),
+            });
+        }
+        a_to(asm, dst + i as u16);
+    }
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(None, &loop_l);
+    asm.label(&done);
+}
+
+/// `acc[0..8] := round_half_away(acc >> 16)` (Q16.16 -> integer, matching
+/// `FixedRouter`'s `hidden_q`). Computes `mag = (|acc| + 2^15) >> 16`, then
+/// re-applies the sign. `tmp` is an 8-byte scratch buffer (caller-owned).
+/// Clobbers A, B.
+fn emit_round_half_away_shift16(asm: &mut ModelAsm, acc: u16, tmp: u16) {
+    let pos = asm.fresh("rt_rpos");
+    let store = asm.fresh("rt_rstore");
+    // was_neg := acc sign; tmp := |acc|
+    a_from(asm, acc + 7);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::Z), &pos);
+    emit_m8(asm, "rt_neg8", tmp, acc);
+    asm.jr(None, &store);
+    asm.label(&pos);
+    emit_m8(asm, "rt_copy8", tmp, acc);
+    asm.label(&store);
+    // tmp += 2^15 (add 0x8000 at byte 1, ripple carry)
+    a_from(asm, tmp + 1);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, tmp + 1);
+    for b in 2..8u16 {
+        a_from(asm, tmp + b);
+        asm.i(Instr::AdcA {
+            src: AluSrc8::Imm(0),
+        });
+        a_to(asm, tmp + b);
+    }
+    // tmp >>= 16 (drop low 2 bytes): tmp[i] := tmp[i+2], top 2 bytes := 0
+    for i in 0..6u16 {
+        a_from(asm, tmp + i + 2);
+        a_to(asm, tmp + i);
+    }
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, tmp + 6);
+    a_to(asm, tmp + 7);
+    // acc := was_neg ? -tmp : tmp
+    let apply_pos = asm.fresh("rt_apos");
+    let apply_done = asm.fresh("rt_adone");
+    a_from(asm, acc + 7);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::Z), &apply_pos);
+    emit_m8(asm, "rt_neg8", acc, tmp);
+    asm.jr(None, &apply_done);
+    asm.label(&apply_pos);
+    emit_m8(asm, "rt_copy8", acc, tmp);
+    asm.label(&apply_done);
+}
+
+/// Store the signed 8-byte `src` into `HQ[k]` (`hq + k*8`), where `k` is the
+/// byte at `k_addr` (small). Clobbers A, B, DE, HL.
+fn emit_store_hq_k(asm: &mut ModelAsm, src: u16, hq: u16, k_addr: u16) {
+    ld16(asm, Reg16Data::HL, hq);
+    emit_add_hl_k_times(asm, 8, k_addr);
+    // (HL) := src[0..8]
+    for i in 0..8u16 {
+        a_from(asm, src + i);
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+}
+
+/// Load `HQ[k]` (`hq + k*8`, 8 bytes signed) into `dst`. Clobbers A, B, DE, HL.
+fn emit_load_hq_k(asm: &mut ModelAsm, dst: u16, hq: u16, k_addr: u16) {
+    ld16(asm, Reg16Data::HL, hq);
+    emit_add_hl_k_times(asm, 8, k_addr);
+    emit_copy_hl_to(asm, dst, 8);
+}
+
+/// `acc[0..8] += prod` if the two operand signs agree (RT_SIGN == RT_SIGN2),
+/// else `acc[0..8] -= prod`. Reproduces the host's `acc += (+/-)|w|*|x|` where
+/// the term sign is `sign(w) xor sign(x)`. Clobbers A, B.
+fn emit_apply_signed(asm: &mut ModelAsm, acc: u16, prod: u16) {
+    let sub = asm.fresh("rt_sub");
+    let done = asm.fresh("rt_asdone");
+    a_from(asm, RT_SIGN);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, RT_SIGN2);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    // A != 0 -> signs differ -> subtract
+    asm.jr(Some(Cond::NZ), &sub);
+    emit_m8(asm, "rt_add8", acc, prod);
+    asm.jr(None, &done);
+    asm.label(&sub);
+    emit_m8(asm, "rt_sub8", acc, prod);
+    asm.label(&done);
+}
+
+/// Jump to `le_label` when signed 8-byte `a <= b` (i.e. NOT `a > b`). Used by
+/// the argmax's strict-`>` keep test (keep current best on `<=`, take on `>`).
+///
+/// Signed compare via top-byte sign-flip + unsigned compare: `a > b` (signed)
+/// iff `a' > b'` (unsigned) where `a' = a ^ (0x80 << 56)`. `a' > b'` iff the
+/// borrow chain `a' - b'` has no final borrow AND `a' != b'`. So jump to
+/// `le_label` on `borrow OR equal`.
+///
+/// Pass 1 accumulates `differs = OR_i (a[i] ^ b[i])` into `E` (sign-flip is
+/// XOR-invariant, so raw bytes suffice for equality). Pass 2 runs the `sbc`
+/// borrow chain (top byte flipped) and reads the final carry. Clobbers A, B, C,
+/// D, E.
+fn emit_signed_le(asm: &mut ModelAsm, a: u16, b: u16, le_label: &str) {
+    // Pass 1: E := OR_i (a[i] ^ b[i])  (equality flag; E == 0 iff a == b).
+    ld_r_imm(asm, Reg8::E, 0);
+    for i in 0..8u16 {
+        a_from(asm, b + i);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, a + i);
+        asm.i(Instr::XorA {
+            src: AluSrc8::Reg(Reg8::B),
+        });
+        asm.i(Instr::OrA {
+            src: AluSrc8::Reg(Reg8::E),
+        });
+        ld_rr(asm, Reg8::E, Reg8::A);
+    }
+    // Precompute the sign-flipped top bytes into scratch so the borrow chain
+    // does not run a carry-clobbering `xor` mid-chain (LD keeps flags; XOR does
+    // not). RT_SIGN := a[7]^0x80, RT_SIGN2 := b[7]^0x80.
+    a_from(asm, a + 7);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, RT_SIGN);
+    a_from(asm, b + 7);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, RT_SIGN2);
+    // Pass 2: borrow chain a' - b'. Carry after the last sbc is the final borrow
+    // (a' < b' unsigned). Only LD/a_from/a_to between the sbc ops (flag-safe).
+    for i in 0..8u16 {
+        let b_addr = if i == 7 { RT_SIGN2 } else { b + i };
+        let a_addr = if i == 7 { RT_SIGN } else { a + i };
+        a_from(asm, b_addr);
+        ld_rr(asm, Reg8::B, Reg8::A);
+        a_from(asm, a_addr);
+        asm.i(if i == 0 {
+            Instr::SubA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        } else {
+            Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        });
+        // discard the difference byte (we only need the final carry)
+    }
+    // borrow (carry set) -> a < b -> a <= b -> jump le
+    asm.jr(Some(Cond::C), le_label);
+    // no borrow: a >= b. If equal (E == 0) -> a <= b -> jump le.
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), le_label);
+    // else a > b: fall through (caller's "take").
+}
+
+/// `moe_router`: the on-device twin of
+/// [`crate::state_model_ref::FixedRouter::route`]. Reproduces the host argmax
+/// with PURELY INTEGER arithmetic from the SAME quantized tables (win_q/bin_q/
+/// wout_q/bout_q, byte-for-byte the bytes `FixedRouter::param_bytes` produced
+/// into the params bank), so host and ROM route identically by construction.
+///
+/// Caller contract: the **params bank is mapped**, `RT_ROFF` holds
+/// `CHUNK_ENTRY + router_off[block]` (the router table's params-bank address),
+/// and the residual `l.x` holds the raw pre-norm residual (i24 Q19.5, 3-byte LE
+/// per lane). On return `S_EXPERT_SEL_ADDR` holds the selected expert index.
+/// The routine reads memory only through `HL`/direct loads (never `SP`), so the
+/// stack is untouched and no SP save/restore is needed.
+///
+/// Wide accumulators live in the matvec accumulator arena `l.acc` (disjoint
+/// lifetime: this runs before norm24/up-matvec touch `l.acc`):
+///   HQ    = l.acc              hidden_q[k], rank * 8 bytes (i64 LE)
+///   ACC   = HQ + rank*8        running i64 accumulator (8)
+///   SUM   = ACC + 8            phase-1 inner sum S = sum_c win*x (8)
+///   BEST  = SUM + 8            argmax best raw[e] (8, i64)
+///   MA    = BEST + 8           magnitude of win_q/wout_q (4)
+///   MB    = MA + 4             magnitude of x_i24 / hidden_q (8)
+///   PROD  = MB + 8             magnitude product low 64 bits (8)
+fn emit_moe_router(asm: &mut ModelAsm, l: &StateWramLayout, moe: &MoePlan, rank: usize) {
+    let d_model = moe.d_model;
+    let n_experts = moe.n_experts;
+    let hq = l.acc;
+    let acc = hq + (rank * 8) as u16;
+    let sum = acc + 8;
+    let best = sum + 8;
+    let ma = best + 8;
+    let mb = ma + 4;
+    let prod = mb + 8;
+
+    // Offsets (bytes) of the four tables inside the router blob (relative to
+    // RT_ROFF). win_q: rank*d_model i32; bin_q: rank i64; wout_q: n_experts*rank
+    // i32; bout_q: n_experts i64.
+    let win_bytes = (rank * d_model * 4) as u16;
+    let bin_bytes = (rank * 8) as u16;
+    let wout_bytes = (n_experts * rank * 4) as u16;
+
+    // `moe_setup` is the blob ENTRY: it must be emitted first so it sits at
+    // CHUNK_ENTRY (0x4000) in the mapped router bank, which is where the driver
+    // `call`s. It runs the router (picks EXPERT_SEL), then caches the selected
+    // expert's 12-byte dispatch entry (from the `moe_disp` table appended after
+    // the code) into RT_DISP. `moe_tables`/`moe_disp` are data labels resolved
+    // at the tail of this same blob.
+    asm.label("moe_setup");
+    asm.ld16_label(Reg16Data::HL, "moe_tables", 0);
+    emit_store_hl_to(asm, RT_ROFF);
+    asm.call("moe_router");
+    asm.ld16_label(Reg16Data::HL, "moe_disp", 0);
+    emit_add_hl_k_times(asm, MOE_DISP_ENTRY as u16, S_EXPERT_SEL_ADDR);
+    emit_copy_hl_to(asm, RT_DISP, MOE_DISP_ENTRY);
+    asm.i(Instr::Ret { cond: None });
+
+    // Shared 8-byte memory-op subroutines (HL = dst, DE = src). Emitted once;
+    // the router calls them instead of inlining every 8-byte op, keeping the
+    // bank-0 driver within budget. Each preserves nothing but the target
+    // buffers; callers reload pointers. `rt_zero8` ignores DE.
+    asm.label("rt_zero8");
+    ld_r_imm(asm, Reg8::A, 0);
+    for _ in 0..8 {
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    asm.i(Instr::Ret { cond: None });
+    // rt_copy8: (HL) := (DE)  [dst := src]
+    asm.label("rt_copy8");
+    for _ in 0..8 {
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+    }
+    asm.i(Instr::Ret { cond: None });
+    // rt_add8: (HL) += (DE)  (carry chain; LD keeps flags)
+    asm.label("rt_add8");
+    for i in 0..8 {
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+        ld_rr(asm, Reg8::B, Reg8::A);
+        asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+        asm.i(if i == 0 {
+            Instr::AddA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        } else {
+            Instr::AdcA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        });
+        asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+        asm.i(Instr::Inc16 { dst: Reg16Data::HL });
+    }
+    asm.i(Instr::Ret { cond: None });
+    // rt_sub8: (HL) -= (DE)
+    asm.label("rt_sub8");
+    for i in 0..8 {
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+        ld_rr(asm, Reg8::B, Reg8::A);
+        asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+        asm.i(if i == 0 {
+            Instr::SubA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        } else {
+            Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        });
+        asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+        asm.i(Instr::Inc16 { dst: Reg16Data::HL });
+    }
+    asm.i(Instr::Ret { cond: None });
+    // rt_neg8: (HL) := -(DE)  (0 - src, borrow chain)
+    asm.label("rt_neg8");
+    for i in 0..8 {
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+        ld_rr(asm, Reg8::B, Reg8::A);
+        ld_r_imm(asm, Reg8::A, 0);
+        asm.i(if i == 0 {
+            Instr::SubA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        } else {
+            Instr::SbcA {
+                src: AluSrc8::Reg(Reg8::B),
+            }
+        });
+        asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+        asm.i(Instr::Inc16 { dst: Reg16Data::HL });
+    }
+    asm.i(Instr::Ret { cond: None });
+
+    // Emit the shared magnitude-multiply and HL-stride routines once.
+    emit_mag_mul(asm, prod, ma, mb);
+    emit_rt_addk(asm);
+    // `rt_term`: PROD := |MA|*|MB| (low 64); then ACC += PROD if the two operand
+    // signs (RT_SIGN, RT_SIGN2) agree, else ACC -= PROD. The shared accumulate
+    // step for both router phases (both use ACC as the running i64 accumulator).
+    asm.label("rt_term");
+    asm.call("rt_magmul");
+    emit_apply_signed(asm, acc, prod);
+    asm.i(Instr::Ret { cond: None });
+    // `rt_abs_ma`: load the 4-byte weight at `(RT_WPTR)` into MA, advance
+    // RT_WPTR by 4, then MA := |MA| with sign -> RT_SIGN. Both router phases
+    // stream weights this way.
+    asm.label("rt_abs_ma");
+    emit_load_hl_from(asm, RT_WPTR);
+    emit_copy_hl_to(asm, ma, 4);
+    emit_store_hl_to(asm, RT_WPTR);
+    emit_abs_to_mag(asm, ma, ma, 4, RT_SIGN);
+    asm.i(Instr::Ret { cond: None });
+
+    asm.label("moe_router");
+
+    // ---- Phase 1: hidden_q[k] = round_half_away( (bin_q[k] + S<<11) >> 16 ) ----
+    // where S = sum_c win_q[k,c] * x_i24[c] (exact factoring of the host's
+    // sum_c win_q * (x<<11): shift distributes over the sum with no i64 overflow
+    // — S < 2^51, bin_q + S<<11 < 2^62).
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, RT_K); // k = 0
+    asm.label("rt_k_loop");
+    // ACC := 0 ; WPTR := RT_ROFF + k*d_model*4 ; XPTR := l.x ; CCNT := d_model.
+    // ACC is the running i64 sum S = sum_c win_q[k,c]*x_i24[c].
+    emit_zero8(asm, acc);
+    emit_load_hl_from(asm, RT_ROFF);
+    emit_add_hl_k_times(asm, (d_model * 4) as u16, RT_K);
+    emit_store_hl_to(asm, RT_WPTR);
+    ld16(asm, Reg16Data::HL, l.x);
+    emit_store_hl_to(asm, RT_XPTR);
+    ld_r_imm(asm, Reg8::A, d_model as u8);
+    a_to(asm, RT_CCNT);
+    asm.label("rt_c_loop");
+    // MA := |win_q(*WPTR)| (4 bytes), advancing WPTR; sign -> RT_SIGN.
+    asm.call("rt_abs_ma");
+    // MB := |x_i24(*XPTR)| (3 bytes, zero-extended to 8), sign -> RT_SIGN2
+    emit_zero8(asm, mb);
+    emit_load_hl_from(asm, RT_XPTR);
+    emit_copy_hl_to(asm, mb, 3);
+    emit_store_hl_to(asm, RT_XPTR); // advance XPTR by 3
+    emit_abs_to_mag(asm, mb, mb, 3, RT_SIGN2);
+    // ACC += (+/-)|MA|*|MB|
+    asm.call("rt_term");
+    // CCNT-- ; loop
+    a_from(asm, RT_CCNT);
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, RT_CCNT);
+    asm.jp(Some(Cond::NZ), "rt_c_loop");
+    // ACC <<= 11 (S << 11), then ACC += bin_q[k] (hidden_acc at Q32.32).
+    emit_shl_n(asm, acc, 8, 11);
+    // bin_q[k] at RT_ROFF + win_bytes + k*8 -> SUM (temp), then ACC += SUM
+    emit_load_hl_from(asm, RT_ROFF);
+    emit_add_hl_imm(asm, win_bytes);
+    emit_add_hl_k_times(asm, 8, RT_K);
+    emit_copy_hl_to(asm, sum, 8);
+    emit_m8(asm, "rt_add8", acc, sum);
+    // hidden_q[k] := round_half_away(ACC >> 16) into HQ + k*8
+    emit_round_half_away_shift16(asm, acc, best); // uses `best` as |acc| scratch
+    // store ACC (now the rounded signed hidden_q) to HQ + k*8
+    emit_store_hq_k(asm, acc, hq, RT_K);
+    // k++ ; if k < rank loop
+    a_from(asm, RT_K);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, RT_K);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(rank as u8),
+    });
+    asm.jp(Some(Cond::C), "rt_k_loop");
+
+    // ---- Phase 2: raw[e] = bout_q[e] + sum_k wout_q[e,k]*hidden_q[k]; argmax ----
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, RT_E);
+    a_to(asm, RT_HAVE); // no best yet
+    asm.label("rt_e_loop");
+    // ACC := bout_q[e] (at RT_ROFF + win_bytes + bin_bytes + wout_bytes + e*8)
+    emit_load_hl_from(asm, RT_ROFF);
+    emit_add_hl_imm(asm, win_bytes + bin_bytes + wout_bytes);
+    emit_add_hl_k_times(asm, 8, RT_E);
+    emit_copy_hl_to(asm, acc, 8);
+    // WPTR := RT_ROFF + win_bytes + bin_bytes + e*rank*4 (wout_q row e)
+    emit_load_hl_from(asm, RT_ROFF);
+    emit_add_hl_imm(asm, win_bytes + bin_bytes);
+    emit_add_hl_k_times(asm, (rank * 4) as u16, RT_E);
+    emit_store_hl_to(asm, RT_WPTR);
+    ld_r_imm(asm, Reg8::A, 0);
+    a_to(asm, RT_K);
+    asm.label("rt_e_k_loop");
+    // MA := |wout_q(*WPTR)| (4), advancing WPTR; sign -> RT_SIGN.
+    asm.call("rt_abs_ma");
+    // MB := |hidden_q[k]| (8), sign -> RT_SIGN2
+    emit_load_hq_k(asm, mb, hq, RT_K);
+    emit_abs_to_mag(asm, mb, mb, 8, RT_SIGN2);
+    // ACC += (+/-)|MA|*|MB|
+    asm.call("rt_term");
+    // k++ ; if k < rank loop
+    a_from(asm, RT_K);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, RT_K);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(rank as u8),
+    });
+    asm.jp(Some(Cond::C), "rt_e_k_loop");
+    // argmax: if !HAVE || ACC > BEST (signed strict) -> take (BEST := ACC,
+    // BESTE := e, HAVE := 1). Lowest index wins ties (strict `>`).
+    let take = asm.fresh("rt_take");
+    let keep = asm.fresh("rt_keep");
+    a_from(asm, RT_HAVE);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::Z), &take); // HAVE == 0 -> take unconditionally
+    // HAVE != 0: if ACC <= BEST -> keep, else fall through to take.
+    emit_signed_le(asm, acc, best, &keep);
+    asm.label(&take);
+    emit_m8(asm, "rt_copy8", best, acc);
+    a_from(asm, RT_E);
+    a_to(asm, RT_BESTE);
+    ld_r_imm(asm, Reg8::A, 1);
+    a_to(asm, RT_HAVE);
+    asm.label(&keep);
+    // e++ ; if e < n_experts loop
+    a_from(asm, RT_E);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, RT_E);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(n_experts as u8),
+    });
+    asm.jp(Some(Cond::C), "rt_e_loop");
+    // EXPERT_SEL := BESTE
+    a_from(asm, RT_BESTE);
+    a_to(asm, S_EXPERT_SEL_ADDR);
+    asm.i(Instr::Ret { cond: None });
+
+    // Blob-local copies of the unsigned multiply (the router runs from a
+    // switchable bank; duplicating `mul16`/`mul16x8` here makes the blob fully
+    // self-contained — no bank-0 dependency during the router). ~150 bytes of
+    // ROM per router bank; ROM is cheap, bank-0 space is not.
+    crate::asm_impl_model::emit_mul16x8(asm);
+    crate::asm_impl_model::emit_mul16(asm);
+}
+
+/// Assemble one block's self-contained router bank: the router code (entry
+/// `moe_setup` at CHUNK_ENTRY) followed by the `moe_disp` dispatch table and
+/// `moe_tables` fixed-point router tables. The code references those two data
+/// blocks by label, so this must be one assembly unit. Runs from the switchable
+/// 0x4000 window (mapped by the driver before the `call CHUNK_ENTRY`).
+fn build_moe_router_bank(
+    l: &StateWramLayout,
+    moe: &MoePlan,
+    disp_data: &[u8],
+    router_tables: &[u8],
+) -> Result<Vec<u8>, ModelRomError> {
+    let mut asm = ModelAsm::new(CHUNK_ENTRY);
+    emit_moe_router(&mut asm, l, moe, moe.rank);
+    asm.label("moe_disp");
+    asm.bytes(disp_data.to_vec());
+    asm.label("moe_tables");
+    asm.bytes(router_tables.to_vec());
+    let (bytes, _labels) = asm.finish()?;
+    if bytes.len() > BANK_BYTES {
+        return Err(ModelRomError::ParamsBankOverflow { bytes: bytes.len() });
+    }
+    Ok(bytes)
+}
+
+/// Bank-0 MoE dispatch routines. `moe_up`/`moe_down` run the selected expert's
+/// up/down matvec AND set up the following epilogue, all from the cached
+/// dispatch entry (14 bytes: up_bank, up_bc, up_scale, down_bank, down_bc,
+/// down_scale, scale_bank). First they program the matvec bank + `CHUNK_BANK` +
+/// `BC` (via `moe_mv_prog`) and `call` the V2 handler (narrow for up, wide for
+/// down); then they map the block's scale bank and load `DE` = the epilogue
+/// scale pointer. So the per-block driver is just `call moe_up; call up_ep16`
+/// (no inline bank-switch / scale-load code — that is what keeps the paged-vocab
+/// driver under the bank-0 budget for BOTH the one-token and multi-token ROMs).
+fn emit_moe_bank0_routines(asm: &mut ModelAsm) {
+    asm.label("moe_up");
+    ld16(asm, Reg16Data::HL, RT_DISP);
+    asm.call("moe_mv_prog"); // program + BC from up half (RT_DISP+0..4)
+    asm.call("matvec_v2");
+    // map scale bank (RT_DISP+12), DE := up_scale (RT_DISP+4)
+    a_from(asm, RT_DISP + 12);
+    a_to(asm, MBC5_ROMB0);
+    a_from(asm, RT_DISP + 13);
+    a_to(asm, MBC5_ROMB1);
+    emit_load_de(asm, RT_DISP + 4);
+    asm.i(Instr::Ret { cond: None });
+
+    asm.label("moe_down");
+    ld16(asm, Reg16Data::HL, RT_DISP + 6);
+    asm.call("moe_mv_prog"); // program + BC from down half (RT_DISP+6..10)
+    asm.call("matvec_v2w");
+    a_from(asm, RT_DISP + 12);
+    a_to(asm, MBC5_ROMB0);
+    a_from(asm, RT_DISP + 13);
+    a_to(asm, MBC5_ROMB1);
+    emit_load_de(asm, RT_DISP + 10);
+    asm.i(Instr::Ret { cond: None });
+
+    // moe_mv_prog: program MBC5 ROMB0/ROMB1 + CHUNK_BANK (bank at (HL),(HL+1))
+    // and BC (stream pointer at (HL+2),(HL+3)) from the 4-byte half at (HL).
+    asm.label("moe_mv_prog");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, MBC5_ROMB0);
+    a_to(asm, CHUNK_BANK);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(asm, MBC5_ROMB1);
+    a_to(asm, CHUNK_BANK + 1);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    asm.i(Instr::Ret { cond: None });
 }
 
 /// `up_ep16`: DE = scale-table pointer; ROWCNT2 preset to the row count
@@ -3943,6 +4758,33 @@ pub(crate) struct V2MatvecPlacement {
     pub(crate) wide: bool,
 }
 
+/// Per-block MoE dispatch plan (deploy step 4). Present only when the topology
+/// is MoE (`n_experts > 1`). For a MoE model the V2 stream enumeration is
+/// `state_in`, then per block `for e in 0..n_experts { up_e, down_e }`, so the
+/// linear `v2_placements` order is deterministic but the forward body dispatches
+/// to `expert_placements[block][EXPERT_SEL]` at runtime instead of consuming the
+/// linear stream. The dense (`Dense`/`n_experts == 1`) path never builds a
+/// `MoePlan`, so it is byte-identical to the pre-MoE ROM.
+pub(crate) struct MoePlan {
+    /// ROM bank holding each block's fixed-point router tables (win_q, bin_q,
+    /// wout_q, bout_q, little-endian at CHUNK_ENTRY).
+    pub(crate) router_bank: Vec<usize>,
+    /// ROM bank holding each block's concatenated expert up/down scale tables.
+    pub(crate) scale_bank: Vec<usize>,
+    /// Per-block dispatch-table bytes (`n_experts * 12`), appended after the
+    /// router code in each router bank at label `moe_disp`.
+    pub(crate) disp_data: Vec<Vec<u8>>,
+    /// Per-block fixed-point router table bytes (`FixedRouter::param_bytes`),
+    /// appended at label `moe_tables`.
+    pub(crate) router_params: Vec<Vec<u8>>,
+    /// Raw scale-table bank payloads (bank order matches `scale_bank`).
+    pub(crate) scale_bank_data: Vec<Vec<u8>>,
+    /// Router shape (uniform across blocks): rank, n_experts, d_model.
+    pub(crate) rank: usize,
+    pub(crate) n_experts: usize,
+    pub(crate) d_model: usize,
+}
+
 /// Weight-chunk plan and bank numbering shared by every stateful ROM
 /// variant (one-token, multi-token, sampling, interactive shell).
 pub(crate) struct StateRomPlan {
@@ -3973,6 +4815,8 @@ pub(crate) struct StateRomPlan {
     /// Number of streamed logit output-pages (`ceil(vocab / 85)` under Paged,
     /// else 1). Head banks are laid out as `n_logit_pages` sets, one per group.
     pub(crate) n_logit_pages: usize,
+    /// MoE dispatch plan (`Some` only for a MoE topology, `n_experts > 1`).
+    pub(crate) moe: Option<MoePlan>,
     /// Total banks including `extra_banks` appended after the head banks.
     pub(crate) bank_count: usize,
     /// When true, `chunk_run` calls a caller-emitted `anim_tick` routine once
@@ -4030,14 +4874,45 @@ pub(crate) fn plan_state_rom_with(
         }
         WeightLowering::V2Dispatch => {
             v2_streams.push((build_matvec_stream_i16(&model.state_in)?, false));
-            for (up, down) in &model.blocks {
-                v2_streams.push((build_matvec_stream_i16(up)?, false));
-                match model.down_width {
-                    AccWidth::I16 => {
-                        v2_streams.push((build_matvec_stream_i16(down)?, false));
+            if t.is_moe() {
+                // MoE V2 enumeration: state_in, then per block `for e in
+                // 0..n_experts { up_e, down_e }`. The existing packing loop
+                // below feeds all experts' streams contiguously; only WHICH
+                // streams feed it changes. `moe_stream_index[block][e] =
+                // (up_stream_idx, down_stream_idx)` maps back to placements.
+                for block in &model.block_ffns {
+                    let experts = match block {
+                        crate::state_model_ref::LoweredBlockFfn::Moe { experts, .. } => experts,
+                        crate::state_model_ref::LoweredBlockFfn::Dense { .. } => {
+                            // A MoE topology must lower to all-MoE blocks
+                            // (validated at lowering); defensive only.
+                            return Err(ModelRomError::UnsupportedTopology {
+                                detail: "MoE topology has a Dense lowered block".to_string(),
+                            });
+                        }
+                    };
+                    for (up, down) in experts {
+                        v2_streams.push((build_matvec_stream_i16(up)?, false));
+                        match model.down_width {
+                            AccWidth::I16 => {
+                                v2_streams.push((build_matvec_stream_i16(down)?, false));
+                            }
+                            AccWidth::I24 => {
+                                v2_streams.push((build_matvec_stream_wide(&down.layer)?, true));
+                            }
+                        }
                     }
-                    AccWidth::I24 => {
-                        v2_streams.push((build_matvec_stream_wide(&down.layer)?, true));
+                }
+            } else {
+                for (up, down) in &model.blocks {
+                    v2_streams.push((build_matvec_stream_i16(up)?, false));
+                    match model.down_width {
+                        AccWidth::I16 => {
+                            v2_streams.push((build_matvec_stream_i16(down)?, false));
+                        }
+                        AccWidth::I24 => {
+                            v2_streams.push((build_matvec_stream_wide(&down.layer)?, true));
+                        }
                     }
                 }
             }
@@ -4091,15 +4966,91 @@ pub(crate) fn plan_state_rom_with(
     let state_out_scales = push_scales(&mut bytes, &model.state_out);
     let decay = bytes.len() as u16;
     bytes.extend_from_slice(&model.decay_u8);
+    // Dense `blocks` scale offsets: for a MoE model these hold expert 0's
+    // scales (`model.blocks` is the dispatch-agnostic placeholder), never read
+    // by the MoE forward body (which reads `moe.expert_scales` instead), but
+    // kept populated so the params layout is uniform.
     let mut blocks = Vec::new();
     for (up, down) in &model.blocks {
         let up_off = push_scales(&mut bytes, &up.layer);
         let down_off = push_scales(&mut bytes, &down.layer);
         blocks.push((up_off, down_off));
     }
+
     if bytes.len() > BANK_BYTES {
         return Err(ModelRomError::ParamsBankOverflow { bytes: bytes.len() });
     }
+
+    // MoE data banks: per block one ROUTER bank (the fixed-point router tables,
+    // byte-for-byte `FixedRouter::param_bytes`, so host and ROM route from the
+    // SAME bytes) and one SCALE bank (every expert's up/down per-row scale
+    // tables concatenated). Both are mapped into the 0x4000 window on demand
+    // (the router bank by `moe_router`, the scale bank by the up/down
+    // epilogue). Each block's router/scale data must fit one bank; if a real
+    // topology exceeds that, `ParamsBankOverflow` fires with the byte count.
+    // The dense (`n_experts == 1`) path builds no MoE banks and is byte-identical.
+    struct MoeData {
+        router_params: Vec<Vec<u8>>,
+        scale_banks: Vec<Vec<u8>>,
+        expert_scale_off: Vec<Vec<(u16, u16)>>,
+        rank: usize,
+    }
+    let moe_data = if t.is_moe() {
+        if lowering != WeightLowering::V2Dispatch {
+            return Err(ModelRomError::UnsupportedTopology {
+                detail: "MoE topology requires V2 dispatch weight lowering".to_string(),
+            });
+        }
+        let mut router_params: Vec<Vec<u8>> = Vec::with_capacity(t.n_blocks);
+        let mut scale_banks: Vec<Vec<u8>> = Vec::with_capacity(t.n_blocks);
+        let mut expert_scale_off: Vec<Vec<(u16, u16)>> = Vec::with_capacity(t.n_blocks);
+        let mut rank = 0usize;
+        for block in &model.block_ffns {
+            let crate::state_model_ref::LoweredBlockFfn::Moe {
+                experts,
+                fixed_router,
+                ..
+            } = block
+            else {
+                return Err(ModelRomError::UnsupportedTopology {
+                    detail: "MoE topology has a Dense lowered block".to_string(),
+                });
+            };
+            rank = fixed_router.rank();
+            // The router bank also carries the per-expert dispatch table (12
+            // bytes/expert), prepended in the finalization step; check the total
+            // fits one bank.
+            let router = fixed_router.param_bytes();
+            if router.len() + t.n_experts * 12 > BANK_BYTES {
+                return Err(ModelRomError::ParamsBankOverflow {
+                    bytes: router.len() + t.n_experts * 12,
+                });
+            }
+            router_params.push(router);
+            let mut scales = Vec::new();
+            let mut per_expert = Vec::with_capacity(experts.len());
+            for (up, down) in experts {
+                let up_off = push_scales(&mut scales, &up.layer);
+                let down_off = push_scales(&mut scales, &down.layer);
+                per_expert.push((up_off, down_off));
+            }
+            if scales.len() > BANK_BYTES {
+                return Err(ModelRomError::ParamsBankOverflow {
+                    bytes: scales.len(),
+                });
+            }
+            scale_banks.push(scales);
+            expert_scale_off.push(per_expert);
+        }
+        Some(MoeData {
+            router_params,
+            scale_banks,
+            expert_scale_off,
+            rank,
+        })
+    } else {
+        None
+    };
     let params = ParamsBlob {
         bytes,
         state_in_scales,
@@ -4156,7 +5107,76 @@ pub(crate) fn plan_state_rom_with(
     let emb_bank0 = state_bank0 + state_bank_rows.len();
     let head_bank0 = emb_bank0 + emb_bank_count;
     let head_bank_count = head_groups.len() * n_logit_pages;
-    let bank_count = head_bank0 + head_bank_count + extra_banks;
+    // MoE data banks come after the head banks: per block a router bank then a
+    // scale bank (interleaved block by block).
+    let moe_bank0 = head_bank0 + head_bank_count;
+
+    // Finalize the MoE plan: derive `expert_placements[block][e]` from the
+    // linear `v2_placements` (stream 0 = state_in, then per block per expert
+    // (up, down)), and assign the router/scale bank numbers.
+    let moe = moe_data.map(|d| {
+        let n_experts = t.n_experts;
+        let mut expert_placements =
+            Vec::<Vec<(V2MatvecPlacement, V2MatvecPlacement)>>::with_capacity(t.n_blocks);
+        for block in 0..t.n_blocks {
+            let mut per_expert = Vec::with_capacity(n_experts);
+            for e in 0..n_experts {
+                let up_idx = 1 + (block * n_experts + e) * 2;
+                let down_idx = up_idx + 1;
+                per_expert.push((v2_placements[up_idx], v2_placements[down_idx]));
+            }
+            expert_placements.push(per_expert);
+        }
+        let mut router_bank = Vec::with_capacity(t.n_blocks);
+        let mut scale_bank = Vec::with_capacity(t.n_blocks);
+        for block in 0..t.n_blocks {
+            router_bank.push(moe_bank0 + block * 2);
+            scale_bank.push(moe_bank0 + block * 2 + 1);
+        }
+        // Per-block dispatch-table bytes (`MOE_DISP_ENTRY` = 14 bytes/expert):
+        //   up_bank(2), up_bc(2), up_scale(2), down_bank(2), down_bc(2),
+        //   down_scale(2), scale_bank(2)
+        // The scale bank is per-block (same for all experts) but stored in each
+        // entry so the shared `moe_up`/`moe_down` routines map it + set the
+        // epilogue scale pointer without any per-block driver code. Appended
+        // after the router code at `moe_disp`; the router tables follow at
+        // `moe_tables`.
+        let mut disp_data = Vec::with_capacity(t.n_blocks);
+        for ((placements, scale_off), &sbank) in expert_placements
+            .iter()
+            .zip(d.expert_scale_off.iter())
+            .zip(scale_bank.iter())
+        {
+            let mut bytes = Vec::with_capacity(n_experts * MOE_DISP_ENTRY);
+            for (&(up, down), &(up_sc, down_sc)) in placements.iter().zip(scale_off.iter()) {
+                let up_bc = CHUNK_ENTRY + up.start_offset;
+                let down_bc = CHUNK_ENTRY + down.start_offset;
+                let up_scale = CHUNK_ENTRY + up_sc;
+                let down_scale = CHUNK_ENTRY + down_sc;
+                bytes.extend_from_slice(&up.start_bank.to_le_bytes());
+                bytes.extend_from_slice(&up_bc.to_le_bytes());
+                bytes.extend_from_slice(&up_scale.to_le_bytes());
+                bytes.extend_from_slice(&down.start_bank.to_le_bytes());
+                bytes.extend_from_slice(&down_bc.to_le_bytes());
+                bytes.extend_from_slice(&down_scale.to_le_bytes());
+                bytes.extend_from_slice(&(sbank as u16).to_le_bytes());
+            }
+            disp_data.push(bytes);
+        }
+        MoePlan {
+            router_bank,
+            scale_bank,
+            disp_data,
+            router_params: d.router_params,
+            scale_bank_data: d.scale_banks,
+            rank: d.rank,
+            n_experts,
+            d_model: t.d_model,
+        }
+    });
+
+    let moe_bank_count = moe.as_ref().map_or(0, |_| t.n_blocks * 2);
+    let bank_count = moe_bank0 + moe_bank_count + extra_banks;
     if bank_count > 512 {
         return Err(ModelRomError::TooManyBanks { banks: bank_count });
     }
@@ -4179,6 +5199,7 @@ pub(crate) fn plan_state_rom_with(
         head_bank0,
         head_groups,
         n_logit_pages,
+        moe,
         bank_count,
         animate: false,
     })
@@ -4703,26 +5724,65 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
 
     // --- FFN blocks (dense conventions on the widened residual) ---
     for block in 0..t.n_blocks {
+        // MoE: run the fixed-point router on the RAW pre-norm residual FIRST
+        // (reads l.x, writes EXPERT_SEL), then cache the selected expert's
+        // dispatch entry. The router picks the expert index ONLY; the FFN math
+        // below is byte-identical to the dense path.
+        if let Some(moe) = &plan.moe {
+            // Map this block's router bank and enter its resident router code at
+            // CHUNK_ENTRY (the router routine + fixed-point helpers live in the
+            // SWITCHABLE bank, not bank 0 — the paged-vocab bank-0 driver has no
+            // room). `moe_setup` runs the router, picks EXPERT_SEL, and caches
+            // the selected expert's dispatch entry into RT_DISP.
+            set_bank(asm, moe.router_bank[block] as u16);
+            asm.i(Instr::Call {
+                cond: None,
+                addr: CHUNK_ENTRY,
+            });
+        }
+
         asm.call("norm24");
         if block == 0 {
             emit_copy16(asm, l.act, l.dump_norm0, t.d_model);
         }
-        emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
+        if plan.moe.is_some() {
+            // up matvec dispatched to the selected expert (narrow, matvec_v2).
+            asm.call("moe_up");
+        } else {
+            emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
+        }
         if block == 0 {
             emit_copy16(asm, l.acc, l.dump_upacc0, 2 * t.d_ff);
         }
-        set_bank(asm, params_bank);
+        // The up epilogue reads scales via `DE` with its scale bank mapped and
+        // the GELU LUT in bank 0. MoE: `moe_up` already mapped this block's
+        // scale bank and set `DE = up_scale`. Dense: map the params bank and
+        // load `DE` here. NOTE: the block-0 `dump_upacc0` copy above clobbers
+        // `DE`, so for MoE block 0 reload `DE = up_scale` after the dump.
+        if plan.moe.is_none() {
+            set_bank(asm, params_bank);
+        }
         // ROWCNT2 := d_ff (16-bit)
         ld_r_imm(asm, Reg8::A, (t.d_ff & 0xFF) as u8);
         a_to(asm, ROWCNT2);
         ld_r_imm(asm, Reg8::A, (t.d_ff >> 8) as u8);
         a_to(asm, ROWCNT2 + 1);
-        ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].0));
+        if plan.moe.is_none() {
+            ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].0));
+        } else if block == 0 {
+            emit_load_de(asm, RT_DISP + 4);
+        }
         asm.call("up_ep16");
         if block == 0 {
             emit_copy16(asm, l.act, l.dump_gelu0, t.d_ff);
         }
-        emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
+        if plan.moe.is_some() {
+            // down matvec dispatched to the selected expert (wide, matvec_v2w);
+            // `moe_down` also maps the scale bank + sets DE = down_scale.
+            asm.call("moe_down");
+        } else {
+            emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
+        }
         if block == 0 {
             emit_copy16(
                 asm,
@@ -4731,8 +5791,14 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
                 l.down_acc_row_bytes() * t.d_model,
             );
         }
-        set_bank(asm, params_bank);
-        ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].1));
+        // MoE: `moe_down` mapped the scale bank + set `DE = down_scale`; only
+        // block 0's `dump_downacc0` clobbers `DE`, so reload it there.
+        if plan.moe.is_none() {
+            set_bank(asm, params_bank);
+            ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].1));
+        } else if block == 0 {
+            emit_load_de(asm, RT_DISP + 10);
+        }
         match l.down_width {
             AccWidth::I16 => asm.call("down_ep24"),
             AccWidth::I24 => asm.call("down_ep24w"),
@@ -4863,6 +5929,11 @@ pub(crate) fn emit_state_routines_and_tables(
     emit_state_out_matvec(asm, l, state_pad);
     emit_state_out_epilogue(asm, l, CHUNK_ENTRY + plan.params.state_out_scales);
     emit_resid_add24(asm);
+    if plan.moe.is_some() {
+        // Bank-0 MoE dispatch routines only. The router routine + fixed-point
+        // helpers live in the switchable router banks (see `build_moe_router_bank`).
+        emit_moe_bank0_routines(asm);
+    }
     emit_up_epilogue16(asm, l);
     match l.down_width {
         AccWidth::I16 => emit_down_epilogue24(asm, l),
@@ -4908,6 +5979,11 @@ pub(crate) fn emit_state_routines_and_tables(
         asm.label("exp_lut");
         asm.bytes(crate::decode::build_exp2_lut().to_vec());
     }
+
+    // The MoE per-block expert dispatch tables are NOT bank-0 data: they are
+    // prepended to each block's router bank (`MoePlan::router_bank_data`), read
+    // by `moe_setup` while that router bank is mapped. This keeps the bank-0
+    // driver small (the d192-scale driver is already near the 16 KiB budget).
 }
 
 pub(crate) struct BuiltStateRom {
@@ -5058,7 +6134,33 @@ pub(crate) fn assemble_state_rom(
     for (i, table) in head_tables.into_iter().enumerate() {
         push_section(&mut pairs, plan.head_bank0 + i, CHUNK_ENTRY, table);
     }
-    let extras_bank0 = plan.head_bank0 + plan.head_groups.len() * plan.n_logit_pages;
+    let mut extras_bank0 = plan.head_bank0 + plan.head_groups.len() * plan.n_logit_pages;
+    // MoE data banks: per block one router bank (router CODE + dispatch table +
+    // router tables, assembled as a self-contained blob entered at CHUNK_ENTRY)
+    // then one scale bank.
+    if let Some(moe) = &plan.moe {
+        for block in 0..t.n_blocks {
+            let router_bank_bytes = build_moe_router_bank(
+                &plan.layout,
+                moe,
+                &moe.disp_data[block],
+                &moe.router_params[block],
+            )?;
+            push_section(
+                &mut pairs,
+                moe.router_bank[block],
+                CHUNK_ENTRY,
+                router_bank_bytes,
+            );
+            push_section(
+                &mut pairs,
+                moe.scale_bank[block],
+                CHUNK_ENTRY,
+                moe.scale_bank_data[block].clone(),
+            );
+        }
+        extras_bank0 += t.n_blocks * 2;
+    }
     for (k, payload) in extra_bank_payloads.iter().enumerate() {
         push_section(&mut pairs, extras_bank0 + k, CHUNK_ENTRY, payload.clone());
     }
@@ -5425,5 +6527,120 @@ mod tests {
             "several MiB of weight code"
         );
         assert_eq!(rom.rom[0x0147], 0x19, "MBC5 cartridge type");
+    }
+
+    // -- MoE ROM builder (deploy step 4) ------------------------------------
+
+    #[test]
+    fn moe_one_token_rom_builds_from_synthetic_moe_checkpoint() {
+        // A small MoE checkpoint (d192 shape, 4 experts, single-page vocab)
+        // must plan and assemble under V2 dispatch, with a MoePlan carrying one
+        // (up, down) placement per (block, expert) and a router table per block.
+        let ck =
+            crate::state_model_ref::synthetic_moe_state_checkpoint(StateTopology::D192_MOE_TEST, 7);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        assert!(lowered.topology.is_moe());
+        let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
+            .expect("layout plans");
+        let plan =
+            plan_state_rom_with(&lowered, layout, 0, WeightLowering::V2Dispatch).expect("plans");
+        let moe = plan.moe.as_ref().expect("MoE plan present");
+        assert_eq!(moe.router_bank.len(), lowered.topology.n_blocks);
+        assert_eq!(moe.scale_bank.len(), lowered.topology.n_blocks);
+        assert_eq!(moe.disp_data.len(), lowered.topology.n_blocks);
+        assert_eq!(moe.router_params.len(), lowered.topology.n_blocks);
+        for disp in &moe.disp_data {
+            // MOE_DISP_ENTRY (14) bytes per expert dispatch entry.
+            assert_eq!(disp.len(), lowered.topology.n_experts * 14);
+        }
+        // Every expert up/down stream got a distinct placement: the dispatch
+        // tables encode distinct (matvec bank, stream pointer) pairs.
+        let mut seen = std::collections::BTreeSet::new();
+        for disp in &moe.disp_data {
+            for e in 0..lowered.topology.n_experts {
+                let o = e * 14;
+                // up (bank, bc) and down (bank, bc)
+                seen.insert((disp[o], disp[o + 1], disp[o + 2], disp[o + 3]));
+                seen.insert((disp[o + 6], disp[o + 7], disp[o + 8], disp[o + 9]));
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            lowered.topology.n_blocks * lowered.topology.n_experts * 2,
+            "each expert up/down stream is packed once (distinct dispatch entry)"
+        );
+        // Full ROM assembles.
+        let rom = build_state_one_token_rom_lowered(&lowered, WeightLowering::V2Dispatch)
+            .expect("builds");
+        assert_eq!(rom.rom.len(), rom.rom_size.bytes());
+        assert_eq!(rom.rom[0x0147], 0x19, "MBC5 cartridge type");
+
+        // The REAL deployed shape (Paged vocab-1024, 8 experts) must also fit
+        // the bank-0 driver budget and the 512-bank ROM budget. The router code
+        // lives in the switchable router banks (not bank 0), which is what keeps
+        // the paged-vocab driver under the 0x0150..0x4000 window.
+        let ckr =
+            crate::state_model_ref::synthetic_moe_state_checkpoint(StateTopology::D192_MOE, 7);
+        let lr = IntStateLoweredModel::lower(&ckr).expect("lowers");
+        let romr = build_state_one_token_rom_lowered(&lr, WeightLowering::V2Dispatch)
+            .expect("real-shape MoE ROM builds within the bank-0 driver budget");
+        assert!(romr.bank_count <= 512, "real MoE fits 512 banks");
+    }
+
+    #[test]
+    fn moe_dispatch_selects_one_expert_per_token() {
+        // MoE requires V2 dispatch; V3 must be rejected loudly.
+        let ck =
+            crate::state_model_ref::synthetic_moe_state_checkpoint(StateTopology::D192_MOE_TEST, 9);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
+            .expect("layout plans");
+        assert!(matches!(
+            plan_state_rom_with(&lowered, layout, 0, WeightLowering::V3),
+            Err(ModelRomError::UnsupportedTopology { .. })
+        ));
+        // The host router selects exactly one expert per MoE block per token,
+        // and the dispatch table has exactly n_experts entries per block.
+        let mut state = lowered.zero_state();
+        let trace = lowered.forward_at(3, &mut state);
+        assert_eq!(
+            trace.selected_experts.len(),
+            lowered.topology.n_blocks,
+            "one expert chosen per block"
+        );
+        for &e in &trace.selected_experts {
+            assert!(e < lowered.topology.n_experts, "expert in range");
+        }
+    }
+
+    #[test]
+    fn dense_path_byte_identical_when_n_experts_is_1() {
+        // A topology with n_experts == 1 is dense (is_moe() == false), so the
+        // ROM builder never constructs a MoePlan and the emitted bytes are
+        // byte-identical to the pure-dense ROM at the same lowering.
+        let topo1 = StateTopology {
+            n_experts: 1,
+            ..StateTopology::D192
+        };
+        assert!(!topo1.is_moe());
+        let ck = synthetic_state_checkpoint_with(topo1, 5);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
+            .expect("layout plans");
+        let plan =
+            plan_state_rom_with(&lowered, layout, 0, WeightLowering::V2Dispatch).expect("plans");
+        assert!(plan.moe.is_none(), "n_experts == 1 takes the dense path");
+
+        let dense = synthetic_state_checkpoint_with(StateTopology::D192, 5);
+        let dense_lowered = IntStateLoweredModel::lower(&dense).expect("lowers");
+        let rom_moe1 = build_state_one_token_rom_lowered(&lowered, WeightLowering::V2Dispatch)
+            .expect("builds");
+        let rom_dense =
+            build_state_one_token_rom_lowered(&dense_lowered, WeightLowering::V2Dispatch)
+                .expect("builds");
+        assert_eq!(
+            rom_moe1.rom, rom_dense.rom,
+            "n_experts == 1 ROM is byte-identical to the dense ROM"
+        );
     }
 }

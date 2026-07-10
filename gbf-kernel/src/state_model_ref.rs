@@ -634,6 +634,67 @@ impl FixedRouter {
         self.n_experts
     }
 
+    #[must_use]
+    pub fn d_model(&self) -> usize {
+        self.d_model
+    }
+
+    /// `win_q`, shape `[rank, d_model]`, row-major (i32, scale `2^16`).
+    #[must_use]
+    pub fn win_q(&self) -> &[i32] {
+        &self.win_q
+    }
+
+    /// `bin_q`, shape `[rank]` (i64, scale `2^32`).
+    #[must_use]
+    pub fn bin_q(&self) -> &[i64] {
+        &self.bin_q
+    }
+
+    /// `wout_q`, shape `[n_experts, rank]`, row-major (i32, scale `2^16`).
+    #[must_use]
+    pub fn wout_q(&self) -> &[i32] {
+        &self.wout_q
+    }
+
+    /// `bout_q`, shape `[n_experts]` (i64, scale `2^32`).
+    #[must_use]
+    pub fn bout_q(&self) -> &[i64] {
+        &self.bout_q
+    }
+
+    /// Serialize the fixed-point router tables into the exact byte layout the
+    /// ROM router reads from bank 0, little-endian, in this order:
+    ///   win_q  : `rank * d_model` i32 (4 B each)
+    ///   bin_q  : `rank` i64 (8 B each)
+    ///   wout_q : `n_experts * rank` i32 (4 B each)
+    ///   bout_q : `n_experts` i64 (8 B each)
+    /// The ROM builder writes these bytes verbatim into the params blob and the
+    /// on-device router indexes them with the same strides, so host and ROM
+    /// route from bit-identical tables by construction (they cannot drift).
+    #[must_use]
+    pub fn param_bytes(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(
+            self.win_q.len() * 4
+                + self.bin_q.len() * 8
+                + self.wout_q.len() * 4
+                + self.bout_q.len() * 8,
+        );
+        for &w in &self.win_q {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+        for &w in &self.bin_q {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+        for &w in &self.wout_q {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+        for &w in &self.bout_q {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+        b
+    }
+
     /// Reported structural hidden-accumulator bound (proven `<= i62`).
     #[must_use]
     pub fn hidden_structural_bound(&self) -> u64 {
@@ -1448,6 +1509,10 @@ pub struct IntStateForwardTrace {
     pub y_act: Vec<u8>,
     /// Residual vector after each FFN block (i24 in i32, Q19.5).
     pub block_residuals: Vec<Vec<i32>>,
+    /// Top-1 expert index selected by the fixed-point router at each MoE block,
+    /// in block order. Empty for a dense (`n_experts == 1`) model. The ROM MoE
+    /// gate compares its per-block `EXPERT_SEL` byte against this.
+    pub selected_experts: Vec<usize>,
     /// Block-0 debug checkpoints (mirrored by the ROM's debug dumps).
     pub block0_norm_act: Vec<u8>,
     pub block0_up_acc: Vec<i16>,
@@ -2106,6 +2171,7 @@ impl IntStateLoweredModel {
 
         // --- FFN blocks (dense conventions on the widened residual) ---
         let mut block_residuals: Vec<Vec<i32>> = Vec::with_capacity(t.n_blocks);
+        let mut selected_experts: Vec<usize> = Vec::new();
         let mut block0_norm_act = vec![0u8; t.d_model];
         let mut block0_up_acc = vec![0i16; t.d_ff];
         let mut block0_gelu_act = vec![0u8; t.d_ff];
@@ -2137,6 +2203,7 @@ impl IntStateLoweredModel {
                         sink.push((block_idx, x.clone()));
                     }
                     let e = fixed_router.route(&x);
+                    selected_experts.push(e);
                     let (u, d) = &experts[e];
                     (u, d)
                 }
@@ -2272,6 +2339,7 @@ impl IntStateLoweredModel {
             state_out_acc: out_acc,
             y_act,
             block_residuals,
+            selected_experts,
             block0_norm_act,
             block0_up_acc,
             block0_gelu_act,
@@ -2346,6 +2414,73 @@ pub fn synthetic_state_checkpoint_with(topology: StateTopology, seed: u64) -> St
 #[must_use]
 pub fn synthetic_state_checkpoint(seed: u64) -> StateCheckpoint {
     synthetic_state_checkpoint_with(StateTopology::ARM_B, seed)
+}
+
+/// Deterministic synthetic **MoE** checkpoint at a MoE topology
+/// (`n_experts >= 1`). Reuses the dense synthetic for the shared non-FFN
+/// tensors (embedding/state/decay) so the non-FFN path matches the dense
+/// checkpoint exactly, then draws a low-rank router and `n_experts` distinct
+/// per-(block, expert) up/down pairs. Used by the deploy-step-4 MoE ROM gate.
+///
+/// # Panics
+/// Panics if the constructed checkpoint fails validation (never for a valid
+/// MoE topology).
+#[must_use]
+pub fn synthetic_moe_state_checkpoint(topology: StateTopology, seed: u64) -> StateCheckpoint {
+    assert!(topology.n_experts >= 1, "MoE topology needs >= 1 expert");
+    let dense_topo = StateTopology {
+        n_experts: 1,
+        ..topology
+    };
+    let dense = synthetic_state_checkpoint_with(dense_topo, seed);
+    let embedding: Vec<f32> = (0..topology.vocab)
+        .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+        .collect();
+
+    let mut rng = seed ^ 0xa5a5_5a5a_1234_9876;
+    let mut next = move || {
+        rng = rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let mut unit = move || (next() >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0;
+
+    let rank = 2usize;
+    let mut blocks = Vec::with_capacity(topology.n_blocks);
+    for bi in 0..topology.n_blocks {
+        let router = LowRankRouter::new(
+            rank,
+            topology.d_model,
+            topology.n_experts,
+            (0..rank * topology.d_model).map(|_| unit()).collect(),
+            (0..rank).map(|_| unit()).collect(),
+            (0..topology.n_experts * rank).map(|_| unit()).collect(),
+            (0..topology.n_experts).map(|_| unit()).collect(),
+        )
+        .expect("router valid");
+        let experts: Vec<(TernaryLayer, TernaryLayer)> = (0..topology.n_experts)
+            .map(|ei| {
+                let ck = synthetic_state_checkpoint_with(
+                    dense_topo,
+                    seed ^ ((bi as u64) << 32) ^ ((ei as u64 + 1) << 8),
+                );
+                let (u, d) = ck.blocks()[0].as_dense().expect("synthetic block is dense");
+                (u.clone(), d.clone())
+            })
+            .collect();
+        blocks.push(BlockFfn::Moe { router, experts });
+    }
+    StateCheckpoint::new_moe(
+        topology,
+        embedding,
+        dense.state_in.clone(),
+        dense.state_out.clone(),
+        dense.decay_raw().to_vec(),
+        blocks,
+    )
+    .expect("synthetic MoE checkpoint is valid")
 }
 
 #[cfg(test)]

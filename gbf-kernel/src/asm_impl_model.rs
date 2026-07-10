@@ -220,6 +220,12 @@ pub enum ModelRomError {
     V2FanInNotMultipleOfFour {
         cols: usize,
     },
+    /// The ROM builder was asked to build a topology it does not support in the
+    /// chosen configuration (e.g. a MoE topology under V3 weight lowering, or a
+    /// MoE topology whose lowered blocks are not all `Moe`).
+    UnsupportedTopology {
+        detail: String,
+    },
 }
 
 impl fmt::Display for ModelRomError {
@@ -275,6 +281,9 @@ impl fmt::Display for ModelRomError {
                     f,
                     "v2 dispatch needs a column count multiple of 4 (got {cols})"
                 )
+            }
+            Self::UnsupportedTopology { detail } => {
+                write!(f, "unsupported ROM topology: {detail}")
             }
         }
     }
