@@ -993,7 +993,7 @@ fn emit_udiv16_odd(asm: &mut ModelAsm, odd: u16) {
 /// `mean = floor(ss / d_model)` runs as `>> k` for the power-of-two factor
 /// and byte-serial division for the odd factor (bit-identical to the pinned
 /// d64 shift when d_model is a power of two).
-fn emit_norm_quant24(asm: &mut ModelAsm, l: &StateWramLayout) {
+fn emit_norm_quant24(asm: &mut ModelAsm, l: &StateWramLayout, isqrt_bank: Option<usize>) {
     let d = l.topology.d_model;
     let k = d.trailing_zeros();
     let odd = (d >> k) as u16;
@@ -1147,7 +1147,26 @@ fn emit_norm_quant24(asm: &mut ModelAsm, l: &StateWramLayout) {
         });
         a_to(asm, ISQ_IN6 + j);
     }
-    asm.call("isqrt48");
+    match isqrt_bank {
+        None => asm.call("isqrt48"),
+        Some(bank) => {
+            // Relocated: `isqrt48` lives at CHUNK_ENTRY in its own switchable
+            // bank. norm24 runs OUTSIDE the matvec inner loop, so SP is the
+            // normal stack here and the `call CHUNK_ENTRY` return address is
+            // pushed safely. isqrt48 touches only fixed WRAM (ISQ_*/NORM_R3),
+            // never mapped ROM data, so no ROM bank must survive the call. The
+            // blob ends in `ret`, returning to the instruction after this call.
+            // We do NOT restore the previously mapped bank: every `norm24`
+            // caller re-maps its own bank (state matvec via `emit_v2_matvec_call`
+            // / `emit_call_chunks`, MoE `moe_up`/`moe_down` via `moe_mv_prog`,
+            // and the paged head epilogue) before any switchable-ROM access.
+            set_bank(asm, bank as u16);
+            asm.i(Instr::Call {
+                cond: None,
+                addr: CHUNK_ENTRY,
+            });
+        }
+    }
     // NORM_D5 = r << 3; NORM_D25 = r << 4
     mem_copy(asm, NORM_D5, NORM_R3, 3);
     zero_mem(asm, NORM_D5 + 3, 2);
@@ -2601,6 +2620,21 @@ fn build_moe_router_bank(
     asm.bytes(disp_data.to_vec());
     asm.label("moe_tables");
     asm.bytes(router_tables.to_vec());
+    let (bytes, _labels) = asm.finish()?;
+    if bytes.len() > BANK_BYTES {
+        return Err(ModelRomError::ParamsBankOverflow { bytes: bytes.len() });
+    }
+    Ok(bytes)
+}
+
+/// Self-contained switchable-bank blob holding the relocated `isqrt48` routine
+/// at [`CHUNK_ENTRY`]. The demo's `norm24` maps this bank and `call`s
+/// CHUNK_ENTRY; the routine ends in `ret`, so control returns to `norm24`. The
+/// emitted bytes are byte-identical to the bank-0 `isqrt48` (same
+/// [`emit_isqrt48`]), just placed at a switchable-bank origin.
+fn build_isqrt_bank() -> Result<Vec<u8>, ModelRomError> {
+    let mut asm = ModelAsm::new(CHUNK_ENTRY);
+    emit_isqrt48(&mut asm);
     let (bytes, _labels) = asm.finish()?;
     if bytes.len() > BANK_BYTES {
         return Err(ModelRomError::ParamsBankOverflow { bytes: bytes.len() });
@@ -4919,6 +4953,13 @@ pub(crate) struct StateRomPlan {
     pub(crate) n_logit_pages: usize,
     /// MoE dispatch plan (`Some` only for a MoE topology, `n_experts > 1`).
     pub(crate) moe: Option<MoePlan>,
+    /// When `Some(bank)`, the fully-unrolled `isqrt48` numeric routine is
+    /// relocated out of the bank-0 driver into this dedicated switchable bank
+    /// (entered at [`CHUNK_ENTRY`]), and `norm24` reaches it via a
+    /// bank-switch + `call CHUNK_ENTRY` instead of a bank-0 `call isqrt48`.
+    /// Only the bank-0-tight subword MoE demo sets this; every other ROM keeps
+    /// `None`, so its driver and bank numbering are byte-identical to before.
+    pub(crate) isqrt_bank: Option<usize>,
     /// Total banks including `extra_banks` appended after the head banks.
     pub(crate) bank_count: usize,
     /// When true, `chunk_run` calls a caller-emitted `anim_tick` routine once
@@ -4937,6 +4978,9 @@ impl StateRomPlan {
         let mut b = self.head_bank0 + self.head_groups.len() * self.n_logit_pages;
         if let Some(moe) = &self.moe {
             b += moe.router_bank.len() + moe.scale_bank.len();
+        }
+        if self.isqrt_bank.is_some() {
+            b += 1;
         }
         b
     }
@@ -4961,6 +5005,7 @@ pub(crate) fn plan_state_rom_with(
     layout: StateWramLayout,
     extra_banks: usize,
     lowering: WeightLowering,
+    relocate_isqrt: bool,
 ) -> Result<StateRomPlan, ModelRomError> {
     let t = model.topology;
     let l = &layout;
@@ -5292,7 +5337,11 @@ pub(crate) fn plan_state_rom_with(
     });
 
     let moe_bank_count = moe.as_ref().map_or(0, |_| t.n_blocks * 2);
-    let bank_count = moe_bank0 + moe_bank_count + extra_banks;
+    // The relocated `isqrt48` blob gets one dedicated switchable bank right
+    // after the MoE data banks (and before any caller-owned `extra_banks`).
+    let isqrt_bank = relocate_isqrt.then_some(moe_bank0 + moe_bank_count);
+    let post_moe_bank0 = moe_bank0 + moe_bank_count + usize::from(relocate_isqrt);
+    let bank_count = post_moe_bank0 + extra_banks;
     if bank_count > 512 {
         return Err(ModelRomError::TooManyBanks { banks: bank_count });
     }
@@ -5316,6 +5365,7 @@ pub(crate) fn plan_state_rom_with(
         head_groups,
         n_logit_pages,
         moe,
+        isqrt_bank,
         bank_count,
         animate: false,
     })
@@ -6035,7 +6085,14 @@ pub(crate) fn emit_state_routines_and_tables(
     emit_emb_copy24(asm, l, plan.emb_bank0 as u16, plan.emb_stride, emb_wide);
     emit_mul16x8(asm);
     emit_mul16(asm);
-    emit_isqrt48(asm);
+    // `isqrt48` (~4.8 KiB fully unrolled) stays in bank 0 for every ROM except
+    // the bank-0-tight subword MoE demo, which relocates it into a dedicated
+    // switchable bank (`plan.isqrt_bank`) to reclaim the driver space. When
+    // relocated it is emitted as a self-contained bank blob in
+    // `assemble_state_rom`, NOT here, so the bank-0 driver never contains it.
+    if plan.isqrt_bank.is_none() {
+        emit_isqrt48(asm);
+    }
     emit_udiv_norm5(asm);
     // The 254-division twin matches the down-epilogue delta carrier: u16
     // quotient (canonical 65535 clamp) on the i16 path, exact u24 quotient
@@ -6049,7 +6106,7 @@ pub(crate) fn emit_state_routines_and_tables(
     if odd > 1 {
         emit_udiv16_odd(asm, odd);
     }
-    emit_norm_quant24(asm, l);
+    emit_norm_quant24(asm, l, plan.isqrt_bank);
     emit_state_update(
         asm,
         l,
@@ -6295,6 +6352,13 @@ pub(crate) fn assemble_state_rom(
         }
         extras_bank0 += t.n_blocks * 2;
     }
+    // Relocated `isqrt48` blob: one dedicated bank after the MoE data banks and
+    // before any caller-owned extra banks (matches the plan's bank numbering).
+    if let Some(isqrt_bank) = plan.isqrt_bank {
+        debug_assert_eq!(isqrt_bank, extras_bank0, "isqrt bank follows MoE banks");
+        push_section(&mut pairs, isqrt_bank, CHUNK_ENTRY, build_isqrt_bank()?);
+        extras_bank0 += 1;
+    }
     for (k, payload) in extra_bank_payloads.iter().enumerate() {
         push_section(&mut pairs, extras_bank0 + k, CHUNK_ENTRY, payload.clone());
     }
@@ -6318,7 +6382,7 @@ fn build_state_model_rom(
     lowering: WeightLowering,
 ) -> Result<BuiltStateRom, ModelRomError> {
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let plan = plan_state_rom_with(model, layout, 0, lowering)?;
+    let plan = plan_state_rom_with(model, layout, 0, lowering, false)?;
     let l = &plan.layout;
 
     // Bank-0 driver.
@@ -6743,8 +6807,8 @@ mod tests {
         assert!(lowered.topology.is_moe());
         let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
             .expect("layout plans");
-        let plan =
-            plan_state_rom_with(&lowered, layout, 0, WeightLowering::V2Dispatch).expect("plans");
+        let plan = plan_state_rom_with(&lowered, layout, 0, WeightLowering::V2Dispatch, false)
+            .expect("plans");
         let moe = plan.moe.as_ref().expect("MoE plan present");
         assert_eq!(moe.router_bank.len(), lowered.topology.n_blocks);
         assert_eq!(moe.scale_bank.len(), lowered.topology.n_blocks);
@@ -6797,7 +6861,7 @@ mod tests {
         let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
             .expect("layout plans");
         assert!(matches!(
-            plan_state_rom_with(&lowered, layout, 0, WeightLowering::V3),
+            plan_state_rom_with(&lowered, layout, 0, WeightLowering::V3, false),
             Err(ModelRomError::UnsupportedTopology { .. })
         ));
         // The host router selects exactly one expert per MoE block per token,
@@ -6828,8 +6892,8 @@ mod tests {
         let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
         let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
             .expect("layout plans");
-        let plan =
-            plan_state_rom_with(&lowered, layout, 0, WeightLowering::V2Dispatch).expect("plans");
+        let plan = plan_state_rom_with(&lowered, layout, 0, WeightLowering::V2Dispatch, false)
+            .expect("plans");
         assert!(plan.moe.is_none(), "n_experts == 1 takes the dense path");
 
         let dense = synthetic_state_checkpoint_with(StateTopology::D192, 5);
@@ -6842,6 +6906,86 @@ mod tests {
         assert_eq!(
             rom_moe1.rom, rom_dense.rom,
             "n_experts == 1 ROM is byte-identical to the dense ROM"
+        );
+    }
+
+    #[test]
+    fn relocate_isqrt_flag_reserves_one_bank_and_moves_isqrt48() {
+        // Same MoE checkpoint, planned both ways. Relocating `isqrt48` must add
+        // exactly one bank (its dedicated switchable bank), place it right after
+        // the MoE data banks, and shift `extras_bank0` by one. The non-relocated
+        // plan keeps `isqrt_bank == None` and the original bank count.
+        let ck = crate::state_model_ref::synthetic_moe_state_checkpoint(
+            StateTopology::D192_MOE_TEST,
+            13,
+        );
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let layout0 = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
+            .expect("layout plans");
+        let layout1 = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
+            .expect("layout plans");
+        let plan_off = plan_state_rom_with(&lowered, layout0, 2, WeightLowering::V2Dispatch, false)
+            .expect("plans");
+        let plan_on = plan_state_rom_with(&lowered, layout1, 2, WeightLowering::V2Dispatch, true)
+            .expect("plans");
+        assert!(plan_off.isqrt_bank.is_none());
+        let ib = plan_on.isqrt_bank.expect("relocated isqrt bank present");
+        assert_eq!(
+            plan_on.bank_count,
+            plan_off.bank_count + 1,
+            "relocation reserves exactly one extra bank"
+        );
+        // The isqrt bank sits after the MoE data banks and before the extras.
+        let moe = plan_on.moe.as_ref().expect("MoE plan");
+        let after_moe = *moe.scale_bank.last().expect("scale bank") + 1;
+        assert_eq!(ib, after_moe, "isqrt bank follows the MoE data banks");
+        assert_eq!(
+            plan_on.extras_bank0(),
+            plan_off.extras_bank0() + 1,
+            "extras shift by one when isqrt relocates"
+        );
+
+        // The relocated blob is byte-identical to a standalone `isqrt48` emitted
+        // at the switchable-bank origin (pure code relocation, no edits).
+        let blob = build_isqrt_bank().expect("isqrt bank builds");
+        let mut ref_asm = ModelAsm::new(CHUNK_ENTRY);
+        emit_isqrt48(&mut ref_asm);
+        let (ref_bytes, _l) = ref_asm.finish().expect("ref isqrt");
+        assert_eq!(blob, ref_bytes, "relocated isqrt48 == standalone isqrt48");
+        assert!(blob.len() <= BANK_BYTES, "isqrt blob fits one bank");
+    }
+
+    #[test]
+    fn isqrt48_lives_in_bank0_unless_relocated() {
+        // The bank-0 routine/table emission hosts the `isqrt48` label for a
+        // non-relocated plan and OMITS it for a relocated plan (where the blob
+        // moves to its own switchable bank). This guards the back-compat
+        // contract that only the bank-0-tight demo relocates; every other ROM's
+        // bank-0 driver still contains `isqrt48` exactly as before.
+        let ck = crate::state_model_ref::synthetic_moe_state_checkpoint(
+            StateTopology::D192_MOE_TEST,
+            21,
+        );
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let cfg = crate::decode::SamplerConfig::new(8, 4242).expect("sampler");
+        let routines_labels = |relocate: bool| {
+            let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
+                .expect("layout plans");
+            let plan =
+                plan_state_rom_with(&lowered, layout, 0, WeightLowering::V2Dispatch, relocate)
+                    .expect("plans");
+            let mut asm = ModelAsm::new(ENTRY_POINT);
+            emit_state_routines_and_tables(&mut asm, &lowered, &plan, Some(&cfg));
+            let (_bytes, labels) = asm.finish().expect("routines assemble");
+            labels
+        };
+        assert!(
+            routines_labels(false).contains_key("isqrt48"),
+            "non-relocated bank-0 routines still host isqrt48"
+        );
+        assert!(
+            !routines_labels(true).contains_key("isqrt48"),
+            "relocated bank-0 routines omit isqrt48 (moved to its own bank)"
         );
     }
 }

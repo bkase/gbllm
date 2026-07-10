@@ -1142,7 +1142,7 @@ pub fn build_state_shell_rom_lowered(
     let sh = layout
         .shell
         .expect("shell layout allocates the shell block");
-    let mut plan = plan_state_rom_with(model, layout, 1, lowering)?;
+    let mut plan = plan_state_rom_with(model, layout, 1, lowering, false)?;
     // Drive the inference animation: `chunk_run` calls `anim_tick` once per
     // weight chunk (SP-safe between chunks). Only the shell enables this.
     plan.animate = true;
@@ -1828,7 +1828,12 @@ pub fn build_state_moe_demo_rom(
         .expect("shell layout allocates the shell block");
     // extra banks: 1 UI (code + font) + the id_bytes data banks.
     let extra_banks = 1 + geom.bank_count;
-    let plan = plan_state_rom_with(model, layout, extra_banks, WeightLowering::V2Dispatch)?;
+    // The real subword MoE demo is the one ROM whose bank-0 driver (shell +
+    // paged sampler + subword render + MoE dispatch) overflows the 16 KiB
+    // window. Relocate the fully-unrolled `isqrt48` (~4.8 KiB) into its own
+    // switchable bank to reclaim the space; every other ROM keeps it in bank 0
+    // (byte-identical driver + bank numbering).
+    let plan = plan_state_rom_with(model, layout, extra_banks, WeightLowering::V2Dispatch, true)?;
     let ui_bank = plan.extras_bank0();
     let id_bytes_bank0 = ui_bank + 1;
 
