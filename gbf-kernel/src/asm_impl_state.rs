@@ -329,6 +329,10 @@ pub struct StateWramLayout {
     pub shell: Option<ShellWram>,
     /// Paged-epilogue block (`Some` only when `logit_paging == Paged`).
     pub paged: Option<PagedSampler>,
+    /// True when the token loop emits the gate-peek dump copies. False only for
+    /// the production (`DumpLevel::None`) layout, where every `dump_*` peek
+    /// address aliases the live `dump_yact` scratch and the copies are skipped.
+    pub dumps_enabled: bool,
     /// Total bytes allocated (excluding gaps), for the budget report.
     pub bytes_allocated: usize,
     /// Named allocations, for the untouched-WRAM gate.
@@ -378,6 +382,14 @@ enum DumpLevel {
     NoXdumpSeparate,
     /// |x| and out-acc overlay the matvec arena, no per-block dumps.
     NoXdumpOverlay,
+    /// Production / no-gate layout: overlays like [`Self::NoXdumpOverlay`] and,
+    /// in addition, allocates *no* gate-peek dump regions. Only the live `yact`
+    /// scratch (written by the state-out epilogue as part of compute) is kept;
+    /// every pure host-peek copy (`snorm`, `inacc`, `norm0`, `upacc0`, `gelu0`,
+    /// `downacc0`, `qdump`, per-block `xdump`) is dropped, and the token loop
+    /// skips emitting those copies (see `dumps_enabled`). Tried LAST, so any ROM
+    /// that fits a dumped level is byte-identical to before this level existed.
+    None,
 }
 
 impl StateWramLayout {
@@ -411,6 +423,7 @@ impl StateWramLayout {
             DumpLevel::FullSeparate,
             DumpLevel::NoXdumpSeparate,
             DumpLevel::NoXdumpOverlay,
+            DumpLevel::None,
         ] {
             match Self::plan_at(topology, down_width, with_shell, level) {
                 Ok(layout) => return Ok(layout),
@@ -529,7 +542,10 @@ impl StateWramLayout {
 
         // Matvec accumulator arena. When overlaying, it must also hold the
         // |x| buffer (3d) and the out-projection accumulators (4d).
-        let overlay = level == DumpLevel::NoXdumpOverlay;
+        let overlay = matches!(level, DumpLevel::NoXdumpOverlay | DumpLevel::None);
+        // Production layout keeps only the live `yact` scratch; every pure
+        // host-peek dump region is dropped and the token loop skips its copies.
+        let dumps_enabled = level != DumpLevel::None;
         let down_acc_bytes = match down_width {
             AccWidth::I16 => 2 * d,
             AccWidth::I24 => 3 * d,
@@ -553,27 +569,63 @@ impl StateWramLayout {
             (absx, sacc, true)
         };
 
-        // Debug dumps (gate surface).
-        let dump_snorm = bump.alloc(d, 1).ok_or_else(|| fail("snorm dump"))?;
-        let dump_inacc = bump
-            .alloc(2 * t.state_slots, 1)
-            .ok_or_else(|| fail("in-acc dump"))?;
-        let dump_yact = bump.alloc(d, 1).ok_or_else(|| fail("yact dump"))?;
-        let dump_norm0 = bump.alloc(d, 1).ok_or_else(|| fail("norm0 dump"))?;
-        let dump_qdump = bump.alloc(d, 1).ok_or_else(|| fail("final norm dump"))?;
-        let dump_gelu0 = bump.alloc(t.d_ff, 1).ok_or_else(|| fail("gelu0 dump"))?;
-        let dump_downacc0 = bump
-            .alloc(down_acc_bytes, 1)
-            .ok_or_else(|| fail("downacc0 dump"))?;
-        let dump_upacc0 = bump
-            .alloc(2 * t.d_ff, 1)
-            .ok_or_else(|| fail("upacc0 dump"))?;
-        let xdump = match level {
-            DumpLevel::FullSeparate => Some(
-                bump.alloc(t.n_blocks * 3 * d, 1)
-                    .ok_or_else(|| fail("per-block residual dumps"))?,
-            ),
-            _ => None,
+        // Dump regions. Under the production (`None`) layout only the live
+        // `yact` scratch is allocated (the state-out epilogue writes `p+128`
+        // per row while folding the residual); every pure host-peek dump is
+        // dropped, its address aliases `yact`, and the token loop skips the
+        // corresponding copies (`dumps_enabled=false`). Under a dumped level the
+        // allocation order below is byte-for-byte identical to before this
+        // production path existed, so existing ROMs keep their exact addresses.
+        let (
+            dump_snorm,
+            dump_inacc,
+            dump_yact,
+            dump_norm0,
+            dump_qdump,
+            dump_gelu0,
+            dump_downacc0,
+            dump_upacc0,
+            xdump,
+        ) = if dumps_enabled {
+            let dump_snorm = bump.alloc(d, 1).ok_or_else(|| fail("snorm dump"))?;
+            let dump_inacc = bump
+                .alloc(2 * t.state_slots, 1)
+                .ok_or_else(|| fail("in-acc dump"))?;
+            let dump_yact = bump.alloc(d, 1).ok_or_else(|| fail("yact dump"))?;
+            let dump_norm0 = bump.alloc(d, 1).ok_or_else(|| fail("norm0 dump"))?;
+            let dump_qdump = bump.alloc(d, 1).ok_or_else(|| fail("final norm dump"))?;
+            let dump_gelu0 = bump.alloc(t.d_ff, 1).ok_or_else(|| fail("gelu0 dump"))?;
+            let dump_downacc0 = bump
+                .alloc(down_acc_bytes, 1)
+                .ok_or_else(|| fail("downacc0 dump"))?;
+            let dump_upacc0 = bump
+                .alloc(2 * t.d_ff, 1)
+                .ok_or_else(|| fail("upacc0 dump"))?;
+            let xdump = match level {
+                DumpLevel::FullSeparate => Some(
+                    bump.alloc(t.n_blocks * 3 * d, 1)
+                        .ok_or_else(|| fail("per-block residual dumps"))?,
+                ),
+                _ => None,
+            };
+            (
+                dump_snorm,
+                dump_inacc,
+                dump_yact,
+                dump_norm0,
+                dump_qdump,
+                dump_gelu0,
+                dump_downacc0,
+                dump_upacc0,
+                xdump,
+            )
+        } else {
+            // Production layout: only the live `yact` scratch is real.
+            let dump_yact = bump.alloc(d, 1).ok_or_else(|| fail("yact dump"))?;
+            (
+                dump_yact, dump_yact, dump_yact, dump_yact, dump_yact, dump_yact, dump_yact,
+                dump_yact, None,
+            )
         };
 
         let mut allocations = bump.allocations.clone();
@@ -612,6 +664,7 @@ impl StateWramLayout {
             xdump,
             shell,
             paged,
+            dumps_enabled,
             bytes_allocated: bump.bytes
                 + usize::from(act_end - S_ACT_BASE)
                 + usize::from(SCRATCH_A_END - SCRATCH_A_BASE)
@@ -5768,9 +5821,13 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
 
     // --- state stage ---
     asm.call("norm24");
-    emit_copy16(asm, l.act, l.dump_snorm, t.d_model);
+    if l.dumps_enabled {
+        emit_copy16(asm, l.act, l.dump_snorm, t.d_model);
+    }
     emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
-    emit_copy16(asm, l.acc, l.dump_inacc, 2 * t.state_slots);
+    if l.dumps_enabled {
+        emit_copy16(asm, l.acc, l.dump_inacc, 2 * t.state_slots);
+    }
     set_bank(asm, params_bank);
     asm.call("state_update");
     // out projection across the state-table banks
@@ -5805,7 +5862,7 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
         }
 
         asm.call("norm24");
-        if block == 0 {
+        if block == 0 && l.dumps_enabled {
             emit_copy16(asm, l.act, l.dump_norm0, t.d_model);
         }
         if plan.moe.is_some() {
@@ -5814,7 +5871,7 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
         } else {
             emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
         }
-        if block == 0 {
+        if block == 0 && l.dumps_enabled {
             emit_copy16(asm, l.acc, l.dump_upacc0, 2 * t.d_ff);
         }
         // The up epilogue reads scales via `DE` with its scale bank mapped and
@@ -5832,11 +5889,14 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
         a_to(asm, ROWCNT2 + 1);
         if plan.moe.is_none() {
             ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].0));
-        } else if block == 0 {
+        } else if block == 0 && l.dumps_enabled {
+            // Only the block-0 `dump_upacc0` copy clobbers `DE`; skip the reload
+            // when that dump is skipped (production layout) since `moe_up` left
+            // `DE = up_scale` intact.
             emit_load_de(asm, RT_DISP + 4);
         }
         asm.call("up_ep16");
-        if block == 0 {
+        if block == 0 && l.dumps_enabled {
             emit_copy16(asm, l.act, l.dump_gelu0, t.d_ff);
         }
         if plan.moe.is_some() {
@@ -5846,7 +5906,7 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
         } else {
             emit_state_matvec(asm, plan, &mut mv, &mut chunk_iter, &mut next_bank);
         }
-        if block == 0 {
+        if block == 0 && l.dumps_enabled {
             emit_copy16(
                 asm,
                 l.acc,
@@ -5855,11 +5915,12 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
             );
         }
         // MoE: `moe_down` mapped the scale bank + set `DE = down_scale`; only
-        // block 0's `dump_downacc0` clobbers `DE`, so reload it there.
+        // block 0's `dump_downacc0` clobbers `DE`, so reload it there. When that
+        // dump is skipped (production layout) `DE` survives from `moe_down`.
         if plan.moe.is_none() {
             set_bank(asm, params_bank);
             ld16(asm, Reg16Data::DE, scales_at(plan.params.blocks[block].1));
-        } else if block == 0 {
+        } else if block == 0 && l.dumps_enabled {
             emit_load_de(asm, RT_DISP + 10);
         }
         match l.down_width {
@@ -5877,7 +5938,9 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
     }
 
     asm.call("norm24");
-    emit_copy16(asm, l.act, l.dump_qdump, t.d_model);
+    if l.dumps_enabled {
+        emit_copy16(asm, l.act, l.dump_qdump, t.d_model);
+    }
 
     match t.logit_paging {
         crate::state_model_ref::LogitPaging::SinglePage => {
@@ -6517,6 +6580,61 @@ mod tests {
         // Shell variant must also fit.
         let ls = StateWramLayout::plan(StateTopology::D192, AccWidth::I24, true).expect("plans");
         assert!(ls.shell.is_some());
+    }
+
+    #[test]
+    fn dumped_layouts_keep_the_gate_peek_surface() {
+        // Every currently-fitting layout stays on a dumped level: the peek
+        // regions are real, disjoint allocations and the token loop keeps
+        // emitting their copies. This pins that `DumpLevel::None` is a strict
+        // last resort that no existing ROM reaches.
+        for (t, w, shell) in [
+            (StateTopology::ARM_B, AccWidth::I16, false),
+            (StateTopology::D192, AccWidth::I24, false),
+            (StateTopology::D192, AccWidth::I24, true),
+        ] {
+            let l = StateWramLayout::plan(t, w, shell).expect("plans");
+            assert!(l.dumps_enabled, "dumped layout keeps gate copies");
+            assert_ne!(l.dump_snorm, l.dump_yact, "peek dumps are distinct");
+        }
+    }
+
+    #[test]
+    fn moe_shell_layout_falls_back_to_the_no_dump_production_level() {
+        // The subword MoE demo (shell + paged sampler + subword render) cannot
+        // afford the gate-peek dumps. It must fall through to `DumpLevel::None`:
+        // fits the 8 KiB budget, drops every peek region, keeps only the live
+        // `yact` scratch, and skips the peek copies in the token loop.
+        let l = StateWramLayout::plan(StateTopology::D192_MOE, AccWidth::I24, true)
+            .expect("MoE shell plans under the no-dump production level");
+        assert!(!l.dumps_enabled, "production layout skips gate copies");
+        assert!(l.xdump.is_none(), "no per-block residual dumps");
+        assert!(l.shell.is_some(), "shell block allocated");
+        assert!(l.paged.is_some(), "paged sampler allocated");
+        assert!(
+            !l.sacc_separate,
+            "production layout overlays the out-acc arena"
+        );
+        assert_eq!(l.absx, l.acc, "|x| overlays the matvec arena");
+        // Every dropped peek address aliases the live `yact` scratch.
+        for peek in [
+            l.dump_snorm,
+            l.dump_inacc,
+            l.dump_norm0,
+            l.dump_upacc0,
+            l.dump_gelu0,
+            l.dump_downacc0,
+            l.dump_qdump,
+        ] {
+            assert_eq!(peek, l.dump_yact, "dropped peek aliases yact");
+        }
+        assert!(l.bytes_allocated <= 8192, "budget: {}", l.bytes_allocated);
+        // No allocation overlaps another.
+        let mut sorted = l.allocations.clone();
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            assert!(pair[0].1 <= pair[1].0, "overlap: {pair:?}");
+        }
     }
 
     #[test]
