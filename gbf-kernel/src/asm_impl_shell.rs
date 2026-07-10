@@ -75,9 +75,10 @@ use crate::asm_impl_model::{
     ld_r_imm, ld_rr, ld16,
 };
 use crate::asm_impl_state::{
-    S_INPUT_ADDR, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP, ShellWram, StateWramLayout,
-    WeightLowering, assemble_state_rom, emit_state_forward_body, emit_state_routines_and_tables,
-    emit_zero16, plan_state_rom_with, set_bank,
+    PagedHeadStorage, S_INPUT_ADDR, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP, ShellWram,
+    StateWramLayout, WeightLowering, assemble_state_rom, emit_paged_head_storage_init,
+    emit_state_forward_body, emit_state_routines_and_tables, emit_zero16, plan_state_rom_with,
+    plan_state_rom_with_paged_head_storage, set_bank,
 };
 use crate::state_model_ref::IntStateLoweredModel;
 
@@ -1142,7 +1143,10 @@ pub fn build_state_shell_rom_lowered(
     let sh = layout
         .shell
         .expect("shell layout allocates the shell block");
-    let mut plan = plan_state_rom_with(model, layout, 1, lowering, false)?;
+    // Direct V2 spends bank-0 bytes on its 81 threaded handlers. Relocate the
+    // exact isqrt routine so the sampler/UI shell still fits the driver window.
+    let relocate_isqrt = lowering == WeightLowering::V2Dispatch;
+    let mut plan = plan_state_rom_with(model, layout, 1, lowering, relocate_isqrt)?;
     // Drive the inference animation: `chunk_run` calls `anim_tick` once per
     // weight chunk (SP-safe between chunks). Only the shell enables this.
     plan.animate = true;
@@ -1163,6 +1167,7 @@ pub fn build_state_shell_rom_lowered(
     let mut asm = ModelAsm::new(ENTRY_POINT);
     asm.i(Instr::Di);
     ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
+    emit_paged_head_storage_init(&mut asm, plan.paged_head_storage);
     // zero the shell WRAM block
     ld16(&mut asm, Reg16Data::HL, sh.prompt);
     ld_r_imm(&mut asm, Reg8::B, (sh.end - sh.prompt) as u8);
@@ -1353,13 +1358,12 @@ pub fn build_state_shell_rom_lowered(
 }
 
 // ===========================================================================
-// Subword MoE demo ROM (deploy step 5, `docs/design/integer-moe-deploy.md`):
-// the vocab-1024 Paged + 8-expert MoE student generating COHERENT MULTI-CHAR
-// subword text on-device, host-byte-identical. The prompt is poked as
-// pre-encoded token ids (host `BpeModel::encode`); on-device BPE encode is out
-// of scope. Each generated token renders its MULTIPLE literal `id_bytes` to the
-// transcript (one token -> several chars), byte-identical to
-// `BpeModel::decode`.
+// Generic Paged subword demo ROM (originally the MoE deploy-step-5 surface in
+// `docs/design/integer-moe-deploy.md`): dense and MoE students generate
+// MULTI-CHAR subword text on-device, host-byte-identically. The prompt is poked
+// as pre-encoded token ids (host `BpeModel::encode`); on-device BPE encode is
+// out of scope. Each generated token renders its literal `id_bytes` to the
+// transcript (one token -> several chars), byte-identical to `BpeModel::decode`.
 // ===========================================================================
 
 /// Byte value the demo renders as a newline (advances the transcript row).
@@ -1424,16 +1428,22 @@ pub fn build_id_bytes_banks(id_bytes: &[Vec<u8>], geom: IdBytesTableGeometry) ->
     banks
 }
 
-/// A fully assembled subword MoE demo ROM plus the trap PCs the runner needs.
+/// A fully assembled dense-or-MoE subword demo ROM plus runner trap PCs.
 #[derive(Debug, Clone)]
 pub struct SubwordDemoRom {
     pub rom: Vec<u8>,
     pub layout: StateWramLayout,
+    /// Explicit wide-head storage selected for this cartridge.
+    pub paged_head_storage: PagedHeadStorage,
+    /// Explicit dense/MoE weight lowering selected for this cartridge.
+    pub weight_lowering: WeightLowering,
     /// Idle head (post-boot / post-run); the driver waits here for the poked
     /// `go` flag before running the poked prompt.
     pub idle_pc: u16,
     /// Hit once per warmup prompt token after its forward pass.
     pub warm_boundary_pc: u16,
+    /// Entry of the shared per-token forward subroutine (cycle profiling).
+    pub forward_pass_pc: u16,
     /// Hit once per generated token after its multi-char render.
     pub token_boundary_pc: u16,
     /// Hit once when a generation run completes.
@@ -1752,6 +1762,27 @@ struct DemoUiEntries {
     render_bytes: u16,
 }
 
+/// Automatic storage policy for the generic subword demo. This deliberately
+/// recognizes only the production dense d192/V1024 no-dump layout; callers of
+/// every older builder and all MoE demos retain streamed WRAM semantics.
+fn subword_demo_paged_head_storage(
+    topology: crate::state_model_ref::StateTopology,
+    layout: &StateWramLayout,
+) -> PagedHeadStorage {
+    if !topology.is_moe()
+        && topology.d_model == 192
+        && topology.d_ff == 384
+        && topology.n_blocks == 6
+        && topology.state_slots == 192
+        && topology.vocab == 1024
+        && !layout.dumps_enabled
+    {
+        PagedHeadStorage::SramFull
+    } else {
+        PagedHeadStorage::WramStreamed
+    }
+}
+
 /// Build the subword-demo UI bank (render routines + byte-indexed font). The
 /// `id_bytes` table lives in SEPARATE data banks; this bank is code + font.
 fn build_subword_ui_bank(
@@ -1779,18 +1810,32 @@ fn build_subword_ui_bank(
     Ok((bytes, entries))
 }
 
-/// Build the subword MoE demo ROM (deploy step 5): the vocab-1024 Paged +
-/// `n_experts`-way MoE student generating multi-char subword text on-device. The
+/// Build the generic wide-vocabulary subword demo ROM: a Paged dense or MoE
+/// student generating multi-char subword text on-device. The
 /// prompt is poked as pre-encoded u16 token ids (`prompt_ids_addr` /
 /// `prompt_len_addr`); setting `go_addr` to 1 runs one generation: warm up over
 /// the poked prompt ids, then sample `n_gen_tokens` tokens from the paged head,
 /// feeding the FULL u16 id back through the embedding lookup and rendering each
 /// token's literal `id_bytes` (multiple chars) to the transcript.
 ///
-/// Requires a Paged wide-vocab MoE topology (`is_moe()` and `LogitPaging::Paged`)
-/// and V2 dispatch (one expert resident per token). `font_tiles` is the
+/// Requires a Paged wide-vocab topology. Dense checkpoints use V3 weights;
+/// MoE checkpoints use V2 dispatch (one expert resident per token). The exact
+/// dense d192/V1024 production/no-dump shape selects lossless full-logit SRAM
+/// head storage; every other shape keeps the legacy streamed WRAM head.
+/// `font_tiles` is the
 /// byte-indexed [`SUBWORD_FONT_BYTES`] font (tile == byte). `id_bytes[i]` is the
 /// literal byte string token `i` decodes to (`BpeModel::id_bytes`).
+pub fn build_state_subword_demo_rom(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+) -> Result<SubwordDemoRom, ModelRomError> {
+    build_state_subword_demo_rom_impl(model, sampler, n_gen_tokens, font_tiles, id_bytes, None)
+}
+
+/// Back-compatible alias for [`build_state_subword_demo_rom`].
 pub fn build_state_moe_demo_rom(
     model: &IntStateLoweredModel,
     sampler: &crate::decode::SamplerConfig,
@@ -1798,10 +1843,10 @@ pub fn build_state_moe_demo_rom(
     font_tiles: &[u8],
     id_bytes: &[Vec<u8>],
 ) -> Result<SubwordDemoRom, ModelRomError> {
-    build_state_moe_demo_rom_impl(model, sampler, n_gen_tokens, font_tiles, id_bytes, None)
+    build_state_subword_demo_rom(model, sampler, n_gen_tokens, font_tiles, id_bytes)
 }
 
-/// Build a self-booting FLASHABLE variant of the subword MoE demo ROM whose
+/// Build a self-booting FLASHABLE variant of the generic subword demo ROM whose
 /// prompt is BAKED into ROM data instead of poked at runtime by a harness.
 ///
 /// `baked_prompt` is `(prompt_ids, rng_seed)`: the pre-encoded u16 token ids
@@ -1812,11 +1857,11 @@ pub fn build_state_moe_demo_rom(
 ///
 /// The idle/warmup/generation flow and every ROM byte outside the small
 /// boot-time baked-init prologue (and the appended id data) are identical to
-/// [`build_state_moe_demo_rom`]; a cartridge produced here needs no SRAM and
-/// self-generates the same sequence a poked run with the same prompt+seed
-/// would. The prompt is capped at 64 ids (the u16 prompt buffer width) and must
-/// be nonempty.
-pub fn build_state_moe_demo_rom_baked(
+/// [`build_state_subword_demo_rom`]; a cartridge produced for the legacy MoE
+/// path needs no SRAM, while the dense full-head variant declares one 8 KiB
+/// SRAM bank. Both self-generate the same sequence as a poked run with the same
+/// prompt+seed. The prompt is capped at 64 ids and must be nonempty.
+pub fn build_state_subword_demo_rom_baked(
     model: &IntStateLoweredModel,
     sampler: &crate::decode::SamplerConfig,
     n_gen_tokens: u8,
@@ -1825,7 +1870,7 @@ pub fn build_state_moe_demo_rom_baked(
     prompt_ids: &[u16],
     rng_seed: u16,
 ) -> Result<SubwordDemoRom, ModelRomError> {
-    build_state_moe_demo_rom_impl(
+    build_state_subword_demo_rom_impl(
         model,
         sampler,
         n_gen_tokens,
@@ -1835,8 +1880,29 @@ pub fn build_state_moe_demo_rom_baked(
     )
 }
 
+/// Back-compatible alias for [`build_state_subword_demo_rom_baked`].
+pub fn build_state_moe_demo_rom_baked(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+    prompt_ids: &[u16],
+    rng_seed: u16,
+) -> Result<SubwordDemoRom, ModelRomError> {
+    build_state_subword_demo_rom_baked(
+        model,
+        sampler,
+        n_gen_tokens,
+        font_tiles,
+        id_bytes,
+        prompt_ids,
+        rng_seed,
+    )
+}
+
 #[allow(clippy::too_many_lines)]
-fn build_state_moe_demo_rom_impl(
+fn build_state_subword_demo_rom_impl(
     model: &IntStateLoweredModel,
     sampler: &crate::decode::SamplerConfig,
     n_gen_tokens: u8,
@@ -1856,9 +1922,18 @@ fn build_state_moe_demo_rom_impl(
         });
     }
     let t = model.topology;
-    if !t.is_moe() || t.logit_paging != crate::state_model_ref::LogitPaging::Paged {
-        return Err(ModelRomError::BadTokenCount {
-            n_tokens: u16::from(n_gen_tokens),
+    if t.logit_paging != crate::state_model_ref::LogitPaging::Paged {
+        return Err(ModelRomError::UnsupportedTopology {
+            detail: "subword demo requires LogitPaging::Paged".to_string(),
+        });
+    }
+    if id_bytes.len() != t.vocab {
+        return Err(ModelRomError::UnsupportedTopology {
+            detail: format!(
+                "subword id_bytes rows ({}) must equal model vocab ({})",
+                id_bytes.len(),
+                t.vocab
+            ),
         });
     }
 
@@ -1873,12 +1948,26 @@ fn build_state_moe_demo_rom_impl(
         .expect("shell layout allocates the shell block");
     // extra banks: 1 UI (code + font) + the id_bytes data banks.
     let extra_banks = 1 + geom.bank_count;
-    // The real subword MoE demo is the one ROM whose bank-0 driver (shell +
-    // paged sampler + subword render + MoE dispatch) overflows the 16 KiB
-    // window. Relocate the fully-unrolled `isqrt48` (~4.8 KiB) into its own
-    // switchable bank to reclaim the space; every other ROM keeps it in bank 0
-    // (byte-identical driver + bank numbering).
-    let plan = plan_state_rom_with(model, layout, extra_banks, WeightLowering::V2Dispatch, true)?;
+    // Dense keeps the exact V3 weight path; MoE keeps its required V2 dispatch.
+    let lowering = if t.is_moe() {
+        WeightLowering::V2Dispatch
+    } else {
+        WeightLowering::V3
+    };
+    // Only the production dense d192/V1024 layout opts in automatically. It is
+    // the no-dump shell layout, so no debug/gate surface silently acquires an
+    // SRAM requirement. MoE and all smaller synthetic demos remain streamed.
+    let paged_head_storage = subword_demo_paged_head_storage(t, &layout);
+    // The subword demo driver is bank-0-tight under either topology. Relocate
+    // the fully-unrolled `isqrt48` (~4.8 KiB) into one switchable bank.
+    let plan = plan_state_rom_with_paged_head_storage(
+        model,
+        layout,
+        extra_banks,
+        lowering,
+        true,
+        paged_head_storage,
+    )?;
     let ui_bank = plan.extras_bank0();
     let id_bytes_bank0 = ui_bank + 1;
 
@@ -1927,6 +2016,7 @@ fn build_state_moe_demo_rom_impl(
     let mut asm = ModelAsm::new(ENTRY_POINT);
     asm.i(Instr::Di);
     ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
+    emit_paged_head_storage_init(&mut asm, plan.paged_head_storage);
     // zero the shell control block (go/plen/cursors); the prompt-id buffer is
     // host-poked, so it lives above `sh.end` and is not cleared here.
     ld16(&mut asm, Reg16Data::HL, sh.prompt);
@@ -2187,14 +2277,23 @@ fn build_state_moe_demo_rom_impl(
     let mut extra_payloads = Vec::with_capacity(extra_banks);
     extra_payloads.push(ui_bytes);
     extra_payloads.extend(id_bytes_banks);
+    let title = if t.is_moe() {
+        // Preserve the deployed MoE cartridge header bytes.
+        "GBFMOEDEMO"
+    } else {
+        "GBFSUBWORD"
+    };
     let (rom, rom_size, table_bytes) =
-        assemble_state_rom("GBFMOEDEMO", driver, &plan, model, &extra_payloads)?;
+        assemble_state_rom(title, driver, &plan, model, &extra_payloads)?;
 
     Ok(SubwordDemoRom {
         rom,
         layout: plan.layout.clone(),
+        paged_head_storage: plan.paged_head_storage,
+        weight_lowering: plan.lowering,
         idle_pc: labels["demo_idle"],
         warm_boundary_pc: labels["demo_warm_boundary"],
+        forward_pass_pc: labels["forward_pass"],
         token_boundary_pc: labels["demo_token_boundary"],
         gen_done_pc: labels["demo_gen_done"],
         n_gen_tokens,
@@ -2284,6 +2383,74 @@ mod tests {
             build_state_shell_rom(&lowered, &cfg, 8, &font[..100]),
             Err(ModelRomError::UiBankOverflow { .. })
         ));
+    }
+
+    #[test]
+    fn only_dense_d192_v1024_no_dump_demo_selects_full_sram_head() {
+        let dense = crate::state_model_ref::StateTopology {
+            vocab: 1024,
+            logit_paging: crate::state_model_ref::LogitPaging::Paged,
+            ..crate::state_model_ref::StateTopology::D192
+        };
+        let dense_layout =
+            StateWramLayout::plan(dense, crate::state_model_ref::AccWidth::I24, true)
+                .expect("dense production shell layout plans");
+        assert!(!dense_layout.dumps_enabled, "production layout is no-dump");
+        assert_eq!(
+            subword_demo_paged_head_storage(dense, &dense_layout),
+            PagedHeadStorage::SramFull
+        );
+
+        let moe = crate::state_model_ref::StateTopology::D192_MOE;
+        let moe_layout = StateWramLayout::plan(moe, crate::state_model_ref::AccWidth::I24, true)
+            .expect("MoE production shell layout plans");
+        assert_eq!(
+            subword_demo_paged_head_storage(moe, &moe_layout),
+            PagedHeadStorage::WramStreamed,
+            "MoE remains on its established V2 + streamed-head cartridge"
+        );
+
+        let small = crate::state_model_ref::StateTopology::D1024_DENSE;
+        let small_layout =
+            StateWramLayout::plan(small, crate::state_model_ref::AccWidth::I16, true)
+                .expect("synthetic dense shell layout plans");
+        assert_eq!(
+            subword_demo_paged_head_storage(small, &small_layout),
+            PagedHeadStorage::WramStreamed,
+            "synthetic/debug shapes do not acquire SRAM implicitly"
+        );
+    }
+
+    #[test]
+    fn dense_d192_v1024_subword_cartridge_builds_with_v3_and_sram_header() {
+        let topology = crate::state_model_ref::StateTopology {
+            vocab: 1024,
+            logit_paging: crate::state_model_ref::LogitPaging::Paged,
+            ..crate::state_model_ref::StateTopology::D192
+        };
+        let checkpoint = crate::state_model_ref::synthetic_state_checkpoint_with(topology, 0x192);
+        let lowered = IntStateLoweredModel::lower(&checkpoint).expect("dense d192/V1024 lowers");
+        let cfg = crate::decode::SamplerConfig::new(8, 2253).expect("sampler");
+        let font = vec![0u8; SUBWORD_FONT_BYTES];
+        let id_bytes = vec![vec![b'x']; topology.vocab];
+        let rom = build_state_subword_demo_rom(&lowered, &cfg, 1, &font, &id_bytes)
+            .expect("production dense subword cartridge builds");
+
+        assert_eq!(rom.weight_lowering, WeightLowering::V3, "dense stays V3");
+        assert_eq!(rom.paged_head_storage, PagedHeadStorage::SramFull);
+        assert_eq!(rom.rom[0x0147], 0x1A, "MBC5+RAM cartridge type");
+        assert_eq!(rom.rom[0x0149], 0x02, "8 KiB SRAM header");
+        assert!(rom.bank_count <= 512, "fits MBC5 9-bit ROM banks");
+        assert!(
+            usize::from(ENTRY_POINT) + rom.driver_bytes <= usize::from(CHUNK_ENTRY),
+            "driver fits bank 0"
+        );
+        eprintln!(
+            "dense d192/V1024 cartridge: banks={}, driver={} B, ROM={} B",
+            rom.bank_count,
+            rom.driver_bytes,
+            rom.rom.len()
+        );
     }
 
     #[test]

@@ -1192,7 +1192,18 @@ impl StateCheckpoint {
 
     #[must_use]
     pub fn embedding_row(&self, id: u8) -> &[f32] {
-        let start = usize::from(id) * self.topology.d_model;
+        self.embedding_row_at(usize::from(id))
+    }
+
+    /// Embedding/tied-head row for a full vocabulary id.
+    ///
+    /// Wide-vocabulary models use ids above `u8::MAX`; keeping this accessor
+    /// in `usize` prevents those rows from aliasing `id % 256` during lowering
+    /// and reference evaluation.
+    #[must_use]
+    pub fn embedding_row_at(&self, id: usize) -> &[f32] {
+        assert!(id < self.topology.vocab, "embedding id {id} out of range");
+        let start = id * self.topology.d_model;
         &self.embedding[start..start + self.topology.d_model]
     }
 
@@ -1241,9 +1252,15 @@ fn f32_ternary_matvec(layer: &TernaryLayer, input: &[f32], out: &mut [f32]) {
 /// start). Returns the `vocab` tied-head logits.
 #[must_use]
 pub fn f32_state_forward(ck: &StateCheckpoint, prev: u8, state: &mut [f32]) -> Vec<f32> {
+    f32_state_forward_at(ck, usize::from(prev), state)
+}
+
+/// [`f32_state_forward`] for a full vocabulary id.
+#[must_use]
+pub fn f32_state_forward_at(ck: &StateCheckpoint, prev: usize, state: &mut [f32]) -> Vec<f32> {
     let t = ck.topology();
     assert_eq!(state.len(), t.state_slots, "state width");
-    let mut x = ck.embedding_row(prev).to_vec();
+    let mut x = ck.embedding_row_at(prev).to_vec();
 
     // State block: delta from the normed+act-quantized input, decayed state
     // update, act-quantized out-projection, residual add.
@@ -1295,7 +1312,7 @@ pub fn f32_state_forward(ck: &StateCheckpoint, prev: u8, state: &mut [f32]) -> V
     let normed = f32_rms_norm_clip(&x);
     let mut logits = vec![0.0f32; t.vocab];
     for (id, logit) in logits.iter_mut().enumerate() {
-        let row = ck.embedding_row(id as u8);
+        let row = ck.embedding_row_at(id);
         let mut acc = 0.0f32;
         for (n, e) in normed.iter().zip(row.iter()) {
             acc += n * e;
@@ -1838,7 +1855,7 @@ impl IntStateLoweredModel {
         let mut emb_resid = Vec::with_capacity(t.vocab * t.d_model);
         let mut max_abs = 0.0f32;
         for id in 0..t.vocab {
-            for &v in ck.embedding_row(id as u8) {
+            for &v in ck.embedding_row_at(id) {
                 max_abs = max_abs.max(v.abs());
                 let q = rte_i64(f64::from(v) * f64::from(STATE_RESID_ONE))
                     .clamp(i64::from(RESID_I24_MIN), i64::from(RESID_I24_MAX));
@@ -1850,7 +1867,7 @@ impl IntStateLoweredModel {
         let head_step = max_abs / QMAX as f32;
         let mut head_i8 = Vec::with_capacity(t.vocab * t.d_model);
         for id in 0..t.vocab {
-            for &v in ck.embedding_row(id as u8) {
+            for &v in ck.embedding_row_at(id) {
                 let q = rte_i64(f64::from(v) * f64::from(QMAX) / f64::from(max_abs))
                     .clamp(-i64::from(QMAX), i64::from(QMAX));
                 head_i8.push(q as i8);
@@ -2000,6 +2017,7 @@ impl IntStateLoweredModel {
     /// students exceed the u8 charset id space).
     #[must_use]
     pub fn emb_resid_row_at(&self, id: usize) -> &[i32] {
+        assert!(id < self.topology.vocab, "embedding id {id} out of range");
         let start = id * self.topology.d_model;
         &self.emb_resid[start..start + self.topology.d_model]
     }
@@ -2012,6 +2030,7 @@ impl IntStateLoweredModel {
     /// Tied-head row for a full `usize` token id.
     #[must_use]
     pub fn head_i8_row_at(&self, id: usize) -> &[i8] {
+        assert!(id < self.topology.vocab, "head id {id} out of range");
         let start = id * self.topology.d_model;
         &self.head_i8[start..start + self.topology.d_model]
     }
@@ -2434,7 +2453,7 @@ pub fn synthetic_moe_state_checkpoint(topology: StateTopology, seed: u64) -> Sta
     };
     let dense = synthetic_state_checkpoint_with(dense_topo, seed);
     let embedding: Vec<f32> = (0..topology.vocab)
-        .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+        .flat_map(|id| dense.embedding_row_at(id).to_vec())
         .collect();
 
     let mut rng = seed ^ 0xa5a5_5a5a_1234_9876;
@@ -2892,6 +2911,78 @@ mod tests {
     }
 
     #[test]
+    fn wide_vocab_lowering_preserves_rows_past_u8() {
+        let topology = StateTopology {
+            d_model: 8,
+            d_ff: 16,
+            n_blocks: 1,
+            state_slots: 8,
+            vocab: 300,
+            n_experts: 1,
+            logit_paging: LogitPaging::Paged,
+        };
+        topology.validate().expect("wide test topology validates");
+        let checkpoint = synthetic_state_checkpoint_with(topology, 0x1024);
+
+        // This pair aliases under an accidental `id as u8` traversal.
+        assert_ne!(
+            checkpoint.embedding_row_at(0),
+            checkpoint.embedding_row_at(256),
+            "source fixture needs distinct rows across the u8 boundary"
+        );
+
+        let lowered = IntStateLoweredModel::lower(&checkpoint).expect("wide checkpoint lowers");
+        let max_abs = checkpoint
+            .embedding
+            .iter()
+            .fold(0.0f32, |m, &v| m.max(v.abs()));
+        for id in [0usize, 255, 256, 299] {
+            let expected_resid: Vec<i32> = checkpoint
+                .embedding_row_at(id)
+                .iter()
+                .map(|&v| {
+                    rte_i64(f64::from(v) * f64::from(STATE_RESID_ONE))
+                        .clamp(i64::from(RESID_I24_MIN), i64::from(RESID_I24_MAX))
+                        as i32
+                })
+                .collect();
+            let expected_head: Vec<i8> = checkpoint
+                .embedding_row_at(id)
+                .iter()
+                .map(|&v| {
+                    rte_i64(f64::from(v) * f64::from(QMAX) / f64::from(max_abs))
+                        .clamp(-i64::from(QMAX), i64::from(QMAX)) as i8
+                })
+                .collect();
+            assert_eq!(
+                lowered.emb_resid_row_at(id),
+                expected_resid,
+                "residual embedding row {id}"
+            );
+            assert_eq!(
+                lowered.head_i8_row_at(id),
+                expected_head,
+                "tied-head row {id}"
+            );
+        }
+        assert_ne!(
+            lowered.emb_resid_row_at(0),
+            lowered.emb_resid_row_at(256),
+            "lowered residual rows must not alias modulo 256"
+        );
+        assert_ne!(
+            lowered.head_i8_row_at(0),
+            lowered.head_i8_row_at(256),
+            "lowered tied-head rows must not alias modulo 256"
+        );
+
+        let mut state = vec![0.0f32; topology.state_slots];
+        let logits = f32_state_forward_at(&checkpoint, 256, &mut state);
+        assert_eq!(logits.len(), topology.vocab);
+        assert_ne!(logits[0], logits[256], "f32 tied head must use wide ids");
+    }
+
+    #[test]
     fn state_saturates_at_the_i24_bound() {
         let ck = synthetic_state_checkpoint(2);
         let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
@@ -2970,7 +3061,7 @@ mod tests {
         // non-FFN path matches the dense checkpoint exactly.
         let dense = synthetic_state_checkpoint_with(dense_topo, seed);
         let embedding: Vec<f32> = (0..topology.vocab)
-            .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+            .flat_map(|id| dense.embedding_row_at(id).to_vec())
             .collect();
 
         let mut rng = seed ^ 0xa5a5_5a5a_1234_9876;
@@ -3035,7 +3126,7 @@ mod tests {
         // Build the equivalent single-expert MoE: same up/down as the dense
         // block, wrapped in a Moe with one expert.
         let embedding: Vec<f32> = (0..topo1.vocab)
-            .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+            .flat_map(|id| dense.embedding_row_at(id).to_vec())
             .collect();
         let blocks: Vec<BlockFfn> = dense
             .blocks()
@@ -3194,7 +3285,7 @@ mod tests {
         );
         let (up, down) = dense.blocks()[0].as_dense().unwrap();
         let embedding: Vec<f32> = (0..topo.vocab)
-            .flat_map(|id| dense.embedding_row(id as u8).to_vec())
+            .flat_map(|id| dense.embedding_row_at(id).to_vec())
             .collect();
         let dense_blocks: Vec<BlockFfn> = (0..topo.n_blocks)
             .map(|_| BlockFfn::Dense {

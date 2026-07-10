@@ -1705,7 +1705,7 @@ mod tests {
             .collect();
         let t = base.topology();
         let embedding: Vec<f32> = (0..t.vocab)
-            .flat_map(|id| base.embedding_row(id as u8).to_vec())
+            .flat_map(|id| base.embedding_row_at(id).to_vec())
             .collect();
         let ck = StateCheckpoint::new(
             t,

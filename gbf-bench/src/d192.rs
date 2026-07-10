@@ -97,7 +97,7 @@ pub fn write_synthetic_state_export(
 
     let emb_bytes: Vec<u8> = (0..topology.vocab)
         .flat_map(|id| {
-            ck.embedding_row(id as u8)
+            ck.embedding_row_at(id)
                 .iter()
                 .flat_map(|v| v.to_le_bytes())
                 .collect::<Vec<u8>>()

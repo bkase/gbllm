@@ -44,6 +44,79 @@ def test_moe_forward_shapes_and_aux_finite():
     assert np.isfinite(float(aux)) and float(aux) > 0.0  # z_loss + balance
 
 
+def test_router_balance_is_computed_per_block_before_summing():
+    cfg = _tiny(
+        n_experts=2,
+        lambda_balance=1.0,
+        lambda_zrouter=0.0,
+    )
+    model = GBModel(cfg)
+    tok_count = 4
+    zloss = mx.zeros((cfg.n_blocks,))
+
+    # Both blocks use both experts uniformly: one unit of Switch balance per
+    # block, hence two after summing blocks.
+    uniform = mx.array([[2.0, 2.0], [2.0, 2.0]])
+    uniform_aux = model._aux_from_totals(uniform, uniform, zloss, tok_count)
+
+    # Each block is individually collapsed, but onto a different expert. A
+    # cross-block aggregation sees the same global totals as `uniform`; the
+    # correct per-block objective assigns two units to each collapsed block.
+    collapsed = mx.array([[4.0, 0.0], [0.0, 4.0]])
+    collapsed_aux = model._aux_from_totals(collapsed, collapsed, zloss, tok_count)
+    mx.eval(uniform_aux, collapsed_aux)
+
+    assert float(uniform_aux) == pytest.approx(2.0)
+    assert float(collapsed_aux) == pytest.approx(4.0)
+
+    onehot_grad = mx.grad(
+        lambda onehot: model._aux_from_totals(onehot, uniform, zloss, tok_count)
+    )(uniform)
+    probs_grad = mx.grad(
+        lambda probs: model._aux_from_totals(uniform, probs, zloss, tok_count)
+    )(uniform)
+    mx.eval(onehot_grad, probs_grad)
+    assert np.count_nonzero(np.array(onehot_grad)) == 0
+    assert np.count_nonzero(np.array(probs_grad)) > 0
+
+
+def test_model_forward_keeps_complementary_block_stats_separate():
+    cfg = ModelConfig(
+        d_model=2,
+        d_ff=2,
+        n_blocks=2,
+        state_slots=4,
+        n_experts=2,
+        vocab=2,
+        router_rank=1,
+        lambda_balance=1.0,
+        lambda_zrouter=0.0,
+    )
+    model = GBModel(cfg)
+    model.embedding = mx.array([[-1.0, 0.0], [1.0, 0.0]])
+    model.state_block.state_in.weight = mx.zeros_like(model.state_block.state_in.weight)
+    model.state_block.state_out.weight = mx.zeros_like(model.state_block.state_out.weight)
+    for block in model.blocks:
+        block.input_projection = mx.array([[1.0, 0.0]])
+        block.input_bias = mx.zeros((1,))
+        block.expert_projection = mx.array([[-1.0], [1.0]])
+        block.expert_bias = mx.zeros((2,))
+        for expert in block.experts:
+            expert.up.weight = mx.zeros_like(expert.up.weight)
+            expert.down.weight = mx.zeros_like(expert.down.weight)
+
+    # Each block independently routes half the tokens to each expert and has
+    # mean soft probabilities [0.5, 0.5], so its Switch term is exactly 1.
+    # Summing blocks first (the old bug) creates cross-block terms and returns
+    # 4 instead of the correct per-block sum 2.
+    ids = mx.array([[0, 1, 0, 1]])
+    _, _, optimized_aux = model(ids, model.init_state(1))
+    _, _, reference_aux = model._forward_per_token(ids, model.init_state(1))
+    mx.eval(optimized_aux, reference_aux)
+    assert float(optimized_aux) == pytest.approx(2.0)
+    assert float(reference_aux) == pytest.approx(2.0)
+
+
 def test_router_rank_default():
     assert ModelConfig(n_experts=1).resolved_rank() == 1
     assert ModelConfig(n_experts=4).resolved_rank() == 1

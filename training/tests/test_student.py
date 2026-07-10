@@ -41,22 +41,21 @@ def _tiny_moe_cfg(**kw):
 
 
 def _trace_expert_counts(model: GBModel, ids: np.ndarray) -> np.ndarray:
-    """Per-expert argmax token counts summed over all blocks, using the REAL
-    residual stream (embedding -> state block -> each block's router)."""
+    """Per-block, per-expert argmax counts on the real residual stream."""
     ids_mx = mx.array(ids.astype(np.int32))
     B, Tn = ids_mx.shape
     h = model.init_state(B)
-    counts = np.zeros(model.cfg.n_experts, dtype=np.int64)
+    counts = np.zeros((model.cfg.n_blocks, model.cfg.n_experts), dtype=np.int64)
     for t in range(Tn):
         x = model.embedding[ids_mx[:, t]]
         x, h = model.state_block(x, h)
         h = mx.stop_gradient(h)
-        for blk in model.blocks:
+        for block_index, blk in enumerate(model.blocks):
             hid = x @ blk.input_projection.T + blk.input_bias
             raw = hid @ blk.expert_projection.T + blk.expert_bias
             idx = np.array(mx.argmax(raw, axis=-1)).reshape(-1)
             for i in idx:
-                counts[int(i)] += 1
+                counts[block_index, int(i)] += 1
             x, _ = blk(x)
     return counts
 
@@ -276,7 +275,7 @@ def test_distillation_reduces_student_teacher_kl():
 # ---------------------------------------------------------------------------
 # (d) MoE load-balance keeps expert utilization spread (anti-collapse)
 # ---------------------------------------------------------------------------
-def test_moe_load_balance_no_collapse_all_experts_used():
+def test_moe_load_balance_prevents_per_block_collapse():
     mx.random.seed(3)
     cfg = _tiny_moe_cfg(n_experts=8)
     m = GBModel(cfg)
@@ -291,10 +290,9 @@ def test_moe_load_balance_no_collapse_all_experts_used():
     # corrected weight, aux_weight is the test's collapse-pressure knob: the
     # EFFECTIVE balance weight here is aux_weight * lambda_balance = 50 * 1e-2 =
     # 0.5. This is deliberately cranked well above the ~5e-2 real-training level
-    # to force full expert recruitment on this toy 2-mode task in only 250
-    # steps. It remains a REAL guard: with aux OFF (aux_weight=0) this same
-    # setup collapses to 6/8 experts (two die), so the assertion below fails
-    # without the load-balance mechanism actually working.
+    # to force broad per-block expert recruitment on this toy 2-mode task in
+    # only 250 steps. It remains a real integration guard; the literal
+    # per-block reduction oracle lives in test_model.py.
     tc = T.TrainConfig(
         seq_len=16, lanes=4, steps=250,
         aux_weight=50.0,  # * default lambda_balance 1e-2 -> effective 0.5
@@ -305,11 +303,15 @@ def test_moe_load_balance_no_collapse_all_experts_used():
 
     probe = _two_mode_stream(reps=6).reshape(4, -1)[:, :64]
     counts = _trace_expert_counts(m, probe)
-    used = int(np.count_nonzero(counts))
-    total = int(counts.sum())
-    max_frac = counts.max() / max(1, total)
-    assert used == cfg.n_experts, f"expert collapse: only {used}/8 used, counts={counts.tolist()}"
-    assert max_frac < 0.9, f"one expert dominates ({max_frac:.2f}), counts={counts.tolist()}"
+    used = np.count_nonzero(counts, axis=1)
+    totals = counts.sum(axis=1)
+    max_frac = counts.max(axis=1) / np.maximum(1, totals)
+    assert np.all(used >= cfg.n_experts - 1), (
+        f"per-block expert collapse: used={used.tolist()}, counts={counts.tolist()}"
+    )
+    assert np.all(max_frac < 0.6), (
+        f"one expert dominates a block ({max_frac.tolist()}), counts={counts.tolist()}"
+    )
 
 
 # ---------------------------------------------------------------------------

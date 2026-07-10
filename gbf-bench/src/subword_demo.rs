@@ -1,12 +1,10 @@
-//! Subword MoE demo surface (deploy step 5, `docs/design/integer-moe-deploy.md`):
-//! host mirror + scripted-session gate for the vocab-1024 Paged + MoE student
-//! generating COHERENT MULTI-CHAR subword text on-device, host-byte-identical.
+//! Wide-vocabulary subword demo host mirror and scripted-session gate. Dense
+//! and MoE Paged students generate multi-char text on-device byte-identically.
 //!
-//! The demo ROM ([`gbf_kernel::asm_impl_shell::build_state_moe_demo_rom`]) pokes
-//! a host-encoded prompt as u16 token ids, warms the recurrent state over them,
-//! then samples `n_gen` tokens from the paged head — feeding the FULL u16 id
-//! back through the embedding lookup — and renders each token's literal
-//! `id_bytes` (multiple chars) to the transcript BG map.
+//! The demo ROM ([`gbf_kernel::asm_impl_shell::build_state_subword_demo_rom`])
+//! pokes a host-encoded prompt as u16 token ids, warms the recurrent state,
+//! samples from the paged head, feeds the full u16 id back through the
+//! embedding lookup, and renders each token's literal multi-byte `id_bytes`.
 //!
 //! Gate (mirrors `demo`'s host byte-identity, extended to the subword surface):
 //! (a) the on-device generated token-id sequence == the host mirror
@@ -23,7 +21,7 @@ use gbf_kernel::asm_impl_shell::{
     BG_MAP_BASE, BG_MAP_STRIDE, SUBWORD_CURSOR_TILE, SUBWORD_FONT_BYTES, SUBWORD_NEWLINE_BYTE,
     SUBWORD_SPACE_BYTE, SubwordDemoRom, TRANSCRIPT_CELLS, TRANSCRIPT_COLS, TRANSCRIPT_ROWS,
 };
-use gbf_kernel::asm_impl_state::S_RNG_ADDR;
+use gbf_kernel::asm_impl_state::{S_RNG_ADDR, S_SAMPLED_ADDR, S_SAMPLED_HI_ADDR};
 use gbf_kernel::decode::{SamplerConfig, XorShift16, sample_topk_from_candidates_trace};
 use gbf_kernel::state_model_ref::IntStateLoweredModel;
 
@@ -79,7 +77,12 @@ pub fn subword_host_generate(
     let mut cell: usize = 0;
     loop {
         // Paged draw over the finalized top-k heap (== on-device `sample_paged`).
-        let cands: Vec<(i32, usize)> = trace.topk_heap.iter().map(|e| (e.logit, e.id)).collect();
+        let cands: Vec<(i32, usize)> = trace
+            .topk_heap
+            .iter()
+            .take(usize::from(cfg.k()))
+            .map(|e| (e.logit, e.id))
+            .collect();
         let pick = sample_topk_from_candidates_trace(&cands, cfg.scale_q16(), &mut rng).picked;
         sequence.push(pick as u16);
         // advance the transcript cursor exactly like the render routine
@@ -152,10 +155,11 @@ pub fn decode_ids(sequence: &[u16], id_bytes: &[Vec<u8>]) -> String {
 /// Result of one scripted subword demo session.
 #[derive(Debug, Clone)]
 pub struct SubwordSessionResult {
-    /// Generated FULL token ids read from the on-device run (reconstructed from
-    /// the host mirror; the ROM writes only the rendered transcript, which is
-    /// what is byte-checked below).
+    /// Host-generated full token ids.
     pub host_sequence: Vec<u16>,
+    /// Full u16 ids read from the device sampler at every token boundary.
+    pub device_sequence: Vec<u16>,
+    pub sequence_matches: bool,
     pub n_tokens: usize,
     /// (a) transcript BG bytes match the host id_bytes->tile render.
     pub transcript_bg_ok: bool,
@@ -165,6 +169,12 @@ pub struct SubwordSessionResult {
     /// Final framebuffer after the run.
     pub framebuffer: Framebuffer,
     pub decoded_text: String,
+    /// Exact emulator M-cycles for each prompt forward, including the demo
+    /// boundary transition but excluding boot and host pokes.
+    pub warmup_m_cycles: Vec<u64>,
+    /// Exact emulator M-cycles for each generated token, including sampling
+    /// and multi-byte rendering through the token boundary.
+    pub generation_m_cycles: Vec<u64>,
 }
 
 fn emu_err(e: impl std::fmt::Display) -> OneTokenError {
@@ -177,9 +187,8 @@ fn bg_row_addr(row: u8) -> u16 {
 
 /// Drive one scripted subword demo session: boot, poke the host-encoded prompt
 /// ids + RNG seed, set `go`, run warmup + `n_gen` token boundaries, then read
-/// the transcript BG and assert it equals the host id_bytes render of the host
-/// mirror's generated sequence. The generated sequence itself is host-verified
-/// byte-exact via the transcript (a wrong id renders wrong bytes).
+/// the full sampled u16 id at every boundary and the transcript BG. The result
+/// exposes direct device-id parity plus byte-render parity against the host.
 pub fn run_subword_demo_session(
     rom: &SubwordDemoRom,
     lowered: &IntStateLoweredModel,
@@ -255,12 +264,22 @@ pub fn run_subword_demo_session(
     };
 
     // Warmup: one boundary per prompt id.
+    let mut warmup_m_cycles = Vec::with_capacity(prompt_ids.len());
     for _ in 0..prompt_ids.len() {
+        let start = emu.m_cycle_count_floor().0;
         run_to(&mut emu, rom.warm_boundary_pc, "warm boundary")?;
+        warmup_m_cycles.push(emu.m_cycle_count_floor().0.saturating_sub(start));
     }
     // Generation: one boundary per token in the host mirror.
+    let mut generation_m_cycles = Vec::with_capacity(host_sequence.len());
+    let mut device_sequence = Vec::with_capacity(host_sequence.len());
     for _ in 0..host_sequence.len() {
+        let start = emu.m_cycle_count_floor().0;
         run_to(&mut emu, rom.token_boundary_pc, "token boundary")?;
+        generation_m_cycles.push(emu.m_cycle_count_floor().0.saturating_sub(start));
+        let lo = emu.peek(S_SAMPLED_ADDR).map_err(emu_err)?;
+        let hi = emu.peek(S_SAMPLED_HI_ADDR).map_err(emu_err)?;
+        device_sequence.push(u16::from_le_bytes([lo, hi]));
     }
     run_to(&mut emu, rom.gen_done_pc, "generation done")?;
 
@@ -283,12 +302,16 @@ pub fn run_subword_demo_session(
     let framebuffer = emu.framebuffer();
     Ok(SubwordSessionResult {
         n_tokens: host_sequence.len(),
+        sequence_matches: device_sequence == host_sequence,
         transcript_sha256: sha256(&bg).to_hex(),
         transcript_bg_ok,
         bg_first_mismatch,
         framebuffer,
         decoded_text: decode_ids(&host_sequence, id_bytes),
         host_sequence,
+        device_sequence,
+        warmup_m_cycles,
+        generation_m_cycles,
     })
 }
 

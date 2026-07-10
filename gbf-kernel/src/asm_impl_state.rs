@@ -58,7 +58,7 @@ use gbf_asm::isa::{
     Reg16Data, Reg16Stack,
 };
 use gbf_asm::layout::{AddressSpace, BankIndex, LayoutPlan, PlacedSection};
-use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, RomSize, assemble_rom};
+use gbf_asm::rom::{CartridgeHeader, ENTRY_POINT, MbcType, RamSize, RomSize, assemble_rom};
 use gbf_asm::section::SectionId;
 
 use crate::asm_impl_model::{
@@ -78,6 +78,29 @@ use crate::state_model_ref::{AccWidth, IntStateLoweredModel, StateTopology};
 /// [`ModelRomError::DriverOverflowsBank0`] past this bound). Exposed so
 /// evidence runners can report the real headroom.
 pub const STATE_DRIVER_BANK_CAPACITY: usize = CHUNK_ENTRY as usize - ENTRY_POINT as usize;
+
+/// First SRAM byte owned by the full-logit head. The first 256 bytes of the
+/// 8 KiB MBC5 SRAM window stay reserved for the emulator/device harness.
+pub const SRAM_FULL_LOGITS_BASE: u16 = 0xA100;
+/// Bytes available after the harness reservation in one 8 KiB SRAM bank.
+pub const SRAM_FULL_LOGITS_CAPACITY: usize = 0x1F00;
+
+/// Storage strategy for a wide-vocabulary paged head.
+///
+/// This is a post-model-lowering, pre-ROM-layout machine-code emission choice:
+/// both variants consume the same page-major head-weight ROM banks and produce
+/// the same i24 logits, argmax, and top-k heap. `WramStreamed` is the legacy
+/// path. `SramFull` trades an 8 KiB MBC5 SRAM requirement for a lossless loop
+/// interchange: each lane's 768-byte product LUT is built once, then applied
+/// to every output page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PagedHeadStorage {
+    /// Reuse one 256-byte WRAM logit page and rebuild every lane LUT per page.
+    #[default]
+    WramStreamed,
+    /// Materialize all i24 logits in MBC5 SRAM, then fold them page-by-page.
+    SramFull,
+}
 
 // ---------------------------------------------------------------------------
 // fixed WRAM anchors (topology-independent)
@@ -156,7 +179,6 @@ const CHUNK_BANK: u16 = 0xC39C; // 2 bytes chunk-run bank number (lo, hi)
 // touch anything else here). CHUNK_BANK doubles as the V2 stream bank; SPSAVE
 // holds the caller's return-address stack while SP walks the activations.
 const WV2_ACC: u16 = 0xC384; // 3 bytes wide (i24) row accumulator (free gap)
-const WV2_PK: u16 = 0xC39B; // 1 byte packed-trit decode temp (free gap)
 const WV2_OUT: u16 = 0xC39E; // 2 bytes output pointer (free gap after CHUNK_BANK)
 
 // MoE fixed-point router scratch (same fixed page; live only during the router
@@ -749,6 +771,23 @@ pub(crate) fn set_bank(asm: &mut ModelAsm, bank: u16) {
     a_to(asm, MBC5_ROMB0);
     ld_r_imm(asm, Reg8::A, (bank >> 8) as u8);
     a_to(asm, MBC5_ROMB1);
+}
+
+/// Initialize the cartridge storage selected by [`PagedHeadStorage`]. Call
+/// once from the driver's boot prologue, after interrupts are disabled and SP
+/// is established. The SRAM variant enables MBC5 RAM and explicitly selects
+/// RAM bank 0; the streamed variant emits no bytes.
+pub(crate) fn emit_paged_head_storage_init(asm: &mut ModelAsm, storage: PagedHeadStorage) {
+    if storage == PagedHeadStorage::SramFull {
+        // MBC5 RAMG ($0000..=$1fff): $0a enables SRAM.
+        ld_r_imm(asm, Reg8::A, 0x0A);
+        a_to(asm, 0x0000);
+        // MBC5 RAMB ($4000..=$5fff): bank 0 (the only 8 KiB bank).
+        asm.i(Instr::XorA {
+            src: AluSrc8::Reg(Reg8::A),
+        });
+        a_to(asm, 0x4000);
+    }
 }
 
 /// `ptr` variable += `k` (16-bit).
@@ -2951,9 +2990,9 @@ fn emit_emb_copy24(
     if wide {
         // 16-bit id = D:A (D = S_INPUT_HI, A = low byte). bank index =
         // (D:A) >> log_rpb, propagating each bit across the byte boundary via
-        // the carry (SRL D; RR A). The result fits the low byte (vocab id space
-        // is <= 2^16, and rows_per_bank >= 1 keeps the quotient in 8 bits for
-        // the deployed vocab), which lands in A for the emb_bank0 add below.
+        // the carry (SRL D; RR A). The result fits the low byte because the ROM
+        // planner rejects embedding tables with more than 256 banks; it lands
+        // in A for the emb_bank0 add below.
         a_from(asm, S_INPUT_HI_ADDR);
         ld_rr(asm, Reg8::D, Reg8::A);
         ld_rr(asm, Reg8::A, Reg8::B); // A = low byte
@@ -3292,10 +3331,16 @@ fn emit_argmax(asm: &mut ModelAsm, l: &StateWramLayout) {
     asm.i(Instr::Ret { cond: None });
 }
 
-/// Heap capacity for the paged running top-k: `min(HEAP_K_MAX, vocab)`. Fits
-/// u8 (`HEAP_K_MAX = 40`).
-fn paged_heap_k(t: &StateTopology) -> u8 {
-    crate::state_model_ref::HEAP_K_MAX.min(t.vocab).max(1) as u8
+/// Heap capacity for the paged running top-k. Sampling ROMs retain exactly the
+/// configured `k`; argmax/parity ROMs without a sampler retain the full host
+/// audit heap (`min(HEAP_K_MAX, vocab)`).
+fn paged_heap_k(t: &StateTopology, sampler: Option<&crate::decode::SamplerConfig>) -> u8 {
+    sampler
+        .map_or(crate::state_model_ref::HEAP_K_MAX, |cfg| {
+            usize::from(cfg.k())
+        })
+        .min(t.vocab)
+        .max(1) as u8
 }
 
 /// Paged twin of [`emit_head_group`]: identical per-lane product-LUT build and
@@ -3508,6 +3553,245 @@ fn emit_head_group_paged(
         src: AluSrc8::Imm(lane_hi as u8),
     });
     asm.jp(Some(Cond::NZ), &lbl("hg_lane"));
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// Build the three 256-byte product-LUT pages for the lane at [`LANE`]. The
+/// emitted arithmetic is intentionally the same as the legacy paged head:
+/// low/high i16 product bytes plus an i24 sign-extension byte, indexed by the
+/// raw i8 head weight. `lbl` supplies routine-local symbolic labels.
+fn emit_head_lane_product_lut(
+    asm: &mut ModelAsm,
+    l: &StateWramLayout,
+    lbl: &impl Fn(&str) -> String,
+) {
+    let act_hi = (l.act >> 8) as u8;
+    // q = ACT[lane] - 128
+    a_from(asm, LANE);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, act_hi);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(128),
+    });
+    a_to(asm, SIGN);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    ld_r_imm(asm, Reg8::B, 0);
+    asm.i(Instr::Bit {
+        bit: BitIndex::new(7).expect("bit 7"),
+        target: CbTarget::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), &lbl("qpos"));
+    ld_r_imm(asm, Reg8::B, 0xFF);
+    asm.label(&lbl("qpos"));
+
+    // Ascending half: entries 0..=127.
+    ld16(asm, Reg16Data::DE, 0);
+    ld16(asm, Reg16Data::HL, l.lut_lo_page);
+    asm.label(&lbl("asc"));
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::L),
+    });
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::NZ), &lbl("asc"));
+
+    // Descending half: entries 255 down to 128.
+    ld16(asm, Reg16Data::DE, 0);
+    ld_r_imm(asm, Reg8::L, 0xFF);
+    asm.label(&lbl("desc"));
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::H),
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::Z), &lbl("desc_done"));
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::L),
+    });
+    asm.jr(None, &lbl("desc"));
+    asm.label(&lbl("desc_done"));
+
+    // Sign-extension page for the i16 product -> i24 accumulation.
+    a_from(asm, SIGN);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.jr(Some(Cond::Z), &lbl("sx"));
+    asm.i(Instr::Cpl);
+    asm.label(&lbl("sx"));
+    ld_rr(asm, Reg8::C, Reg8::A);
+    ld16(asm, Reg16Data::HL, l.lut_lo_page + 0x200);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.label(&lbl("fillp"));
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::NZ), &lbl("fillp"));
+    asm.label(&lbl("filln"));
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::L);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::NZ), &lbl("filln"));
+}
+
+/// Lossless full-head twin of [`emit_head_group_paged`]. For each lane, build
+/// the 768-byte q*weight LUT once, then visit every page-major head bank and
+/// accumulate into the corresponding full i24 logit slice in MBC5 SRAM. This
+/// is the loop interchange that removes `n_logit_pages - 1` redundant LUT
+/// constructions per lane while preserving the exact addition order for each
+/// logit (lanes still ascend).
+fn emit_head_group_paged_sram(
+    asm: &mut ModelAsm,
+    plan: &StateRomPlan,
+    g: usize,
+    lane_lo: usize,
+    lane_hi: usize,
+) {
+    let l = &plan.layout;
+    let t = &l.topology;
+    let lut_hi = (l.lut_lo_page >> 8) as u8;
+    let n_groups = plan.head_groups.len();
+    let lbl = |s: &str| format!("{s}_sram_{g}");
+    asm.label(&lbl("head_grp"));
+    ld_r_imm(asm, Reg8::A, lane_lo as u8);
+    a_to(asm, LANE);
+    asm.label(&lbl("lane"));
+    emit_head_lane_product_lut(asm, l, &lbl);
+
+    for page in 0..plan.n_logit_pages {
+        let base_id = page * crate::state_model_ref::LOGIT_PAGE_IDS;
+        let page_len = ((page + 1) * crate::state_model_ref::LOGIT_PAGE_IDS)
+            .min(t.vocab)
+            .saturating_sub(base_id);
+        let bank = plan.head_bank0 + page * n_groups + g;
+        set_bank(asm, bank as u16);
+
+        // DE := this lane's 256-byte weight page in the mapped head bank.
+        a_from(asm, LANE);
+        if lane_lo > 0 {
+            asm.i(Instr::SubA {
+                src: AluSrc8::Imm(lane_lo as u8),
+            });
+        }
+        asm.i(Instr::AddA {
+            src: AluSrc8::Imm((CHUNK_ENTRY >> 8) as u8),
+        });
+        ld_rr(asm, Reg8::D, Reg8::A);
+        ld_r_imm(asm, Reg8::E, 0);
+
+        // HL := full_logits + 3*global_page_base. Each iteration adds the
+        // lane product for local id E into one raw i24 SRAM logit.
+        let dst = SRAM_FULL_LOGITS_BASE + (3 * base_id) as u16;
+        ld16(asm, Reg16Data::HL, dst);
+        let acc = format!("{}_p{page}", lbl("acc"));
+        asm.label(&acc);
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::DE });
+        ld_rr(asm, Reg8::C, Reg8::A);
+        ld_r_imm(asm, Reg8::B, lut_hi);
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+        asm.i(Instr::AddA {
+            src: AluSrc8::HlIndirect,
+        });
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+        asm.i(Instr::Inc8 {
+            dst: IncDec8Target::Reg(Reg8::B),
+        });
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+        asm.i(Instr::AdcA {
+            src: AluSrc8::HlIndirect,
+        });
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+        asm.i(Instr::Inc8 {
+            dst: IncDec8Target::Reg(Reg8::B),
+        });
+        asm.i(Instr::LdAFromReg16Addr { src: Reg16Addr::BC });
+        asm.i(Instr::AdcA {
+            src: AluSrc8::HlIndirect,
+        });
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: Reg16Addr::Hli,
+        });
+        asm.i(Instr::Inc8 {
+            dst: IncDec8Target::Reg(Reg8::E),
+        });
+        ld_rr(asm, Reg8::A, Reg8::E);
+        asm.i(Instr::CpA {
+            src: AluSrc8::Imm(page_len as u8),
+        });
+        asm.jr(Some(Cond::NZ), &acc);
+    }
+
+    a_from(asm, LANE);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, LANE);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(lane_hi as u8),
+    });
+    asm.jp(Some(Cond::NZ), &lbl("lane"));
     asm.i(Instr::Ret { cond: None });
 }
 
@@ -4925,6 +5209,9 @@ pub(crate) struct MoePlan {
 /// variant (one-token, multi-token, sampling, interactive shell).
 pub(crate) struct StateRomPlan {
     pub(crate) lowering: WeightLowering,
+    /// Wide-vocabulary head storage. Single-page and all legacy builders use
+    /// `WramStreamed`; the production dense subword demo opts into `SramFull`.
+    pub(crate) paged_head_storage: PagedHeadStorage,
     pub(crate) layout: StateWramLayout,
     /// V3 weight code: one `Vec<u8>` chunk per bank, grouped per matvec. Empty
     /// under `V2Dispatch`.
@@ -4957,8 +5244,9 @@ pub(crate) struct StateRomPlan {
     /// relocated out of the bank-0 driver into this dedicated switchable bank
     /// (entered at [`CHUNK_ENTRY`]), and `norm24` reaches it via a
     /// bank-switch + `call CHUNK_ENTRY` instead of a bank-0 `call isqrt48`.
-    /// Only the bank-0-tight subword MoE demo sets this; every other ROM keeps
-    /// `None`, so its driver and bank numbering are byte-identical to before.
+    /// Set by the bank-0-tight subword demo and by Paged V2 model ROMs (whose
+    /// direct-handler table has the same pressure). All other ROMs keep `None`,
+    /// so their driver bytes and bank numbering remain unchanged.
     pub(crate) isqrt_bank: Option<usize>,
     /// Total banks including `extra_banks` appended after the head banks.
     pub(crate) bank_count: usize,
@@ -5007,8 +5295,50 @@ pub(crate) fn plan_state_rom_with(
     lowering: WeightLowering,
     relocate_isqrt: bool,
 ) -> Result<StateRomPlan, ModelRomError> {
+    plan_state_rom_with_paged_head_storage(
+        model,
+        layout,
+        extra_banks,
+        lowering,
+        relocate_isqrt,
+        PagedHeadStorage::WramStreamed,
+    )
+}
+
+/// Plan a state ROM with an explicit wide-head storage contract. Keeping this
+/// separate from [`WeightLowering`] matters: dense/MoE weight representation
+/// and head-logit liveness are orthogonal choices.
+pub(crate) fn plan_state_rom_with_paged_head_storage(
+    model: &IntStateLoweredModel,
+    layout: StateWramLayout,
+    extra_banks: usize,
+    lowering: WeightLowering,
+    relocate_isqrt: bool,
+    paged_head_storage: PagedHeadStorage,
+) -> Result<StateRomPlan, ModelRomError> {
     let t = model.topology;
     let l = &layout;
+
+    if paged_head_storage == PagedHeadStorage::SramFull {
+        if t.logit_paging != crate::state_model_ref::LogitPaging::Paged {
+            return Err(ModelRomError::UnsupportedTopology {
+                detail: "SramFull head storage requires LogitPaging::Paged".to_string(),
+            });
+        }
+        let logit_bytes =
+            3usize
+                .checked_mul(t.vocab)
+                .ok_or_else(|| ModelRomError::UnsupportedTopology {
+                    detail: "SramFull logit byte count overflow".to_string(),
+                })?;
+        if logit_bytes > SRAM_FULL_LOGITS_CAPACITY {
+            return Err(ModelRomError::UnsupportedTopology {
+                detail: format!(
+                    "SramFull needs {logit_bytes} logit bytes after the 256-byte harness reservation; capacity is {SRAM_FULL_LOGITS_CAPACITY}"
+                ),
+            });
+        }
+    }
 
     // Both lowerings enumerate matvecs in the same forward-pass order:
     // state_in, then (up, down) per block.
@@ -5244,6 +5574,13 @@ pub(crate) fn plan_state_rom_with(
     }
     let emb_rpb = BANK_BYTES / emb_stride;
     let emb_bank_count = t.vocab.div_ceil(emb_rpb);
+    if emb_bank_count > 256 {
+        return Err(ModelRomError::UnsupportedTopology {
+            detail: format!(
+                "embedding table needs {emb_bank_count} banks, but emb_copy24 supports at most 256"
+            ),
+        });
+    }
 
     // Head: 64 lane pages of 256 bytes per bank.
     let head_groups: Vec<(usize, usize)> = (0..t.d_model)
@@ -5347,6 +5684,7 @@ pub(crate) fn plan_state_rom_with(
     }
     Ok(StateRomPlan {
         lowering,
+        paged_head_storage,
         layout,
         per_matvec_chunks,
         v2_weight_banks,
@@ -5625,9 +5963,12 @@ fn emit_v2_wide_combine(asm: &mut ModelAsm) {
     a_to(asm, WV2_ACC + 2);
 }
 
-/// Emit the shared V2 dispatch matvec routine, its 81 pattern handlers, the
+/// Emit the shared V2 dispatch matvec routine, its 81 direct pattern handlers,
 /// five sentinel handlers, and the 86-entry handler table. Emitted once, in
 /// bank 0, only when the plan's lowering is `V2Dispatch`.
+///
+/// The stream and table labels are symbolic pre-layout IR here; `ModelAsm`
+/// resolves the table's label-address words during final ROM layout.
 fn emit_matvec_v2(asm: &mut ModelAsm, l: &StateWramLayout) {
     let act = l.act;
     let acc = l.acc;
@@ -5655,55 +5996,18 @@ fn emit_matvec_v2(asm: &mut ModelAsm, l: &StateWramLayout) {
     ld16(asm, Reg16Data::SP, act);
     asm.jp(None, "v2_dispatch");
 
-    // --- dispatch tail ------------------------------------------------------
-    // Fetch the next stream byte. A base-81 index (< 81) falls through to the
-    // shared computed apply; a sentinel (>= 81) vectors through the 5-entry
-    // sentinel table. Decoding trits at runtime (via the `v2_pack` LUT) instead
-    // of 81 unrolled handlers keeps the bank-0 routine ~1.5 KiB smaller, which
-    // the dense d192 driver needs; the extra cycles are affordable under the
-    // 120 s/char budget.
+    // --- threaded dispatch -------------------------------------------------
+    // Fetch one base-81/sentinel byte and jump through the 86-entry table.
+    // Direct pattern handlers spend ROM bytes to remove the runtime LUT load,
+    // four trit extracts, and their branches. Production DumpLevel::None plus
+    // the relocated isqrt48 table leave enough bank-0 headroom for this faster
+    // form; the old computed decoder was selected for a 120 s/token budget.
     asm.label("v2_dispatch");
     emit_v2_fetch(asm);
-    asm.i(Instr::CpA {
-        src: AluSrc8::Imm(81),
-    });
-    asm.jp(Some(Cond::NC), "v2_sentinel");
-
-    // --- computed apply (A = base-81 index, 0..80) --------------------------
-    // HL := v2_pack + A; load the 2-bit-packed trits; apply the four columns.
-    asm.ld16_label(Reg16Data::HL, "v2_pack", 0);
-    asm.i(Instr::AddA {
-        src: AluSrc8::Reg(Reg8::L),
-    });
-    ld_rr(asm, Reg8::L, Reg8::A);
-    ld_rr(asm, Reg8::A, Reg8::H);
-    asm.i(Instr::AdcA {
-        src: AluSrc8::Imm(0),
-    });
-    ld_rr(asm, Reg8::H, Reg8::A);
-    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
-    a_to(asm, WV2_PK);
-    asm.i(Instr::Pop {
-        dst: Reg16Stack::HL,
-    });
-    emit_v2_apply_col(asm, Reg8::L, 0);
-    emit_v2_apply_col(asm, Reg8::H, 1);
-    asm.i(Instr::Pop {
-        dst: Reg16Stack::HL,
-    });
-    emit_v2_apply_col(asm, Reg8::L, 2);
-    emit_v2_apply_col(asm, Reg8::H, 3);
-    asm.jp(None, "v2_dispatch");
-
-    // --- sentinel vector (A = sentinel byte, 81..85) ------------------------
-    asm.label("v2_sentinel");
-    asm.i(Instr::SubA {
-        src: AluSrc8::Imm(81),
-    });
     asm.i(Instr::AddA {
         src: AluSrc8::Reg(Reg8::A),
     });
-    asm.ld16_label(Reg16Data::HL, "v2_sent_table", 0);
+    asm.ld16_label(Reg16Data::HL, "v2_table", 0);
     asm.i(Instr::AddA {
         src: AluSrc8::Reg(Reg8::L),
     });
@@ -5719,6 +6023,27 @@ fn emit_matvec_v2(asm: &mut ModelAsm, l: &StateWramLayout) {
     asm.i(Instr::Ld8RegFromHl { dst: Reg8::H });
     ld_rr(asm, Reg8::L, Reg8::A);
     asm.i(Instr::JpHl);
+
+    // --- base-81 pattern handlers (indices 0..80) --------------------------
+    // Every handler consumes exactly four activations (two POPs), applies only
+    // its nonzero trits to DE, then re-enters the threaded dispatcher.
+    for index in 0..=80_u8 {
+        asm.label(&format!("v2_h{index}"));
+        let pattern = crate::spec::base81_pattern(index);
+        for pair in 0..2 {
+            asm.i(Instr::Pop {
+                dst: Reg16Stack::HL,
+            });
+            for (offset, reg) in [(0, Reg8::L), (1, Reg8::H)] {
+                match pattern[pair * 2 + offset] {
+                    1 => emit_v2_add_de(asm, reg),
+                    -1 => emit_v2_sub_de(asm, reg),
+                    _ => {}
+                }
+            }
+        }
+        asm.jp(None, "v2_dispatch");
+    }
 
     // --- i16 sentinels ------------------------------------------------------
     // ROW_END: store DE, advance out ptr by 2, re-seed bias + SP, keep going.
@@ -5779,8 +6104,11 @@ fn emit_matvec_v2(asm: &mut ModelAsm, l: &StateWramLayout) {
     emit_v2_store_wacc(asm, false);
     emit_v2_restore_sp_ret(asm);
 
-    // --- sentinel vector table (5 entries, LE addresses) --------------------
-    asm.label("v2_sent_table");
+    // --- handler table (81 patterns + 5 sentinels, LE addresses) -----------
+    asm.label("v2_table");
+    for index in 0..=80_u8 {
+        asm.word_label(&format!("v2_h{index}"));
+    }
     asm.word_label("v2_row_end"); // 81 (BASE81_ROW_END)
     asm.word_label("v2_matrix_end"); // 82 (BASE81_MATRIX_END)
     asm.word_label("v2_seg_mid"); // 83 (V2_SEG_MID)
@@ -5789,52 +6117,6 @@ fn emit_matvec_v2(asm: &mut ModelAsm, l: &StateWramLayout) {
     // Table length pinned: 81 pattern indices + 5 sentinels.
     debug_assert_eq!(V2_TABLE_LEN, 86);
     let _ = (V2_SEG_MID, V2_ROW_END_WIDE, V2_MATRIX_END_WIDE);
-
-    // --- base-81 -> 2-bit trit pack LUT (81 bytes) --------------------------
-    // v2_pack[i] packs base81_pattern(i) as 2 bits per column (00 zero, 01 +1,
-    // 10 -1), column k in bits [2k+1:2k].
-    asm.label("v2_pack");
-    let pack: Vec<u8> = (0..=80_u8)
-        .map(|index| {
-            let mut byte = 0u8;
-            for (k, &w) in crate::spec::base81_pattern(index).iter().enumerate() {
-                let field = match w {
-                    1 => 0b01,
-                    -1 => 0b10,
-                    _ => 0b00,
-                };
-                byte |= field << (2 * k);
-            }
-            byte
-        })
-        .collect();
-    asm.bytes(pack);
-}
-
-/// Apply one packed trit column to the accumulator: extract the 2-bit field
-/// `k` from `WV2_PK`, then `DE += reg` (field 01), `DE -= reg` (field 10), or
-/// nothing (field 00). `reg` holds the popped activation byte.
-fn emit_v2_apply_col(asm: &mut ModelAsm, reg: Reg8, k: u8) {
-    a_from(asm, WV2_PK);
-    for _ in 0..(2 * k) {
-        asm.i(Instr::Rrca);
-    }
-    asm.i(Instr::AndA {
-        src: AluSrc8::Imm(0b11),
-    });
-    // A: 0 -> skip (carry after `sub 1`), 1 -> plus (zero), 2 -> minus.
-    asm.i(Instr::SubA {
-        src: AluSrc8::Imm(1),
-    });
-    let done = asm.fresh("v2col_done");
-    asm.jr(Some(Cond::C), &done);
-    let plus = asm.fresh("v2col_plus");
-    asm.jr(Some(Cond::Z), &plus);
-    emit_v2_sub_de(asm, reg);
-    asm.jr(None, &done);
-    asm.label(&plus);
-    emit_v2_add_de(asm, reg);
-    asm.label(&done);
 }
 
 /// Store `WV2_ACC` (3 bytes) through `WV2_OUT`; when `advance`, bump the out
@@ -6008,12 +6290,12 @@ pub(crate) fn emit_state_forward_body(asm: &mut ModelAsm, plan: &StateRomPlan) {
     }
 }
 
-/// Emit the paged head/argmax epilogue (deploy step 2): stream
-/// `n_logit_pages` output-pages of `<= LOGIT_PAGE_IDS` ids, folding each page
-/// into the running top-1 (`argmax16`) and the running top-k heap. The single
-/// 256-byte logit page is reused per page; the full `3 * vocab` logit vector is
-/// never materialized. Leaves the argmax id at `paged.argmax16` and the sorted
-/// heap ready for `sample_paged`.
+/// Emit the paged head/argmax epilogue. `WramStreamed` keeps the legacy
+/// page-at-a-time construction. `SramFull` first materializes the lossless full
+/// i24 vector with lane-outer loop order, then copies each page back through
+/// the same WRAM fold routines. Both leave the final page resident at
+/// [`StateWramLayout::logits`], the argmax at `paged.argmax16`, and the same
+/// sorted heap ready for `sample_paged`.
 fn emit_state_paged_epilogue(asm: &mut ModelAsm, plan: &StateRomPlan) {
     let l = &plan.layout;
     let t = &l.topology;
@@ -6031,30 +6313,51 @@ fn emit_state_paged_epilogue(asm: &mut ModelAsm, plan: &StateRomPlan) {
     a_to(asm, pg.argmax16 + 1);
     a_to(asm, pg.heap_count);
 
-    for page in 0..plan.n_logit_pages {
-        let base_id = (page * crate::state_model_ref::LOGIT_PAGE_IDS) as u16;
-        let page_len = ((page + 1) * crate::state_model_ref::LOGIT_PAGE_IDS)
-            .min(t.vocab)
-            .saturating_sub(page * crate::state_model_ref::LOGIT_PAGE_IDS);
-        // pg_idx := page ; pg_len := page_len ; pg_base := base_id
-        ld_r_imm(asm, Reg8::A, page as u8);
-        a_to(asm, pg.pg_idx);
-        ld_r_imm(asm, Reg8::A, page_len as u8);
-        a_to(asm, pg.pg_len);
-        ld_r_imm(asm, Reg8::A, (base_id & 0xFF) as u8);
-        a_to(asm, pg.pg_base);
-        ld_r_imm(asm, Reg8::A, (base_id >> 8) as u8);
-        a_to(asm, pg.pg_base + 1);
-        // zero this output-page's logits (3 * page_len bytes)
-        emit_zero16(asm, l.logits, (3 * page_len) as u16);
-        // accumulate the head lane groups for THIS page's banks
-        for (g, _) in plan.head_groups.iter().enumerate() {
-            let bank = plan.head_bank0 + page * n_groups + g;
-            set_bank(asm, bank as u16);
-            asm.call(&format!("head_grp_pg_{g}"));
+    match plan.paged_head_storage {
+        PagedHeadStorage::WramStreamed => {
+            for page in 0..plan.n_logit_pages {
+                let base_id = (page * crate::state_model_ref::LOGIT_PAGE_IDS) as u16;
+                let page_len = ((page + 1) * crate::state_model_ref::LOGIT_PAGE_IDS)
+                    .min(t.vocab)
+                    .saturating_sub(page * crate::state_model_ref::LOGIT_PAGE_IDS);
+                emit_paged_fold_metadata(asm, pg, page, page_len, base_id);
+                // Zero this output-page, then accumulate its mapped head banks.
+                emit_zero16(asm, l.logits, (3 * page_len) as u16);
+                for (g, _) in plan.head_groups.iter().enumerate() {
+                    let bank = plan.head_bank0 + page * n_groups + g;
+                    set_bank(asm, bank as u16);
+                    asm.call(&format!("head_grp_pg_{g}"));
+                }
+                asm.call("argmax_fold_pg");
+                asm.call("heap_offer_pg");
+            }
         }
-        asm.call("argmax_fold_pg");
-        asm.call("heap_offer_pg");
+        PagedHeadStorage::SramFull => {
+            // Full-vector storage is zeroed once. Each group routine walks all
+            // pages for every lane, so each lane LUT is constructed once.
+            emit_zero16(asm, SRAM_FULL_LOGITS_BASE, (3 * t.vocab) as u16);
+            for (g, _) in plan.head_groups.iter().enumerate() {
+                asm.call(&format!("head_grp_sram_{g}"));
+            }
+            // Reuse the established fold machinery verbatim. Copying in page
+            // order also preserves the token-end contract: the final page is
+            // resident in the legacy WRAM logit page.
+            for page in 0..plan.n_logit_pages {
+                let base_id = (page * crate::state_model_ref::LOGIT_PAGE_IDS) as u16;
+                let page_len = ((page + 1) * crate::state_model_ref::LOGIT_PAGE_IDS)
+                    .min(t.vocab)
+                    .saturating_sub(page * crate::state_model_ref::LOGIT_PAGE_IDS);
+                emit_paged_fold_metadata(asm, pg, page, page_len, base_id);
+                emit_copy16(
+                    asm,
+                    SRAM_FULL_LOGITS_BASE + 3 * base_id,
+                    l.logits,
+                    3 * page_len,
+                );
+                asm.call("argmax_fold_pg");
+                asm.call("heap_offer_pg");
+            }
+        }
     }
     // finalize + argmax id -> S_ARGMAX_ADDR low byte (charset feedback) and the
     // high byte -> S_SAMPLED_HI_ADDR (the wide-id feedback high byte, shared by
@@ -6063,6 +6366,24 @@ fn emit_state_paged_epilogue(asm: &mut ModelAsm, plan: &StateRomPlan) {
     a_to(asm, S_ARGMAX_ADDR);
     a_from(asm, pg.argmax16 + 1);
     a_to(asm, S_SAMPLED_HI_ADDR);
+}
+
+/// Set the page-local metadata consumed by the shared argmax/top-k fold.
+fn emit_paged_fold_metadata(
+    asm: &mut ModelAsm,
+    pg: PagedSampler,
+    page: usize,
+    page_len: usize,
+    base_id: u16,
+) {
+    ld_r_imm(asm, Reg8::A, page as u8);
+    a_to(asm, pg.pg_idx);
+    ld_r_imm(asm, Reg8::A, page_len as u8);
+    a_to(asm, pg.pg_len);
+    ld_r_imm(asm, Reg8::A, (base_id & 0xFF) as u8);
+    a_to(asm, pg.pg_base);
+    ld_r_imm(asm, Reg8::A, (base_id >> 8) as u8);
+    a_to(asm, pg.pg_base + 1);
 }
 
 /// Emit every shared routine body plus the bank-0 data tables (GELU/y LUTs
@@ -6086,8 +6407,8 @@ pub(crate) fn emit_state_routines_and_tables(
     emit_mul16x8(asm);
     emit_mul16(asm);
     // `isqrt48` (~4.8 KiB fully unrolled) stays in bank 0 for every ROM except
-    // the bank-0-tight subword MoE demo, which relocates it into a dedicated
-    // switchable bank (`plan.isqrt_bank`) to reclaim the driver space. When
+    // bank-0-tight subword demos and Paged direct-V2 ROMs, which relocate it
+    // into a dedicated switchable bank (`plan.isqrt_bank`). When
     // relocated it is emitted as a self-contained bank blob in
     // `assemble_state_rom`, NOT here, so the bank-0 driver never contains it.
     if plan.isqrt_bank.is_none() {
@@ -6141,10 +6462,17 @@ pub(crate) fn emit_state_routines_and_tables(
         }
         crate::state_model_ref::LogitPaging::Paged => {
             for (g, &(lo, hi)) in plan.head_groups.iter().enumerate() {
-                emit_head_group_paged(asm, l, g, lo, hi);
+                match plan.paged_head_storage {
+                    PagedHeadStorage::WramStreamed => {
+                        emit_head_group_paged(asm, l, g, lo, hi);
+                    }
+                    PagedHeadStorage::SramFull => {
+                        emit_head_group_paged_sram(asm, plan, g, lo, hi);
+                    }
+                }
             }
             emit_argmax_fold_pg(asm, l);
-            let heap_k = paged_heap_k(t);
+            let heap_k = paged_heap_k(t, sampler);
             emit_heap_offer_pg(asm, l, heap_k);
             if let Some(cfg) = sampler {
                 emit_rng_step(asm);
@@ -6371,6 +6699,10 @@ pub(crate) fn assemble_state_rom(
     };
     let mut header = CartridgeHeader::new(title)?;
     header.rom_size = rom_size;
+    if plan.paged_head_storage == PagedHeadStorage::SramFull {
+        header.mbc_type = MbcType::Mbc5Ram;
+        header.ram_size = RamSize::Kib8;
+    }
     let rom = assemble_rom(&pairs, &layout, &header)?;
     Ok((rom, rom_size, table_bytes))
 }
@@ -6381,14 +6713,42 @@ fn build_state_model_rom(
     sampler: Option<&crate::decode::SamplerConfig>,
     lowering: WeightLowering,
 ) -> Result<BuiltStateRom, ModelRomError> {
+    build_state_model_rom_with_paged_head_storage(
+        model,
+        loop_tokens,
+        sampler,
+        lowering,
+        PagedHeadStorage::WramStreamed,
+    )
+}
+
+fn build_state_model_rom_with_paged_head_storage(
+    model: &IntStateLoweredModel,
+    loop_tokens: Option<u16>,
+    sampler: Option<&crate::decode::SamplerConfig>,
+    lowering: WeightLowering,
+    paged_head_storage: PagedHeadStorage,
+) -> Result<BuiltStateRom, ModelRomError> {
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let plan = plan_state_rom_with(model, layout, 0, lowering, false)?;
+    // Direct V2's 81 threaded handlers do not coexist with the ~4.8 KiB
+    // unrolled isqrt routine in the largest sampling drivers. Relocate isqrt
+    // for every V2 model builder; V3 retains its original bank-0 placement.
+    let relocate_isqrt = lowering == WeightLowering::V2Dispatch;
+    let plan = plan_state_rom_with_paged_head_storage(
+        model,
+        layout,
+        0,
+        lowering,
+        relocate_isqrt,
+        paged_head_storage,
+    )?;
     let l = &plan.layout;
 
     // Bank-0 driver.
     let mut asm = ModelAsm::new(ENTRY_POINT);
     asm.i(Instr::Di);
     ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
+    emit_paged_head_storage_init(&mut asm, plan.paged_head_storage);
     if loop_tokens.is_some() {
         asm.i(Instr::XorA {
             src: AluSrc8::Reg(Reg8::A),
@@ -6502,6 +6862,18 @@ pub fn build_state_one_token_rom_lowered(
     build_state_one_token_rom_debug(model, lowering).map(|(rom, _labels)| rom)
 }
 
+/// Build a one-token parity ROM with an explicit paged-head storage strategy.
+/// Normal production APIs retain [`PagedHeadStorage::WramStreamed`]; this
+/// surface exists for byte-parity/cycle gates and deliberate deployments.
+pub fn build_state_one_token_rom_with_paged_head_storage(
+    model: &IntStateLoweredModel,
+    lowering: WeightLowering,
+    paged_head_storage: PagedHeadStorage,
+) -> Result<StateOneTokenRom, ModelRomError> {
+    build_state_one_token_rom_debug_with_paged_head_storage(model, lowering, paged_head_storage)
+        .map(|(rom, _labels)| rom)
+}
+
 /// Same as [`build_state_one_token_rom_lowered`] but also returns the resolved
 /// label -> address map. Intended for cycle-profiling and disassembly tooling
 /// that needs to attribute an executing PC to a named driver routine; the ROM
@@ -6510,8 +6882,27 @@ pub fn build_state_one_token_rom_debug(
     model: &IntStateLoweredModel,
     lowering: WeightLowering,
 ) -> Result<(StateOneTokenRom, BTreeMap<String, u16>), ModelRomError> {
+    build_state_one_token_rom_debug_with_paged_head_storage(
+        model,
+        lowering,
+        PagedHeadStorage::WramStreamed,
+    )
+}
+
+/// Debug-label twin of [`build_state_one_token_rom_with_paged_head_storage`].
+pub fn build_state_one_token_rom_debug_with_paged_head_storage(
+    model: &IntStateLoweredModel,
+    lowering: WeightLowering,
+    paged_head_storage: PagedHeadStorage,
+) -> Result<(StateOneTokenRom, BTreeMap<String, u16>), ModelRomError> {
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let built = build_state_model_rom(model, None, None, lowering)?;
+    let built = build_state_model_rom_with_paged_head_storage(
+        model,
+        None,
+        None,
+        lowering,
+        paged_head_storage,
+    )?;
     let labels = built.labels.clone();
     let rom = StateOneTokenRom {
         layout,
@@ -6592,11 +6983,36 @@ pub fn build_state_multi_token_sampling_rom_lowered(
     sampler: &crate::decode::SamplerConfig,
     lowering: WeightLowering,
 ) -> Result<StateMultiTokenRom, ModelRomError> {
+    build_state_multi_token_sampling_rom_with_paged_head_storage(
+        model,
+        n_tokens,
+        sampler,
+        lowering,
+        PagedHeadStorage::WramStreamed,
+    )
+}
+
+/// Sampling-ROM twin with an explicit wide-head storage strategy. This is the
+/// multi-token parity surface for validating that SRAM materialization keeps
+/// the same configured-k sampler sequence and full u16 feedback.
+pub fn build_state_multi_token_sampling_rom_with_paged_head_storage(
+    model: &IntStateLoweredModel,
+    n_tokens: u16,
+    sampler: &crate::decode::SamplerConfig,
+    lowering: WeightLowering,
+    paged_head_storage: PagedHeadStorage,
+) -> Result<StateMultiTokenRom, ModelRomError> {
     if n_tokens == 0 || n_tokens > 256 {
         return Err(ModelRomError::BadTokenCount { n_tokens });
     }
     let layout = StateWramLayout::plan(model.topology, model.down_width, false)?;
-    let built = build_state_model_rom(model, Some(n_tokens), Some(sampler), lowering)?;
+    let built = build_state_model_rom_with_paged_head_storage(
+        model,
+        Some(n_tokens),
+        Some(sampler),
+        lowering,
+        paged_head_storage,
+    )?;
     Ok(StateMultiTokenRom {
         layout,
         token_start_pc: built.labels["token_start"],
@@ -6726,6 +7142,124 @@ mod tests {
         assert!(rom.token_end_pc > rom.token_start_pc);
         assert!(rom.weight_chunk_count >= 9, "state in-proj + 8 FFN matvecs");
         assert_eq!(rom.rom[0x0147], 0x19, "MBC5 cartridge type");
+    }
+
+    #[test]
+    fn sram_full_head_declares_and_initializes_exactly_one_8kib_bank() {
+        let ck = synthetic_state_checkpoint_with(StateTopology::D1024_DENSE, 0x51a7);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let rom = build_state_one_token_rom_with_paged_head_storage(
+            &lowered,
+            WeightLowering::V3,
+            PagedHeadStorage::SramFull,
+        )
+        .expect("SRAM full-head ROM builds");
+
+        assert_eq!(rom.rom[0x0147], 0x1A, "MBC5+RAM cartridge type");
+        assert_eq!(rom.rom[0x0149], 0x02, "exactly 8 KiB SRAM");
+        assert!(
+            3 * lowered.topology.vocab <= SRAM_FULL_LOGITS_CAPACITY,
+            "full i24 vector fits after the harness reservation"
+        );
+        // Boot prologue: DI; LD SP,nn; LD A,$0a; LD ($0000),A; XOR A;
+        // LD ($4000),A. This pins both RAM enable and RAM-bank-0 selection.
+        assert_eq!(
+            &rom.rom[usize::from(ENTRY_POINT)..usize::from(ENTRY_POINT) + 13],
+            &[
+                0xF3, 0x31, 0xF0, 0xDF, 0x3E, 0x0A, 0xEA, 0x00, 0x00, 0xAF, 0xEA, 0x00, 0x40
+            ]
+        );
+    }
+
+    #[test]
+    fn sram_full_head_rejects_single_page_topology() {
+        let ck = synthetic_state_checkpoint(0x51);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let layout = StateWramLayout::plan(lowered.topology, lowered.down_width, false)
+            .expect("layout plans");
+        assert!(matches!(
+            plan_state_rom_with_paged_head_storage(
+                &lowered,
+                layout,
+                0,
+                WeightLowering::V3,
+                false,
+                PagedHeadStorage::SramFull,
+            ),
+            Err(ModelRomError::UnsupportedTopology { .. })
+        ));
+    }
+
+    #[test]
+    fn sram_full_head_rejects_vectors_past_the_bounded_8kib_window() {
+        let topology = StateTopology {
+            vocab: SRAM_FULL_LOGITS_CAPACITY / 3 + 1,
+            ..StateTopology::D1024_DENSE
+        };
+        let ck = synthetic_state_checkpoint_with(topology, 0x8b);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("oversize paged model lowers");
+        let layout = StateWramLayout::plan(topology, lowered.down_width, false)
+            .expect("WRAM layout is independent of full SRAM size");
+        assert!(matches!(
+            plan_state_rom_with_paged_head_storage(
+                &lowered,
+                layout,
+                0,
+                WeightLowering::V3,
+                false,
+                PagedHeadStorage::SramFull,
+            ),
+            Err(ModelRomError::UnsupportedTopology { .. })
+        ));
+    }
+
+    #[test]
+    fn paged_embedding_selector_rejects_more_than_256_embedding_banks() {
+        let topology = StateTopology {
+            d_model: 192,
+            d_ff: 16,
+            n_blocks: 1,
+            state_slots: 8,
+            vocab: 4_097,
+            n_experts: 1,
+            logit_paging: crate::state_model_ref::LogitPaging::Paged,
+        };
+        topology
+            .validate()
+            .expect("generic paged topology validates");
+        let checkpoint = synthetic_state_checkpoint_with(topology, 0x256b);
+        let lowered = IntStateLoweredModel::lower(&checkpoint).expect("lowers");
+        let layout = StateWramLayout::plan(topology, lowered.down_width, false).expect("plans");
+        let error = match plan_state_rom_with(&lowered, layout, 0, WeightLowering::V3, false) {
+            Err(error) => error,
+            Ok(_) => panic!("emb_copy24 bank quotient must fit u8"),
+        };
+        assert!(
+            matches!(
+                error,
+                ModelRomError::UnsupportedTopology { ref detail }
+                    if detail.contains("257 banks") && detail.contains("at most 256")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_wram_streamed_storage_is_byte_identical_to_legacy_builder() {
+        let ck = synthetic_state_checkpoint_with(StateTopology::D1024_DENSE, 0x51);
+        let lowered = IntStateLoweredModel::lower(&ck).expect("lowers");
+        let legacy = build_state_one_token_rom_lowered(&lowered, WeightLowering::V3)
+            .expect("legacy paged ROM builds");
+        let explicit = build_state_one_token_rom_with_paged_head_storage(
+            &lowered,
+            WeightLowering::V3,
+            PagedHeadStorage::WramStreamed,
+        )
+        .expect("explicit streamed ROM builds");
+        assert_eq!(legacy.rom, explicit.rom, "legacy ROM bytes are unchanged");
+        assert_eq!(legacy.driver_bytes, explicit.driver_bytes);
+        assert_eq!(legacy.bank_count, explicit.bank_count);
+        assert_eq!((explicit.rom[0x0147], explicit.rom[0x0149]), (0x19, 0x00));
     }
 
     #[test]
@@ -6956,12 +7490,42 @@ mod tests {
     }
 
     #[test]
+    fn direct_v2_model_builder_auto_relocates_isqrt() {
+        let paged = synthetic_state_checkpoint_with(StateTopology::D1024_DENSE, 0x52);
+        let paged = IntStateLoweredModel::lower(&paged).expect("paged lowers");
+        let (paged_rom, paged_labels) =
+            build_state_one_token_rom_debug(&paged, WeightLowering::V2Dispatch)
+                .expect("Paged direct-V2 ROM fits via automatic relocation");
+        assert!(!paged_labels.contains_key("isqrt48"));
+        assert_eq!(
+            (paged_rom.rom[0x0147], paged_rom.rom[0x0149]),
+            (0x19, 0x00),
+            "isqrt relocation does not imply SRAM"
+        );
+
+        let single = synthetic_state_checkpoint(0x52);
+        let single = IntStateLoweredModel::lower(&single).expect("single-page lowers");
+        let (single_rom, single_labels) =
+            build_state_one_token_rom_debug(&single, WeightLowering::V2Dispatch)
+                .expect("SinglePage direct-V2 ROM builds");
+        assert!(
+            !single_labels.contains_key("isqrt48"),
+            "SinglePage direct-V2 also relocates the routine"
+        );
+        assert_eq!(
+            (single_rom.rom[0x0147], single_rom.rom[0x0149]),
+            (0x19, 0x00),
+            "isqrt relocation remains independent of SRAM"
+        );
+    }
+
+    #[test]
     fn isqrt48_lives_in_bank0_unless_relocated() {
         // The bank-0 routine/table emission hosts the `isqrt48` label for a
         // non-relocated plan and OMITS it for a relocated plan (where the blob
-        // moves to its own switchable bank). This guards the back-compat
-        // contract that only the bank-0-tight demo relocates; every other ROM's
-        // bank-0 driver still contains `isqrt48` exactly as before.
+        // moves to its own switchable bank). This pins the lower-level plan
+        // switch independently of the production builders, which now relocate
+        // every direct-V2 ROM to leave deterministic bank-0 headroom.
         let ck = crate::state_model_ref::synthetic_moe_state_checkpoint(
             StateTopology::D192_MOE_TEST,
             21,

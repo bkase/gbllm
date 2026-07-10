@@ -438,17 +438,23 @@ class GBModel(nn.Module):
         """Zeroed recurrent state [B,S] at stream start."""
         return mx.zeros((batch, self.cfg.state_slots))
 
-    def _aux_from_totals(self, total_onehot, total_probs, total_zloss, tok_count):
-        """Window-level router aux from summed-over-all-(token,block) totals.
-        balance = E * sum_e (f_e * P_e), f_e = fraction routed to e, P_e = mean
-        prob of e (switch-transformer form); zrouter = mean_tok z_loss. Both
-        summed across blocks (tok_count = B*T = tokens per block), matching the
-        per-token reference accumulation exactly."""
+    def _aux_from_totals(self, block_onehot, block_probs, block_zloss, tok_count):
+        """Window-level router aux from per-block token totals.
+
+        ``block_onehot`` and ``block_probs`` are ``[n_blocks, n_experts]``.
+        The Switch balance term is computed independently for each block and
+        then summed; aggregating expert totals before multiplying would let
+        different blocks collapse onto complementary experts while appearing
+        globally balanced. ``block_zloss`` is ``[n_blocks]`` and remains a sum
+        of the per-block token means.
+        """
         cfg = self.cfg
-        f = total_onehot / tok_count  # [E]
-        p = total_probs / tok_count  # [E]
+        # Hard top-1 assignments are stop-gradient dispatch provenance. Router
+        # learning for this term flows through the soft probabilities only.
+        f = mx.stop_gradient(block_onehot / tok_count)  # [L,E]
+        p = block_probs / tok_count  # [L,E]
         balance = cfg.n_experts * mx.sum(f * p)
-        zrouter = total_zloss / tok_count
+        zrouter = mx.sum(block_zloss) / tok_count
         return cfg.lambda_balance * balance + cfg.lambda_zrouter * zrouter
 
     def __call__(self, ids: mx.array, h: mx.array):
@@ -469,29 +475,28 @@ class GBModel(nn.Module):
         x_all, h = self.state_block.forward_sequence(embed_all, h)  # [B,T,D], [B,S]
 
         xf = x_all.reshape(B * T, cfg.d_model)  # [N,D]
-        total_onehot = None
-        total_probs = None
-        total_zloss = None
+        block_onehot = []
+        block_probs = []
+        block_zloss = []
         for blk in self.blocks:
             xf, stats = blk(xf)
             if stats is not None:
-                oh = mx.sum(stats["onehot"], axis=0)  # [E]
-                pr = mx.sum(stats["probs"], axis=0)  # [E]
-                zl = mx.sum(stats["zloss"])  # scalar
-                if total_onehot is None:
-                    total_onehot, total_probs, total_zloss = oh, pr, zl
-                else:
-                    total_onehot = total_onehot + oh
-                    total_probs = total_probs + pr
-                    total_zloss = total_zloss + zl
+                block_onehot.append(mx.sum(stats["onehot"], axis=0))  # [E]
+                block_probs.append(mx.sum(stats["probs"], axis=0))  # [E]
+                block_zloss.append(mx.sum(stats["zloss"]))  # scalar
 
         normed = rms_norm_clip(xf)  # [N,D]
         logits = (normed @ self.embedding.T).reshape(B, T, cfg.vocab)  # [B,T,V]
 
-        if total_onehot is None:
+        if not block_onehot:
             aux = mx.array(0.0)
         else:
-            aux = self._aux_from_totals(total_onehot, total_probs, total_zloss, B * T)
+            aux = self._aux_from_totals(
+                mx.stack(block_onehot),
+                mx.stack(block_probs),
+                mx.stack(block_zloss),
+                B * T,
+            )
         return logits, h, aux
 
     def _forward_per_token(self, ids: mx.array, h: mx.array, dense_moe: bool = False):
@@ -503,31 +508,39 @@ class GBModel(nn.Module):
         """
         B, T = ids.shape
         cfg = self.cfg
-        agg_onehot = None
-        agg_probs = None
-        agg_zloss = None
+        block_onehot = [None] * len(self.blocks)
+        block_probs = [None] * len(self.blocks)
+        block_zloss = [None] * len(self.blocks)
         tok_count = 0
         logits_steps = []
         for t in range(T):
             x = self.embedding[ids[:, t]]  # [B,D]
             x, h = self.state_block(x, h)
-            for blk in self.blocks:
+            for block_index, blk in enumerate(self.blocks):
                 x, stats = blk.forward_dense(x) if dense_moe else blk(x)
                 if stats is not None:
-                    if agg_onehot is None:
-                        agg_onehot = mx.sum(stats["onehot"], axis=0)
-                        agg_probs = mx.sum(stats["probs"], axis=0)
-                        agg_zloss = mx.sum(stats["zloss"])
+                    oh = mx.sum(stats["onehot"], axis=0)
+                    pr = mx.sum(stats["probs"], axis=0)
+                    zl = mx.sum(stats["zloss"])
+                    if block_onehot[block_index] is None:
+                        block_onehot[block_index] = oh
+                        block_probs[block_index] = pr
+                        block_zloss[block_index] = zl
                     else:
-                        agg_onehot = agg_onehot + mx.sum(stats["onehot"], axis=0)
-                        agg_probs = agg_probs + mx.sum(stats["probs"], axis=0)
-                        agg_zloss = agg_zloss + mx.sum(stats["zloss"])
+                        block_onehot[block_index] = block_onehot[block_index] + oh
+                        block_probs[block_index] = block_probs[block_index] + pr
+                        block_zloss[block_index] = block_zloss[block_index] + zl
             normed = rms_norm_clip(x)
             logits_steps.append(normed @ self.embedding.T)  # [B,V]
             tok_count += B
         logits = mx.stack(logits_steps, axis=1)  # [B,T,V]
-        if agg_onehot is None:
+        if not block_onehot or block_onehot[0] is None:
             aux = mx.array(0.0)
         else:
-            aux = self._aux_from_totals(agg_onehot, agg_probs, agg_zloss, tok_count)
+            aux = self._aux_from_totals(
+                mx.stack(block_onehot),
+                mx.stack(block_probs),
+                mx.stack(block_zloss),
+                tok_count,
+            )
         return logits, h, aux
