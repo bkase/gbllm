@@ -25,9 +25,10 @@ use gbf_emu::{
 };
 use gbf_foundation::sha256;
 use gbf_kernel::asm_impl_state::{
-    S_ARGMAX_ADDR, S_DONE_ADDR, S_EXPERT_SEL_ADDR, S_INPUT_ADDR, S_STACK_TOP, StateMultiTokenRom,
-    StateOneTokenRom, StateWramLayout, WeightLowering, build_state_multi_token_rom,
-    build_state_multi_token_rom_lowered, build_state_one_token_rom_lowered,
+    S_ARGMAX_ADDR, S_DONE_ADDR, S_EXPERT_SEL_ADDR, S_INPUT_ADDR, S_INPUT_HI_ADDR, S_STACK_TOP,
+    StateMultiTokenRom, StateOneTokenRom, StateWramLayout, WeightLowering,
+    build_state_multi_token_rom, build_state_multi_token_rom_lowered,
+    build_state_one_token_rom_lowered,
 };
 use gbf_kernel::model_ref::TernaryLayer;
 use gbf_kernel::state_model_ref::{
@@ -766,7 +767,9 @@ pub fn harvest_state_cases(
         if positions.contains(&pos) {
             cases.push((pos, id, state.clone()));
         }
-        let _ = lowered.forward(id, &mut state);
+        // `ids` are u8 (charset/seed ids < 256); `forward_at` is byte-identical
+        // to `forward` for these and keeps the wide-vocab accessor uniform.
+        let _ = lowered.forward_at(usize::from(id), &mut state);
     }
     cases
 }
@@ -775,7 +778,7 @@ pub fn harvest_state_cases(
 /// byte-exact gates never false-timeout on the slower V2 dispatch path or on
 /// bigger topologies. Still far under the 120 s/char design budget; a genuine
 /// hang spins forever and is caught by any finite budget.
-fn state_run_budget(lowered: &IntStateLoweredModel) -> CycleBudget {
+pub(crate) fn state_run_budget(lowered: &IntStateLoweredModel) -> CycleBudget {
     let macs = lowered.topology.macs_per_token();
     let floor = DMG_FRAME_CLOCK_CYCLES.saturating_mul(3_000).0;
     // MoE adds the fixed-point router: per block, rank*d_model magnitude
@@ -804,6 +807,11 @@ fn run_one_state_case(
         .load_rom(&rom.rom)
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
     emu.poke(S_INPUT_ADDR, input)
+        .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
+    // The one-token cases feed a u8 input id; its high byte is 0. The wide
+    // (Paged) embedding lookup reads S_INPUT_HI, so pin it explicitly rather
+    // than relying on post-boot WRAM being zero.
+    emu.poke(S_INPUT_HI_ADDR, 0)
         .map_err(|e| OneTokenError::Emulator(e.to_string()))?;
     for (slot, h) in state.iter().enumerate() {
         for (k, byte) in h.to_le_bytes().into_iter().enumerate() {
@@ -972,7 +980,11 @@ pub fn run_state_moe_rom_gate_lowered(
 
 /// Host-side stateful generation mirror: zero state, argmax feedback.
 pub struct StateHostGeneration {
+    /// Low byte of each generated id (mirrors the u8 on-device output ring).
     pub sequence: Vec<u8>,
+    /// Full generated ids (== `sequence` under charset/SinglePage vocab < 256;
+    /// carries the true `argmax_full` id under wide-vocab subword Paged models).
+    pub sequence_full: Vec<usize>,
     pub first_trace: IntStateForwardTrace,
     pub last_trace: IntStateForwardTrace,
 }
@@ -986,14 +998,20 @@ pub fn state_host_generate(
 ) -> StateHostGeneration {
     assert!(n_tokens >= 1, "host generation needs at least one token");
     let mut state = lowered.zero_state();
-    let mut input = seed;
+    // Feed back the FULL id (`forward_at` / `argmax_full`) so wide-vocab subword
+    // ids >= 256 re-embed correctly; the u8 `sequence` is the low-byte mirror of
+    // the on-device output ring. Under charset SinglePage this is byte-identical
+    // to the old u8 feedback (every id < 256).
+    let mut input: usize = usize::from(seed);
     let mut sequence = Vec::with_capacity(usize::from(n_tokens));
+    let mut sequence_full = Vec::with_capacity(usize::from(n_tokens));
     let mut first_trace = None;
     let mut last_trace = None;
     for t in 0..n_tokens {
-        let trace = lowered.forward(input, &mut state);
-        input = trace.argmax;
+        let trace = lowered.forward_at(input, &mut state);
+        input = trace.argmax_full;
         sequence.push(trace.argmax);
+        sequence_full.push(trace.argmax_full);
         if t == 0 {
             first_trace = Some(trace.clone());
         }
@@ -1003,6 +1021,7 @@ pub fn state_host_generate(
     }
     StateHostGeneration {
         sequence,
+        sequence_full,
         first_trace: first_trace.expect("n_tokens >= 1"),
         last_trace: last_trace.expect("n_tokens >= 1"),
     }

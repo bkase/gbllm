@@ -16,4 +16,5 @@ pub mod reports;
 pub mod sampling;
 pub mod shell;
 pub mod stateful;
+pub mod subword_demo;
 pub mod workload;

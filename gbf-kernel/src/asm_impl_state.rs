@@ -109,7 +109,19 @@ pub const S_RNG_ADDR: u16 = 0xC2E6;
 /// fixed-point router at each MoE block; read by the runtime expert dispatch.
 /// Reused per block. Zero/unused on dense (non-MoE) models.
 pub const S_EXPERT_SEL_ADDR: u16 = 0xC2E8;
-const CTRL_END: u16 = 0xC2E9;
+/// High byte of the current input token id (wide-vocab subword models). The
+/// low byte lives at [`S_INPUT_ADDR`]; together they form the u16 embedding
+/// index. Written by the wide-id feedback loop under [`LogitPaging::Paged`].
+/// Always 0 on the charset [`LogitPaging::SinglePage`] path (ids < 256), so the
+/// SinglePage embedding lookup / feedback stays byte-identical.
+pub const S_INPUT_HI_ADDR: u16 = 0xC2E9;
+/// High byte of the PICKED id (sampler `S_SAMPLED_ADDR` low byte, or the
+/// paged-argmax `S_ARGMAX_ADDR` low byte — only one epilogue runs per ROM) for
+/// the current token (wide-vocab). Together with the low byte it is the u16
+/// token id the subword render table indexes and the wide-id feedback loop
+/// re-embeds. Zero on the charset SinglePage path.
+pub const S_SAMPLED_HI_ADDR: u16 = 0xC2EA;
+const CTRL_END: u16 = 0xC2EB;
 
 // scratch page B (state-ROM-owned; fixed block 0xC300..0xC3C0)
 const NORM_SS7: u16 = 0xC300; // 7 bytes sum of squares
@@ -2825,10 +2837,23 @@ fn emit_down_epilogue24_wide(asm: &mut ModelAsm, l: &StateWramLayout) {
     asm.i(Instr::Ret { cond: None });
 }
 
-/// `emb_copy24`: A = input id. Maps the embedding bank holding the id's
-/// row (power-of-two `stride` bytes per row, `rows_per_bank` rows per
+/// `emb_copy24`: A = input id LOW byte. Maps the embedding bank holding the
+/// id's row (power-of-two `stride` bytes per row, `rows_per_bank` rows per
 /// bank) and copies the `3 * d_model`-byte i24 row into X.
-fn emit_emb_copy24(asm: &mut ModelAsm, l: &StateWramLayout, emb_bank0: u16, stride: usize) {
+///
+/// When `wide` (a paged wide-vocab subword model), the id is the u16
+/// `S_INPUT_HI_ADDR:S_INPUT_ADDR`; the caller still passes the low byte in `A`,
+/// and the routine reads the high byte from `S_INPUT_HI_ADDR`. The bank index
+/// `id >> log_rpb` is computed as a full 16-bit shift so ids >= 256 map to the
+/// correct embedding bank. The SinglePage (`!wide`) path is byte-identical to
+/// the pre-wide emission (id < 256, high byte always 0).
+fn emit_emb_copy24(
+    asm: &mut ModelAsm,
+    l: &StateWramLayout,
+    emb_bank0: u16,
+    stride: usize,
+    wide: bool,
+) {
     let rows_per_bank = BANK_BYTES / stride;
     debug_assert!(rows_per_bank.is_power_of_two());
     let log_rpb = rows_per_bank.trailing_zeros();
@@ -2836,11 +2861,30 @@ fn emit_emb_copy24(asm: &mut ModelAsm, l: &StateWramLayout, emb_bank0: u16, stri
     let mask = (rows_per_bank - 1) as u8;
     asm.label("emb_copy24");
     ld_rr(asm, Reg8::B, Reg8::A);
-    // bank = emb_bank0 + (id >> log_rpb), 9-bit
-    for _ in 0..log_rpb {
-        asm.i(Instr::Srl {
-            target: CbTarget::Reg(Reg8::A),
-        });
+    if wide {
+        // 16-bit id = D:A (D = S_INPUT_HI, A = low byte). bank index =
+        // (D:A) >> log_rpb, propagating each bit across the byte boundary via
+        // the carry (SRL D; RR A). The result fits the low byte (vocab id space
+        // is <= 2^16, and rows_per_bank >= 1 keeps the quotient in 8 bits for
+        // the deployed vocab), which lands in A for the emb_bank0 add below.
+        a_from(asm, S_INPUT_HI_ADDR);
+        ld_rr(asm, Reg8::D, Reg8::A);
+        ld_rr(asm, Reg8::A, Reg8::B); // A = low byte
+        for _ in 0..log_rpb {
+            asm.i(Instr::Srl {
+                target: CbTarget::Reg(Reg8::D),
+            });
+            asm.i(Instr::Rr {
+                target: CbTarget::Reg(Reg8::A),
+            });
+        }
+    } else {
+        // bank = emb_bank0 + (id >> log_rpb), id < 256 (charset SinglePage).
+        for _ in 0..log_rpb {
+            asm.i(Instr::Srl {
+                target: CbTarget::Reg(Reg8::A),
+            });
+        }
     }
     asm.i(Instr::AddA {
         src: AluSrc8::Imm((emb_bank0 & 0xFF) as u8),
@@ -4695,8 +4739,9 @@ fn emit_sample_paged(asm: &mut ModelAsm, l: &StateWramLayout) {
         dst: IncDec8Target::Reg(Reg8::C),
     });
     asm.label("spg_pick");
-    // S_SAMPLED := low byte of samp_ids[C] (charset feedback is u8; the ring
-    // stores the low id byte, mirroring the host argmax u8 accessor).
+    // S_SAMPLED(:S_SAMPLED_HI) := samp_ids[C] (u16). The wide-vocab subword
+    // feedback needs the FULL id; the render/id_bytes table indexes it. The low
+    // byte alone drives the SinglePage-compatible charset ring accessor.
     ld_rr(asm, Reg8::A, Reg8::C);
     asm.i(Instr::AddA {
         src: AluSrc8::Reg(Reg8::A),
@@ -4710,8 +4755,12 @@ fn emit_sample_paged(asm: &mut ModelAsm, l: &StateWramLayout) {
         src: AluSrc8::Imm(0),
     });
     ld_rr(asm, Reg8::H, Reg8::A);
-    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
     a_to(asm, S_SAMPLED_ADDR);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    a_to(asm, S_SAMPLED_HI_ADDR);
     asm.i(Instr::Ret { cond: None });
 }
 
@@ -4824,6 +4873,20 @@ pub(crate) struct StateRomPlan {
     /// shell sets this and emits `anim_tick`; every other ROM leaves it false
     /// so `chunk_run` is byte-identical to the pre-animation emission.
     pub(crate) animate: bool,
+}
+
+impl StateRomPlan {
+    /// Bank number of the first caller-owned `extra_banks` bank (the ones passed
+    /// as `extra_bank_payloads` to [`assemble_state_rom`]), i.e. immediately
+    /// after the weight/params/state/emb/head banks and any MoE router/scale
+    /// banks. Mirrors the `extras_bank0` computation in `assemble_state_rom`.
+    pub(crate) fn extras_bank0(&self) -> usize {
+        let mut b = self.head_bank0 + self.head_groups.len() * self.n_logit_pages;
+        if let Some(moe) = &self.moe {
+            b += moe.router_bank.len() + moe.scale_bank.len();
+        }
+        b
+    }
 }
 
 fn push_scales(bytes: &mut Vec<u8>, layer: &crate::model_ref::TernaryLayer) -> u16 {
@@ -5880,9 +5943,13 @@ fn emit_state_paged_epilogue(asm: &mut ModelAsm, plan: &StateRomPlan) {
         asm.call("argmax_fold_pg");
         asm.call("heap_offer_pg");
     }
-    // finalize + argmax id -> S_ARGMAX_ADDR low byte (charset feedback)
+    // finalize + argmax id -> S_ARGMAX_ADDR low byte (charset feedback) and the
+    // high byte -> S_SAMPLED_HI_ADDR (the wide-id feedback high byte, shared by
+    // the argmax and sampler paths; only one epilogue runs per ROM).
     a_from(asm, pg.argmax16);
     a_to(asm, S_ARGMAX_ADDR);
+    a_from(asm, pg.argmax16 + 1);
+    a_to(asm, S_SAMPLED_HI_ADDR);
 }
 
 /// Emit every shared routine body plus the bank-0 data tables (GELU/y LUTs
@@ -5901,7 +5968,8 @@ pub(crate) fn emit_state_routines_and_tables(
         WeightLowering::V2Dispatch => emit_matvec_v2(asm, l),
     }
     emit_copy_bytes(asm);
-    emit_emb_copy24(asm, l, plan.emb_bank0 as u16, plan.emb_stride);
+    let emb_wide = t.logit_paging == crate::state_model_ref::LogitPaging::Paged;
+    emit_emb_copy24(asm, l, plan.emb_bank0 as u16, plan.emb_stride, emb_wide);
     emit_mul16x8(asm);
     emit_mul16(asm);
     emit_isqrt48(asm);
@@ -6033,7 +6101,10 @@ pub(crate) fn assemble_state_rom(
         let mut bank = Vec::with_capacity((hi - lo) * plan.emb_stride);
         for id in lo..hi {
             let before = bank.len();
-            for &v in model.emb_resid_row(id as u8) {
+            // The full `usize` id lookup (`emb_resid_row_at`) is REQUIRED: `id
+            // as u8` would alias ids >= 256 (wide-vocab subword models) to rows
+            // 0..255. SinglePage/charset (vocab <= 85) is unaffected (id < 256).
+            for &v in model.emb_resid_row_at(id) {
                 bank.extend_from_slice(&v.to_le_bytes()[..3]);
             }
             bank.resize(before + plan.emb_stride, 0);
@@ -6197,6 +6268,9 @@ fn build_state_model_rom(
         });
         a_to(&mut asm, S_TOKEN_IDX_ADDR);
         a_to(&mut asm, S_DONE_ADDR);
+        // The seed id is poked as a u8 at S_INPUT_ADDR; zero its high byte so
+        // the first (wide) embedding lookup indexes the seed row exactly.
+        a_to(&mut asm, S_INPUT_HI_ADDR);
         // Zero the persistent state once (trained initial-state contract).
         emit_zero16(&mut asm, l.state, (4 * l.topology.state_slots) as u16);
     }
@@ -6224,6 +6298,7 @@ fn build_state_model_rom(
     } else {
         S_ARGMAX_ADDR
     };
+    let wide_feedback = model.topology.logit_paging == crate::state_model_ref::LogitPaging::Paged;
     if let Some(n_tokens) = loop_tokens {
         a_from(&mut asm, S_TOKEN_IDX_ADDR);
         ld_rr(&mut asm, Reg8::L, Reg8::A);
@@ -6231,6 +6306,14 @@ fn build_state_model_rom(
         a_from(&mut asm, picked_addr);
         asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
         a_to(&mut asm, S_INPUT_ADDR);
+        if wide_feedback {
+            // Wide-vocab subword feedback: carry the picked id's HIGH byte back
+            // into S_INPUT_HI so the next embedding lookup indexes the full u16
+            // id. The output ring stores the low byte (u8 accessor, host mirror
+            // compares the full id via the wide host generator).
+            a_from(&mut asm, S_SAMPLED_HI_ADDR);
+            a_to(&mut asm, S_INPUT_HI_ADDR);
+        }
         a_from(&mut asm, S_TOKEN_IDX_ADDR);
         asm.i(Instr::Inc8 {
             dst: IncDec8Target::Reg(Reg8::A),

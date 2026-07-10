@@ -71,7 +71,8 @@ use gbf_asm::isa::{AluSrc8, BitIndex, CbTarget, Cond, HighDirectOffset, Instr, R
 use gbf_asm::rom::{ENTRY_POINT, RomSize};
 
 use crate::asm_impl_model::{
-    BANK_BYTES, CHUNK_ENTRY, ModelAsm, ModelRomError, a_from, a_to, ld_r_imm, ld_rr, ld16,
+    BANK_BYTES, CHUNK_ENTRY, MBC5_ROMB0, MBC5_ROMB1, ModelAsm, ModelRomError, a_from, a_to,
+    ld_r_imm, ld_rr, ld16,
 };
 use crate::asm_impl_state::{
     S_INPUT_ADDR, S_RNG_ADDR, S_SAMPLED_ADDR, S_STACK_TOP, ShellWram, StateWramLayout,
@@ -1145,7 +1146,7 @@ pub fn build_state_shell_rom_lowered(
     // Drive the inference animation: `chunk_run` calls `anim_tick` once per
     // weight chunk (SP-safe between chunks). Only the shell enables this.
     plan.animate = true;
-    let ui_bank = plan.head_bank0 + plan.head_groups.len();
+    let ui_bank = plan.extras_bank0();
     // Animation frame counter, in the zeroed shell block (free byte prompt+0x2A).
     let anim_fc = sh.prompt + 0x2A;
     let (ui_bytes, ui) = build_ui_bank(font_tiles, &sh)?;
@@ -1347,6 +1348,758 @@ pub fn build_state_shell_rom_lowered(
         ui_bank_bytes,
         weight_code_bytes: plan.weight_code_bytes,
         weight_chunk_count: plan.weight_chunk_count,
+        table_bytes,
+    })
+}
+
+// ===========================================================================
+// Subword MoE demo ROM (deploy step 5, `docs/design/integer-moe-deploy.md`):
+// the vocab-1024 Paged + 8-expert MoE student generating COHERENT MULTI-CHAR
+// subword text on-device, host-byte-identical. The prompt is poked as
+// pre-encoded token ids (host `BpeModel::encode`); on-device BPE encode is out
+// of scope. Each generated token renders its MULTIPLE literal `id_bytes` to the
+// transcript (one token -> several chars), byte-identical to
+// `BpeModel::decode`.
+// ===========================================================================
+
+/// Byte value the demo renders as a newline (advances the transcript row).
+pub const SUBWORD_NEWLINE_BYTE: u8 = b'\n';
+/// Byte value the demo renders as a space (blank tile == byte 0x20).
+pub const SUBWORD_SPACE_BYTE: u8 = b' ';
+/// Demo block-cursor tile: inverted space (space byte + invert offset). The
+/// byte-indexed font makes tile 0x20 blank, so 0xA0 is the solid block.
+pub const SUBWORD_CURSOR_TILE: u8 = SUBWORD_SPACE_BYTE + SHELL_INVERT_TILE_OFFSET;
+/// Number of glyphs in the byte-indexed demo font (ASCII range; tile == byte).
+/// The caller supplies [`SUBWORD_FONT_BYTES`] font bytes (tile == byte value);
+/// the bench harness builds them from the committed runtime ASCII font.
+pub const SUBWORD_FONT_TILES: usize = 128;
+pub const SUBWORD_FONT_BYTES: usize = SUBWORD_FONT_TILES * 16;
+
+/// Row layout of the on-device `id_bytes` table: `[len, b0, b1, ...]` padded to
+/// `stride`. `stride = next_pow2(1 + max_token_len)` so one row is a
+/// power-of-two and the bank/row index is a shift+mask (mirrors the embedding
+/// table geometry). Byte b of token id is at ROM offset `id*stride + 1 + b`.
+#[derive(Debug, Clone, Copy)]
+pub struct IdBytesTableGeometry {
+    pub stride: usize,
+    pub rows_per_bank: usize,
+    pub bank_count: usize,
+    pub vocab: usize,
+}
+
+impl IdBytesTableGeometry {
+    #[must_use]
+    pub fn plan(vocab: usize, max_token_len: usize) -> Self {
+        let stride = (1 + max_token_len).next_power_of_two().max(2);
+        let rows_per_bank = BANK_BYTES / stride;
+        let bank_count = vocab.div_ceil(rows_per_bank).max(1);
+        Self {
+            stride,
+            rows_per_bank,
+            bank_count,
+            vocab,
+        }
+    }
+}
+
+/// Build the `id_bytes` ROM banks from a per-id byte-string table (`id_bytes[i]`
+/// = the literal bytes token `i` decodes to, e.g. `BpeModel::id_bytes`). Each
+/// bank holds `rows_per_bank` fixed-stride rows; row = `[len, bytes.., 0-pad]`.
+#[must_use]
+pub fn build_id_bytes_banks(id_bytes: &[Vec<u8>], geom: IdBytesTableGeometry) -> Vec<Vec<u8>> {
+    let mut banks = Vec::with_capacity(geom.bank_count);
+    for bank_idx in 0..geom.bank_count {
+        let lo = bank_idx * geom.rows_per_bank;
+        let hi = ((bank_idx + 1) * geom.rows_per_bank).min(geom.vocab);
+        let mut bank = Vec::with_capacity((hi - lo) * geom.stride);
+        for row in id_bytes.iter().take(hi).skip(lo) {
+            let len = row.len().min(geom.stride - 1);
+            let before = bank.len();
+            bank.push(len as u8);
+            bank.extend_from_slice(&row[..len]);
+            bank.resize(before + geom.stride, 0);
+        }
+        banks.push(bank);
+    }
+    banks
+}
+
+/// A fully assembled subword MoE demo ROM plus the trap PCs the runner needs.
+#[derive(Debug, Clone)]
+pub struct SubwordDemoRom {
+    pub rom: Vec<u8>,
+    pub layout: StateWramLayout,
+    /// Idle head (post-boot / post-run); the driver waits here for the poked
+    /// `go` flag before running the poked prompt.
+    pub idle_pc: u16,
+    /// Hit once per warmup prompt token after its forward pass.
+    pub warm_boundary_pc: u16,
+    /// Hit once per generated token after its multi-char render.
+    pub token_boundary_pc: u16,
+    /// Hit once when a generation run completes.
+    pub gen_done_pc: u16,
+    pub n_gen_tokens: u8,
+    /// WRAM base of the poked prompt-token-id buffer (u16 LE per id).
+    pub prompt_ids_addr: u16,
+    /// WRAM byte holding the poked prompt length (number of u16 ids).
+    pub prompt_len_addr: u16,
+    /// WRAM byte the host pokes to 1 to start a run (the demo "START").
+    pub go_addr: u16,
+    pub id_bytes_geom: IdBytesTableGeometry,
+    pub rom_size: RomSize,
+    pub bank_count: u16,
+    pub driver_bytes: usize,
+    pub ui_bank_bytes: usize,
+    pub table_bytes: usize,
+}
+
+/// `ui_render_bytes` (UI-render bank): render the picked u16 token id's literal
+/// bytes to the transcript. The id_bytes bank is mapped by the caller; A holds
+/// the row's low byte, the routine reads `len` then each byte, painting
+/// `tile == byte` at the transcript cursor (a newline byte advances the row,
+/// exactly like the host `expected_subword_transcript_bg`). Sets `sh.tfull`
+/// when the region fills. HL points at the row start on entry.
+fn emit_ui_render_bytes(asm: &mut ModelAsm, sh: &ShellWram, bcur: u16) {
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+    asm.label("ui_render_bytes");
+    // LCD off around the transcript writes (a handful of BG cells per token):
+    // no VBlank sync needed, and it keeps the fast emulator run cheap while
+    // staying glitch-free on real hardware. Restored at `urb_done`. HL (the row
+    // pointer) must survive, so stash/restore A only.
+    ld_rr(asm, Reg8::D, Reg8::H);
+    ld_rr(asm, Reg8::E, Reg8::L);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_LCDC);
+    ld_rr(asm, Reg8::H, Reg8::D);
+    ld_rr(asm, Reg8::L, Reg8::E);
+    // B = len := (HL++) ; if 0, nothing to draw
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "urb_ret");
+    ld_rr(asm, Reg8::B, Reg8::A);
+    // Save the row pointer (HL) in DE across the per-byte cell writes.
+    ld_rr(asm, Reg8::D, Reg8::H);
+    ld_rr(asm, Reg8::E, Reg8::L);
+    asm.label("urb_byte");
+    // stop if the transcript region is already full
+    a_from(asm, sh.tfull);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::NZ), "urb_ret");
+    // byte := (DE++) ; save B (remaining count) and DE (row cursor)
+    ld_rr(asm, Reg8::H, Reg8::D);
+    ld_rr(asm, Reg8::L, Reg8::E);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::D, Reg8::H);
+    ld_rr(asm, Reg8::E, Reg8::L);
+    a_to(asm, bcur); // stash the current byte
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(SUBWORD_NEWLINE_BYTE),
+    });
+    asm.jr(Some(Cond::Z), "urb_nl");
+    // glyph write: tile == byte at the transcript cursor, advance one cell
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::Push {
+        src: gbf_asm::isa::Reg16Stack::DE,
+    });
+    ld_rr(asm, Reg8::D, Reg8::A); // D = remaining count (ui_cell_addr clobbers B)
+    a_from(asm, bcur);
+    ld_rr(asm, Reg8::E, Reg8::A); // E = glyph tile (== byte)
+    a_from(asm, sh.tcur);
+    asm.call("ui_cell_addr");
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::E });
+    a_from(asm, sh.tcur);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, sh.tcur);
+    ld_rr(asm, Reg8::B, Reg8::D); // restore remaining count
+    asm.i(Instr::Pop {
+        dst: gbf_asm::isa::Reg16Stack::DE,
+    });
+    asm.jr(None, "urb_advance");
+    asm.label("urb_nl");
+    // newline: erase the block cursor at the current cell, advance to next row
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::Push {
+        src: gbf_asm::isa::Reg16Stack::DE,
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+    a_from(asm, sh.tcur);
+    asm.call("ui_cell_addr");
+    asm.i(Instr::Ld8HlFromImm {
+        imm: SUBWORD_SPACE_BYTE,
+    });
+    // new cell = (row + 1) * 20  (mirror ui_render_token's row math)
+    a_from(asm, sh.tcur);
+    ld_r_imm(asm, Reg8::B, 0);
+    asm.label("urb_div");
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(TRANSCRIPT_COLS),
+    });
+    asm.jr(Some(Cond::C), "urb_dd");
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(TRANSCRIPT_COLS),
+    });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(None, "urb_div");
+    asm.label("urb_dd");
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::C),
+    }); // *5
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    }); // *20
+    a_to(asm, sh.tcur);
+    ld_rr(asm, Reg8::B, Reg8::D); // restore remaining count
+    asm.i(Instr::Pop {
+        dst: gbf_asm::isa::Reg16Stack::DE,
+    });
+    asm.label("urb_advance");
+    // if tcur >= TRANSCRIPT_CELLS, mark full; else keep looping bytes
+    a_from(asm, sh.tcur);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(TRANSCRIPT_CELLS),
+    });
+    asm.jr(Some(Cond::C), "urb_next");
+    ld_r_imm(asm, Reg8::A, 1);
+    a_to(asm, sh.tfull);
+    asm.label("urb_next");
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "urb_byte");
+    asm.label("urb_ret");
+    // draw the block cursor at the current cell unless the region filled
+    a_from(asm, sh.tfull);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::NZ), "urb_done");
+    a_from(asm, sh.tcur);
+    asm.call("ui_cell_addr");
+    asm.i(Instr::Ld8HlFromImm {
+        imm: SUBWORD_CURSOR_TILE,
+    });
+    asm.label("urb_done");
+    ld_r_imm(asm, Reg8::A, LCDC_ON);
+    ldh_a_to(asm, IO_LCDC); // LCD back on
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `dui_init` (subword demo UI bank): LCD off, palette/scroll, upload the
+/// byte-indexed font (normal at 0x8000, inverted at 0x8800), clear the whole BG
+/// map to the space byte, LCD on. No keyboard / status chrome — the demo pokes
+/// its prompt as token ids, so the screen is just the transcript.
+fn emit_dui_init(asm: &mut ModelAsm) {
+    use gbf_asm::isa::Reg16Addr;
+    asm.label("dui_init");
+    // LCD off immediately for the bulk VRAM upload (no VBlank wait needed).
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_LCDC);
+    ldh_a_to(asm, IO_SCY);
+    ldh_a_to(asm, IO_SCX);
+    ld_r_imm(asm, Reg8::A, BGP_STANDARD);
+    ldh_a_to(asm, IO_BGP);
+    // font: normal tiles at 0x8000
+    asm.ld16_label(Reg16Data::HL, "subword_font", 0);
+    ld16(asm, Reg16Data::DE, 0x8000);
+    ld16(asm, Reg16Data::BC, SUBWORD_FONT_BYTES as u16);
+    asm.label("dui_fc1");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "dui_fc1");
+    // font: inverted tiles at 0x8800 (complement both planes)
+    asm.ld16_label(Reg16Data::HL, "subword_font", 0);
+    ld16(asm, Reg16Data::DE, 0x8800);
+    ld16(asm, Reg16Data::BC, SUBWORD_FONT_BYTES as u16);
+    asm.label("dui_fc2");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Cpl);
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "dui_fc2");
+    // clear the whole 32x32 BG map to the space byte
+    ld16(asm, Reg16Data::HL, BG_MAP_BASE);
+    ld16(asm, Reg16Data::BC, 1024);
+    asm.label("dui_cl");
+    ld_r_imm(asm, Reg8::A, SUBWORD_SPACE_BYTE);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "dui_cl");
+    ld_r_imm(asm, Reg8::A, LCDC_ON);
+    ldh_a_to(asm, IO_LCDC);
+    asm.i(Instr::Ret { cond: None });
+}
+
+/// `dui_gen_begin` (subword demo): clear the transcript region, reset the
+/// transcript cursor/full flag, draw the block cursor at cell 0. Mirrors
+/// `ui_gen_begin` minus the "GENERATING" message row. LCD off for the bulk
+/// transcript clear (one batched VRAM write, then LCD back on) instead of a
+/// per-row VBlank wait — the transcript spans two BG-map segments (rows 0..9 at
+/// stride 32) so a single LCD-off clear is both correct and fast.
+fn emit_dui_gen_begin(asm: &mut ModelAsm, sh: &ShellWram) {
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+    asm.label("dui_gen_begin");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_LCDC); // LCD off for the bulk clear (no VBlank wait needed)
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, sh.ui_row);
+    asm.label("dgb_row");
+    a_from(asm, sh.ui_row);
+    for _ in 0..4 {
+        asm.i(Instr::AddA {
+            src: AluSrc8::Reg(Reg8::A),
+        });
+    }
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    }); // row*32 low, CF = bit 8
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (BG_MAP_BASE >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_r_imm(asm, Reg8::B, TRANSCRIPT_COLS);
+    ld_r_imm(asm, Reg8::A, SUBWORD_SPACE_BYTE);
+    asm.label("dgb_fill");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "dgb_fill");
+    a_from(asm, sh.ui_row);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, sh.ui_row);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(TRANSCRIPT_ROWS),
+    });
+    asm.jp(Some(Cond::NZ), "dgb_row");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, sh.tcur);
+    a_to(asm, sh.tfull);
+    ld16(asm, Reg16Data::HL, BG_MAP_BASE);
+    asm.i(Instr::Ld8HlFromImm {
+        imm: SUBWORD_CURSOR_TILE,
+    });
+    ld_r_imm(asm, Reg8::A, LCDC_ON);
+    ldh_a_to(asm, IO_LCDC); // LCD back on
+    asm.i(Instr::Ret { cond: None });
+}
+
+struct DemoUiEntries {
+    init: u16,
+    gen_begin: u16,
+    render_bytes: u16,
+}
+
+/// Build the subword-demo UI bank (render routines + byte-indexed font). The
+/// `id_bytes` table lives in SEPARATE data banks; this bank is code + font.
+fn build_subword_ui_bank(
+    font_tiles: &[u8],
+    sh: &ShellWram,
+    bcur: u16,
+) -> Result<(Vec<u8>, DemoUiEntries), ModelRomError> {
+    debug_assert_eq!(font_tiles.len(), SUBWORD_FONT_BYTES);
+    let mut asm = ModelAsm::new(CHUNK_ENTRY);
+    emit_dui_init(&mut asm);
+    emit_dui_gen_begin(&mut asm, sh);
+    emit_ui_render_bytes(&mut asm, sh, bcur);
+    emit_ui_cell_addr(&mut asm);
+    asm.label("subword_font");
+    asm.bytes(font_tiles.to_vec());
+    let (bytes, labels) = asm.finish()?;
+    if bytes.len() > BANK_BYTES {
+        return Err(ModelRomError::UiBankOverflow { bytes: bytes.len() });
+    }
+    let entries = DemoUiEntries {
+        init: labels["dui_init"],
+        gen_begin: labels["dui_gen_begin"],
+        render_bytes: labels["ui_render_bytes"],
+    };
+    Ok((bytes, entries))
+}
+
+/// Build the subword MoE demo ROM (deploy step 5): the vocab-1024 Paged +
+/// `n_experts`-way MoE student generating multi-char subword text on-device. The
+/// prompt is poked as pre-encoded u16 token ids (`prompt_ids_addr` /
+/// `prompt_len_addr`); setting `go_addr` to 1 runs one generation: warm up over
+/// the poked prompt ids, then sample `n_gen_tokens` tokens from the paged head,
+/// feeding the FULL u16 id back through the embedding lookup and rendering each
+/// token's literal `id_bytes` (multiple chars) to the transcript.
+///
+/// Requires a Paged wide-vocab MoE topology (`is_moe()` and `LogitPaging::Paged`)
+/// and V2 dispatch (one expert resident per token). `font_tiles` is the
+/// byte-indexed [`SUBWORD_FONT_BYTES`] font (tile == byte). `id_bytes[i]` is the
+/// literal byte string token `i` decodes to (`BpeModel::id_bytes`).
+#[allow(clippy::too_many_lines)]
+pub fn build_state_moe_demo_rom(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+) -> Result<SubwordDemoRom, ModelRomError> {
+    use crate::asm_impl_state::{S_INPUT_HI_ADDR, S_SAMPLED_HI_ADDR};
+    if n_gen_tokens == 0 || n_gen_tokens > SHELL_MAX_GEN_TOKENS {
+        return Err(ModelRomError::BadTokenCount {
+            n_tokens: u16::from(n_gen_tokens),
+        });
+    }
+    if font_tiles.len() != SUBWORD_FONT_BYTES {
+        return Err(ModelRomError::UiBankOverflow {
+            bytes: font_tiles.len(),
+        });
+    }
+    let t = model.topology;
+    if !t.is_moe() || t.logit_paging != crate::state_model_ref::LogitPaging::Paged {
+        return Err(ModelRomError::BadTokenCount {
+            n_tokens: u16::from(n_gen_tokens),
+        });
+    }
+
+    // id_bytes table geometry (fixed-stride rows across data banks).
+    let max_len = id_bytes.iter().map(Vec::len).max().unwrap_or(1);
+    let geom = IdBytesTableGeometry::plan(t.vocab, max_len);
+    let id_bytes_banks = build_id_bytes_banks(id_bytes, geom);
+
+    let layout = StateWramLayout::plan(model.topology, model.down_width, true)?;
+    let sh = layout
+        .shell
+        .expect("shell layout allocates the shell block");
+    // extra banks: 1 UI (code + font) + the id_bytes data banks.
+    let extra_banks = 1 + geom.bank_count;
+    let plan = plan_state_rom_with(model, layout, extra_banks, WeightLowering::V2Dispatch)?;
+    let ui_bank = plan.extras_bank0();
+    let id_bytes_bank0 = ui_bank + 1;
+
+    // WRAM reuse of the shell 0x100 page: the host pokes the prompt-id buffer
+    // (u16 LE, +0x40..+0xC0 = 64 ids), the demo copies each token's id_bytes row
+    // into `row_buf` (+0xC0..+0x100), and `go`/`plen`/cursors reuse the control
+    // bytes. `bcur` is a per-byte render scratch. The stride must fit `row_buf`.
+    let prompt_ids_addr = sh.prompt + 0x40;
+    let row_buf = sh.prompt + 0xC0;
+    let go_addr = sh.submit;
+    let plen_addr = sh.plen;
+    let bcur = sh.prompt + 0x2B; // free byte (anim_fc uses +0x2A; unused here)
+    if geom.stride > 0x40 {
+        return Err(ModelRomError::TableRowTooWide {
+            stride: geom.stride,
+        });
+    }
+    // 64-id prompt cap (u16 buffer); more would collide with `row_buf`.
+    if n_gen_tokens == 0 {
+        return Err(ModelRomError::BadTokenCount { n_tokens: 0 });
+    }
+
+    let (ui_bytes, ui) = build_subword_ui_bank(font_tiles, &sh, bcur)?;
+    let ui_bank_bytes = ui_bytes.len();
+
+    let id_bytes_geom_log_rpb = geom.rows_per_bank.trailing_zeros();
+    let id_bytes_log_stride = geom.stride.trailing_zeros();
+    // Full 16-bit row-within-bank mask (rows_per_bank can exceed 256).
+    let id_bytes_row_mask_lo = ((geom.rows_per_bank - 1) & 0xFF) as u8;
+    let id_bytes_row_mask_hi = (((geom.rows_per_bank - 1) >> 8) & 0xFF) as u8;
+
+    let map_ui = |asm: &mut ModelAsm| set_bank(asm, ui_bank as u16);
+    let call_abs = |asm: &mut ModelAsm, addr: u16| {
+        asm.i(Instr::Call { cond: None, addr });
+    };
+
+    // --- bank-0 driver ---
+    let mut asm = ModelAsm::new(ENTRY_POINT);
+    asm.i(Instr::Di);
+    ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
+    // zero the shell control block (go/plen/cursors); the prompt-id buffer is
+    // host-poked, so it lives above `sh.end` and is not cleared here.
+    ld16(&mut asm, Reg16Data::HL, sh.prompt);
+    ld_r_imm(&mut asm, Reg8::B, (sh.end - sh.prompt) as u8);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.label("dsh_zero");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: gbf_asm::isa::Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "dsh_zero");
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.init);
+
+    // --- idle: poll for the poked `go` flag (tight loop; no VBlank wait — the
+    // screen is static while idle, so no VRAM writes need syncing) ---
+    asm.label("demo_idle");
+    a_from(&mut asm, go_addr);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::Z), "demo_idle");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(&mut asm, go_addr);
+    a_from(&mut asm, plen_addr);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::Z), "demo_idle"); // ignore empty prompts
+
+    // --- generation run ---
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.gen_begin);
+    // zero the recurrent state (fresh context per submit)
+    emit_zero16(
+        &mut asm,
+        plan.layout.state,
+        (4 * plan.layout.topology.state_slots) as u16,
+    );
+    // canonicalize the RNG seed (0 -> 1)
+    a_from(&mut asm, S_RNG_ADDR);
+    ld_rr(&mut asm, Reg8::B, Reg8::A);
+    a_from(&mut asm, S_RNG_ADDR + 1);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "dsh_rng_ok");
+    ld_r_imm(&mut asm, Reg8::A, 1);
+    a_to(&mut asm, S_RNG_ADDR);
+    asm.label("dsh_rng_ok");
+
+    // --- warmup: one forward pass per poked prompt token id (no RNG draws) ---
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.widx);
+    asm.label("dsh_warm_loop");
+    // load prompt_ids[widx] (u16 LE) -> S_INPUT / S_INPUT_HI
+    a_from(&mut asm, sh.widx);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    }); // *2
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((prompt_ids_addr & 0xFF) as u8),
+    });
+    ld_rr(&mut asm, Reg8::L, Reg8::A);
+    ld_r_imm(&mut asm, Reg8::A, (prompt_ids_addr >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(&mut asm, Reg8::H, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: gbf_asm::isa::Reg16Addr::Hli,
+    });
+    a_to(&mut asm, S_INPUT_ADDR);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    a_to(&mut asm, S_INPUT_HI_ADDR);
+    asm.call("forward_pass");
+    asm.label("demo_warm_boundary");
+    a_from(&mut asm, sh.widx);
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.widx);
+    ld_rr(&mut asm, Reg8::B, Reg8::A);
+    a_from(&mut asm, plen_addr);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::NZ), "dsh_warm_loop");
+
+    // --- generation: sample (paged), render id_bytes, feed the full id back ---
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.gcount);
+    asm.label("dsh_gen_loop");
+    asm.call("sample_paged");
+    // feed the full picked id back: S_SAMPLED/HI -> S_INPUT/HI
+    a_from(&mut asm, S_SAMPLED_ADDR);
+    a_to(&mut asm, S_INPUT_ADDR);
+    a_from(&mut asm, S_SAMPLED_HI_ADDR);
+    a_to(&mut asm, S_INPUT_HI_ADDR);
+    // render: the id_bytes row and the render CODE live in DIFFERENT switchable
+    // banks, so copy the row into WRAM (`row_buf`) while the id_bytes bank is
+    // mapped, THEN map the UI-render bank and paint from WRAM.
+    // id = S_SAMPLED_HI:S_SAMPLED ; bank = id_bytes_bank0 + (id >> log_rpb)
+    a_from(&mut asm, S_SAMPLED_HI_ADDR);
+    ld_rr(&mut asm, Reg8::D, Reg8::A);
+    a_from(&mut asm, S_SAMPLED_ADDR);
+    for _ in 0..id_bytes_geom_log_rpb {
+        asm.i(Instr::Srl {
+            target: CbTarget::Reg(Reg8::D),
+        });
+        asm.i(Instr::Rr {
+            target: CbTarget::Reg(Reg8::A),
+        });
+    }
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((id_bytes_bank0 & 0xFF) as u8),
+    });
+    a_to(&mut asm, MBC5_ROMB0);
+    ld_r_imm(&mut asm, Reg8::A, (id_bytes_bank0 >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(&mut asm, MBC5_ROMB1);
+    // HL = CHUNK_ENTRY + ((id & (rows_per_bank-1)) << log_stride)  (row within
+    // bank). The row index is a FULL 16-bit value (ids >= 256), so mask both
+    // bytes of the id then 16-bit shift-left by log_stride.
+    a_from(&mut asm, S_SAMPLED_ADDR);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(id_bytes_row_mask_lo),
+    });
+    ld_rr(&mut asm, Reg8::L, Reg8::A);
+    a_from(&mut asm, S_SAMPLED_HI_ADDR);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(id_bytes_row_mask_hi),
+    });
+    ld_rr(&mut asm, Reg8::H, Reg8::A);
+    for _ in 0..id_bytes_log_stride {
+        asm.i(Instr::AddHl { src: Reg16Data::HL });
+    }
+    ld_rr(&mut asm, Reg8::A, Reg8::H);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((CHUNK_ENTRY >> 8) as u8),
+    });
+    ld_rr(&mut asm, Reg8::H, Reg8::A);
+    // copy `stride` bytes: (HL) -> row_buf
+    ld16(&mut asm, Reg16Data::DE, row_buf);
+    ld_r_imm(&mut asm, Reg8::B, geom.stride as u8);
+    asm.label("dsh_rowcopy");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: gbf_asm::isa::Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: gbf_asm::isa::Reg16Addr::DE,
+    });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "dsh_rowcopy");
+    // switch to the UI-render bank and paint the row's bytes (HL = row_buf)
+    ld16(&mut asm, Reg16Data::HL, row_buf);
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.render_bytes);
+    asm.label("demo_token_boundary");
+    a_from(&mut asm, sh.gcount);
+    asm.i(Instr::Inc8 {
+        dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.gcount);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(n_gen_tokens),
+    });
+    asm.jp(Some(Cond::Z), "demo_gen_done");
+    a_from(&mut asm, sh.tfull);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::NZ), "demo_gen_done");
+    asm.call("forward_pass");
+    asm.jp(None, "dsh_gen_loop");
+
+    asm.label("demo_gen_done");
+    asm.jp(None, "demo_idle");
+
+    // per-token forward pass subroutine (paged head; wide emb feedback)
+    asm.label("forward_pass");
+    emit_state_forward_body(&mut asm, &plan);
+    asm.i(Instr::Ret { cond: None });
+
+    emit_state_routines_and_tables(&mut asm, model, &plan, Some(sampler));
+
+    let (driver, labels) = asm.finish()?;
+    let driver_bytes = driver.len();
+    if usize::from(ENTRY_POINT) + driver_bytes > usize::from(CHUNK_ENTRY) {
+        return Err(ModelRomError::DriverOverflowsBank0 {
+            bytes: driver_bytes,
+        });
+    }
+
+    let mut extra_payloads = Vec::with_capacity(extra_banks);
+    extra_payloads.push(ui_bytes);
+    extra_payloads.extend(id_bytes_banks);
+    let (rom, rom_size, table_bytes) =
+        assemble_state_rom("GBFMOEDEMO", driver, &plan, model, &extra_payloads)?;
+
+    Ok(SubwordDemoRom {
+        rom,
+        layout: plan.layout.clone(),
+        idle_pc: labels["demo_idle"],
+        warm_boundary_pc: labels["demo_warm_boundary"],
+        token_boundary_pc: labels["demo_token_boundary"],
+        gen_done_pc: labels["demo_gen_done"],
+        n_gen_tokens,
+        prompt_ids_addr,
+        prompt_len_addr: plen_addr,
+        go_addr,
+        id_bytes_geom: geom,
+        rom_size,
+        bank_count: plan.bank_count as u16,
+        driver_bytes,
+        ui_bank_bytes,
         table_bytes,
     })
 }
