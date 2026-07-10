@@ -122,6 +122,22 @@ pub const SHELL_FONT_BYTES: usize = SHELL_FONT_TILES * 16;
 /// 256-byte output ring).
 pub const SHELL_MAX_GEN_TOKENS: u8 = TRANSCRIPT_CELLS;
 
+/// Interactive subword keyboard cells in the legacy 4x19 grid order. Unlike
+/// the charset shell, the cell value is an ASCII byte/tile, not a model id.
+pub const SUBWORD_KEY_BYTES: [u8; KB_CELLS as usize] =
+    *b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-':;()\"/\n";
+/// Typed byte cap for the interactive subword shell (one prompt row).
+pub const SUBWORD_SHELL_PROMPT_CAP: u8 = SHELL_PROMPT_CAP;
+/// Deterministic nonzero RNG seed baked into the default cartridge.
+pub const SUBWORD_SHELL_DEFAULT_RNG_SEED: u16 = 0x5EED;
+/// Display substitution for decoded bytes outside printable ASCII/newline.
+pub const SUBWORD_DISPLAY_FALLBACK_BYTE: u8 = b'?';
+/// Maximum decoded bytes rendered in one VBlank-safe token row.
+pub const SUBWORD_VBLANK_RENDER_MAX_BYTES: usize = 11;
+/// ASCII UI strings for the typed subword shell (tile == byte).
+pub const SUBWORD_STATUS_BYTES: &[u8; 17] = b"A:KEY B:DEL ST:GO";
+pub const SUBWORD_MESSAGE_BYTES: &[u8; 10] = b"GENERATING";
+
 /// Status row text "A:KEY B:DEL ST:GO" as charset_v1 ids.
 pub const SHELL_STATUS_TEXT_IDS: [u8; 17] =
     [0, 69, 10, 4, 24, 62, 1, 69, 3, 4, 11, 62, 18, 19, 69, 6, 14];
@@ -599,6 +615,215 @@ fn emit_ui_frame(asm: &mut ModelAsm, sh: &ShellWram) {
     asm.i(Instr::Ret { cond: None });
 }
 
+/// ASCII-keyboard twin of `ui_frame` for the subword shell. Cell navigation is
+/// unchanged, but the typed/echoed byte comes from [`SUBWORD_KEY_BYTES`].
+fn emit_subword_ui_frame(asm: &mut ModelAsm, sh: &ShellWram) {
+    use gbf_asm::isa::IncDec8Target;
+    let prompt_bg = BG_MAP_BASE + u16::from(PROMPT_ROW) * BG_MAP_STRIDE;
+    asm.label("ui_frame");
+    asm.call("ui_wait_vbl");
+    asm.call("ui_joypad");
+    a_from(asm, sh.joy_prev);
+    asm.i(Instr::Cpl);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, sh.joy_cur);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    ld_rr(asm, Reg8::D, Reg8::A);
+
+    // Right.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_r");
+    a_from(asm, sh.kbcur);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(KB_CELLS - 1),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_r");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.call("ui_kb_move");
+    asm.label("suf_no_r");
+
+    // Left.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x40),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_l");
+    a_from(asm, sh.kbcur);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_l");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.call("ui_kb_move");
+    asm.label("suf_no_l");
+
+    // Up.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x10),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_u");
+    a_from(asm, sh.kbcur);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(KB_COLS),
+    });
+    asm.jr(Some(Cond::C), "suf_no_u");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(KB_COLS),
+    });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.call("ui_kb_move");
+    asm.label("suf_no_u");
+
+    // Down.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x20),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_d");
+    a_from(asm, sh.kbcur);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(KB_CELLS - KB_COLS),
+    });
+    asm.jr(Some(Cond::NC), "suf_no_d");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(KB_COLS),
+    });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.call("ui_kb_move");
+    asm.label("suf_no_d");
+
+    // A: append selected ASCII byte and echo tile==byte.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x01),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_a");
+    a_from(asm, sh.plen);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(SUBWORD_SHELL_PROMPT_CAP),
+    });
+    asm.jr(Some(Cond::NC), "suf_no_a");
+    ld_rr(asm, Reg8::C, Reg8::A);
+    a_from(asm, sh.kbcur);
+    asm.call("sui_key_byte");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
+    ld_rr(asm, Reg8::L, Reg8::C);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::E });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((prompt_bg & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (prompt_bg >> 8) as u8);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::E });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, sh.plen);
+    asm.label("suf_no_a");
+
+    // B: backspace one typed byte.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x02),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_b");
+    a_from(asm, sh.plen);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_b");
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, sh.plen);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((prompt_bg & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (prompt_bg >> 8) as u8);
+    asm.i(Instr::Ld8HlFromImm {
+        imm: SUBWORD_SPACE_BYTE,
+    });
+    asm.label("suf_no_b");
+
+    // START: submit; bank-0 ignores an empty byte prompt.
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x08),
+    });
+    asm.jr(Some(Cond::Z), "suf_no_s");
+    ld_r_imm(asm, Reg8::A, 1);
+    a_to(asm, sh.submit);
+    asm.label("suf_no_s");
+    asm.i(Instr::Ret { cond: None });
+}
+
+fn emit_subword_ui_key_helpers(asm: &mut ModelAsm, sh: &ShellWram) {
+    use gbf_asm::isa::Reg16Stack;
+    // A=cell -> A=ASCII byte; preserve BC/DE for movement callers.
+    asm.label("sui_key_byte");
+    asm.i(Instr::Push {
+        src: Reg16Stack::DE,
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_r_imm(asm, Reg8::D, 0);
+    asm.ld16_label(Reg16Data::HL, "subword_key_bytes", 0);
+    asm.i(Instr::AddHl { src: Reg16Data::DE });
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::DE,
+    });
+    asm.i(Instr::Ret { cond: None });
+
+    // E=old cell, C=new cell.
+    asm.label("ui_kb_move");
+    asm.i(Instr::Push {
+        src: Reg16Stack::DE,
+    });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    a_to(asm, sh.kbcur);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.call("sui_key_byte");
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.call("ui_kb_addr");
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.call("sui_key_byte");
+    ld_rr(asm, Reg8::D, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.call("ui_kb_addr");
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(SHELL_INVERT_TILE_OFFSET),
+    });
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Pop {
+        dst: Reg16Stack::DE,
+    });
+    asm.i(Instr::Ret { cond: None });
+}
+
 /// `ui_warm_mark`: highlight (invert) prompt char [`sh.widx`] on the
 /// prompt row — the warmup progress affordance.
 fn emit_ui_warm_mark(asm: &mut ModelAsm, sh: &ShellWram) {
@@ -931,6 +1156,221 @@ fn emit_ui_init(asm: &mut ModelAsm, sh: &ShellWram) {
     // LCD on
     ld_r_imm(asm, Reg8::A, LCDC_ON);
     ldh_a_to(asm, IO_LCDC);
+    asm.i(Instr::Ret { cond: None });
+}
+
+fn emit_subword_ui_init(asm: &mut ModelAsm, sh: &ShellWram) {
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+    let status_bg = BG_MAP_BASE + u16::from(STATUS_ROW) * BG_MAP_STRIDE;
+    asm.label("ui_init");
+    asm.call("ui_wait_vbl");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    ldh_a_to(asm, IO_LCDC);
+    ldh_a_to(asm, IO_SCY);
+    ldh_a_to(asm, IO_SCX);
+    ld_r_imm(asm, Reg8::A, BGP_STANDARD);
+    ldh_a_to(asm, IO_BGP);
+
+    asm.ld16_label(Reg16Data::HL, "subword_font", 0);
+    ld16(asm, Reg16Data::DE, 0x8000);
+    ld16(asm, Reg16Data::BC, SUBWORD_FONT_BYTES as u16);
+    asm.label("sui_fc1");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "sui_fc1");
+
+    asm.ld16_label(Reg16Data::HL, "subword_font", 0);
+    ld16(asm, Reg16Data::DE, 0x8800);
+    ld16(asm, Reg16Data::BC, SUBWORD_FONT_BYTES as u16);
+    asm.label("sui_fc2");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Cpl);
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "sui_fc2");
+
+    ld16(asm, Reg16Data::HL, BG_MAP_BASE);
+    ld16(asm, Reg16Data::BC, 1024);
+    asm.label("sui_clear");
+    ld_r_imm(asm, Reg8::A, SUBWORD_SPACE_BYTE);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec16 { dst: Reg16Data::BC });
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jr(Some(Cond::NZ), "sui_clear");
+
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("sui_keyboard");
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.call("sui_key_byte");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.call("ui_kb_addr");
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::E });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(KB_CELLS),
+    });
+    asm.jr(Some(Cond::NZ), "sui_keyboard");
+
+    asm.ld16_label(Reg16Data::HL, "subword_status", 0);
+    ld16(asm, Reg16Data::DE, status_bg);
+    ld_r_imm(asm, Reg8::B, SUBWORD_STATUS_BYTES.len() as u8);
+    asm.label("sui_status");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "sui_status");
+
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, sh.kbcur);
+    asm.call("sui_key_byte");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.call("ui_kb_addr");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(SHELL_INVERT_TILE_OFFSET),
+    });
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    ld_r_imm(asm, Reg8::A, LCDC_ON);
+    ldh_a_to(asm, IO_LCDC);
+    asm.i(Instr::Ret { cond: None });
+}
+
+fn emit_subword_ui_gen_begin(asm: &mut ModelAsm, sh: &ShellWram) {
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+    let msg_bg = BG_MAP_BASE + u16::from(MSG_ROW) * BG_MAP_STRIDE;
+    asm.label("ui_gen_begin");
+    asm.call("ui_wait_vbl");
+    asm.ld16_label(Reg16Data::HL, "subword_message", 0);
+    ld16(asm, Reg16Data::DE, msg_bg);
+    ld_r_imm(asm, Reg8::B, SUBWORD_MESSAGE_BYTES.len() as u8);
+    asm.label("sugb_msg");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "sugb_msg");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, sh.ui_row);
+    asm.label("sugb_row");
+    asm.call("ui_wait_vbl");
+    a_from(asm, sh.ui_row);
+    for _ in 0..5 {
+        asm.i(Instr::AddA {
+            src: AluSrc8::Reg(Reg8::A),
+        });
+    }
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (BG_MAP_BASE >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    ld_r_imm(asm, Reg8::B, TRANSCRIPT_COLS);
+    ld_r_imm(asm, Reg8::A, SUBWORD_SPACE_BYTE);
+    asm.label("sugb_fill");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "sugb_fill");
+    a_from(asm, sh.ui_row);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, sh.ui_row);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(TRANSCRIPT_ROWS),
+    });
+    asm.jp(Some(Cond::NZ), "sugb_row");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, sh.tcur);
+    a_to(asm, sh.tfull);
+    asm.call("ui_wait_vbl");
+    ld16(asm, Reg16Data::HL, BG_MAP_BASE);
+    asm.i(Instr::Ld8HlFromImm {
+        imm: SUBWORD_CURSOR_TILE,
+    });
+    asm.i(Instr::Ret { cond: None });
+}
+
+fn emit_subword_ui_gen_end(asm: &mut ModelAsm, sh: &ShellWram, tw: SubwordTokenizerWram) {
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+    let msg_bg = BG_MAP_BASE + u16::from(MSG_ROW) * BG_MAP_STRIDE;
+    let prompt_bg = BG_MAP_BASE + u16::from(PROMPT_ROW) * BG_MAP_STRIDE;
+    asm.label("ui_gen_end");
+    asm.call("ui_wait_vbl");
+    ld16(asm, Reg16Data::HL, msg_bg);
+    ld_r_imm(asm, Reg8::B, SUBWORD_MESSAGE_BYTES.len() as u8);
+    ld_r_imm(asm, Reg8::A, SUBWORD_SPACE_BYTE);
+    asm.label("suge_msg");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "suge_msg");
+    ld16(asm, Reg16Data::HL, prompt_bg);
+    ld_r_imm(asm, Reg8::B, SUBWORD_SHELL_PROMPT_CAP);
+    asm.label("suge_prompt");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "suge_prompt");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, sh.plen);
+    a_to(asm, tw.token_len);
     asm.i(Instr::Ret { cond: None });
 }
 
@@ -1463,6 +1903,607 @@ pub struct SubwordDemoRom {
     pub table_bytes: usize,
 }
 
+/// Self-contained typed-prompt subword cartridge. The user enters ASCII via
+/// JOYP, the ROM performs exact byte-BPE in a switchable tokenizer bank, warms
+/// the recurrent state from the resulting u16 ids, and renders sampled
+/// multi-byte tokens. No host poke is part of this contract.
+#[derive(Debug, Clone)]
+pub struct SubwordShellRom {
+    pub rom: Vec<u8>,
+    pub layout: StateWramLayout,
+    pub paged_head_storage: PagedHeadStorage,
+    pub weight_lowering: WeightLowering,
+    pub idle_pc: u16,
+    pub tokenize_done_pc: u16,
+    pub warm_boundary_pc: u16,
+    pub token_boundary_pc: u16,
+    pub gen_done_pc: u16,
+    pub forward_pass_pc: u16,
+    pub n_gen_tokens: u8,
+    pub rng_seed: u16,
+    /// Raw typed ASCII bytes (`SUBWORD_SHELL_PROMPT_CAP` bytes max).
+    pub prompt_bytes_addr: u16,
+    /// Raw typed-byte length.
+    pub prompt_byte_len_addr: u16,
+    /// Exact encoded ids, u16 little-endian, at most one per typed byte.
+    pub prompt_ids_addr: u16,
+    /// Encoded token count, distinct from the typed-byte length.
+    pub prompt_token_len_addr: u16,
+    pub id_bytes_geom: IdBytesTableGeometry,
+    pub rom_size: RomSize,
+    pub bank_count: u16,
+    pub driver_bytes: usize,
+    pub ui_bank_bytes: usize,
+    pub tokenizer_bank_bytes: usize,
+    pub table_bytes: usize,
+}
+
+/// Interactive tokenizer overlay inside the shell's private 256-byte page.
+/// Typed bytes remain at `prompt+0x00`; the exact u16 token sequence occupies
+/// `prompt+0x40..+0x68`. Everything between is short-lived tokenizer/control
+/// scratch and the render row buffer remains at `+0xC0`.
+#[derive(Debug, Clone, Copy)]
+struct SubwordTokenizerWram {
+    token_len: u16,
+    merge_ptr: u16,
+    new_id: u16,
+    remain: u16,
+    pos: u16,
+    scan: u16,
+    class: u16,
+    pair_left: u16,
+    pair_right: u16,
+    marker: u16,
+    token_base: u16,
+    render_byte: u16,
+    row_buf: u16,
+}
+
+impl SubwordTokenizerWram {
+    fn at(sh: ShellWram) -> Self {
+        Self {
+            token_len: sh.prompt + 0x2A,
+            merge_ptr: sh.prompt + 0x2B,
+            new_id: sh.prompt + 0x2D,
+            remain: sh.prompt + 0x2F,
+            pos: sh.prompt + 0x31,
+            scan: sh.prompt + 0x32,
+            class: sh.prompt + 0x33,
+            pair_left: sh.prompt + 0x34,
+            pair_right: sh.prompt + 0x36,
+            marker: sh.prompt + 0x38,
+            token_base: sh.prompt + 0x40,
+            render_byte: sh.prompt + 0x39,
+            row_buf: sh.prompt + 0xC0,
+        }
+    }
+}
+
+fn validate_subword_tokenizer(
+    vocab: usize,
+    id_bytes: &[Vec<u8>],
+    merges: &[(u16, u16)],
+) -> Result<(), ModelRomError> {
+    if vocab != id_bytes.len() || vocab != 256 + merges.len() {
+        return Err(ModelRomError::UnsupportedTopology {
+            detail: format!(
+                "subword tokenizer shape mismatch: model vocab={vocab}, id_bytes={}, merges={} (expected vocab=256+merges)",
+                id_bytes.len(),
+                merges.len()
+            ),
+        });
+    }
+    if vocab >= 0x8000 {
+        return Err(ModelRomError::UnsupportedTopology {
+            detail: "subword vocab must leave bit 15 free for chunk boundaries".to_string(),
+        });
+    }
+    for (byte, bytes) in id_bytes.iter().take(256).enumerate() {
+        if bytes.as_slice() != [byte as u8] {
+            return Err(ModelRomError::UnsupportedTopology {
+                detail: format!("base byte token {byte} does not decode to itself"),
+            });
+        }
+    }
+    for (rank, &(left, right)) in merges.iter().enumerate() {
+        let new_id = 256 + rank;
+        if merges[..rank].contains(&(left, right)) {
+            return Err(ModelRomError::UnsupportedTopology {
+                detail: format!(
+                    "merge rank {rank} repeats pair ({left},{right}); device rank lookup requires unique merge pairs"
+                ),
+            });
+        }
+        if usize::from(left) >= new_id || usize::from(right) >= new_id {
+            return Err(ModelRomError::UnsupportedTopology {
+                detail: format!(
+                    "merge rank {rank} references undefined pair ({left},{right}); operands must be < {new_id}"
+                ),
+            });
+        }
+        let mut replay = id_bytes[usize::from(left)].clone();
+        replay.extend_from_slice(&id_bytes[usize::from(right)]);
+        if replay != id_bytes[new_id] {
+            return Err(ModelRomError::UnsupportedTopology {
+                detail: format!("merge rank {rank} does not replay id_bytes[{new_id}]"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn subword_ascii_class(byte: u8) -> u8 {
+    if byte.is_ascii_alphabetic() {
+        1
+    } else if byte.is_ascii_digit() {
+        2
+    } else if byte == b'_' {
+        4
+    } else if byte.is_ascii_whitespace() {
+        5
+    } else if byte.is_ascii() {
+        3
+    } else {
+        0
+    }
+}
+
+fn subword_ascii_class_table() -> Vec<u8> {
+    (0..=u8::MAX).map(subword_ascii_class).collect()
+}
+
+/// Emit the exact typed-byte tokenizer into one switchable bank. The builder
+/// emits symbolic pre-layout labels; `ModelAsm::finish` resolves the routine
+/// and table addresses inside that bank.
+fn emit_subword_tokenizer(
+    asm: &mut ModelAsm,
+    sh: ShellWram,
+    tw: SubwordTokenizerWram,
+    merge_count: usize,
+) {
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+
+    asm.label("subword_tokenize");
+    // Seed one u16 base-byte token per typed byte; high bytes start clear.
+    a_from(asm, sh.plen);
+    a_to(asm, tw.token_len);
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("tok_copy");
+    a_from(asm, tw.token_len);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "tok_mark_init");
+    ld_rr(asm, Reg8::L, Reg8::C);
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::E });
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((tw.token_base & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (tw.token_base >> 8) as u8);
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.jp(None, "tok_copy");
+
+    // Mark the first token of every canonical ASCII pre-token chunk with bit
+    // 15. Merge scans reject a pair whose RIGHT token carries this bit.
+    asm.label("tok_mark_init");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, tw.pos);
+    asm.label("tok_chunk");
+    a_from(asm, tw.token_len);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.pos);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "tok_rank_init");
+    // token[pos].high |= $80
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(((tw.token_base + 1) & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (tw.token_base >> 8) as u8);
+    ld_r_imm(asm, Reg8::A, 0x80);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+
+    // Optional leading ASCII space attaches only when the immediately next
+    // byte begins a letter/digit/punctuation/underscore run (classes 1..=4).
+    a_from(asm, tw.pos);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(b' '),
+    });
+    asm.jp(Some(Cond::NZ), "tok_class_current");
+    a_from(asm, tw.pos);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, tw.scan);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.token_len);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "tok_class_current");
+    a_from(asm, tw.scan);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.call("tok_class");
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::Z), "tok_class_current");
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(5),
+    });
+    asm.jp(Some(Cond::NC), "tok_class_current");
+    a_to(asm, tw.class);
+    asm.jp(None, "tok_consume");
+
+    asm.label("tok_class_current");
+    a_from(asm, tw.pos);
+    a_to(asm, tw.scan);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.call("tok_class");
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::Z), "tok_single");
+    a_to(asm, tw.class);
+
+    asm.label("tok_consume");
+    a_from(asm, tw.scan);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.token_len);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "tok_chunk_done");
+    a_from(asm, tw.scan);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::H, (sh.prompt >> 8) as u8);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.call("tok_class");
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.class);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::NZ), "tok_chunk_done");
+    a_from(asm, tw.scan);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, tw.scan);
+    asm.jp(None, "tok_consume");
+
+    asm.label("tok_single");
+    a_from(asm, tw.pos);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, tw.pos);
+    asm.jp(None, "tok_chunk");
+    asm.label("tok_chunk_done");
+    a_from(asm, tw.scan);
+    a_to(asm, tw.pos);
+    asm.jp(None, "tok_chunk");
+
+    // Canonical BPE as rank-ordered passes. A token created at rank r cannot
+    // participate in an earlier rank because merge operands at rank q are all
+    // < 256+q. Thus one left-to-right non-overlapping pass per rank is exactly
+    // the minimum-rank/leftmost loop, without a runtime hash/CSR lookup.
+    asm.label("tok_rank_init");
+    asm.ld16_label(Reg16Data::HL, "tok_merge_pairs", 0);
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, tw.merge_ptr);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, tw.merge_ptr + 1);
+    ld_r_imm(asm, Reg8::A, 0x00);
+    a_to(asm, tw.new_id);
+    ld_r_imm(asm, Reg8::A, 0x01);
+    a_to(asm, tw.new_id + 1);
+    let merge_count = merge_count as u16;
+    ld_r_imm(asm, Reg8::A, merge_count as u8);
+    a_to(asm, tw.remain);
+    ld_r_imm(asm, Reg8::A, (merge_count >> 8) as u8);
+    a_to(asm, tw.remain + 1);
+    asm.label("tok_rank");
+    a_from(asm, tw.remain);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.remain + 1);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "tok_done");
+    a_from(asm, tw.merge_ptr);
+    ld_rr(asm, Reg8::L, Reg8::A);
+    a_from(asm, tw.merge_ptr + 1);
+    ld_rr(asm, Reg8::H, Reg8::A);
+    for dst in [
+        tw.pair_left,
+        tw.pair_left + 1,
+        tw.pair_right,
+        tw.pair_right + 1,
+    ] {
+        asm.i(Instr::LdAFromReg16Addr {
+            src: Reg16Addr::Hli,
+        });
+        a_to(asm, dst);
+    }
+    ld_rr(asm, Reg8::A, Reg8::L);
+    a_to(asm, tw.merge_ptr);
+    ld_rr(asm, Reg8::A, Reg8::H);
+    a_to(asm, tw.merge_ptr + 1);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(asm, tw.pos);
+
+    asm.label("tok_scan");
+    a_from(asm, tw.pos);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.token_len);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::C), "tok_next_rank");
+    asm.jp(Some(Cond::Z), "tok_next_rank");
+    a_from(asm, tw.pos);
+    asm.call("tok_ptr");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x80),
+    });
+    a_to(asm, tw.marker);
+    a_from(asm, tw.pair_left);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jp(Some(Cond::NZ), "tok_no_merge");
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x7F),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    a_from(asm, tw.pair_left + 1);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    asm.jp(Some(Cond::NZ), "tok_no_merge");
+    // HL already points at the right token.
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::C, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x80),
+    });
+    asm.jp(Some(Cond::NZ), "tok_no_merge");
+    a_from(asm, tw.pair_right);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::C),
+    });
+    asm.jp(Some(Cond::NZ), "tok_no_merge");
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x7F),
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    a_from(asm, tw.pair_right + 1);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::E),
+    });
+    asm.jp(Some(Cond::NZ), "tok_no_merge");
+
+    // token[pos] := (256+rank) | inherited-left-boundary.
+    a_from(asm, tw.pos);
+    asm.call("tok_ptr");
+    a_from(asm, tw.new_id);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    a_from(asm, tw.new_id + 1);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x7F),
+    });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.marker);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+
+    // Shift token[pos+2..len] left by one u16 slot.
+    a_from(asm, tw.pos);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, tw.scan);
+    asm.label("tok_shift");
+    a_from(asm, tw.scan);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    ld_rr(asm, Reg8::B, Reg8::A);
+    a_from(asm, tw.token_len);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "tok_shift_done");
+    ld_rr(asm, Reg8::A, Reg8::B);
+    asm.call("tok_ptr");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::E, Reg8::A);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::D });
+    a_from(asm, tw.scan);
+    asm.call("tok_ptr");
+    ld_rr(asm, Reg8::A, Reg8::E);
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    ld_rr(asm, Reg8::A, Reg8::D);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    a_from(asm, tw.scan);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, tw.scan);
+    asm.jp(None, "tok_shift");
+    asm.label("tok_shift_done");
+    a_from(asm, tw.token_len);
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, tw.token_len);
+
+    asm.label("tok_no_merge");
+    a_from(asm, tw.pos);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(asm, tw.pos);
+    asm.jp(None, "tok_scan");
+
+    asm.label("tok_next_rank");
+    a_from(asm, tw.new_id);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm(1),
+    });
+    a_to(asm, tw.new_id);
+    a_from(asm, tw.new_id + 1);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, tw.new_id + 1);
+    a_from(asm, tw.remain);
+    asm.i(Instr::SubA {
+        src: AluSrc8::Imm(1),
+    });
+    a_to(asm, tw.remain);
+    a_from(asm, tw.remain + 1);
+    asm.i(Instr::SbcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(asm, tw.remain + 1);
+    asm.jp(None, "tok_rank");
+
+    asm.label("tok_done");
+    // Boundary bits are tokenizer-internal. Publish plain u16 ids to the
+    // warmup loop/debug contract.
+    ld_r_imm(asm, Reg8::C, 0);
+    asm.label("tok_unmark");
+    a_from(asm, tw.token_len);
+    ld_rr(asm, Reg8::B, Reg8::A);
+    ld_rr(asm, Reg8::A, Reg8::C);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::Z), "tok_return");
+    asm.call("tok_ptr");
+    asm.i(Instr::Inc16 { dst: Reg16Data::HL });
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(0x7F),
+    });
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::C),
+    });
+    asm.jp(None, "tok_unmark");
+    asm.label("tok_return");
+    asm.i(Instr::Ret { cond: None });
+
+    asm.label("tok_ptr");
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((tw.token_base & 0xFF) as u8),
+    });
+    ld_rr(asm, Reg8::L, Reg8::A);
+    ld_r_imm(asm, Reg8::A, (tw.token_base >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(asm, Reg8::H, Reg8::A);
+    asm.i(Instr::Ret { cond: None });
+
+    asm.label("tok_class");
+    ld_rr(asm, Reg8::E, Reg8::A);
+    ld_r_imm(asm, Reg8::D, 0);
+    asm.ld16_label(Reg16Data::HL, "tok_class_table", 0);
+    asm.i(Instr::AddHl { src: Reg16Data::DE });
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    asm.i(Instr::Ret { cond: None });
+}
+
+fn build_subword_tokenizer_bank(
+    sh: ShellWram,
+    tw: SubwordTokenizerWram,
+    merges: &[(u16, u16)],
+) -> Result<(Vec<u8>, u16), ModelRomError> {
+    let mut asm = ModelAsm::new(CHUNK_ENTRY);
+    emit_subword_tokenizer(&mut asm, sh, tw, merges.len());
+    asm.label("tok_merge_pairs");
+    let mut pair_bytes = Vec::with_capacity(4 * merges.len());
+    for &(left, right) in merges {
+        pair_bytes.extend_from_slice(&left.to_le_bytes());
+        pair_bytes.extend_from_slice(&right.to_le_bytes());
+    }
+    asm.bytes(pair_bytes);
+    asm.label("tok_class_table");
+    asm.bytes(subword_ascii_class_table());
+    let (bytes, labels) = asm.finish()?;
+    if bytes.len() > BANK_BYTES {
+        return Err(ModelRomError::UiBankOverflow { bytes: bytes.len() });
+    }
+    Ok((bytes, labels["subword_tokenize"]))
+}
+
 /// `ui_render_bytes` (UI-render bank): render the picked u16 token id's literal
 /// bytes to the transcript. The id_bytes bank is mapped by the caller; A holds
 /// the row's low byte, the routine reads `len` then each byte, painting
@@ -1472,18 +2513,21 @@ pub struct SubwordDemoRom {
 fn emit_ui_render_bytes(asm: &mut ModelAsm, sh: &ShellWram, bcur: u16) {
     use gbf_asm::isa::{IncDec8Target, Reg16Addr};
     asm.label("ui_render_bytes");
-    // LCD off around the transcript writes (a handful of BG cells per token):
-    // no VBlank sync needed, and it keeps the fast emulator run cheap while
-    // staying glitch-free on real hardware. Restored at `urb_done`. HL (the row
-    // pointer) must survive, so stash/restore A only.
+    // A token is capped by the validated row-buffer stride and fits one VBlank.
+    // Preserve the row pointer while waiting; never disable LCD mid-scanline.
     ld_rr(asm, Reg8::D, Reg8::H);
     ld_rr(asm, Reg8::E, Reg8::L);
+    asm.call("ui_wait_vbl");
+    ld_rr(asm, Reg8::H, Reg8::D);
+    ld_rr(asm, Reg8::L, Reg8::E);
+    // A decoded row can take longer than the remainder of one VBlank once
+    // cell-address division and cursor maintenance are included. Enter
+    // VBlank first, then disable the LCD for the whole batch; every exit
+    // funnels through `urb_done`, which restores LCDC.
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
     ldh_a_to(asm, IO_LCDC);
-    ld_rr(asm, Reg8::H, Reg8::D);
-    ld_rr(asm, Reg8::L, Reg8::E);
     // B = len := (HL++) ; if 0, nothing to draw
     asm.i(Instr::LdAFromReg16Addr {
         src: Reg16Addr::Hli,
@@ -1516,6 +2560,20 @@ fn emit_ui_render_bytes(asm: &mut ModelAsm, sh: &ShellWram, bcur: u16) {
         src: AluSrc8::Imm(SUBWORD_NEWLINE_BYTE),
     });
     asm.jr(Some(Cond::Z), "urb_nl");
+    // Font coverage is bytes 0..127, but only printable ASCII is legible.
+    // Preserve the true token/feedback bytes in WRAM and sanitize display only.
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x20),
+    });
+    asm.jr(Some(Cond::C), "urb_fallback");
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(0x7F),
+    });
+    asm.jr(Some(Cond::C), "urb_glyph_ok");
+    asm.label("urb_fallback");
+    ld_r_imm(asm, Reg8::A, SUBWORD_DISPLAY_FALLBACK_BYTE);
+    a_to(asm, bcur);
+    asm.label("urb_glyph_ok");
     // glyph write: tile == byte at the transcript cursor, advance one cell
     ld_rr(asm, Reg8::A, Reg8::B);
     asm.i(Instr::Push {
@@ -1618,7 +2676,7 @@ fn emit_ui_render_bytes(asm: &mut ModelAsm, sh: &ShellWram, bcur: u16) {
     });
     asm.label("urb_done");
     ld_r_imm(asm, Reg8::A, LCDC_ON);
-    ldh_a_to(asm, IO_LCDC); // LCD back on
+    ldh_a_to(asm, IO_LCDC);
     asm.i(Instr::Ret { cond: None });
 }
 
@@ -1629,7 +2687,8 @@ fn emit_ui_render_bytes(asm: &mut ModelAsm, sh: &ShellWram, bcur: u16) {
 fn emit_dui_init(asm: &mut ModelAsm) {
     use gbf_asm::isa::Reg16Addr;
     asm.label("dui_init");
-    // LCD off immediately for the bulk VRAM upload (no VBlank wait needed).
+    asm.call("ui_wait_vbl");
+    // Disable LCD only from VBlank for the bulk VRAM upload.
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -1699,6 +2758,7 @@ fn emit_dui_init(asm: &mut ModelAsm) {
 fn emit_dui_gen_begin(asm: &mut ModelAsm, sh: &ShellWram) {
     use gbf_asm::isa::{IncDec8Target, Reg16Addr};
     asm.label("dui_gen_begin");
+    asm.call("ui_wait_vbl");
     asm.i(Instr::XorA {
         src: AluSrc8::Reg(Reg8::A),
     });
@@ -1762,6 +2822,55 @@ struct DemoUiEntries {
     render_bytes: u16,
 }
 
+struct SubwordShellUiEntries {
+    init: u16,
+    frame: u16,
+    gen_begin: u16,
+    gen_end: u16,
+    render_bytes: u16,
+}
+
+fn build_subword_shell_ui_bank(
+    font_tiles: &[u8],
+    sh: ShellWram,
+    tw: SubwordTokenizerWram,
+) -> Result<(Vec<u8>, SubwordShellUiEntries), ModelRomError> {
+    debug_assert_eq!(font_tiles.len(), SUBWORD_FONT_BYTES);
+    let mut asm = ModelAsm::new(CHUNK_ENTRY);
+    emit_subword_ui_init(&mut asm, &sh);
+    emit_subword_ui_frame(&mut asm, &sh);
+    emit_subword_ui_gen_begin(&mut asm, &sh);
+    emit_subword_ui_gen_end(&mut asm, &sh, tw);
+    emit_ui_render_bytes(&mut asm, &sh, tw.render_byte);
+    emit_ui_wait_vbl(&mut asm);
+    emit_ui_joypad(&mut asm, &sh);
+    emit_ui_kb_addr(&mut asm);
+    emit_ui_cell_addr(&mut asm);
+    emit_subword_ui_key_helpers(&mut asm, &sh);
+    asm.label("subword_font");
+    asm.bytes(font_tiles.to_vec());
+    asm.label("subword_key_bytes");
+    asm.bytes(SUBWORD_KEY_BYTES.to_vec());
+    asm.label("subword_status");
+    asm.bytes(SUBWORD_STATUS_BYTES.to_vec());
+    asm.label("subword_message");
+    asm.bytes(SUBWORD_MESSAGE_BYTES.to_vec());
+    let (bytes, labels) = asm.finish()?;
+    if bytes.len() > BANK_BYTES {
+        return Err(ModelRomError::UiBankOverflow { bytes: bytes.len() });
+    }
+    Ok((
+        bytes,
+        SubwordShellUiEntries {
+            init: labels["ui_init"],
+            frame: labels["ui_frame"],
+            gen_begin: labels["ui_gen_begin"],
+            gen_end: labels["ui_gen_end"],
+            render_bytes: labels["ui_render_bytes"],
+        },
+    ))
+}
+
 /// Automatic storage policy for the generic subword demo. This deliberately
 /// recognizes only the production dense d192/V1024 no-dump layout; callers of
 /// every older builder and all MoE demos retain streamed WRAM semantics.
@@ -1796,6 +2905,7 @@ fn build_subword_ui_bank(
     emit_dui_gen_begin(&mut asm, sh);
     emit_ui_render_bytes(&mut asm, sh, bcur);
     emit_ui_cell_addr(&mut asm);
+    emit_ui_wait_vbl(&mut asm);
     asm.label("subword_font");
     asm.bytes(font_tiles.to_vec());
     let (bytes, labels) = asm.finish()?;
@@ -1808,6 +2918,376 @@ fn build_subword_ui_bank(
         render_bytes: labels["ui_render_bytes"],
     };
     Ok((bytes, entries))
+}
+
+/// Build the self-contained JOYP-driven subword shell with the deterministic
+/// default RNG seed [`SUBWORD_SHELL_DEFAULT_RNG_SEED`]. `merges[r] = (a,b)`
+/// creates token `256+r`; the builder validates that replay against `id_bytes`
+/// before embedding the rank-ordered tokenizer program.
+pub fn build_state_subword_shell_rom(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+    merges: &[(u16, u16)],
+) -> Result<SubwordShellRom, ModelRomError> {
+    build_state_subword_shell_rom_with_seed(
+        model,
+        sampler,
+        n_gen_tokens,
+        font_tiles,
+        id_bytes,
+        merges,
+        SUBWORD_SHELL_DEFAULT_RNG_SEED,
+    )
+}
+
+/// Seed-explicit twin of [`build_state_subword_shell_rom`]. A zero seed is
+/// rejected: the cartridge must not depend on power-on WRAM contents.
+#[allow(clippy::too_many_arguments)]
+pub fn build_state_subword_shell_rom_with_seed(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+    merges: &[(u16, u16)],
+    rng_seed: u16,
+) -> Result<SubwordShellRom, ModelRomError> {
+    build_state_subword_shell_rom_impl(
+        model,
+        sampler,
+        n_gen_tokens,
+        font_tiles,
+        id_bytes,
+        merges,
+        rng_seed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_state_subword_shell_rom_impl(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+    merges: &[(u16, u16)],
+    rng_seed: u16,
+) -> Result<SubwordShellRom, ModelRomError> {
+    use crate::asm_impl_state::{S_INPUT_HI_ADDR, S_SAMPLED_HI_ADDR};
+    use gbf_asm::isa::{IncDec8Target, Reg16Addr};
+
+    if n_gen_tokens == 0 || n_gen_tokens > SHELL_MAX_GEN_TOKENS {
+        return Err(ModelRomError::BadTokenCount {
+            n_tokens: u16::from(n_gen_tokens),
+        });
+    }
+    if rng_seed == 0 {
+        return Err(ModelRomError::UnsupportedTopology {
+            detail: "interactive subword shell requires a nonzero RNG seed".to_string(),
+        });
+    }
+    if font_tiles.len() != SUBWORD_FONT_BYTES {
+        return Err(ModelRomError::UiBankOverflow {
+            bytes: font_tiles.len(),
+        });
+    }
+    let t = model.topology;
+    validate_subword_tokenizer(t.vocab, id_bytes, merges)?;
+    if t.is_moe() || t.logit_paging != crate::state_model_ref::LogitPaging::Paged {
+        return Err(ModelRomError::UnsupportedTopology {
+            detail: "interactive subword shell requires a dense Paged model".to_string(),
+        });
+    }
+
+    let max_len = id_bytes.iter().map(Vec::len).max().unwrap_or(1);
+    if max_len > SUBWORD_VBLANK_RENDER_MAX_BYTES {
+        return Err(ModelRomError::TableRowTooWide { stride: max_len });
+    }
+    let geom = IdBytesTableGeometry::plan(t.vocab, max_len);
+    if geom.stride > 0x40 {
+        return Err(ModelRomError::TableRowTooWide {
+            stride: geom.stride,
+        });
+    }
+    let id_bytes_banks = build_id_bytes_banks(id_bytes, geom);
+    let layout = StateWramLayout::plan(t, model.down_width, true)?;
+    let sh = layout
+        .shell
+        .expect("interactive shell layout has shell page");
+    debug_assert_eq!(
+        sh.prompt & 0x00FF,
+        0,
+        "interactive tokenizer indexes prompt storage through L"
+    );
+    let tw = SubwordTokenizerWram::at(sh);
+    let storage = subword_demo_paged_head_storage(t, &layout);
+    // UI + tokenizer + id_bytes banks follow the model tables.
+    let extra_banks = 2 + geom.bank_count;
+    let plan = plan_state_rom_with_paged_head_storage(
+        model,
+        layout,
+        extra_banks,
+        WeightLowering::V3,
+        true,
+        storage,
+    )?;
+    let ui_bank = plan.extras_bank0();
+    let tokenizer_bank = ui_bank + 1;
+    let id_bytes_bank0 = tokenizer_bank + 1;
+    let (ui_bytes, ui) = build_subword_shell_ui_bank(font_tiles, sh, tw)?;
+    let ui_bank_bytes = ui_bytes.len();
+    let (tokenizer_bytes, tokenizer_entry) = build_subword_tokenizer_bank(sh, tw, merges)?;
+    let tokenizer_bank_bytes = tokenizer_bytes.len();
+
+    let id_log_rpb = geom.rows_per_bank.trailing_zeros();
+    let id_log_stride = geom.stride.trailing_zeros();
+    let id_row_mask_lo = ((geom.rows_per_bank - 1) & 0xFF) as u8;
+    let id_row_mask_hi = (((geom.rows_per_bank - 1) >> 8) & 0xFF) as u8;
+    let map_ui = |asm: &mut ModelAsm| set_bank(asm, ui_bank as u16);
+    let call_abs = |asm: &mut ModelAsm, addr: u16| asm.i(Instr::Call { cond: None, addr });
+
+    let mut asm = ModelAsm::new(ENTRY_POINT);
+    asm.i(Instr::Di);
+    ld16(&mut asm, Reg16Data::SP, S_STACK_TOP);
+    emit_paged_head_storage_init(&mut asm, plan.paged_head_storage);
+    // Clear typed bytes, controls, token ids and render scratch. The final
+    // 0x40-byte row buffer is overwritten before each render.
+    ld16(&mut asm, Reg16Data::HL, sh.prompt);
+    ld_r_imm(&mut asm, Reg8::B, 0xC0);
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.label("ss_zero");
+    asm.i(Instr::LdReg16AddrFromA {
+        dst: Reg16Addr::Hli,
+    });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "ss_zero");
+    // Deterministic real-hardware seed: never inherit power-on WRAM.
+    ld_r_imm(&mut asm, Reg8::A, rng_seed as u8);
+    a_to(&mut asm, S_RNG_ADDR);
+    ld_r_imm(&mut asm, Reg8::A, (rng_seed >> 8) as u8);
+    a_to(&mut asm, S_RNG_ADDR + 1);
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.init);
+
+    // One JOYP/PPU frame per idle hit.
+    asm.label("subword_shell_idle");
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.frame);
+    a_from(&mut asm, sh.submit);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::Z), "subword_shell_idle");
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.submit);
+    a_from(&mut asm, sh.plen);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::Z), "subword_shell_idle");
+
+    // Exact device BPE, in its own bank. Returned ids have boundary bits
+    // removed and are directly inspectable as u16 LE at `tw.token_base`.
+    set_bank(&mut asm, tokenizer_bank as u16);
+    call_abs(&mut asm, tokenizer_entry);
+    asm.label("subword_tokenize_done");
+
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.gen_begin);
+    emit_zero16(
+        &mut asm,
+        plan.layout.state,
+        (4 * plan.layout.topology.state_slots) as u16,
+    );
+
+    // Warm recurrent state with every exact u16 BPE id, no RNG draws.
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.widx);
+    asm.label("ss_warm_loop");
+    a_from(&mut asm, sh.widx);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((tw.token_base & 0xFF) as u8),
+    });
+    ld_rr(&mut asm, Reg8::L, Reg8::A);
+    ld_r_imm(&mut asm, Reg8::A, (tw.token_base >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    ld_rr(&mut asm, Reg8::H, Reg8::A);
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    a_to(&mut asm, S_INPUT_ADDR);
+    asm.i(Instr::Ld8RegFromHl { dst: Reg8::A });
+    a_to(&mut asm, S_INPUT_HI_ADDR);
+    asm.call("subword_forward_pass");
+    asm.label("subword_warm_boundary");
+    a_from(&mut asm, sh.widx);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.widx);
+    ld_rr(&mut asm, Reg8::B, Reg8::A);
+    a_from(&mut asm, tw.token_len);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Reg(Reg8::B),
+    });
+    asm.jp(Some(Cond::NZ), "ss_warm_loop");
+
+    asm.i(Instr::XorA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.gcount);
+    asm.label("ss_gen_loop");
+    asm.call("sample_paged");
+    a_from(&mut asm, S_SAMPLED_ADDR);
+    a_to(&mut asm, S_INPUT_ADDR);
+    a_from(&mut asm, S_SAMPLED_HI_ADDR);
+    a_to(&mut asm, S_INPUT_HI_ADDR);
+    // Low-byte output ring retained for the existing debug surface.
+    a_from(&mut asm, sh.gcount);
+    ld_rr(&mut asm, Reg8::L, Reg8::A);
+    ld_r_imm(&mut asm, Reg8::H, (plan.layout.out >> 8) as u8);
+    a_from(&mut asm, S_SAMPLED_ADDR);
+    asm.i(Instr::Ld8HlFromReg { src: Reg8::A });
+
+    // Map the selected id_bytes row, copy it to WRAM, then map UI code and
+    // render sanitized glyphs while preserving the true sampled u16 feedback.
+    a_from(&mut asm, S_SAMPLED_HI_ADDR);
+    ld_rr(&mut asm, Reg8::D, Reg8::A);
+    a_from(&mut asm, S_SAMPLED_ADDR);
+    for _ in 0..id_log_rpb {
+        asm.i(Instr::Srl {
+            target: CbTarget::Reg(Reg8::D),
+        });
+        asm.i(Instr::Rr {
+            target: CbTarget::Reg(Reg8::A),
+        });
+    }
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((id_bytes_bank0 & 0xFF) as u8),
+    });
+    a_to(&mut asm, MBC5_ROMB0);
+    ld_r_imm(&mut asm, Reg8::A, (id_bytes_bank0 >> 8) as u8);
+    asm.i(Instr::AdcA {
+        src: AluSrc8::Imm(0),
+    });
+    a_to(&mut asm, MBC5_ROMB1);
+    a_from(&mut asm, S_SAMPLED_ADDR);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(id_row_mask_lo),
+    });
+    ld_rr(&mut asm, Reg8::L, Reg8::A);
+    a_from(&mut asm, S_SAMPLED_HI_ADDR);
+    asm.i(Instr::AndA {
+        src: AluSrc8::Imm(id_row_mask_hi),
+    });
+    ld_rr(&mut asm, Reg8::H, Reg8::A);
+    for _ in 0..id_log_stride {
+        asm.i(Instr::AddHl { src: Reg16Data::HL });
+    }
+    ld_rr(&mut asm, Reg8::A, Reg8::H);
+    asm.i(Instr::AddA {
+        src: AluSrc8::Imm((CHUNK_ENTRY >> 8) as u8),
+    });
+    ld_rr(&mut asm, Reg8::H, Reg8::A);
+    ld16(&mut asm, Reg16Data::DE, tw.row_buf);
+    ld_r_imm(&mut asm, Reg8::B, geom.stride as u8);
+    asm.label("ss_row_copy");
+    asm.i(Instr::LdAFromReg16Addr {
+        src: Reg16Addr::Hli,
+    });
+    asm.i(Instr::LdReg16AddrFromA { dst: Reg16Addr::DE });
+    asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+    asm.i(Instr::Dec8 {
+        dst: IncDec8Target::Reg(Reg8::B),
+    });
+    asm.jr(Some(Cond::NZ), "ss_row_copy");
+    ld16(&mut asm, Reg16Data::HL, tw.row_buf);
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.render_bytes);
+    asm.label("subword_token_boundary");
+    a_from(&mut asm, sh.gcount);
+    asm.i(Instr::Inc8 {
+        dst: IncDec8Target::Reg(Reg8::A),
+    });
+    a_to(&mut asm, sh.gcount);
+    asm.i(Instr::CpA {
+        src: AluSrc8::Imm(n_gen_tokens),
+    });
+    asm.jp(Some(Cond::Z), "ss_gen_done");
+    a_from(&mut asm, sh.tfull);
+    asm.i(Instr::OrA {
+        src: AluSrc8::Reg(Reg8::A),
+    });
+    asm.jp(Some(Cond::NZ), "ss_gen_done");
+    asm.call("subword_forward_pass");
+    asm.jp(None, "ss_gen_loop");
+
+    asm.label("ss_gen_done");
+    map_ui(&mut asm);
+    call_abs(&mut asm, ui.gen_end);
+    asm.label("subword_generation_done");
+    asm.jp(None, "subword_shell_idle");
+
+    asm.label("subword_forward_pass");
+    emit_state_forward_body(&mut asm, &plan);
+    asm.i(Instr::Ret { cond: None });
+    emit_state_routines_and_tables(&mut asm, model, &plan, Some(sampler));
+
+    let (driver, labels) = asm.finish()?;
+    let driver_bytes = driver.len();
+    if usize::from(ENTRY_POINT) + driver_bytes > usize::from(CHUNK_ENTRY) {
+        return Err(ModelRomError::DriverOverflowsBank0 {
+            bytes: driver_bytes,
+        });
+    }
+    let mut extra_payloads = Vec::with_capacity(extra_banks);
+    extra_payloads.push(ui_bytes);
+    extra_payloads.push(tokenizer_bytes);
+    extra_payloads.extend(id_bytes_banks);
+    let (rom, rom_size, table_bytes) =
+        assemble_state_rom("GBFSUBSHELL", driver, &plan, model, &extra_payloads)?;
+
+    Ok(SubwordShellRom {
+        rom,
+        layout: plan.layout.clone(),
+        paged_head_storage: plan.paged_head_storage,
+        weight_lowering: plan.lowering,
+        idle_pc: labels["subword_shell_idle"],
+        tokenize_done_pc: labels["subword_tokenize_done"],
+        warm_boundary_pc: labels["subword_warm_boundary"],
+        token_boundary_pc: labels["subword_token_boundary"],
+        gen_done_pc: labels["subword_generation_done"],
+        forward_pass_pc: labels["subword_forward_pass"],
+        n_gen_tokens,
+        rng_seed,
+        prompt_bytes_addr: sh.prompt,
+        prompt_byte_len_addr: sh.plen,
+        prompt_ids_addr: tw.token_base,
+        prompt_token_len_addr: tw.token_len,
+        id_bytes_geom: geom,
+        rom_size,
+        bank_count: plan.bank_count as u16,
+        driver_bytes,
+        ui_bank_bytes,
+        tokenizer_bank_bytes,
+        table_bytes,
+    })
 }
 
 /// Build the generic wide-vocabulary subword demo ROM: a Paged dense or MoE
@@ -2333,7 +3813,22 @@ pub fn synthetic_font_tiles() -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::asm_impl_state::build_state_multi_token_sampling_rom;
-    use crate::state_model_ref::synthetic_state_checkpoint;
+    use crate::state_model_ref::{synthetic_state_checkpoint, synthetic_state_checkpoint_with};
+
+    /// A validation-clean 1024-token byte-BPE program with short rows. Every
+    /// learned token is a distinct pair of base bytes, which keeps this helper
+    /// independent of the gbf-data artifact while exercising the cartridge's
+    /// full 768-rank table.
+    fn synthetic_subword_tables() -> (Vec<Vec<u8>>, Vec<(u16, u16)>) {
+        let mut id_bytes: Vec<Vec<u8>> = (0..=u8::MAX).map(|byte| vec![byte]).collect();
+        let mut merges = Vec::with_capacity(1024 - 256);
+        for rank in 0..(1024 - 256) {
+            let pair = ((rank / 256) as u16, (rank % 256) as u16);
+            merges.push(pair);
+            id_bytes.push(vec![pair.0 as u8, pair.1 as u8]);
+        }
+        (id_bytes, merges)
+    }
 
     #[test]
     fn shell_rom_builds_from_synthetic_checkpoint() {
@@ -2419,6 +3914,85 @@ mod tests {
             PagedHeadStorage::WramStreamed,
             "synthetic/debug shapes do not acquire SRAM implicitly"
         );
+    }
+
+    #[test]
+    fn typed_subword_shell_builds_small_paged_shape_with_streamed_head() {
+        let topology = crate::state_model_ref::StateTopology::D1024_DENSE;
+        let checkpoint = synthetic_state_checkpoint_with(topology, 0x51E11);
+        let lowered = IntStateLoweredModel::lower(&checkpoint).expect("small Paged model lowers");
+        let cfg = crate::decode::SamplerConfig::new(8, 2253).expect("sampler");
+        let font = vec![0u8; SUBWORD_FONT_BYTES];
+        let (id_bytes, merges) = synthetic_subword_tables();
+        let rom = build_state_subword_shell_rom(&lowered, &cfg, 2, &font, &id_bytes, &merges)
+            .expect("typed subword shell builds");
+
+        assert_eq!(rom.paged_head_storage, PagedHeadStorage::WramStreamed);
+        assert_eq!(rom.weight_lowering, WeightLowering::V3);
+        assert_eq!(rom.rom[0x0147], 0x19, "plain MBC5 cartridge type");
+        assert_eq!(rom.rom[0x0149], 0x00, "streamed shape declares no SRAM");
+        assert_eq!(rom.rng_seed, SUBWORD_SHELL_DEFAULT_RNG_SEED);
+        assert_eq!(rom.prompt_byte_len_addr, rom.prompt_bytes_addr + 0x20);
+        assert_eq!(rom.prompt_token_len_addr, rom.prompt_bytes_addr + 0x2A);
+        assert_eq!(rom.prompt_ids_addr, rom.prompt_bytes_addr + 0x40);
+        assert_eq!(rom.id_bytes_geom.stride, 4);
+        assert!(rom.ui_bank_bytes > SUBWORD_FONT_BYTES);
+        assert!(rom.ui_bank_bytes <= BANK_BYTES);
+        assert!(rom.tokenizer_bank_bytes > 4 * merges.len() + 256);
+        assert!(rom.tokenizer_bank_bytes <= BANK_BYTES);
+        assert!(usize::from(ENTRY_POINT) + rom.driver_bytes <= usize::from(CHUNK_ENTRY));
+        for pc in [
+            rom.idle_pc,
+            rom.tokenize_done_pc,
+            rom.warm_boundary_pc,
+            rom.token_boundary_pc,
+            rom.gen_done_pc,
+            rom.forward_pass_pc,
+        ] {
+            assert!((ENTRY_POINT..CHUNK_ENTRY).contains(&pc), "pc {pc:#06x}");
+        }
+        assert!(rom.idle_pc < rom.tokenize_done_pc);
+        assert!(rom.tokenize_done_pc < rom.warm_boundary_pc);
+        assert!(rom.warm_boundary_pc < rom.token_boundary_pc);
+        assert!(rom.token_boundary_pc < rom.gen_done_pc);
+    }
+
+    #[test]
+    fn typed_subword_shell_production_shape_uses_full_sram_head() {
+        let topology = crate::state_model_ref::StateTopology {
+            vocab: 1024,
+            logit_paging: crate::state_model_ref::LogitPaging::Paged,
+            ..crate::state_model_ref::StateTopology::D192
+        };
+        let checkpoint = synthetic_state_checkpoint_with(topology, 0x5A11);
+        let lowered = IntStateLoweredModel::lower(&checkpoint).expect("dense d192/V1024 lowers");
+        let cfg = crate::decode::SamplerConfig::new(8, 2253).expect("sampler");
+        let font = vec![0u8; SUBWORD_FONT_BYTES];
+        let (id_bytes, merges) = synthetic_subword_tables();
+        let rom = build_state_subword_shell_rom(&lowered, &cfg, 1, &font, &id_bytes, &merges)
+            .expect("production typed subword shell builds");
+
+        assert_eq!(rom.paged_head_storage, PagedHeadStorage::SramFull);
+        assert_eq!(rom.rom[0x0147], 0x1A, "MBC5+RAM cartridge type");
+        assert_eq!(rom.rom[0x0149], 0x02, "8 KiB SRAM header");
+        assert!(rom.bank_count <= 512, "fits MBC5 9-bit ROM banks");
+        assert!(usize::from(ENTRY_POINT) + rom.driver_bytes <= usize::from(CHUNK_ENTRY));
+    }
+
+    #[test]
+    fn typed_subword_shell_rejects_ambiguous_or_corrupt_tokenizer_tables() {
+        let (mut id_bytes, mut merges) = synthetic_subword_tables();
+        merges[1] = merges[0];
+        id_bytes[257] = id_bytes[256].clone();
+        let err = validate_subword_tokenizer(1024, &id_bytes, &merges)
+            .expect_err("duplicate merge pair must be rejected");
+        assert!(matches!(err, ModelRomError::UnsupportedTopology { .. }));
+
+        let (mut id_bytes, merges) = synthetic_subword_tables();
+        id_bytes[256].push(b'x');
+        let err = validate_subword_tokenizer(1024, &id_bytes, &merges)
+            .expect_err("id_bytes replay mismatch must be rejected");
+        assert!(matches!(err, ModelRomError::UnsupportedTopology { .. }));
     }
 
     #[test]

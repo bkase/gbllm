@@ -186,6 +186,17 @@ impl BpeModel {
         BASE_VOCAB + self.merges.len()
     }
 
+    /// Ordered merge program used by the canonical encoder.
+    ///
+    /// Merge `i` consumes the returned pair at index `i` and produces token
+    /// id `256 + i`. Cartridge builders use this read-only view to embed the
+    /// exact tokenizer program beside an interactive on-device prompt shell;
+    /// keeping the source table here prevents the ROM tokenizer from being
+    /// reconstructed heuristically from decoded token bytes.
+    pub fn merges(&self) -> &[(TokenId, TokenId)] {
+        &self.merges
+    }
+
     /// Longest token's byte length (the on-device render-buffer bound).
     pub fn max_token_len(&self) -> usize {
         self.id_bytes.iter().map(Vec::len).max().unwrap_or(1)

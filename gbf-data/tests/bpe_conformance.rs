@@ -52,6 +52,12 @@ fn load_vectors() -> ConformanceFile {
 fn bpe_artifact_loads_and_reports_expected_shape() {
     let model = load_model();
     assert_eq!(model.vocab_size(), 1024, "deployed vocab is 1024 tokens");
+    assert_eq!(model.merges().len(), 768, "1024 = 256 base + 768 merges");
+    assert_eq!(
+        model.merges()[0],
+        (32, 116),
+        "ordered merge program remains artifact-exact"
+    );
     // Single-byte ids decode to their own byte.
     assert_eq!(model.id_bytes(97), Some(&b"a"[..]));
     // The header pins max_token_len = 11.
@@ -104,4 +110,62 @@ fn bpe_encode_matches_golden_conformance_vectors() {
         "every conformance vector must pass"
     );
     assert!(passed >= 15, "expected the frozen 15+ vector corpus");
+}
+
+/// Cartridge-friendly formulation of the canonical merge loop: visit merge
+/// ranks once, in artifact order, and replace every non-overlapping leftmost
+/// occurrence within each pre-token chunk. A token created at rank `r` cannot
+/// participate in an earlier merge (earlier merge operands were defined before
+/// token `256 + r`), so no earlier rank ever needs revisiting.
+fn encode_by_rank_passes(model: &BpeModel, text: &str) -> Vec<u16> {
+    let mut out = Vec::new();
+    for chunk in gbf_data::bpe::pretokenize(text) {
+        let mut ids: Vec<u16> = chunk.bytes().map(u16::from).collect();
+        for (rank, &(left, right)) in model.merges().iter().enumerate() {
+            let mut pos = 0usize;
+            while pos + 1 < ids.len() {
+                if ids[pos] == left && ids[pos + 1] == right {
+                    ids[pos] = (256 + rank) as u16;
+                    ids.remove(pos + 1);
+                }
+                pos += 1;
+            }
+        }
+        out.extend(ids);
+    }
+    out
+}
+
+#[test]
+fn rank_ordered_merge_passes_equal_the_canonical_encoder() {
+    let model = load_model();
+    let mut cases = vec![
+        String::new(),
+        "Once upon a time".into(),
+        "The machines dreamed".into(),
+        "8\n TA\nz".into(),
+        "two  spaces".into(),
+        "A cat sat.".into(),
+        "123 words!?".into(),
+        "___ __".into(),
+    ];
+
+    // Exhaust a compact alphabet across the ASCII pre-tokenizer classes. This
+    // catches accidental cross-chunk merges as well as equal-rank overlap.
+    const ALPHABET: &[u8] = b"aA0 .!\n_";
+    for &a in ALPHABET {
+        for &b in ALPHABET {
+            for &c in ALPHABET {
+                cases.push(String::from_utf8(vec![a, b, c]).expect("ASCII"));
+            }
+        }
+    }
+
+    for text in cases {
+        assert_eq!(
+            encode_by_rank_passes(&model, &text),
+            model.encode(&text),
+            "rank-pass encoder diverged on {text:?}"
+        );
+    }
 }
