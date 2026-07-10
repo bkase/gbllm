@@ -1791,13 +1791,58 @@ fn build_subword_ui_bank(
 /// and V2 dispatch (one expert resident per token). `font_tiles` is the
 /// byte-indexed [`SUBWORD_FONT_BYTES`] font (tile == byte). `id_bytes[i]` is the
 /// literal byte string token `i` decodes to (`BpeModel::id_bytes`).
-#[allow(clippy::too_many_lines)]
 pub fn build_state_moe_demo_rom(
     model: &IntStateLoweredModel,
     sampler: &crate::decode::SamplerConfig,
     n_gen_tokens: u8,
     font_tiles: &[u8],
     id_bytes: &[Vec<u8>],
+) -> Result<SubwordDemoRom, ModelRomError> {
+    build_state_moe_demo_rom_impl(model, sampler, n_gen_tokens, font_tiles, id_bytes, None)
+}
+
+/// Build a self-booting FLASHABLE variant of the subword MoE demo ROM whose
+/// prompt is BAKED into ROM data instead of poked at runtime by a harness.
+///
+/// `baked_prompt` is `(prompt_ids, rng_seed)`: the pre-encoded u16 token ids
+/// (`BpeModel::encode`) and the XorShift16 seed. At BOOT — after the shell
+/// control block is zeroed — the ids are copied out of ROM into
+/// `prompt_ids_addr`, `prompt_len` is set, `S_RNG_ADDR` is seeded, and `go` is
+/// raised, so warmup + generation start automatically with NO external poke.
+///
+/// The idle/warmup/generation flow and every ROM byte outside the small
+/// boot-time baked-init prologue (and the appended id data) are identical to
+/// [`build_state_moe_demo_rom`]; a cartridge produced here needs no SRAM and
+/// self-generates the same sequence a poked run with the same prompt+seed
+/// would. The prompt is capped at 64 ids (the u16 prompt buffer width) and must
+/// be nonempty.
+pub fn build_state_moe_demo_rom_baked(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+    prompt_ids: &[u16],
+    rng_seed: u16,
+) -> Result<SubwordDemoRom, ModelRomError> {
+    build_state_moe_demo_rom_impl(
+        model,
+        sampler,
+        n_gen_tokens,
+        font_tiles,
+        id_bytes,
+        Some((prompt_ids, rng_seed)),
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_state_moe_demo_rom_impl(
+    model: &IntStateLoweredModel,
+    sampler: &crate::decode::SamplerConfig,
+    n_gen_tokens: u8,
+    font_tiles: &[u8],
+    id_bytes: &[Vec<u8>],
+    baked_prompt: Option<(&[u16], u16)>,
 ) -> Result<SubwordDemoRom, ModelRomError> {
     use crate::asm_impl_state::{S_INPUT_HI_ADDR, S_SAMPLED_HI_ADDR};
     if n_gen_tokens == 0 || n_gen_tokens > SHELL_MAX_GEN_TOKENS {
@@ -1855,6 +1900,14 @@ pub fn build_state_moe_demo_rom(
     if n_gen_tokens == 0 {
         return Err(ModelRomError::BadTokenCount { n_tokens: 0 });
     }
+    // Validate the baked prompt (if any): nonempty and within the 64-id buffer.
+    if let Some((prompt_ids, _)) = baked_prompt
+        && (prompt_ids.is_empty() || prompt_ids.len() > 64)
+    {
+        return Err(ModelRomError::BadTokenCount {
+            n_tokens: prompt_ids.len() as u16,
+        });
+    }
 
     let (ui_bytes, ui) = build_subword_ui_bank(font_tiles, &sh, bcur)?;
     let ui_bank_bytes = ui_bytes.len();
@@ -1889,6 +1942,42 @@ pub fn build_state_moe_demo_rom(
         dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
     });
     asm.jr(Some(Cond::NZ), "dsh_zero");
+    // --- baked-prompt boot init (self-booting cartridge): copy the ROM-resident
+    // prompt ids into the WRAM prompt buffer, set the length + RNG seed, and
+    // raise `go` so the idle loop below runs one generation with NO poke. Only
+    // emitted for the baked variant; the poked path is byte-identical. ---
+    if let Some((prompt_ids, rng_seed)) = baked_prompt {
+        let plen = prompt_ids.len() as u8;
+        let n_bytes = 2 * u16::from(plen); // u16 LE per id
+        // HL := &baked_prompt_data (ROM), DE := prompt_ids_addr (WRAM)
+        asm.ld16_label(Reg16Data::HL, "baked_prompt_data", 0);
+        ld16(&mut asm, Reg16Data::DE, prompt_ids_addr);
+        ld_r_imm(&mut asm, Reg8::B, n_bytes as u8);
+        asm.label("dsh_bake_copy");
+        asm.i(Instr::LdAFromReg16Addr {
+            src: gbf_asm::isa::Reg16Addr::Hli,
+        });
+        asm.i(Instr::LdReg16AddrFromA {
+            dst: gbf_asm::isa::Reg16Addr::DE,
+        });
+        asm.i(Instr::Inc16 { dst: Reg16Data::DE });
+        asm.i(Instr::Dec8 {
+            dst: gbf_asm::isa::IncDec8Target::Reg(Reg8::B),
+        });
+        asm.jr(Some(Cond::NZ), "dsh_bake_copy");
+        // prompt_len := plen
+        ld_r_imm(&mut asm, Reg8::A, plen);
+        a_to(&mut asm, plen_addr);
+        // S_RNG_ADDR := rng_seed (u16 LE)
+        let seed = rng_seed.to_le_bytes();
+        ld_r_imm(&mut asm, Reg8::A, seed[0]);
+        a_to(&mut asm, S_RNG_ADDR);
+        ld_r_imm(&mut asm, Reg8::A, seed[1]);
+        a_to(&mut asm, S_RNG_ADDR + 1);
+        // go := 1
+        ld_r_imm(&mut asm, Reg8::A, 1);
+        a_to(&mut asm, go_addr);
+    }
     map_ui(&mut asm);
     call_abs(&mut asm, ui.init);
 
@@ -2067,6 +2156,18 @@ pub fn build_state_moe_demo_rom(
 
     asm.label("demo_gen_done");
     asm.jp(None, "demo_idle");
+
+    // Baked prompt id data (u16 LE per id). Placed after the unconditional
+    // `jp demo_idle` above so it is never executed; the boot prologue copies it
+    // into WRAM. Only present for the baked (self-booting cartridge) variant.
+    if let Some((prompt_ids, _)) = baked_prompt {
+        asm.label("baked_prompt_data");
+        let mut data = Vec::with_capacity(2 * prompt_ids.len());
+        for &id in prompt_ids {
+            data.extend_from_slice(&id.to_le_bytes());
+        }
+        asm.bytes(data);
+    }
 
     // per-token forward pass subroutine (paged head; wide emb feedback)
     asm.label("forward_pass");
