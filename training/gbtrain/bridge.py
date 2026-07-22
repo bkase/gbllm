@@ -3,9 +3,9 @@
 This is the seam between GPU training and the deterministic Rust deploy
 pipeline. It reads a ``gbllm_student_hardened.v1`` directory (produced by
 ``gbtrain.export.export_hardened`` -- manifest.json + hardened.safetensors) and
-re-serializes it into the tensor-file layout the Rust loader consumes
-(``gbf-bench/src/stateful.rs::load_state_checkpoint`` family), one ``.bin`` per
-tensor plus a self-describing ``manifest.json`` with a per-tensor sha256.
+re-serializes it into the tensor-file layout the Rust compiler consumes
+(``gbf-codegen/src/import_state_checkpoint.rs``), one ``.bin`` per tensor plus
+a self-describing ``manifest.json`` with a per-tensor sha256.
 
 **Schema.** The dense arm matches ``f_s5_state_checkpoint_export.v1`` exactly.
 The MoE arm emits ``f_s8_moe_state_checkpoint_export.v2``. The ``.v2`` differs

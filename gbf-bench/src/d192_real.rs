@@ -948,7 +948,8 @@ fn run_phases(repo_root: &Path, opts: &D192RealOptions) -> D192RealReport {
             b
         }
         Err(e) => {
-            report.record_fail("load-real-checkpoint", &e);
+            let error = OneTokenError::from(e);
+            report.record_fail("load-real-checkpoint", &error);
             remaining_phases(&mut report, 2);
             return report;
         }

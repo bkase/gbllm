@@ -70,13 +70,61 @@ from the same successful session.
 
 ## Rebuild
 
+The production entry point is `gbf compile`; the benchmark emitter is only a
+temporary compatibility wrapper. Starting from a hardened MLX export, first
+create the Rust checkpoint layout with the Python bridge:
+
 ```bash
-cargo run --release -p gbf-bench --bin emit-interactive-subword-rom -- \
-  /path/to/bridged-dense-student \
-  artifacts/builds/gbllm-dense-d192-interactive.gb \
-  24
+cd training
+uv run python -c \
+  'from gbtrain.bridge import bridge_hardened_export; import sys; bridge_hardened_export(sys.argv[1], sys.argv[2])' \
+  /path/to/student_dense_d192 \
+  /path/to/bridged-dense-student/ckpt
+cd ..
+
+cargo run --release -p gbf-cli -- compile \
+  --profile interactive-subword-dmg \
+  --checkpoint-export /path/to/bridged-dense-student/ckpt \
+  --tokenizer training/artifacts/tinystories_bpe_1024.json \
+  --tokens 24 \
+  --top-k 4 \
+  --temperature 0.6 \
+  --rng-seed 0x5eed \
+  --out artifacts/builds/gbllm-dense-d192-interactive
 ```
 
-The bridged directory contains `ckpt/` plus
-`tokenizer/gbllm_bpe.v2.json`. The emitter also writes an adjacent `.sym` file
-for the debugger acceptance script.
+That output packet contains:
+
+- `rom.gb` and `rom.sym` — the cartridge and debugger symbols;
+- `build_report.json` — verified input hashes, actual topology, lowering,
+  storage, sampler, ROM hash, and honest stage coverage;
+- `compile_request.json` — the requested profile, inputs, and knobs.
+
+For the pinned dense d192 export and tokenizer, `rom.gb` must have the SHA-256
+shown above and must compare byte-for-byte equal to the cared-for
+`artifacts/builds/gbllm-dense-d192-interactive.gb`.
+
+## Source-of-truth boundary
+
+The code path that actually produces the ROM is:
+
+```text
+MLX training/hardening (Python)
+  -> hardened.safetensors + manifest.json
+Python artifact bridge (training/gbtrain/bridge.py)
+  -> f_s5_state_checkpoint_export.v1
+gbf compile (Rust)
+  -> gbf-codegen import_state_checkpoint
+  -> StatefulSubwordProgram
+  -> IntStateLoweredModel
+  -> gbf-kernel stateful subword backend
+  -> gbf-asm cartridge assembly
+  -> rom.gb + rom.sym + reports
+```
+
+The training checkpoint and tokenizer under `training/artifacts/` are local,
+ignored artifacts today. Therefore the checked-in source alone cannot recreate
+this exact ROM. Clean-clone reproducibility requires pinning those two inputs in
+a content-addressed artifact store (or equivalent) and verifying the hashes in
+`build_report.json`. The Rust compiler begins at the bridged checkpoint schema;
+this change does not claim that MLX training or the bridge runs in Rust.

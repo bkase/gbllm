@@ -8,7 +8,7 @@
 //! export**: [`write_synthetic_state_export`] writes manifest + tensor
 //! files mirroring the exact format `s8_matched_cycles.rs export_checkpoint`
 //! emits, then everything downstream exercises the *real* production path —
-//! `stateful::load_state_checkpoint` (manifest topology + sha256
+//! `gbf_codegen::import_state_checkpoint` (manifest topology + sha256
 //! verification), `IntStateLoweredModel::lower` (width plan), the banked
 //! ROM builders, and the byte-exact emulator gates.
 //!
@@ -438,7 +438,7 @@ pub fn run_d192_readiness(work_dir: &Path) -> Result<D192ReadinessReport, OneTok
             seed: D192_SYNTHETIC_SEED,
             tensors_verified_sha256: bundle.tensors_verified,
             manifest_sha256: sha256(&manifest_bytes).to_hex(),
-            loader: "gbf_bench::stateful::load_state_checkpoint (production path: manifest \
+            loader: "gbf_codegen::import_state_checkpoint (production path: manifest \
                      topology block + per-tensor sha256 verification)",
         },
         width,

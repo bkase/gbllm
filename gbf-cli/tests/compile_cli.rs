@@ -82,3 +82,23 @@ fn compile_rejects_out_of_range_token_counts() {
         .failure()
         .stderr(predicate::str::contains("1..=256"));
 }
+
+#[test]
+fn interactive_compile_requires_an_explicit_tokenizer() {
+    let export = tempfile::tempdir().expect("export tempdir");
+    write_synthetic_checkpoint_export(export.path(), 31).expect("writes export");
+    let out = tempfile::tempdir().expect("out tempdir");
+    gbf()
+        .args([
+            "compile",
+            "--profile",
+            "interactive-subword-dmg",
+            "--checkpoint-export",
+            export.path().to_str().expect("utf8 path"),
+            "--out",
+            out.path().to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--tokenizer is required"));
+}

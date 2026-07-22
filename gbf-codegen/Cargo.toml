@@ -9,6 +9,7 @@ publish = false
 gbf-abi = { path = "../gbf-abi" }
 gbf-artifact = { path = "../gbf-artifact" }
 gbf-asm = { path = "../gbf-asm" }
+gbf-data = { path = "../gbf-data" }
 gbf-foundation = { path = "../gbf-foundation" }
 gbf-hw = { path = "../gbf-hw" }
 gbf-ir = { path = "../gbf-ir" }

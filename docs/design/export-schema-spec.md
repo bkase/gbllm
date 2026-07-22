@@ -1,8 +1,25 @@
-# export-schema-spec
+# export-schema-spec (historical proposal; superseded)
+
+> This document captured a pre-implementation proposal and is not the current
+> deploy contract. Its file/line references, 85-token vocabulary cap, rejection
+> of MoE, and proposed untied-head schema are historical. The executable source
+> of truth is `gbf-codegen/src/import_state_checkpoint.rs` followed by
+> `gbf-kernel/src/state_model_ref.rs` and `gbf-kernel/src/asm_impl_state.rs`.
+> The remainder is retained as design history, not as instructions for the
+> current compiler.
 
 ## Summary
 
-The current export is `f_s5_state_checkpoint_export.v1` (manifest.json + row-major tensor blobs), loaded by `gbf_bench::stateful::load_state_checkpoint` (gbf-bench/src/stateful.rs:79) into `StateCheckpoint` (gbf-kernel/src/state_model_ref.rs:199), lowered by `IntStateLoweredModel::lower` (state_model_ref.rs:881), and compiled to a banked ROM by `StateWramLayout::plan` + `build_state_*_rom` (gbf-kernel/src/asm_impl_state.rs). It hard-codes a single dense FFN per block (`blocks: Vec<BlockWeights>`, one up/down pair), a tied head derived from the f32 embedding, and vocab capped at 85 (single-page i24 logits). The loader explicitly rejects `moe:true` (stateful.rs:107). This spec defines `f_s5_state_checkpoint_export.v2` adding: (a) N experts/block, (b) a per-block low-rank router, (c) an untied subword head with its own weights+scales for vocab V>80, and (d) an MLX→manifest tensor mapping. The canonical MoE/router shapes already exist trainer-side in `gbf-model/src/qat/export.rs` (visit_router_at:619, visit_expert_at:429) and should be mirrored exactly. The manifest already carries the extension hint fields `topology.moe`, `topology.n_experts_per_block`, `topology.tied_head` (currently false/1/true), so v2 only needs to populate them and add the new tensors + parsing.
+The implemented compiler accepts dense `f_s5_state_checkpoint_export.v1` and
+top-1 MoE `f_s8_moe_state_checkpoint_export.v2` manifests. The
+`gbf-codegen::import_state_checkpoint` importer verifies every tensor SHA-256
+and constructs `StateCheckpoint`; `IntStateLoweredModel::lower` owns integer
+lowering. `LogitPaging::Paged` supports wide u16 token ids (the deployed model
+uses V=1024), and the deployed head remains tied to the embedding. The
+interactive dense subword path is compiled by
+`gbf-codegen::compile_state_subword` into the stateful V3 backend and final
+`gbf-asm` cartridge. The sections below describe the earlier proposal that led
+to parts of this implementation; they do not describe the current schema.
 
 ## Schema envelope + versioning
 

@@ -21,9 +21,8 @@ use gbf_foundation::sha256;
 use gbf_hw::joypad::Button;
 use gbf_kernel::asm_impl_shell::{
     BG_MAP_BASE, BG_MAP_STRIDE, KB_CELLS, KB_COLS, PROMPT_ROW, SHELL_PROMPT_CAP,
-    SUBWORD_CURSOR_TILE, SUBWORD_FONT_BYTES, SUBWORD_KEY_BYTES, SUBWORD_NEWLINE_BYTE,
-    SUBWORD_SPACE_BYTE, SubwordDemoRom, SubwordShellRom, TRANSCRIPT_CELLS, TRANSCRIPT_COLS,
-    TRANSCRIPT_ROWS,
+    SUBWORD_CURSOR_TILE, SUBWORD_KEY_BYTES, SUBWORD_NEWLINE_BYTE, SUBWORD_SPACE_BYTE,
+    SubwordDemoRom, SubwordShellRom, TRANSCRIPT_CELLS, TRANSCRIPT_COLS, TRANSCRIPT_ROWS,
 };
 use gbf_kernel::asm_impl_state::{S_RNG_ADDR, S_SAMPLED_ADDR, S_SAMPLED_HI_ADDR};
 use gbf_kernel::decode::{SamplerConfig, XorShift16, sample_topk_from_candidates_trace};
@@ -74,21 +73,7 @@ pub fn subword_typing_script(prompt: &[u8], key_bytes: &[u8]) -> Option<Vec<Joyp
 /// non-printable bytes are blank. Separate from the charset `tile == id` font.
 #[must_use]
 pub fn subword_font_tiles() -> Vec<u8> {
-    // The kernel's demo shares the shell newline glyph (a return arrow).
-    let newline_glyph = crate::shell::NEWLINE_GLYPH;
-    let font = gbf_runtime::text::font_bytes();
-    let mut out = Vec::with_capacity(SUBWORD_FONT_BYTES);
-    for byte in 0..128u8 {
-        if byte == SUBWORD_NEWLINE_BYTE {
-            out.extend_from_slice(&newline_glyph);
-        } else if (0x20..0x7F).contains(&byte) {
-            let ascii = byte as usize;
-            out.extend_from_slice(&font[ascii * 16..ascii * 16 + 16]);
-        } else {
-            out.extend_from_slice(&[0u8; 16]);
-        }
-    }
-    out
+    gbf_codegen::compile_state_subword::subword_font_tiles()
 }
 
 /// Host mirror of one subword demo run: zero state, one forward pass per prompt
