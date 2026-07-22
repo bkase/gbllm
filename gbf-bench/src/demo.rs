@@ -216,8 +216,9 @@ pub fn load_demo_quality_facts(repo_root: &Path) -> Result<DemoQualityFacts, One
         deployed_beats_kn5_full: gap < 0.0,
         deployed_minus_kn5_full_bits_per_raw_byte: gap,
         kn5_on_cart_feasibility: feasibility,
-        honest_claim: "best deployable model to date that fits the cart and the UX budget; \
-                       output is coherent English-like pseudo-prose, not KN-5-beating text",
+        honest_claim: "at this packet's recorded git revision, the best measured \
+            deployable model that fit the cart and UX budget; output is coherent \
+            English-like pseudo-prose, not KN-5-beating text",
         next_levers: vec![
             "close the hard-ternary QAT gap (scale run 2 widened it 3.6x: +0.1033 bpc; levers: \
              longer hardness warmup, later hard switch, lower hard-phase lr, gap-aware distill \

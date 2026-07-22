@@ -29,9 +29,9 @@ buffers scale ~linearly with d_model, so ~192 is the max deployable activation
 width. Capacity comes from MANY EXPERTS at a deployable width, not from widening
 d_model: experts live in ROM (one active per token) so they cost no
 activation-WRAM. The d512 teacher is fp and undeployed (teachers have no device
-constraint); distilling a d192 student from it is the intended setup. The V=1024
-tied head needs on-device logit paging at deploy (separately beaded) — a
-deploy-side concern, not a training concern.
+constraint); distilling a d192 student from it is the intended setup. The
+V=1024 tied head now deploys through the paged-logit path; the production dense
+shape retains the complete logit vector in 8 KiB cartridge SRAM.
 """
 
 from __future__ import annotations

@@ -1,7 +1,13 @@
 # Game Boy inference speed — optimization ledger
 
-Running log of every speed optimization applied to the deployed **dense d192
-state model** running on DMG (`artifacts/builds/gbllm-shell-d192.gb`). One entry
+> **Status: historical optimization record for
+> `artifacts/builds/gbllm-shell-d192.gb`.** Its measurements and head shape are
+> properties of that legacy cartridge, not the current V1024 interactive ROM.
+> The current product is documented in [the repository README](../README.md).
+
+Running log of every speed optimization applied to the then-deployed **dense
+d192 state model** running on DMG
+(`artifacts/builds/gbllm-shell-d192.gb`). One entry
 per landed change: what it was, *why it worked*, the measured effect, and how it
 was proven safe.
 
@@ -123,7 +129,7 @@ dwarfed by the ~40 cycles saved per zero call.
 the only input it short-circuits. Byte-exact: d192 + arm-B regressions and all
 63 kernel unit tests pass.
 
-## Floor analysis — why 17.782 s/char is the practical byte-exact floor
+## Historical floor analysis for this cartridge
 
 After entries 1–3 (21.695 → 17.782, −18.0%), every remaining block was traced to
 its algorithmic limit for byte-exact integer work on the LR35902:
@@ -140,8 +146,9 @@ its algorithmic limit for byte-exact integer work on the LR35902:
   per lane, 3 sub-multiplies). The multiplier-zero early-out (entry 3) already
   collapses the hi-byte products for small lanes; the 7-byte i48 accumulator is
   the minimum width for 192 summed i24 squares; the `isqrt48` is a fixed 24-step.
-- **Tied head — ~9%.** Already register-pointer-tight: the per-lane product LUT is
-  built with adds (not multiplies) and the 256×d_model logit accumulate uses
+- **Tied head — ~9%.** Already register-pointer-tight in this legacy profile:
+  the per-lane product LUT is built with adds (not multiplies) and its
+  256×d_model logit accumulate uses
   `add a,(hl)` against `(bc)`/`(de)` cursors. No addressing slack.
 - **Per-row epilogues (up/down/state-out) — small.** They keep read/write cursors
   in scratch RAM, but the reload is only ~0.5% combined and is forced by the
@@ -156,13 +163,14 @@ the zero early-out is in.
 Further byte-exact speedups exist only as sub-1% micro-opts with rising risk. The
 real next levers are strategic, not micro:
 
-## Remaining levers (strategic — each a deliberate choice, not a micro-step)
+## Remaining levers recorded at the time
 
 - **RMS norm cluster** (`n24_*` / `udn5_rot_*` / `udiv_norm5`, ~10%): runs ~8×/token.
   The 24-bit sum-of-squares (three software multiplies per lane) is intrinsic;
   gains would need a squaring-specific routine — higher risk.
-- **Tied-head logits** (`emit_head` / `hg_*`, ~8%): builds a per-lane product LUT
-  then accumulates 256 logits.
+- **Tied-head logits** (`emit_head` / `hg_*`, ~8%): this legacy profile builds
+  a per-lane product LUT and accumulates 256 logits. The current V1024
+  interactive cartridge uses paged logits and SRAM-full storage instead.
 - **Software multiplies** (`mul16` / `mul16x8`): zero-multiplier early-out landed
   (entry 3). The remaining shift-add cost is the biggest structural prize — a
   quarter-square table (`a*b = f(a+b) - f(|a-b|)`, `f(n)=floor(n^2/4)`, exact for

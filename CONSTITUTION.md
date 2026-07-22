@@ -1,5 +1,9 @@
 # THE ENGINEER'S CONSTITUTION
 
+> **Status: normative engineering doctrine, not an inventory of guarantees
+> already achieved by every artifact.** A project document may claim that a
+> doctrine is enforced only when an executable gate demonstrates it.
+
 ## I. The Doctrine of Correctness
 
 - **Correctness by Construction:** Make invalid states unrepresentable. If the types align, the logic should be sound.
@@ -32,7 +36,12 @@
 
 - **Easy and Hermetic-ish:** Optimize for standard Codex/Claude cloud environments. Prefer **Rust stable**, **uv** (Python), and **bun** (Node). Pin versions to ensure reproducibility. Fall back to Nix/Docker only when standard tooling fails.
 - **Supply Chain Minimalism:** Prefer copying a 50-line utility over adding a 50MB dependency. Dependencies are liabilities. (Don't reinvent good wheels.)
-- **Reproducible Builds:** The artifact produced by CI must be bit-for-bit identical to the artifact produced locally.
+- **Reproducible Builds:** A release build is reproducible only when CI and local
+  builds consume content-addressed inputs and produce bit-for-bit identical
+  artifacts. Until that gate exists, document the narrower replay boundary and
+  do not describe the release as hermetic. The current interactive ROM has a
+  verified local hardened-checkpoint-to-ROM rebuild; its ignored training
+  inputs are not yet available to a clean clone.
 
 ## V. Observability & Self-Healing
 
@@ -43,4 +52,7 @@
 ## VI. The Knowledge Graph (Documentation)
 
 - **Single Source of Truth:** If it's not in the repo, it doesn't exist. Markdown, JSONL, beads_rust for in-repo task tracking.
-- **Living Documentation:** Documentation is code. It is linted. It is tested. If the code changes and the docs don't, the build fails (e.g., doc-tests in Rust).
+- **Living Documentation:** Documentation is code. Claims should name their
+  executable owner and be linted or tested where practical. “The build fails on
+  doc drift” is a guarantee only for claims covered by an actual sensor; other
+  design text must be labeled current, target, historical, or superseded.

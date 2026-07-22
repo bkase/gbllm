@@ -1746,7 +1746,10 @@ pub fn d192_real_report_to_markdown(r: &D192RealReport) -> String {
     }
 
     if !r.samples.is_empty() {
-        let _ = writeln!(out, "## Sampled text (best deployable model to date)");
+        let _ = writeln!(
+            out,
+            "## Sampled text (best deployable model at this report's recorded git revision)"
+        );
         let _ = writeln!(out);
         for s in &r.samples {
             let _ = writeln!(

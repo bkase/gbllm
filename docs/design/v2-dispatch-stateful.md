@@ -1,5 +1,11 @@
 # V2 dispatch lowering in the stateful/model ROM builder (bd-1tuql)
 
+> **Status: historical design note for the optional V2 dispatch path.** The
+> cared-for dense d192/V1024 ROM selects V3 weights-as-code, as recorded by the
+> compiler build report and the [repository README](../../README.md). Statements
+> below about what was absent or planned describe the state when this note was
+> written, not the current implementation inventory.
+
 ## Why
 
 The deployable ROM builder (`gbf-kernel/src/asm_impl_state.rs`,

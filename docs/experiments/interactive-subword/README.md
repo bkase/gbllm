@@ -1,5 +1,9 @@
 # Interactive subword cartridge
 
+> **Status: current production artifact and acceptance evidence.** The complete
+> training, model, lowering, and runtime explanation is in the
+> [repository README](../../../README.md).
+
 The dense d192/V1024 cartridge now accepts a prompt through the Game Boy
 joypad, performs the deployed byte-BPE on the cartridge, and generates the
 same full-u16 token sequence as the host integer model.
@@ -71,20 +75,20 @@ from the same successful session.
 ## Rebuild
 
 The production entry point is `gbf compile`; the benchmark emitter is only a
-temporary compatibility wrapper. Starting from a hardened MLX export, first
+compatibility wrapper. Starting from a hardened MLX export, first
 create the Rust checkpoint layout with the Python bridge:
 
 ```bash
-cd training
-uv run python -c \
-  'from gbtrain.bridge import bridge_hardened_export; import sys; bridge_hardened_export(sys.argv[1], sys.argv[2])' \
-  /path/to/student_dense_d192 \
-  /path/to/bridged-dense-student/ckpt
-cd ..
+mkdir -p /tmp/gbllm-interactive-build
+PYTHONPATH=training training/.venv/bin/python -c \
+  "from gbtrain.bridge import bridge_hardened_export; \
+bridge_hardened_export( \
+  'training/artifacts/student_dense_d192', \
+  '/tmp/gbllm-interactive-build/ckpt')"
 
 cargo run --release -p gbf-cli -- compile \
   --profile interactive-subword-dmg \
-  --checkpoint-export /path/to/bridged-dense-student/ckpt \
+  --checkpoint-export /tmp/gbllm-interactive-build/ckpt \
   --tokenizer training/artifacts/tinystories_bpe_1024.json \
   --tokens 24 \
   --top-k 4 \
@@ -128,3 +132,12 @@ this exact ROM. Clean-clone reproducibility requires pinning those two inputs in
 a content-addressed artifact store (or equivalent) and verifying the hashes in
 `build_report.json`. The Rust compiler begins at the bridged checkpoint schema;
 this change does not claim that MLX training or the bridge runs in Rust.
+
+For the verified byte-identical local rebuild, the hardened student SHA-256 is
+`166d34596df30837a52d7e14a1c6b5cbccb39f1903f9f938350ab131870f57d2`
+and the tokenizer SHA-256 is
+`ffae9160f720a680d18e2194ab86e44b23732ba0bcec68123cf04f49556443ad`.
+
+The original MLX training run also lacks a complete
+command/environment/input-hash record, so the compiler report proves the
+bridged-checkpoint-to-ROM build rather than deterministic retraining.

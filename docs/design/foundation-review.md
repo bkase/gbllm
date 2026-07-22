@@ -1,6 +1,14 @@
-# Foundation review
+# Foundation review (archived)
 
-verdict: needs-work
+> **Status: superseded review findings.** This review correctly found defects in
+> an earlier tokenizer. The current implementation in
+> `training/gbtrain/tokenizer.py` is total and look-around-free, validates a
+> complete `id_bytes_hex` table, records `max_token_len`, trims capped UTF-8
+> input at a character boundary, and is cross-checked by Python/Rust conformance
+> vectors. The original findings are retained below as the reason those guards
+> exist; they do not describe the tokenizer used by the current ROM.
+
+verdict at review time: needs-work; current findings: resolved
 
 ## [high] Pre-tokenizer regex silently DROPS characters, so the core 'lossless / decode(encode(text))==text for any input' contract is false. The underscore '_' (and other Unicode connector-punctuation \p{Pc}) matches NONE of the alternatives: it is excluded from the letter class ` ?[^\W\d_]+` (explicit `_`), it is a \w char so it is excluded from the punctuation class ` ?[^\s\w]+`, and it is neither \d nor \s. `re.findall` skips unmatched spans, so the byte is lost. Verified with the shipped pattern: decode(encode('hello_world'))=='helloworld', '__init__'->'init', 'x_1'->'x1', 'a_b'->'ab'. Any snake_case identifier, markdown, or path underscore is corrupted. Because training used the same pretokenizer, the vocab never contains 0x5f except as base id 95, so the loss is doubly invisible (no token to inspect).
 

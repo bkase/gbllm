@@ -9,7 +9,7 @@ of every mistake.
 This document is the source of truth for:
 
 1. **What each persona owns** (mandate, signals, out-of-scope).
-2. **Which harness runs each persona** (claude, codex, gemini, or a combo).
+2. **Which harness runs each persona** (Claude and Codex).
 3. **How to pick the 4–7 personas to fire on a given bead** (routing).
 
 `AGENTS.md` defers to this file for persona definitions.
@@ -18,16 +18,15 @@ This document is the source of truth for:
 
 ## Harnesses
 
-Three external review harnesses are addressed by name in this document:
+Two external review harnesses are addressed by name in this document:
 
 - **`claude`** — Claude (via Claude Code / ACPX). Tested invocation:
   `bunx acpx@latest --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 claude exec "<persona-prompt>"`
-- **`gemini`** — Gemini (via ACPX). Tested invocation:
-  `bunx acpx@latest --agent 'gemini --skip-trust -m gemini-3.1-pro-preview --acp' --cwd /Users/bkase/Documents/gbllm --approve-all --format text --suppress-reads --timeout 1800 exec "<persona-prompt>"`
 - **`codex`** — OpenAI Codex CLI. Driven the same way via acpx (one-shot exec, bounded
   timeout, no PTY scraping).
 
-Every persona below names a 2- or 3-harness assignment. **Run all named
+**Never invoke Gemini.** It is retired from the project review policy. Every
+persona below names a two-harness Claude + Codex assignment. **Run both named
 harnesses for that persona** when the persona is selected for a bead — multiple
 harnesses on the same persona are an explicit cross-check, not redundancy.
 Disagreement between harnesses is itself a signal worth surfacing.
@@ -49,15 +48,15 @@ of this document.
 | #   | Persona                               | Always-on?  | Harnesses               |
 | --- | ------------------------------------- | ----------- | ----------------------- |
 | P1  | Architecture & Boundary Steward       | conditional | claude + codex          |
-| P2  | Code Cleanliness / Idiomatic Rust     | conditional | claude + codex + gemini |
-| P3  | AI Researcher / Experimenter Analyzer | conditional | claude + gemini         |
-| P4  | QA / Test Engineer                    | conditional | gemini + codex          |
-| P5  | Proof-of-Work Detective               | **always**  | gemini + claude         |
-| P6  | RFC Scope Sentinel                    | **always**  | gemini + claude         |
-| P7  | Numerical & Determinism Reviewer      | conditional | codex + gemini          |
-| P8  | Public Contract / Schema Stability    | conditional | gemini + claude         |
-| P9  | Performance & Resource Reviewer       | conditional | gemini + claude         |
-| P10 | Observability & Telemetry Reviewer    | conditional | gemini + claude         |
+| P2  | Code Cleanliness / Idiomatic Rust     | conditional | claude + codex          |
+| P3  | AI Researcher / Experimenter Analyzer | conditional | claude + codex          |
+| P4  | QA / Test Engineer                    | conditional | claude + codex          |
+| P5  | Proof-of-Work Detective               | **always**  | claude + codex          |
+| P6  | RFC Scope Sentinel                    | **always**  | claude + codex          |
+| P7  | Numerical & Determinism Reviewer      | conditional | claude + codex          |
+| P8  | Public Contract / Schema Stability    | conditional | claude + codex          |
+| P9  | Performance & Resource Reviewer       | conditional | claude + codex          |
+| P10 | Observability & Telemetry Reviewer    | conditional | claude + codex          |
 
 ---
 
@@ -97,7 +96,7 @@ dependency arrow added that violates the architecture diagram.
 
 ## P2. Code Cleanliness / Idiomatic Rust
 
-**Harnesses:** `claude` + `codex` + `gemini`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Owns local code quality: idioms, naming, ownership patterns,
 comments, dead code, dependency hygiene at the file level. This is the persona
@@ -136,7 +135,7 @@ internal boundaries.
 
 ## P3. AI Researcher / Experimenter Analyzer
 
-**Harnesses:** `claude` + `gemini`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Verifies that the _math_ matches the RFC and that the
 implementation's claims about gradients, reductions, and information flow are
@@ -182,7 +181,7 @@ named.
 
 ## P4. QA / Test Engineer
 
-**Harnesses:** `gemini` + `codex`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Owns test coverage, fixture realism, edge-case discipline, and
 red-before-green verification. This persona enforces that tests can actually
@@ -223,7 +222,7 @@ named.
 
 ## P5. Proof-of-Work Detective (ALWAYS-ON)
 
-**Harnesses:** `gemini` + `claude`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Verifies the bead actually delivered what its closure comment
 claims. Reads the closure, the diff, and the RFC, and asks: _did this code path
@@ -262,7 +261,7 @@ deferred integration.
 
 ## P6. RFC Scope Sentinel (ALWAYS-ON)
 
-**Harnesses:** `gemini` + `claude`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Owns the bead-to-RFC contract. Asks: _did this bead deliver
 exactly its declared scope?_ Distinct from P5: P5 asks "did it really happen?";
@@ -298,7 +297,7 @@ authorizes; everything else is flagged for a separate bead.
 
 ## P7. Numerical & Determinism Reviewer
 
-**Harnesses:** `codex` + `gemini`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Owns floating-point safety, NaN/Inf handling, seed plumbing, and
 bit-reproducibility of artifacts. Critical for QAT and oracle/conformance work
@@ -346,7 +345,7 @@ every random path's seed is explicit.
 
 ## P8. Public Contract / Schema Stability Reviewer
 
-**Harnesses:** `gemini` + `claude`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Owns the public surface that downstream consumers depend on:
 serde JSON field names, semver of exported types, artifact/fixture schema, and
@@ -387,7 +386,7 @@ line; expert/layer scope is named.
 
 ## P9. Performance & Resource Reviewer
 
-**Harnesses:** `gemini` + `claude`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Owns allocation, host↔device tensor copies, sync I/O on hot paths,
 lock-holding scope, and async correctness.
@@ -422,7 +421,7 @@ across `await`.
 
 ## P10. Observability & Telemetry Reviewer
 
-**Harnesses:** `gemini` + `claude`
+**Harnesses:** `claude` + `codex`
 
 **Mandate.** Owns structured event shapes, log/metric stability, span hygiene,
 and whether emitted events have a real consumer.

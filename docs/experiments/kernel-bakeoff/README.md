@@ -1,5 +1,10 @@
 # Kernel bake-off: ternary matvec strategies on DMG (bd-rzq5n)
 
+> **Status: historical kernel-selection evidence.** It explains why V3
+> weights-as-code was selected, but its fixture sizes are not the topology or
+> performance of the current d192/V1024 ROM. See the
+> [repository README](../../../README.md) for the production path.
+
 **Date:** 2026-07-04. **Producer:** `cargo run -p gbf-bench --bin kernel-bakeoff`.
 **Evidence:** `kernel_bakeoff.json` / `kernel_bakeoff.md` in this directory
 (regenerated deterministically; fixed seeds, gameroy-measured M-cycles,

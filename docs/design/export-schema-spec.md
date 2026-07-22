@@ -1,70 +1,160 @@
-# export-schema-spec (historical proposal; superseded)
+# Model export and bridge schemas
 
-> This document captured a pre-implementation proposal and is not the current
-> deploy contract. Its file/line references, 85-token vocabulary cap, rejection
-> of MoE, and proposed untied-head schema are historical. The executable source
-> of truth is `gbf-codegen/src/import_state_checkpoint.rs` followed by
-> `gbf-kernel/src/state_model_ref.rs` and `gbf-kernel/src/asm_impl_state.rs`.
-> The remainder is retained as design history, not as instructions for the
-> current compiler.
+> **Status: current implementation inventory.** Schema truth lives in
+> `training/gbtrain/export.py`, `training/gbtrain/bridge.py`, and
+> `gbf-codegen/src/import_state_checkpoint.rs`. The production interactive
+> profile continues through `gbf-codegen/src/compile_state_subword.rs`,
+> `gbf-kernel`, and `gbf-asm`. This document records what those producers and
+> consumers accept today.
 
-## Summary
+## There are two export boundaries
 
-The implemented compiler accepts dense `f_s5_state_checkpoint_export.v1` and
-top-1 MoE `f_s8_moe_state_checkpoint_export.v2` manifests. The
-`gbf-codegen::import_state_checkpoint` importer verifies every tensor SHA-256
-and constructs `StateCheckpoint`; `IntStateLoweredModel::lower` owns integer
-lowering. `LogitPaging::Paged` supports wide u16 token ids (the deployed model
-uses V=1024), and the deployed head remains tied to the embedding. The
-interactive dense subword path is compiled by
-`gbf-codegen::compile_state_subword` into the stateful V3 backend and final
-`gbf-asm` cartridge. The sections below describe the earlier proposal that led
-to parts of this implementation; they do not describe the current schema.
+The MLX trainer and Rust runtime do not read the same physical artifact.
 
-## Schema envelope + versioning
+### 1. Hardened MLX artifact
 
-Bump `manifest.schema` to `f_s5_state_checkpoint_export.v2` (string checked at stateful.rs:90). The loader must accept both v1 (dense, tied) and v2 (MoE and/or untied head). Gate all new parsing on `topology.moe` and `topology.tied_head` so a v2 manifest with moe=false,tied_head=true is byte-identical to v1. Keep `numeric_convention` (weight_encoding Ternary2, per_output_row Q8.8 u16 raw = raw/256, Int8 act grid [-8,8]/127) unchanged for all ternary tensors; add a `router_convention` and `head_convention` sub-block (below). Retain per-tensor sha256 + `git_sha`/`seed`/`bead` provenance.
+`training/gbtrain/export.py::export_hardened` writes:
 
-## (a) N experts per block — manifest + tensors
+~~~text
+<student>/
+  config.json
+  weights.safetensors
+  hardened.safetensors
+  manifest.json
+~~~
 
-Set `topology.moe=true`, `topology.n_experts_per_block=N`. For each block k in 0..n_blocks and each expert e in 0..N, emit the same ternary pair the dense block uses today, expert-indexed: tensor names `block{k}_expert{e}_up.ternary` (i8 {-1,0,1}, shape [d_ff, d_model], row_major), `block{k}_expert{e}_up.scales` (u16_le Q8.8, shape [d_ff]), `block{k}_expert{e}_down.ternary` (shape [d_model, d_ff]), `block{k}_expert{e}_down.scales` (shape [d_model]). Extend each `layers[]` entry (currently kind=`prenorm_residual_ffn`) to kind=`moe_ffn` carrying `n_experts` plus an `experts: [{up_ternary,up_scales,up_shape,down_ternary,down_scales,down_shape}, ...]` array (length N) instead of the single up/down fields; keep the flat single-pair form when n_experts==1. Optional per-block shared-dense branch (trainer-side `SharedDenseBranch`, export.rs:444) is out of scope unless present — if emitted, add `block{k}_shared_up`/`_down` (dense f32) + scalar `block{k}_shared_alpha`; recommend spec'ing it as NOT-supported-yet and rejecting at load if present.
+The hardened manifest format is `gbllm_student_hardened.v1`. It contains:
 
-## (b) Per-block router weight tensor
+- topology: d_model, d_ff, block count, state slots, expert count, vocabulary,
+  and optional router rank;
+- one fp32 embedding used for both token lookup and the tied output head;
+- Q8.8 recurrent decay raws;
+- hardened projection tensors, each with Int8 {-1, 0, +1} weights and UInt16
+  Q8.8 scales.
 
-Mirror `Top1RouterQat` low-rank form (export.rs:619): two full-precision f32 matrices per MoE block. Names `block{k}_router_in` (role router_input_projection, dtype f32_le, shape [router_rank, d_model], row_major) and `block{k}_router_out` (role router_expert_projection, shape [n_experts, router_rank]); optional biases `block{k}_router_in.bias` [router_rank], `block{k}_router_out.bias` [n_experts]. Add `topology.router_rank` (trainer default = `n_experts.div_ceil(4).clamp(1,8)`, gbf-model/src/qat/router.rs:75). Add `router_convention` block stating: router logits = router_out @ (router_in @ x_norm) (+biases), dispatch = argmax over n_experts (top-1), deterministic tie-break = lowest expert index, gating is hard one-hot (selected expert output used as-is, no softmax scaling) — this matches RouterTrainMode one-hot dispatch. Note whether x fed to router is the block input, the RMS-normed vector, or the Int8 fake-quant activation (must be pinned; recommend the same `rms_norm(x)` fed to the up-projection so the device reuses one normed buffer). If N==1, router tensors are omitted and the single expert is used unconditionally.
+MoE artifacts additionally contain four fp32 low-rank router tensors per block
+and expert-indexed up/down projections.
 
-## (c) Untied subword head, vocab V>80
+The exporter reloads `hardened.safetensors` into the MLX model and reevaluates
+it. That round trip is the trainer-side proof that serialization preserves hard
+QAT behavior.
 
-Set `topology.tied_head=false`, `topology.vocab=V`, and replace `lexical` charset_v1 string with a subword descriptor (e.g. `subword_v1 (V ids; tokenizer sha256=...)`). Add an untied head tensor: since logits today are computed against per-tensor-symmetric i8 head weights derived from the embedding (state_model_ref.rs:895-904), export the head directly. Recommended: `head.i8` (role lm_head_weight, dtype i8, shape [V, d_model], row_major, per-tensor symmetric) + `head.scale` — either one f32 scalar `head_step` (per-tensor, matching current `max|emb|/127`) or per-row u16 Q8.8 `head.scales` [V]; pick per-tensor scalar to match the existing single-`head_step` device epilogue unless per-row is required. Keep `embedding` (f32_le [V, d_model]) as the input embedding (no longer tied). Add `head_convention`: logits = head_i8 @ actq8(rms_norm(x_final)); dequant step = ACT_RANGE/QMAX * head_step. IMPORTANT device constraint: `StateTopology::validate` caps vocab at 85 because i24 logits (3 bytes) must fit one 256-byte WRAM page and the sampler tables are single-page (state_model_ref.rs:177, asm_impl_state.rs:217/363/371); V>85 requires multi-page logits/sampler layout and raising that cap. Also every `id as u8`/`prev: u8`/`argmax = id as u8` (state_model_ref.rs:1004,1010,1031,1209,1222; stateful.rs id handling) caps V at 256 at the type level — widen to u16/usize for V>256.
+### 2. Rust-consumable bridged checkpoint
 
-## (d) MLX tensor names/dtypes/layout → manifest mapping
+`training/gbtrain/bridge.py::bridge_hardened_export` reads the hardened
+artifact and writes:
 
-MLX (mlx.core / safetensors or .npz) stores dense arrays row-major, C-contiguous, little-endian. Mapping rules per tensor: (1) f32 tensors (embedding, head float pre-quant, router_in/out, biases) → dtype `f32_le`, bytes = row-major flatten, no transpose. If MLX linear weight is stored [out,in] it already matches manifest [rows=out, cols=in]; assert and record shape. (2) Ternary weights: MLX exports full-precision f32 expert up/down; the exporter must quantize to {-1,0,+1} i8 (one byte/elt) and per-output-row scales to Q8.8 u16_le (raw=round(scale*256)), identical to `TernaryLayer`/`int_scale_to_grid` semantics — this quantization is the exporter's job, MLX supplies f32 + the trainer's row scale. (3) Head: MLX f32 head → per-tensor symmetric i8 with `head_step=max|W|/127` (round-ties-even) OR pass through the trainer's own head_step. (4) decay: MLX per-slot decay f32 → u16 Q8.8 (exact for {0.5,0.75,0.875,0.9375}). Provide a fixed MLX-path→manifest-name table: `blocks.{k}.moe.expert.{e}.up.weight`→`block{k}_expert{e}_up.ternary`, `...up.scale`→`block{k}_expert{e}_up.scales`, `...down.*` similarly, `blocks.{k}.moe.router.input_projection.weight`→`block{k}_router_in`, `...expert_projection.weight`→`block{k}_router_out`, `embedding`→`embedding`, `classifier`/`lm_head`→`head`. Note MLX uses `.` path separators matching gbf-artifact ArtifactPath (export.rs); the manifest uses `block{k}_...` flat filenames, so the exporter renames. Every tensor keeps a `layout:"row_major"` field and sha256.
+~~~text
+<bridged>/ckpt/
+  manifest.json
+  tensors/*.bin
+~~~
 
-## Rust structs/functions that must change
+Every tensor entry records a semantic name, role, dtype, shape, row-major
+layout, relative file, and SHA-256. Files are little-endian. The bridge is
+NumPy/stdlib-only and does not quantize a new float checkpoint: it repackages
+values already hardened by the trainer.
 
-1) `StateTopology` (state_model_ref.rs:131): add `n_experts_per_block`, `router_rank`, `tied_head: bool` fields; update `validate()` (161; raise vocab cap at 177 if V>85), `macs_per_token()` (183; add router MACs + only the selected expert's FFN MACs + untied head). Add a new D-const or make `D192` explicit. 2) `BlockWeights` (model_ref.rs:154): replace the single up/down with either `experts: Vec<{up,down}>` + `router_in: Vec<f32>`/`router_out: Vec<f32>` (+ranks), or introduce a new `MoeBlockWeights` struct and make `StateCheckpoint.blocks` hold an enum {Dense(BlockWeights), Moe(MoeBlockWeights)}. 3) `StateCheckpoint` (state_model_ref.rs:199) + `new()` (314): validate expert counts, router shapes [rank,d_model]/[n_experts,rank], optional untied head [V,d_model]; add `head: Option<HeadWeights>` and `blocks()` accessor changes. 4) `IntStateLoweredModel` (state_model_ref.rs:556): `blocks: Vec<(LoweredLayer,LoweredLayer)>` → `Vec<Vec<(LoweredLayer,LoweredLayer)>>` (per-expert) + per-block lowered router (f32 or fixed-point) + gating; `head_i8`/`head_step` sourced from untied head when tied_head=false. `lower()` (881): lower every expert, compute down_width/bounds across ALL experts (938,946), lower router. `forward_probed()` (1031): block loop (1133) must run router→argmax→select expert e→run only that expert's up/down; head loop (1207) reads untied head; widen `argmax`/id types for V>256. `emb_resid_row`/`head_i8_row` (1004,1010) take u8 — widen for large V. 5) `load_state_checkpoint` (stateful.rs:79): remove moe rejection (107), parse `n_experts_per_block`/`router_rank`/`tied_head` (112), loop experts + load router f32 + optional head (block loop 198), add f32 tensor loader for router/head. 6) `StateWramLayout::plan`/`plan_at` (asm_impl_state.rs:297/341) + `build_state_one_token_rom`/`build_state_multi_token_rom`: allocate/emit per-expert weight chunks, a router scratch + gather-argmax routine, and multi-page logits+sampler when V>85. 7) Manifest reader + `TopologyFacts` in d192.rs (306) and d192_real.rs (parse_topology near 838-850). 8) Test producers `write_synthetic_state_export` (d192.rs:61) and `synthetic_state_checkpoint_with` (state_model_ref.rs ~1246) must emit v2 tensors.
+## Implemented bridge schemas
 
-## Minimal vs full rollout
+| Topology | Schema | Layer representation |
+|---|---|---|
+| Dense, one expert | `f_s5_state_checkpoint_export.v1` | One ternary up/down pair per block |
+| MoE, more than one expert | `f_s8_moe_state_checkpoint_export.v2` | Low-rank fp32 router plus indexed ternary experts |
 
-Loading is separable from executing. Phase 1 (schema + load): extend manifest, structs, and `load_state_checkpoint` to read experts+router+untied head and round-trip shapes/sha256 — no ROM change; this satisfies 'can be loaded by the Rust deploy pipeline' for the host integer evaluator. Phase 2 (host forward): `IntStateLoweredModel::lower`/`forward` execute router top-1 + selected expert + untied head. Phase 3 (device ROM): `StateWramLayout`/`build_state_*_rom` emit expert weight banks, router argmax, multi-page logits. Recommend delivering Phase 1+2 first (host byte-exact gate) since the D192 readiness harness (d192.rs:326) already drives load→lower→forward before ROM.
+Both schemas use:
 
-## Risks
+- fp32 embedding with a tied head;
+- ternary state-input and state-output projections;
+- per-output-row Q8.8 scales;
+- per-slot Q8.8 multi-timescale decay;
+- explicit sequence-state topology;
+- tensor-level SHA-256 verification.
 
-- Device page limits: vocab is capped at 85 (i24 logits + sampler tables must each fit one 256-byte WRAM page, state_model_ref.rs:177, asm_impl_state.rs:217/363/371). A subword head with V>85 breaks the single-page logits/sampler assumption and requires multi-page ROM layout, not just a schema field.
-- u8 id truncation: `forward(prev:u8)`, `head_i8_row(id:u8)`, `emb_resid_row(id:u8)`, and `argmax = id as u8` (state_model_ref.rs:1004,1010,1031,1209,1222) silently cap vocab at 256; V>256 needs u16/usize widening throughout the host + ROM.
-- WRAM budget: N experts multiply the FFN weight code and add router scratch. At d192 the layout already drops per-block residual dumps for budget (d192.rs caveats); N experts + a larger untied head + multi-page logits may not fit 8 KiB WRAM / the ROM bank plan without rework.
-- Router numeric contract unpinned: whether the router consumes raw x, rms_norm(x), or the Int8 fake-quant activation, and whether router matmul is f32 or fixed-point on device, is not specified by the trainer manifest; a wrong choice diverges from the trainer's top-1 dispatch and silently routes to the wrong expert. Tie-break rule (lowest index) must be pinned to match Burn/MLX argmax.
-- down_width/accumulator bounds (state_model_ref.rs:938-979) are computed over the single dense block today; with N experts the i16/i24 decision and DownDeltaEscapesI24 checks must be taken as the worst case over ALL experts, or a rarely-selected expert can overflow at runtime.
-- Ternary+scale quantization happens in the exporter, not MLX: MLX provides f32; if the exporter's round-ties rule for {-1,0,1} and Q8.8 scales does not match the trainer's QAT quantizer (gbf-model qat/ternary.rs), the deployed weights differ from what was trained/measured.
-- Shared-dense expert branch (SharedDenseBranch, export.rs:444, with dense f32 up/down + alpha) exists in the trainer MoE and is unhandled; if the MLX student uses it, silently ignoring it changes the computation. Spec should explicitly reject-or-support it.
+There is no production `f_s5_state_checkpoint_export.v2` untied-head path.
+The current V1024 cartridge does not require one: it keeps the head tied and
+uses paged logits plus cartridge SRAM.
 
-## Open questions
+## Dense tensor naming
 
-- Is the target subword vocab V ≤85 (fits current single-page logits with only a cap bump) or larger (needs multi-page logits + sampler + id-width rework)? This determines whether ROM changes are in scope.
-- Does the MLX student use the low-rank two-matrix router (input_projection[rank,d_model] + expert_projection[n_experts,rank]) as in Top1RouterQat, or a single [n_experts,d_model] gate? router_rank and tensor count depend on this.
-- Is the head genuinely untied (its own f32/i8 weights) or still tied to a now-larger embedding? If tied, only vocab widening is needed, no `head.*` tensors.
-- Top-1 only, or top-k>1 dispatch? All device/host selection logic assumes single-expert execution; top-k needs weighted combination and changes MAC/latency budgets.
-- Are per-block shared-dense expert branches (+alpha) present in the student? If so, dense f32 branch tensors and the alpha blend must be added to schema and forward.
-- Should router weights stay f32 on device (extra f32 matmul code) or be quantized (ternary/i8) for ROM size? Affects both schema dtype and ROM feasibility.
-- What is the exact input to the router (block input x vs rms_norm(x) vs Int8 activation) in the MLX/Burn reference forward, so the Rust host path can be byte-exact?
+The bridge maps hardened MLX keys to Rust checkpoint names:
+
+| Hardened key | Rust base |
+|---|---|
+| `embedding` | `embedding` |
+| `state_block.state_in` | `state_input_to_state` |
+| `state_block.state_out` | `state_state_to_output` |
+| `blocks.B.experts.0.up` | `blockB_up` |
+| `blocks.B.experts.0.down` | `blockB_down` |
+
+Each ternary base produces `BASE.ternary` and `BASE.scales` entries whose
+files end in `.ternary.i8.bin` and `.scales.q8_8_u16le.bin`.
+
+## MoE tensor naming
+
+For MoE, block B and expert E use:
+
+- `blockB_expertE_up.ternary` and `.scales`;
+- `blockB_expertE_down.ternary` and `.scales`;
+- `blockB_router_input_projection`;
+- `blockB_router_input_bias`;
+- `blockB_router_expert_projection`;
+- `blockB_router_expert_bias`.
+
+The router semantics are:
+
+~~~text
+hidden = input_projection @ raw_residual + input_bias
+scores = expert_projection @ hidden + expert_bias
+expert = lowest_index_argmax(scores)
+~~~
+
+Router parameters stay fp32 in the bridged format. Expert and state
+projections are ternary with Q8.8 row scales.
+
+## Importer behavior
+
+`gbf-codegen::import_state_checkpoint`:
+
+1. accepts dense f_s5 v1 or MoE f_s8 v2;
+2. validates the manifest topology and schema/topology agreement;
+3. verifies every referenced tensor's SHA-256 before parsing;
+4. validates shapes, element counts, dtypes, and ternary values;
+5. builds the corresponding dense or MoE state checkpoint;
+6. selects single-page logits for small vocabularies and `LogitPaging::Paged`
+   when the vocabulary exceeds the single-page limit.
+
+The production V1024 checkpoint therefore imports through the paged path.
+`gbf-bench::stateful::load_state_checkpoint` is now a compatibility re-export
+of this compiler-owned importer. The former claim that the loader rejects MoE
+or caps deployment at 85 vocabulary entries is obsolete.
+
+For the cared-for dense ROM, `gbf compile --profile
+interactive-subword-dmg` passes the imported checkpoint and tokenizer through
+the narrow `StatefulSubwordProgram`, `IntStateLoweredModel`, the stateful V3
+backend, and `gbf-asm`. This is a real compiler-owned product path, but it does
+not fabricate the still-unwired generic fourteen-stage products.
+
+## Current provenance limitation
+
+The hardened and bridged manifests are sufficient to validate tensor contents,
+but they are not a complete release provenance record. In particular, the
+production chain does not fail closed on missing:
+
+- git revision and dirty state;
+- actual training argv and full effective TrainConfig;
+- teacher, dataset, and tokenizer hashes;
+- Python, MLX, Rust, and target versions;
+- a hash linking the hardened source artifact to the bridged manifest;
+- a mandatory compiler git revision rather than the currently optional
+  `GBF_COMPILER_GIT_REVISION`.
+
+The interactive compiler now emits `build_report.json` and
+`compile_request.json`, including checkpoint-manifest, tokenizer, and ROM
+hashes plus topology, sampler, storage, and honest stage-coverage facts. Those
+reports close the build-side gap; they cannot reconstruct provenance that the
+training and bridge inputs never recorded.
+
+Documentation must therefore distinguish a verified local
+hardened-checkpoint-to-ROM rebuild from a hermetic clean-clone training replay.
+The repository [README](../../README.md) records the exact current boundary.

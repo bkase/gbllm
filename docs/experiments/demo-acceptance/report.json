@@ -704,7 +704,7 @@
     "deployed_beats_kn5_full": false,
     "deployed_minus_kn5_full_bits_per_raw_byte": 0.7123251499738403,
     "kn5_on_cart_feasibility": "KN-5 does not fit on-cart: the full-corpus fit holds 4621191 unique n-gram entries (orders 2-5; 3759337 unique 5-gram contexts alone) and the 256 MiB-cap fit still holds 2715582 5-gram contexts. Every entry needs a packed multi-char context key plus smoothed continuation statistics — several bytes per entry before any runtime code — while the 8 MiB MBC5 ROM ceiling is already saturated by the deployed d192 ROM (8,388,608 bytes, ~6.07 MiB of it weight code). No committed on-cart KN-5 representation or DMG-latency evaluation of one exists.",
-    "honest_claim": "best deployable model to date that fits the cart and the UX budget; output is coherent English-like pseudo-prose, not KN-5-beating text",
+    "honest_claim": "at this packet's recorded git revision, the best measured deployable model that fit the cart and UX budget; output is coherent English-like pseudo-prose, not KN-5-beating text",
     "next_levers": [
       "close the hard-ternary QAT gap (scale run 2 widened it 3.6x: +0.1033 bpc; levers: longer hardness warmup, later hard switch, lower hard-phase lr, gap-aware distill weight schedule)",
       "raise ternary sparsity (deployed zero fraction 0.0085; V3 kernels skip zeros, so sparsity buys both quality-per-byte and latency)",

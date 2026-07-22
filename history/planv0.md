@@ -1,4 +1,18 @@
-Yes. End-to-end Rust remains the right strategic choice, but the mature form of the design is now:
+# Plan v0: target architecture
+
+> **Status: historical target architecture, not the current product call
+> graph.** This plan describes the intended end-to-end Rust/artifact/compiler
+> architecture. The current interactive d192/V1024 ROM is trained in Python/MLX
+> and built through the bridge → `gbf compile --profile
+> interactive-subword-dmg` → compiler checkpoint importer → narrow recurrent
+> program/integer lowerer → stateful backend path documented in [the repository
+> README](../README.md). That real compiler-owned path is not the full generic
+> fourteen-stage architecture described below. Statements such as “remains,”
+> “is,” and “owns” express this plan's intended design, not proof that a
+> production artifact executes every stage.
+
+End-to-end Rust was the strategic choice proposed by this plan, whose mature
+form was:
 
 - shared topology, quantization, packing, LUT generation, charset, and sequence-semantics definitions live in common Rust crates;
 - trainer, oracle stack, compiler, runtime authoring, and emulator harness all consume those crates;

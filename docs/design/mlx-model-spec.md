@@ -1,71 +1,136 @@
-# mlx-model-spec
+# MLX model implementation
 
-## Summary
+> **Status: current implementation inventory.** The executable source of truth
+> is `training/gbtrain/model.py`, `training/gbtrain/train.py`, and
+> `training/gbtrain/qat_schedule.py`. This document describes those files; it
+> does not reserve future model behavior.
 
-Implementation spec for an MLX (Apple Metal) floating-point reference model that must be bit-faithful to the trainer's hard-ternary f32 semantics (gbf-kernel `f32_state_forward` / `f32_forward`), which is the exact fp reference that the canonical integer semantics (`IntStateLoweredModel::forward`, state-int-semantics.v2) lower from. Matching that f32 reference is the contract: a QAT student trained in MLX against these equations lowers into the Rust deploy pipeline unchanged. The model is a stateful MoE: embedding -> LinearState MT4 recurrent block (with residual) -> N pre-norm residual blocks whose FFN is a top-1 8-expert MoE (each expert a ternary up/GELU/down MLP) -> final RMS-norm -> tied subword head. The spec below pins tensor shapes, per-block forward equations, exact quant/rounding conventions, where ternary weight fake-quant and Int8 activation fake-quant hooks attach, and the truncated-BPTT detached-state-carry contract. All arithmetic that the deploy path reproduces (RMS norm, GELU tanh-approx constant, Int8 fake-quant, ternary per-row Q8.8 scales, round-ties-even at train time) must match the cited Rust functions exactly; MLX must run these in fp32 (not bf16/fp16) to preserve the reference.
+## Production artifact
 
-## Global constants and dtype discipline
+The current interactive cartridge uses the hardened dense student at
+`training/artifacts/student_dense_d192`:
 
-Pin from gbf-kernel/src/model_ref.rs: ACT_RANGE=8.0, QMAX=127, NORM_EPS=1.0e-5, GELU tanh-approx constant SQRT_2_OVER_PI = FRAC_2_SQRT_PI * FRAC_1_SQRT_2 (compute in f64, cast to f32 at the multiply, exactly as gelu_approx_f32, model_ref.rs:221-231). Ternary weights are {-1,0,+1}; per-output-row scale is Q8.8 = scale_raw(u16)/256.0 (model_ref.rs:274-275). Decay is Q8.8 = decay_raw/256 (state_model_ref.rs:462-463). All MLX modules MUST execute in mx.float32 end-to-end; do NOT let MLX auto-promote to fp16/bf16 on Metal, or the fake-quant rounding boundaries and RMS reciprocal-sqrt will diverge from the ndarray f32 reference. Train-time rounding is round-ties-even (Burn ndarray); the integer/runtime path uses round-half-away, so the MLX reference must use round-ties-even (banker's rounding) for every fake-quant to match the training reference, not the runtime path.
+| Field | Value |
+|---|---:|
+| d_model | 192 |
+| d_ff | 384 |
+| residual blocks | 6 |
+| recurrent state slots | 192 |
+| experts per block | 1 |
+| vocabulary | 1,024 byte-BPE tokens |
+| training step | 24,000 |
 
-## Topology and tensor shapes (d192 student family)
+The configurable MLX implementation can construct more than one expert, but
+that is not the topology in
+`artifacts/builds/gbllm-dense-d192-interactive.gb`.
 
-StateTopology::D192 (state_model_ref.rs:150-156): d_model D=192, d_ff F=384, n_blocks B=6, state_slots S=192. Prompt target vocab V≈1024 subword (overrides the charset_v1 V=80 in the reference). Shapes: embedding E [V, D] f32 (tied head reuses E). state_in W_in [S, D] ternary + scale_in [S] (Q8.8). decay per-slot [S] (Q8.8, MT4). state_out W_out [D, S] ternary + scale_out [D]. Per block b: router input_projection [rank, D] + input_bias [rank], expert_projection [n_experts=8, rank] + expert_bias [8]; default rank = clamp(ceil(8/4),1,8)=2 (router.rs:75-77). Per block per expert e in 0..8: up W_up [F, D] ternary + scale_up [F]; down W_down [D, F] ternary + scale_down [D]. Tied head logits [V] = final_norm[D] · E[v][D]. Row-major throughout: W[row*cols + col], matvec output row r = sum_col W[r,col]*x[col].
+## Token forward pass
 
-## Embedding + module list
+`GBModel.__call__` in `training/gbtrain/model.py` executes a token window;
+`GBModel._forward_per_token` is its per-token reference used by the equality
+test. Together they execute this sequence for each input token:
 
-embed(prev_id) = E[prev_id, :] -> x [D] f32, the residual stream (trainer keeps this in f32; deploy lowers x to Q19.5 i24 but the MLX reference stays f32). MLX module order per token: (1) LinearStateBlock (updates recurrent state, residual-adds y into x); (2) for b in 0..6: MoEBlock_b (prenorm, router top-1, selected expert FFN, residual-add delta into x); (3) final RMS-norm+clip -> normed [D]; (4) tied head logits[v] = sum_d normed[d]*E[v,d]. No activation-quant on the final normed vector in the trainer f32 reference (the integer path quantizes it; that is a documented divergence, state_model_ref.rs:121).
+1. Look up a row in the fp32 embedding, producing the residual vector `x`.
+2. Run the `LinearStateBlock`:
+   - RMS-normalize and clip `x`;
+   - optionally apply Int8 fake quantization;
+   - project into 192 state slots;
+   - update each slot as `state = state * decay + input_delta`;
+   - project the state back to d192;
+   - optionally fake-quantize that output and add it to the residual.
+3. Run six pre-norm residual FFN blocks. In the production dense branch each
+   block performs `x += down(actq(gelu(up(actq(rms_norm(x))))))`.
+4. Apply final RMS normalization.
+5. Compute logits with the embedding transposed. The embedding and head are
+   tied; there is no independent output-head parameter or bias.
 
-## LinearState MT4 recurrent block forward (must match f32_state_forward, state_model_ref.rs:448-469)
+All MLX tensors are explicitly cast to fp32. RMS normalization clips to
+[-8, 8], GELU uses the tanh approximation, and the hard-QAT path uses
+round-to-even fake quantization.
 
-Given residual x [D] and persistent state h [S] (zeroed at stream start): normed = rms_norm_clip(x); normed = act_fake_quant(normed) [both defined below]; delta = ternary_matvec(W_in, scale_in, normed) -> [S]; state update per slot s: h[s] = h[s]*decay[s] + delta[s]; y = ternary_matvec(W_out, scale_out, h) -> [D]; x[d] += act_fake_quant(y[d]). Order is exact: the input activation-quant happens BEFORE W_in; the output activation-quant happens on y AFTER W_out and BEFORE the residual add. MT4 decay: rates [0.5,0.75,0.875,0.9375] = raws {128,192,224,240}=round(rate*256). Slot->rate mapping is CONTIGUOUS BLOCKS (gbf-artifact/src/sequence.rs:275-282): slots_per_rate = S/4 = 48; decay[s] = rates[s / 48]. So slots 0..47 use 0.5, 48..95 use 0.75, 96..143 use 0.875, 144..191 use 0.9375. Validate S % 4 == 0. h is carried across tokens within a truncation window (see BPTT contract).
+## Recurrent state
 
-## Pre-norm residual MoE FFN block forward (top-1 over 8 experts)
+The state uses four contiguous decay bands:
 
-Given residual x [D]: (a) router runs on the block input. Router (router.rs:575-627): hidden = input_projection[rank,D] @ x + input_bias -> [rank]; raw_logits = expert_projection[8,rank] @ hidden + expert_bias -> [8]; effective = raw_logits (+train jitter, see stochastic phases); routing_probs = softmax(effective); expert_index = argmax(effective) with LOWEST-index tiebreak (top1_index, router.rs:1094-1110). (b) Selected expert FFN (dense-convention prenorm block, mirrors f32 FFN loop model_ref.rs:292-305): normed = rms_norm_clip(x); normed = act_fake_quant(normed); hidden = ternary_matvec(W_up_e, scale_up_e, normed) -> [F]; hidden = act_fake_quant(gelu_approx(hidden)) [GELU applied to the raw f32 matvec output, THEN Int8 fake-quant]; ffn_delta = ternary_matvec(W_down_e, scale_down_e, hidden) -> [D]; x[d] += ffn_delta[d]. Hard top-1: only the selected expert executes and contributes; routing weight is the one-hot dispatch (HardTop1). OPEN: whether the router reads pre-norm x or a normed x — the reference files run the router on raw d_model input (router.forward takes input [D] with no internal norm), so spec the router on the pre-norm residual x; pin this against the composition owner before committing.
+| Slots | Decay | Q8.8 raw |
+|---|---:|---:|
+| 0–47 | 0.5 | 128 |
+| 48–95 | 0.75 | 192 |
+| 96–143 | 0.875 | 224 |
+| 144–191 | 0.9375 | 240 |
 
-## rms_norm_clip and act_fake_quant (exact, must match model_ref.rs:242-268 / state_model_ref.rs:419-429)
+State values carry across tokens and across truncated-BPTT windows. At a window
+boundary `training/gbtrain/train.py` stops gradients through the carried value
+but does not zero the value. This gives fixed-size sequence memory without a KV
+cache that grows with context length.
 
-rms_norm_clip(x[n]): sum_sq = sum_i x_i^2 (fp32 accumulate); mean_sq = sum_sq / n; rms = sqrt(mean_sq + 1e-5); out_i = clamp(x_i / rms, -8.0, 8.0). n = D for both the state block and each FFN prenorm. act_fake_quant(v) (Int8, fixed range, round-ties-even): clamped = clamp(v,-8,8); q = clamp(round_ties_even((clamped/8)*127), -127, 127); return (q/127)*8. This is a straight-through fake-quant: forward applies the quant, backward passes gradient through (STE / identity on the clamp interior). Implement round_ties_even explicitly in MLX (mx.round is round-half-to-even in NumPy-compatible mode; verify on Metal, else emulate). gelu_approx(x): inner = x + 0.044715*x^3; g = 0.5*x*(tanh(inner*SQRT_2_OVER_PI_f32)+1).
+## Ternary projections and activation QAT
 
-## ternary_matvec and QAT weight fake-quant hook (per-row Q8.8 scale)
+`TernaryLinear` holds latent fp32 weights and a learned threshold. In hard-QAT
+mode it:
 
-Deployed math (hard): out_r = sum_c (w_rc * (scale_raw_r/256)) * x_c, w_rc in {-1,0,+1} (model_ref.rs:270-281). QAT training uses TernaryLinearQat: latent fp weights -> per-row threshold ternarize to {-1,0,+1} (one global threshold OR one threshold per output row — NOT per-weight, per CLAUDE.md ternary contract) with straight-through estimator; per-output-row scale is quantized to the Q8.8 grid (scale_raw/256, scale_raw u16) also via STE. The MLX TernaryLinear module must therefore hold: latent weight [rows,cols] fp32, ternary threshold [rows] (or scalar), latent row scale [rows] fp32. Forward: w_tern = STE_ternarize(latent, threshold); scale = STE_q8_8(latent_scale); out = (w_tern * scale[:,None]) @ x. Hook placement: this weight fake-quant wraps EVERY ternary projection — W_in, W_out, and every expert W_up/W_down (the router input/expert projections are low-rank fp in the reference (router.rs matvec is plain f32) and are NOT ternary unless a later bead ternarizes them; keep them fp32 in the MLX reference).
+1. maps each weight to -1, 0, or +1 using a straight-through estimator;
+2. at the Off-to-Hard transition, calibrates each row's threshold and scale
+   from the latent row magnitudes, then keeps them as model parameters;
+3. snaps the stored scale to the Q8.8 grid with a straight-through estimator;
+4. applies the scaled ternary matrix multiplication.
 
-## Where the Int8 activation fake-quant hooks attach
+Activation fake quantization is attached at four sites:
 
-Attach act_fake_quant (Int8, [-8,8], round-ties-even) at exactly four sites, matching f32_state_forward: (1) after rms_norm_clip on the state-block input, before W_in; (2) on the state out-projection output y, after W_out, before the residual add; (3) after rms_norm_clip on each FFN prenorm, before W_up; (4) after gelu_approx on the hidden vector, before W_down. Do NOT quantize: the residual stream x itself, the router path, the down-projection output delta, or the final normed head input (all unquantized in the trainer f32 reference; the integer path quantizes some of these — documented divergences, keep them out of the MLX reference). Note the naming: activations are symmetric Int8 on fixed [-8,8]; the 'Q8.8' in the prompt refers to the per-row WEIGHT scale, not the activation grid — keep these two quantizers distinct in the MLX modules (ActFakeQuant vs TernaryLinear.scale).
+1. after state-input RMS normalization, before the state-input projection;
+2. after the state-output projection, before its residual add;
+3. after each FFN RMS normalization, before the up projection;
+4. after GELU, before the down projection.
 
-## Router load-balance aux loss and stochastic phases
+The residual stream, dense down-projection output, and final normalized head
+input are not fake-quantized by the MLX model.
 
-Per-token router aux terms (router.rs:678-713): z_loss = logsumexp(raw_logits)^2 (uses RAW logits, not jittered/effective); token_balance_proxy = routing_probs[expert_index] * n_experts (single-token proxy; the real batch load-balance objective — mean over tokens of (fraction routed to e)*(mean prob of e)*n_experts — is owned by the training-loss composer where batch expert fractions exist, so the MLX trainer must aggregate expert-usage fractions across the batch/window itself); temporal_smoothness = clamp(1 - dot(routing_probs_t, routing_probs_{t-1}), 0, 1), with previous distribution carried across tokens and RESET at sequence start (reset_sequence). Default aux weights all 1.0 (router.rs:258-266). Training stochastic schedule by phase (RouterStochasticConfig::for_phase, router.rs:187-210): DenseTeacherWarmup(drop 0.0, jitter 0.0) -> RouterWarmup(0.1,0.5) -> ExpertTernaryQat(0.1,0.3) -> FullNumericQat(0.05,0.1) -> HardenAndSelect(0.0,0.0). Jitter adds to effective logits only (softmax/argmax see jittered; z_loss sees raw); dropout masks experts to -inf pre-softmax with an all-dropped rescue. Eval/Export force drop=jitter=0. Reproduce the splitmix64 RNG streams only if you need bit-identical dropout masks; otherwise any per-(seed,step,layer) RNG suffices for training.
+## Dense and MoE behavior
 
-## Tied subword head
+`MoEBlock` has two executable branches:
 
-logits[v] = sum_d final_normed[d] * E[v,d] for v in 0..V (state_model_ref.rs:489-498). The head weight IS the embedding matrix E [V,D] (tied, no separate parameter, no bias). Deploy lowers the tied head to per-tensor symmetric i8 (scale=max|E|/127) and E to Q19.5 for the residual path — two different quantizations of the same fp E; the MLX reference keeps a single fp32 E used both for embed lookup and head. argmax tiebreak: lowest index wins (matches IntForwardTrace argmax, model_ref.rs:585-592). CAUTION: V≈1024 exceeds the device single-page i24-logit cap of 85 (StateTopology::validate, state_model_ref.rs:177) — training at V=1024 is fine for the fp reference/MLX student, but the current deploy pipeline cannot emit 1024 logits in one page; a logit-paging (or vocab-reduction) bead is required before this student is deployable.
+- `n_experts == 1`: run expert zero directly and return zero router auxiliary
+  loss;
+- `n_experts > 1`: run the low-rank fp32 router, choose hard top-1 experts with
+  lowest-index tie breaking, dispatch tokens to those experts, and compute
+  z-loss plus batch load-balance loss.
 
-## Truncated-BPTT detached-state-carry training contract
+The implemented `ModelConfig` defaults are
+`lambda_zrouter = 1e-3` and `lambda_balance = 1e-2`. The MLX model does not
+carry a previous router distribution, compute temporal-smoothness loss, or run
+the older phase-specific dropout/jitter schedule described by the superseded
+design.
 
-State semantics (apply_state_update, linear_state.rs:517-534): h_t[s] = h_{t-1}[s]*decay[s] + delta_t[s], carried in-place across tokens. Training contract: process a stream in truncation windows of length T (BPTT-T). Within a window, unroll the recurrence and backprop through all T state updates (gradient flows through h and through the router temporal-smoothness dot). At each window boundary: DETACH the carried state — h_carry = stop_gradient(h_last) (mx.stop_gradient) — and pass it as the initial state of the next window, so gradients do not cross the truncation boundary but the state VALUE persists (this is the standard truncated-BPTT detached carry). Also carry router previous_distribution across windows detached; RESET both h and previous_distribution to zero/None only at true sequence boundaries (document start), not at window boundaries. Batch constraint: the scalar LinearState reference is batch=1 (linear_state.rs:257-261); the MLX trainer may batch B independent streams as a leading axis but must keep per-stream state [B,S] and detach per-stream at each stream's window boundary. The forward within a window must be sequential in t (the recurrence is not parallelizable as written); use an MLX scan/loop over T, keeping fp32.
+## Training schedule
 
-## Determinism / export-parity checklist
+`training/run_teacher.py` trains the dense d512 teacher with QAT off.
+`training/run_student.py` trains the deployable student with teacher
+distillation and the `Off -> Hard` schedule:
 
-To guarantee the MLX-trained student lowers correctly: (1) run a parity harness that feeds identical weights through the MLX forward and the Rust f32_state_forward and asserts logits agree to ~1e-4 over a token stream (per-token drift accumulates through the recurrence, so measure over long streams and on bpc/argmax, per state_model_ref.rs:122). (2) Confirm ternarize threshold semantics (per-row vs global) match whatever TernaryLinearQat exports, and that row scales land on the exact Q8.8 grid before export. (3) Keep the four activation-quant hook sites and the two-not-quantized sites exactly as listed; a misplaced quant is the most likely silent parity break. (4) Export must round-trip: emit E (fp32), per-projection ternary weights+Q8.8 row scales, per-slot decay raws {128,192,224,240}, and router fp projections, in the f_s5_state_checkpoint_export manifest topology block (d_model,d_ff,n_blocks,state_slots,vocab). Export is definition-of-done (per user memory: an 8h run was lost to measure-and-discard).
+- QAT is off for the first 40% of steps;
+- ternary weights and Int8 activations turn on together for the remaining 60%;
+- hard-phase learning rate decays toward 0.1 times peak;
+- distillation weight rises from 0.5 to 0.65.
 
-## Risks
+The loss is cross-entropy plus temperature-scaled teacher distillation plus
+router auxiliary loss. Router auxiliary loss is zero for the production dense
+student.
 
-- MoE vs dense reference gap: the grounded Rust references (model_ref.rs, state_model_ref.rs) implement a DENSE FFN stack, not MoE. There is no committed integer/f32 reference for the top-1 8-expert MoE FFN path plus router; the MLX MoE FFN semantics are inferred from block.rs topology + router.rs + expert prenorm-FFN structure. The exact residual/aux-loss composition of the MoE block (esp. whether the router sees pre-norm or normed x, and whether expert projections are ternary) is NOT pinned by an executable reference and must be confirmed against the composition/lowering owner before it can be called export-faithful.
-- Rounding-mode trap: train reference is round-ties-even; runtime/integer path is round-half-away. If the MLX student is accidentally matched to the runtime path (or MLX mx.round on Metal is not true banker's rounding), fake-quant boundaries diverge from the training reference and QAT will not reproduce.
-- dtype promotion on Metal: MLX may run matmuls in fp16/bf16 by default on some paths; any reduced precision in RMS reciprocal-sqrt, the ternary matvec accumulation, or softmax breaks bit-parity with the ndarray f32 reference.
-- Vocab cap: V≈1024 exceeds the deploy device single-page logit cap of 85 (StateTopology::validate). The fp/MLX reference can train at 1024, but deployment is blocked without a logit-paging or vocab-reduction bead — the 'lowers into the Rust deploy pipeline' goal is not currently satisfiable at V=1024.
-- Batch-state semantics: the scalar LinearState reference is batch=1; batching streams in MLX requires per-stream state and per-stream detach/reset, which has no reference implementation to match against.
-- Load-balance loss ambiguity: only a single-token proxy exists in router.rs; the real batch load-balance objective is owned elsewhere. If the MLX trainer implements a different aggregation than the eventual training-loss owner, aux-loss magnitudes (and thus routing behavior) will not match.
+## Deployment status
 
-## Open questions
+Vocabulary 1,024 is deployed today. The Rust loader selects paged logits for a
+wide vocabulary, and the exact d192/V1024 ROM stores the complete i24 logit
+vector in 8 KiB cartridge SRAM. The old single-page limit of 85 logits remains
+relevant only to the non-paged layout; it is not a deployment blocker.
 
-- Does the MoE router read the pre-norm residual x or an RMS-normed x? The reference router takes raw [D] input with no internal norm; standard prenorm MoE would normalize first. Needs the composition owner to confirm.
-- Are the router input_projection/expert_projection ternary-QAT or full-precision at deploy? router.rs treats them as plain f32; if they must ternarize for the ROM, the MLX reference needs ternary hooks on them too.
-- For the MoE FFN, is there a residual/skip or shared-dense branch (SharedDenseBranchStage appears in block.rs as optional)? If a shared dense branch runs alongside the selected expert, its ternary FFN and residual contribution must be added to the spec.
-- Exact ternarization threshold contract for TernaryLinearQat: one global threshold vs one-per-output-row, and the STE form (clip range) — must be read from the QAT expert/ternary implementation to match export scales.
-- Truncation window length T and whether router previous_distribution is detached or fully reset at window boundaries vs only at sequence boundaries — pin against the training-loop owner.
-- Which integer-semantics divergences (final-norm activation quant, down-delta quant, u8 zp128) are intentionally EXCLUDED from the MLX fp reference (they should be, to match the trainer) vs. must be QAT-simulated so the student anticipates them — confirm the QAT fidelity target is the f32 reference, not the integer path.
+Hardening and schema details live in
+[export-schema-spec.md](export-schema-spec.md). The complete current-product
+walkthrough is the repository [README](../../README.md).
+
+## Remaining truth gaps
+
+- MLX GPU optimization is not promised to be bit-identical across machines.
+- The saved production manifest does not capture the original argv, all input
+  hashes, git revision/dirty state, MLX version, or device.
+- An MoE-capable code path is not evidence that an MoE model is the current ROM
+  or that it beats the dense artifact.

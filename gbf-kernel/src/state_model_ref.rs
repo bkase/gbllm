@@ -258,12 +258,12 @@ impl StateTopology {
     }
 
     /// Host-evaluator validation. Identical to [`Self::validate`] except the
-    /// single-page vocab cap is relaxed to the paged host ceiling: the host
-    /// integer forward computes `vocab` i32 logits in RAM with no 256-byte
-    /// page limit, so V=1024 subword MoE students load and forward here even
-    /// though on-device logit paging (deploy step 2) has not yet relaxed the
-    /// ROM's single-page cap. Every other device structural limit is enforced
-    /// unchanged, so dense d192/arm-B (vocab 80) validate identically.
+    /// single-page vocab cap is relaxed to the host ceiling: the host integer
+    /// forward computes `vocab` i32 logits in RAM with no 256-byte page limit.
+    /// This permits host-only evaluation of a wide vocabulary even when a
+    /// caller labels its topology `SinglePage`. Production V=1024 ROMs use
+    /// [`LogitPaging::Paged`] and pass the ordinary [`Self::validate`] path.
+    /// Every other device structural limit remains enforced.
     pub fn validate_host(&self) -> Result<(), StateModelError> {
         // The host holds all logits in RAM, so the single-page cap never binds;
         // a Paged topology still respects the paged ceiling.
