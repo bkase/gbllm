@@ -2,7 +2,15 @@ use std::process::ExitCode;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompileProfile {
+    /// Stateless dense-bigram compiler path (`f_s6_dense_checkpoint_export.v1`).
+    DenseBigram,
+    /// JOYP-driven recurrent byte-BPE cartridge for DMG/MBC5+8KiB RAM.
+    InteractiveSubwordDmg,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "gbf", about = "GBLLM command-line tools")]
@@ -25,20 +33,35 @@ struct GbfCli {
 
 #[derive(Debug, Subcommand)]
 enum GbfCommand {
-    /// Compile a trained checkpoint export into a bootable model ROM
-    /// (`rom.gb` + `build_report.json`) through the gbf-codegen pipeline.
+    /// Compile a trained checkpoint export into a bootable model ROM through
+    /// the gbf-codegen pipeline.
     #[cfg(feature = "compile")]
     Compile {
-        /// Checkpoint export directory (`f_s6_dense_checkpoint_export.v1`
-        /// bundle: `manifest.json` + `tensors/`).
+        /// Compiler path to execute.
+        #[arg(long, value_enum, default_value_t = CompileProfile::DenseBigram)]
+        profile: CompileProfile,
+        /// Checkpoint export directory (`manifest.json` plus tensor blobs).
         #[arg(long)]
         checkpoint_export: PathBuf,
-        /// Output directory for `rom.gb` and `build_report.json`.
+        /// Byte-BPE JSON; required by `interactive-subword-dmg`.
+        #[arg(long)]
+        tokenizer: Option<PathBuf>,
+        /// Output packet directory. Interactive builds write `rom.gb`,
+        /// `rom.sym`, `build_report.json`, and `compile_request.json`.
         #[arg(long)]
         out: PathBuf,
-        /// On-device generation steps compiled into the ROM loop (1..=256).
-        #[arg(long, default_value_t = 256)]
-        tokens: u16,
+        /// On-device generation steps (defaults: dense=256, interactive=24).
+        #[arg(long)]
+        tokens: Option<u16>,
+        /// Interactive integer sampler top-k.
+        #[arg(long)]
+        top_k: Option<u8>,
+        /// Interactive sampler temperature.
+        #[arg(long)]
+        temperature: Option<f64>,
+        /// Interactive XorShift16 seed (decimal or `0x` hexadecimal).
+        #[arg(long, value_parser = parse_u16)]
+        rng_seed: Option<u16>,
     },
     /// S1 First Pulse experiment workflows.
     #[cfg(any(
@@ -102,10 +125,24 @@ fn main() -> ExitCode {
             match cli.command {
                 #[cfg(feature = "compile")]
                 GbfCommand::Compile {
+                    profile,
                     checkpoint_export,
+                    tokenizer,
                     out,
                     tokens,
-                } => exit_code(run_compile(&checkpoint_export, &out, tokens)),
+                    top_k,
+                    temperature,
+                    rng_seed,
+                } => exit_code(run_compile(CompileInvocation {
+                    profile,
+                    checkpoint_export: &checkpoint_export,
+                    tokenizer: tokenizer.as_deref(),
+                    out: &out,
+                    tokens,
+                    top_k,
+                    temperature,
+                    rng_seed,
+                })),
                 #[cfg(any(
                     feature = "phase-a",
                     feature = "ablation",
@@ -232,32 +269,140 @@ fn s4_logging(cli: &GbfCli) -> gbf_experiments::s4::cli::S4CliLogging {
 }
 
 #[cfg(feature = "compile")]
-fn run_compile(
-    checkpoint_export: &std::path::Path,
-    out: &std::path::Path,
-    tokens: u16,
-) -> Result<(), gbf_codegen::compile::CompileError> {
-    use gbf_codegen::compile::{CompileOptions, compile_checkpoint_export, write_build_outputs};
+#[derive(Debug)]
+enum RunCompileError {
+    Dense(gbf_codegen::compile::CompileError),
+    Interactive(gbf_codegen::compile_state_subword::InteractiveSubwordCompileError),
+    Usage(String),
+}
 
-    let compiled =
-        compile_checkpoint_export(checkpoint_export, &CompileOptions { n_tokens: tokens })?;
-    let outputs = write_build_outputs(&compiled, out)?;
-    let rom = &compiled.report.rom;
-    println!(
-        "compiled {} -> {} ({} bytes, {} banks, {} weight chunks, {}-token loop)",
-        checkpoint_export.display(),
-        outputs.rom_path.display(),
-        rom.rom_bytes,
-        rom.bank_count,
-        rom.weight_chunk_count,
-        rom.n_tokens
-    );
-    println!(
-        "artifact {} | build report {}",
-        compiled.report.artifact.semantic_hash,
-        outputs.report_path.display()
-    );
+#[cfg(feature = "compile")]
+impl std::fmt::Display for RunCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dense(error) => error.fmt(f),
+            Self::Interactive(error) => error.fmt(f),
+            Self::Usage(reason) => f.write_str(reason),
+        }
+    }
+}
+
+#[cfg(feature = "compile")]
+impl std::error::Error for RunCompileError {}
+
+#[cfg(feature = "compile")]
+struct CompileInvocation<'a> {
+    profile: CompileProfile,
+    checkpoint_export: &'a std::path::Path,
+    tokenizer: Option<&'a std::path::Path>,
+    out: &'a std::path::Path,
+    tokens: Option<u16>,
+    top_k: Option<u8>,
+    temperature: Option<f64>,
+    rng_seed: Option<u16>,
+}
+
+#[cfg(feature = "compile")]
+fn run_compile(invocation: CompileInvocation<'_>) -> Result<(), RunCompileError> {
+    let CompileInvocation {
+        profile,
+        checkpoint_export,
+        tokenizer,
+        out,
+        tokens,
+        top_k,
+        temperature,
+        rng_seed,
+    } = invocation;
+    match profile {
+        CompileProfile::DenseBigram => {
+            use gbf_codegen::compile::{
+                CompileOptions, compile_checkpoint_export, write_build_outputs,
+            };
+            if tokenizer.is_some() || top_k.is_some() || temperature.is_some() || rng_seed.is_some()
+            {
+                return Err(RunCompileError::Usage(
+                    "--tokenizer, --top-k, --temperature, and --rng-seed require --profile interactive-subword-dmg"
+                        .to_string(),
+                ));
+            }
+            let n_tokens = tokens.unwrap_or(256);
+            let compiled =
+                compile_checkpoint_export(checkpoint_export, &CompileOptions { n_tokens })
+                    .map_err(RunCompileError::Dense)?;
+            let outputs = write_build_outputs(&compiled, out).map_err(RunCompileError::Dense)?;
+            let rom = &compiled.report.rom;
+            println!(
+                "compiled {} -> {} ({} bytes, {} banks, {} weight chunks, {}-token loop)",
+                checkpoint_export.display(),
+                outputs.rom_path.display(),
+                rom.rom_bytes,
+                rom.bank_count,
+                rom.weight_chunk_count,
+                rom.n_tokens
+            );
+            println!(
+                "artifact {} | build report {}",
+                compiled.report.artifact.semantic_hash,
+                outputs.report_path.display()
+            );
+        }
+        CompileProfile::InteractiveSubwordDmg => {
+            use gbf_codegen::compile_state_subword::{
+                InteractiveSubwordCompileOptions, compile_interactive_subword,
+                write_interactive_subword_outputs,
+            };
+            let tokenizer = tokenizer.ok_or_else(|| {
+                RunCompileError::Usage(
+                    "--tokenizer is required for --profile interactive-subword-dmg".to_string(),
+                )
+            })?;
+            let n_tokens = u8::try_from(tokens.unwrap_or(24)).map_err(|_| {
+                RunCompileError::Usage(
+                    "interactive --tokens must fit the cartridge range 1..=255".to_string(),
+                )
+            })?;
+            let options = InteractiveSubwordCompileOptions {
+                n_tokens,
+                top_k: top_k.unwrap_or(4),
+                temperature: temperature.unwrap_or(0.6),
+                rng_seed: rng_seed.unwrap_or(0x5EED),
+            };
+            let compiled = compile_interactive_subword(checkpoint_export, tokenizer, &options)
+                .map_err(RunCompileError::Interactive)?;
+            let outputs = write_interactive_subword_outputs(&compiled, out)
+                .map_err(RunCompileError::Interactive)?;
+            let rom = &compiled.report.rom;
+            println!(
+                "compiled {} + {} -> {} ({} bytes, {} banks, {} generated tokens)",
+                checkpoint_export.display(),
+                tokenizer.display(),
+                outputs.rom_path.display(),
+                rom.rom_bytes,
+                rom.bank_count,
+                rom.generation_tokens,
+            );
+            println!(
+                "ROM sha256 {} | symbols {} | build report {} | compile request {}",
+                rom.sha256,
+                outputs.symbols_path.display(),
+                outputs.report_path.display(),
+                outputs.request_path.display(),
+            );
+        }
+    }
     Ok(())
+}
+
+fn parse_u16(value: &str) -> Result<u16, String> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u16::from_str_radix(hex, 16).map_err(|error| error.to_string())
+    } else {
+        value.parse::<u16>().map_err(|error| error.to_string())
+    }
 }
 
 fn exit_code<E: std::fmt::Display>(result: Result<(), E>) -> ExitCode {

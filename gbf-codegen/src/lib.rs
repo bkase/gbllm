@@ -3,9 +3,11 @@
 pub mod arena;
 pub mod budget;
 pub mod compile;
+pub mod compile_state_subword;
 pub mod f_b1;
 pub mod import;
 pub mod import_checkpoint_export;
+pub mod import_state_checkpoint;
 pub mod kernel_select;
 pub mod legalize;
 pub mod lower_asm;

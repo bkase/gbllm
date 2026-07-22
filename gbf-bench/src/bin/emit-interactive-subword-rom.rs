@@ -1,5 +1,4 @@
-//! Emit the playable wide-vocabulary cartridge: joypad keyboard, exact
-//! on-device BPE prompt encoding, recurrent prefill, and subword generation.
+//! Compatibility wrapper for the compiler-owned interactive-subword profile.
 //!
 //! Usage:
 //! `cargo run --release -p gbf-bench --bin emit-interactive-subword-rom -- \
@@ -10,16 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
-use gbf_bench::stateful::load_state_checkpoint;
-use gbf_bench::subword_demo::subword_font_tiles;
-use gbf_kernel::asm_impl_shell::{SUBWORD_SHELL_PROMPT_CAP, build_state_subword_shell_rom};
-use gbf_kernel::asm_impl_state::{S_RNG_ADDR, S_SAMPLED_ADDR, S_SAMPLED_HI_ADDR};
-use gbf_kernel::decode::SamplerConfig;
-use gbf_kernel::state_model_ref::{IntStateLoweredModel, LogitPaging};
-
-/// Coherence-first sampling policy shared with the proven fixed-prompt ROM.
-const TOP_K: u8 = 4;
-const TEMPERATURE: f64 = 0.6;
+use gbf_codegen::compile_state_subword::{
+    InteractiveSubwordCompileOptions, compile_interactive_subword, interactive_subword_symbols,
+};
+use gbf_kernel::asm_impl_shell::SUBWORD_SHELL_PROMPT_CAP;
 
 fn symbols_path(rom_path: &Path) -> PathBuf {
     rom_path.with_extension("sym")
@@ -39,72 +32,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let n_gen: u8 = args.get(3).map_or(Ok(24), |value| value.parse())?;
 
-    let bundle = load_state_checkpoint(&bridged_dir.join("ckpt"))?;
-    let topology = bundle.topology;
-    assert_eq!(
-        topology.logit_paging,
-        LogitPaging::Paged,
-        "interactive subword shell requires a wide paged vocabulary"
-    );
-    let lowered = IntStateLoweredModel::lower(&bundle.checkpoint)?;
-
     let bpe_path = args.get(4).map_or_else(
         || bridged_dir.join("tokenizer/gbllm_bpe.v2.json"),
         PathBuf::from,
     );
-    let bpe = gbf_data::bpe::BpeModel::from_json(&std::fs::read_to_string(&bpe_path)?)?;
-    assert_eq!(bpe.vocab_size(), topology.vocab, "BPE vocab matches model");
-    let id_bytes: Vec<Vec<u8>> = (0..topology.vocab)
-        .map(|id| bpe.id_bytes(id as u16).expect("id in vocab").to_vec())
-        .collect();
-
-    let sampler =
-        SamplerConfig::from_temperature(TOP_K, lowered.logit_dequant_step(), TEMPERATURE)?;
-    let rom = build_state_subword_shell_rom(
-        &lowered,
-        &sampler,
-        n_gen,
-        &subword_font_tiles(),
-        &id_bytes,
-        bpe.merges(),
-    )?;
+    let options = InteractiveSubwordCompileOptions {
+        n_tokens: n_gen,
+        ..InteractiveSubwordCompileOptions::default()
+    };
+    let compiled = compile_interactive_subword(&bridged_dir.join("ckpt"), &bpe_path, &options)?;
+    let rom = &compiled.rom;
 
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&out, &rom.rom)?;
     let sym = symbols_path(&out);
-    std::fs::write(
-        &sym,
-        format!(
-            "00:{:04x} subword_shell_idle\n\
-             00:{:04x} subword_tokenize_done\n\
-             00:{:04x} subword_warm_boundary\n\
-             00:{:04x} subword_forward_pass\n\
-             00:{:04x} subword_token_boundary\n\
-             00:{:04x} subword_generation_done\n\
-             00:{:04x} subword_prompt_bytes\n\
-             00:{:04x} subword_prompt_byte_len\n\
-             00:{:04x} subword_prompt_token_ids\n\
-             00:{:04x} subword_prompt_token_len\n\
-             00:{S_RNG_ADDR:04x} subword_rng\n\
-             00:{S_SAMPLED_ADDR:04x} subword_sampled_lo\n\
-             00:{S_SAMPLED_HI_ADDR:04x} subword_sampled_hi\n",
-            rom.idle_pc,
-            rom.tokenize_done_pc,
-            rom.warm_boundary_pc,
-            rom.forward_pass_pc,
-            rom.token_boundary_pc,
-            rom.gen_done_pc,
-            rom.prompt_bytes_addr,
-            rom.prompt_byte_len_addr,
-            rom.prompt_ids_addr,
-            rom.prompt_token_len_addr,
-        ),
-    )?;
+    std::fs::write(&sym, interactive_subword_symbols(rom))?;
 
     println!("wrote {} ({} bytes)", out.display(), rom.rom.len());
     println!("wrote {}", sym.display());
+    let topology = compiled.program.topology;
     println!(
         "  topology=d{} ff{} blocks={} experts={} vocab={}",
         topology.d_model, topology.d_ff, topology.n_blocks, topology.n_experts, topology.vocab
@@ -119,8 +67,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rom.paged_head_storage,
     );
     println!(
-        "  prompt=joypad keyboard ({} bytes) sampler=k{TOP_K}/T{TEMPERATURE} seed={:#06x} n_gen={n_gen}",
-        SUBWORD_SHELL_PROMPT_CAP, rom.rng_seed
+        "  prompt=joypad keyboard ({} bytes) sampler=k{}/T{} seed={:#06x} n_gen={n_gen}",
+        SUBWORD_SHELL_PROMPT_CAP,
+        compiled.report.sampler.top_k,
+        compiled.report.sampler.requested_temperature,
+        rom.rng_seed
     );
     println!("  controls=D-pad move, A type, B delete, START generate");
     Ok(())

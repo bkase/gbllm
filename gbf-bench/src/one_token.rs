@@ -62,6 +62,18 @@ impl std::fmt::Display for OneTokenError {
 
 impl std::error::Error for OneTokenError {}
 
+impl From<gbf_codegen::import_state_checkpoint::StateCheckpointImportError> for OneTokenError {
+    fn from(error: gbf_codegen::import_state_checkpoint::StateCheckpointImportError) -> Self {
+        use gbf_codegen::import_state_checkpoint::StateCheckpointImportError;
+        match error {
+            StateCheckpointImportError::Io { path, reason } => Self::Io { path, reason },
+            StateCheckpointImportError::Manifest { reason } => Self::Manifest { reason },
+            StateCheckpointImportError::ShaMismatch { tensor } => Self::ShaMismatch { tensor },
+            StateCheckpointImportError::Model(reason) => Self::Model(reason),
+        }
+    }
+}
+
 fn read_file(path: &Path) -> Result<Vec<u8>, OneTokenError> {
     fs::read(path).map_err(|e| OneTokenError::Io {
         path: path.to_path_buf(),

@@ -2343,6 +2343,7 @@ dependencies = [
  "gbf-abi",
  "gbf-artifact",
  "gbf-asm",
+ "gbf-data",
  "gbf-foundation",
  "gbf-hw",
  "gbf-ir",
