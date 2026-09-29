@@ -1,0 +1,4 @@
+# Regenerable intermediates (src/build.sh recreates them).
+out/
+# High-quality local master; the smaller 1080p sharing copy is tracked.
+gbllm-kinetic.mp4

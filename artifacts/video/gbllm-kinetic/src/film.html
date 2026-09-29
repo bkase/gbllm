@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>gbllm — kinetic typography</title>
+<style>
+  /* Helvetica Neue Condensed Black ships with macOS; PragmataPro is the
+     author's licensed mono (falls back to Menlo on other machines). */
+  @font-face { font-family: "GBDisplay"; src: local("HelveticaNeue-CondensedBlack"), local("Helvetica Neue Condensed Black"); }
+  @font-face { font-family: "GBMono"; src: local("PragmataProMono-Regular"), local("PragmataPro Mono"), local("Menlo-Regular"); }
+  @font-face { font-family: "GBMono"; font-weight: 700; src: local("PragmataProMono-Bold"), local("PragmataPro Mono Bold"), local("Menlo-Bold"); }
+  html, body { margin: 0; background: #000; color: #ccc; font: 13px Menlo, monospace; }
+  canvas { display: block; width: 100vw; max-width: calc(100vh * 16 / 9 - 40px); margin: 0 auto; }
+  #ui { display: flex; gap: 12px; align-items: center; padding: 6px 12px; }
+  #ui input[type=range] { flex: 1; }
+  body.render #ui { display: none; }
+  body.render canvas { width: 1920px; max-width: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<div id="ui">
+  <button id="play">play</button>
+  <input id="scrub" type="range" min="0" max="74" step="0.01" value="0">
+  <span id="clock">0.00</span>
+  <audio id="audio" src="../out/score.wav" preload="auto"></audio>
+</div>
+<script src="timeline.js"></script>
+<script src="data.js"></script>
+<script src="film.js"></script>
+<script>
+  const render = new URLSearchParams(location.search).has("render");
+  if (render) document.body.classList.add("render");
+  window.FILM_DURATION = TIMELINE.duration;
+  const canvas = document.getElementById("c");
+  const film = createFilm(canvas);
+  window.renderFrame = (t) => { film.draw(t); return canvas.toDataURL("image/png"); };
+  film.ready.then(() => {
+    window.FILM_READY = true;
+    if (render) return;
+    const audio = document.getElementById("audio");
+    const scrub = document.getElementById("scrub");
+    const clock = document.getElementById("clock");
+    const play = document.getElementById("play");
+    let t = Number(location.hash.slice(1)) || 0;
+    play.onclick = () => (audio.paused ? audio.play() : audio.pause());
+    scrub.oninput = () => { t = Number(scrub.value); audio.currentTime = t; };
+    document.onkeydown = (e) => { if (e.code === "Space") { e.preventDefault(); play.click(); } };
+    audio.currentTime = t;
+    (function loop() {
+      if (!audio.paused) t = audio.currentTime;
+      film.draw(t);
+      scrub.value = t;
+      clock.textContent = t.toFixed(2);
+      requestAnimationFrame(loop);
+    })();
+  });
+</script>
+</body>
+</html>
